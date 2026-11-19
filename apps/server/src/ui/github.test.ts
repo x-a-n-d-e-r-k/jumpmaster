@@ -2,12 +2,13 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import type { GuidanceForge } from '../api/github.js';
 import { createApp } from '../app.js';
 import { setOperatorPassphrase } from '../auth/operator.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
+import type { DropZoneConfig } from '../config.js';
 import { openDb } from '../db/open.js';
 import {
   EXPIRATION_NOTE,
@@ -28,6 +29,7 @@ let app: FastifyInstance | undefined;
 afterEach(async () => {
   await app?.close();
   app = undefined;
+  vi.restoreAllMocks();
 });
 
 /** A job name a workflow could carry: forge text, rendered escaped or not at all. */
@@ -39,6 +41,10 @@ type Opts = {
   fail?: number;
   noCi?: boolean;
   identity?: 'two-bot' | 'starter';
+  /** No author PAT in the install. */
+  noAuthor?: boolean;
+  /** An author app for the zone's owner, its installation recorded, and a token source for it. */
+  authorApp?: { token: string };
 };
 
 function forgeFor(o: Opts = {}) {
@@ -71,7 +77,7 @@ async function world(o: Opts = {}) {
     boot: loadBoot({}, undefined),
     env: {
       JM_CLAUDE_TOKEN: CLAUDE,
-      JM_GITHUB_AUTHOR_TOKEN: AUTHOR,
+      ...(o.noAuthor ? {} : { JM_GITHUB_AUTHOR_TOKEN: AUTHOR }),
       JM_GITHUB_REVIEWER_TOKEN: REVIEWER,
       JM_JOIN_TOKEN: 'join-secret-value-7',
       JM_OPERATOR_TOKEN: TOKEN,
@@ -90,6 +96,15 @@ async function world(o: Opts = {}) {
     leaseWaitMs: 0,
     leasePollMs: 0,
     guidanceForge: forgeFor(o),
+    ...(o.authorApp
+      ? {
+          appTokens: {
+            provider: () => ({ token: async () => o.authorApp?.token ?? '' }),
+            fresh: vi.fn(),
+            clear: vi.fn(),
+          },
+        }
+      : {}),
   });
   app = a;
   await setOperatorPassphrase(db, 'a long operator passphrase', t0);
@@ -109,6 +124,39 @@ async function world(o: Opts = {}) {
     },
   });
   if (added.statusCode !== 200) throw new Error(added.body);
+  if (o.authorApp) {
+    // The installation discovery's ids and the owner's author entry, as the store would hold them.
+    const cfg = store.current();
+    const dropZones = cfg.dropZones.map(
+      (z) =>
+        ({
+          ...z,
+          githubApp: { repositoryId: 1, installations: { author: 11 } },
+        }) as DropZoneConfig,
+    );
+    vi.spyOn(store, 'current').mockReturnValue({ ...cfg, dropZones });
+    vi.spyOn(store, 'resolvedApps').mockReturnValue(
+      new Map([
+        [
+          'octo-org',
+          {
+            author: {
+              source: 'vault',
+              fingerprint: 'fp-a',
+              entry: {
+                appId: '42',
+                slug: 'jm-author-app',
+                clientId: 'c',
+                pem: 'not-a-key',
+                importedAt: '2026-11-01',
+              },
+            },
+            reviewer: { source: 'missing' },
+          },
+        ],
+      ]),
+    );
+  }
   const get = (url: string) =>
     a.inject({ method: 'GET', url, headers: { host: HOST, cookie: s.cookie } });
   return { db, store, get };
@@ -207,6 +255,23 @@ describe('the GitHub page of a zone', () => {
     expect(note).toBeLessThan(html.indexOf('download="'));
     expect(html).toContain('with zero approvals');
     expect(html).toContain(escapeHtml(STARTER_CODEOWNERS_NOTE));
+  });
+
+  test('an app-author zone with no author PAT renders its guidance on the author app, not the no-author message', async () => {
+    const appToken = ['ghs', 'PAGEAPPTOKEN'.repeat(3)].join('_');
+    const without = await (await world({ noAuthor: true })).get('/zones/demo/github');
+    expect(without.statusCode).toBe(409);
+    expect(without.body).toContain('Set or replace the tokens');
+    await app?.close();
+    vi.restoreAllMocks();
+    const r = await (await world({ noAuthor: true, authorApp: { token: appToken } })).get(
+      '/zones/demo/github',
+    );
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.body).toContain('id="ruleset"');
+    expect(r.body).toContain('jumpmaster-demo-ruleset.json');
+    expect(r.body).not.toContain('Set or replace the tokens');
+    expect(r.body).not.toContain(appToken);
   });
 
   test('an unknown zone is 404; a refused read says why, escaped, and links the GitHub step', async () => {

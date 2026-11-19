@@ -269,7 +269,7 @@ export function createApp(
     /** Where an invite's code is registered for the log scrub (default the server's set). */
     scrub?: { add(secret: string): void };
     /** The app token source: drops mint from it, and the kill switch clears its cache. */
-    appTokens?: Pick<AppTokenSource, 'fresh' | 'clear'>;
+    appTokens?: Pick<AppTokenSource, 'fresh' | 'clear' | 'provider'>;
     /** The kill switch's installation suspension (§4.2); absent, the kill route is DB-only. */
     appSuspension?: ControlDeps['appSuspension'];
     /** The installation check every mint goes through (issue #267), for the doctor. */
@@ -425,6 +425,7 @@ export function createApp(
       store: deps.config,
       now: deps.now,
       ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
+      ...(deps.appTokens ? { appTokens: deps.appTokens } : {}),
     });
     // The zones page (Task 11): every zone, a page per zone, and the add page.
     registerZonesPages(app, { db: deps.db, store: deps.config, now: deps.now });

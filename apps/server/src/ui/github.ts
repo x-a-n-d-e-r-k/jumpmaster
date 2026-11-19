@@ -9,6 +9,7 @@ import {
 import { withCsrf } from '../auth/guard.js';
 import type { ConfigStore } from '../config/store.js';
 import type { DropZoneConfig } from '../config.js';
+import type { AppTokenSource } from '../forge/app-tokens.js';
 import {
   CODEOWNERS_PLACEHOLDER,
   EXPIRATION_NOTE,
@@ -285,6 +286,8 @@ export function registerGithubPages(
     store: ConfigStore;
     now(): Date;
     guidanceForge?: (repo: string, token: string) => GuidanceForge;
+    /** The app token source: an app-author zone's guidance reads on its author app (§4.4). */
+    appTokens?: Pick<AppTokenSource, 'provider'>;
   },
 ): void {
   const { store, now } = deps;
@@ -302,7 +305,11 @@ export function registerGithubPages(
       r =
         reviewers === null
           ? { ok: false, status: 400, error: 'a code owner is a GitHub login or an org/team name' }
-          : await guidanceFor(store, config, zone, forgeOf, { reviewers, now });
+          : await guidanceFor(store, config, zone, forgeOf, {
+              reviewers,
+              now,
+              ...(deps.appTokens ? { appTokens: deps.appTokens } : {}),
+            });
     } catch (e) {
       r = { ok: false, status: 400, error: (e as Error).message };
     }
