@@ -413,12 +413,14 @@ export async function testCredential(
   }
 }
 
-const APP_KEY_REJECTED =
+/** `testAppEntry`'s problems, exported so a caller (the doctor) can tell them apart. */
+export const APP_KEY_REJECTED =
   "GitHub rejected this app's key (401): it is the wrong key or it was revoked. Generate a new private key on the app's page and import it again.";
-const APP_ID_MISMATCH =
+export const APP_ID_MISMATCH =
   "GitHub says this key belongs to a different app than the entry's app id: re-import the app";
-const APP_SLUG_MISMATCH =
+export const APP_SLUG_MISMATCH =
   "GitHub names this app differently from the entry's slug: re-import the app";
+export const APP_SIGN_FAILED = 'the private key could not be used to sign';
 
 /**
  * Tests a GitHub App entry (§4.4): signs the app JWT with the entry's key and calls `GET /app`.
@@ -443,7 +445,7 @@ export async function testAppEntry(
     jwt = appJwt(entry.appId, entry.pem, Math.floor(now() / 1000));
   } catch {
     // The exception text can quote key material.
-    return { ok: false, status: null, problem: 'the private key could not be used to sign' };
+    return { ok: false, status: null, problem: APP_SIGN_FAILED };
   }
   scrub.add(jwt);
   let res: Response;
