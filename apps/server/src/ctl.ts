@@ -139,8 +139,8 @@ function zonesAddRequest(args: string[]): Raw | null {
 const GITHUB_LOGIN = /^@?[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$|^@?[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 
 /**
- * `ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | codeowners [--reviewer
- * <login>]… | checklist`: one read of the zone's guidance, printed per artifact by `runCtl`.
+ * `ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | merge-ruleset | codeowners
+ * [--reviewer <login>]… | checklist`: one read of the zone's guidance, printed per artifact by `runCtl`.
  */
 function githubRequest(args: string[]): Raw | null {
   const [, zone, what, ...rest] = args;
@@ -157,7 +157,7 @@ function githubRequest(args: string[]): Raw | null {
   }
   if (!zone || !what) return null;
   const path = `/api/control/zones/${encodeURIComponent(zone)}/github`;
-  if (what === 'recommend' || what === 'ruleset' || what === 'checklist')
+  if (['recommend', 'ruleset', 'merge-ruleset', 'checklist'].includes(what))
     return rest.length === 0 ? { path, method: 'GET' } : null;
   if (what === 'pat')
     return rest.length === 1 && ['author', 'reviewer', 'read'].includes(rest[0] ?? '')
@@ -185,6 +185,7 @@ type GuidanceView = {
   };
   pat: Record<string, string>;
   ruleset: { text: string; note?: string };
+  mergeRuleset?: { text: string };
   codeowners: { text: string };
   checklist: { url: string; items: string[] };
 };
@@ -194,6 +195,7 @@ function githubLines(args: string[], g: GuidanceView): string[] {
   const [, , what, role] = args;
   const text = (t: string) => t.replace(/\n$/, '').split('\n');
   if (what === 'ruleset') return text(g.ruleset.text);
+  if (what === 'merge-ruleset') return text(g.mergeRuleset?.text ?? '');
   if (what === 'codeowners') return text(g.codeowners.text);
   if (what === 'pat')
     return [
@@ -1681,7 +1683,15 @@ async function runCtlOn(
     return 0;
   }
   if (args[0] === 'github' && !request.path.endsWith('/github/recommend') && res.ok) {
-    for (const line of githubLines(args, JSON.parse(text) as GuidanceView)) out(line);
+    const g = JSON.parse(text) as GuidanceView;
+    // The merge ruleset exists only for a zone whose author and reviewer are both GitHub Apps.
+    if (args[2] === 'merge-ruleset' && !g.mergeRuleset) {
+      err(
+        `zone ${args[1]} is not a two-app zone (author and reviewer both GitHub Apps): it has no merge ruleset`,
+      );
+      return 1;
+    }
+    for (const line of githubLines(args, g)) out(line);
     return 0;
   }
   if (args[0] === 'zones' && args[1] !== 'add' && res.ok && !args.includes('--json')) {

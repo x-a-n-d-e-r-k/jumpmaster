@@ -9,6 +9,7 @@ import {
   codeownersText,
   collaboratorChecklist,
   EXPIRATION_NOTE,
+  mergeRulesetJson,
   PAT_PERMISSIONS,
   PLAN_QUESTION,
   PRIVATE_PLAN_STOP,
@@ -338,5 +339,183 @@ describe('zoneGuidance', () => {
       expect(g.codeowners.filename).toBe('.github/CODEOWNERS');
       expect(g.rulesUrl).toBe(`https://github.com/${zone.repo}/settings/rules`);
     }
+  });
+});
+
+describe('two-app zones (spec 2026-11-13-github-app-auth §5.2)', () => {
+  const detection = {
+    defaultBranch: 'main',
+    ciJobs: [{ workflow: 'ci.yml', job: 'test' }],
+    ownerType: 'Organization' as const,
+    visibility: 'public' as const,
+  };
+  const logins = { author: 'jm-author', reviewer: 'jm-reviewer', codeowners: ['alice'] };
+  const APPS = {
+    author: { appId: 4242, slug: 'acme-jm-author' },
+    reviewer: { slug: 'acme-jm-reviewer' },
+  };
+
+  test('mergeRulesetJson is the jumpmaster-merge ruleset: Restrict updates only, bypassed by the author app and admins', () => {
+    const text = mergeRulesetJson(4242);
+    expect(text.endsWith('}\n')).toBe(true);
+    const r = JSON.parse(text);
+    expect(text).toBe(`${JSON.stringify(r, null, 2)}\n`);
+    expect(r.name).toBe('jumpmaster-merge');
+    expect(r.target).toBe('branch');
+    expect(r.enforcement).toBe('active');
+    expect(r.rules).toEqual([{ type: 'update' }]);
+    expect(r.bypass_actors).toEqual([
+      { actor_type: 'Integration', actor_id: 4242, bypass_mode: 'always' },
+      { actor_type: 'RepositoryRole', actor_id: 5, bypass_mode: 'always' },
+    ]);
+    expect(r.conditions).toEqual({ ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } });
+    for (const bad of [1.5, 0, -1, Number.NaN, 2 ** 53])
+      expect(() => mergeRulesetJson(bad), String(bad)).toThrow();
+  });
+
+  test('a two-app zone gets both rulesets; hybrid, PAT two-bot and starter get only the main one', () => {
+    const g = zoneGuidance(twoBot, detection, logins, {}, APPS);
+    expect(g.mergeRuleset).toEqual({
+      filename: `jumpmaster-${twoBot.id}-merge-ruleset.json`,
+      text: mergeRulesetJson(4242),
+      note: expect.stringContaining('only the author app (acme-jm-author) and repository admins'),
+    });
+    expect(g.mergeRuleset?.note).toMatch(/plain write access no longer can/);
+    expect(g.mergeRuleset?.note).toMatch(/bypass list/);
+    expect(g.mergeRuleset?.note).toMatch(/write role re-opens merges/);
+    expect(JSON.parse(g.ruleset.text).bypass_actors).toEqual([]);
+    expect(g.ruleset.text).toBe(rulesetJson(twoBot, detection));
+
+    const hybrid = zoneGuidance(twoBot, detection, logins, {}, { author: APPS.author });
+    const pat = zoneGuidance(twoBot, detection, logins);
+    const st = zoneGuidance(starter, { ...detection, ownerType: 'User' }, logins, {}, APPS);
+    for (const other of [hybrid, pat, st]) expect(other).not.toHaveProperty('mergeRuleset');
+  });
+
+  test('without apps, zoneGuidance is what it was', () => {
+    const g = zoneGuidance(twoBot, detection, logins);
+    expect(zoneGuidance(twoBot, detection, logins, {}, {})).toEqual(g);
+    expect(g).toEqual({
+      recommendation: recommendIdentity({
+        ownerType: 'Organization',
+        visibility: 'public',
+        owner: 'octo-org',
+      }),
+      pat: {
+        author: patTemplateUrl('author', repo, { expirationDays: 90 }),
+        reviewer: patTemplateUrl('reviewer', repo, { expirationDays: 90 }),
+        read: patTemplateUrl('read', repo, { expirationDays: 90 }),
+      },
+      ruleset: {
+        filename: `jumpmaster-${twoBot.id}-ruleset.json`,
+        text: rulesetJson(twoBot, detection),
+      },
+      codeowners: {
+        filename: '.github/CODEOWNERS',
+        text: codeownersText(twoBot, ['alice'], { reviewerBot: 'jm-reviewer' }),
+        newFileUrl: codeownersNewFileUrl(repo, 'main'),
+      },
+      checklist: {
+        url: 'https://github.com/octo-org/demo/settings/access',
+        items: [
+          'invite jm-author with the Write role',
+          'accept the invitation as jm-author',
+          'invite jm-reviewer with the Write role',
+          'accept the invitation as jm-reviewer',
+        ],
+      },
+      rulesUrl: 'https://github.com/octo-org/demo/settings/rules',
+      ciJobs: ['test'],
+    });
+  });
+
+  test('CODEOWNERS for an app reviewer: no catch-all, no reviewer login, two comments, the protected paths as before', () => {
+    const zone = makeZone({
+      identity: 'two-bot',
+      protectedPaths: ['.github/**', 'CLAUDE.md', '*', 'a b'],
+    });
+    const before = codeownersText(zone, ['alice']);
+    const text = codeownersText(zone, ['alice'], {
+      reviewerBot: 'jm-reviewer',
+      reviewerApp: { slug: 'acme-review-app\n* @stranger' },
+    });
+    const rules = text.split('\n').filter((l) => l !== '' && !l.startsWith('#'));
+    expect(rules.some((l) => l.startsWith('*'))).toBe(false);
+    expect(rules).toEqual(['.github/** @alice', 'CLAUDE.md @alice']);
+    expect(text).not.toContain('jm-reviewer');
+    expect(text).toMatch(/^# A GitHub App can't be a code owner, .*reviewer app.*people\.$/m);
+    expect(text).toMatch(/^# .*CODEOWNERS gives other paths to people or teams, use the hybrid/m);
+    for (const line of text.split('\n'))
+      expect(line === '' || line.startsWith('#') || rules.includes(line), line).toBe(true);
+    // The PAT lines are kept as they were.
+    const keep = (t: string) => t.split('\n').filter((l) => !/reviewer app|use the hybrid/.test(l));
+    expect(keep(text)).toEqual(keep(before));
+    // Starter: never.
+    expect(
+      codeownersText(makeZone({ identity: 'starter' }), ['octo'], {
+        reviewerApp: { slug: 'x' },
+      }),
+    ).toBe(codeownersText(makeZone({ identity: 'starter' }), ['octo']));
+  });
+
+  test('CODEOWNERS for a PAT reviewer bot is byte-identical to before', () => {
+    const zone = makeZone({
+      id: 'web',
+      identity: 'two-bot',
+      protectedPaths: ['.github/**', 'CLAUDE.md'],
+    });
+    expect(codeownersText(zone, ['alice'], { reviewerBot: 'jm-reviewer' })).toBe(
+      [
+        "# Jumpmaster zone web: changes to these paths need a human code owner's review.",
+        '# The reviewer bot owns everything else, so its approval merges an ordinary pull request; the lines after this one give the protected paths back to people.',
+        '* @jm-reviewer',
+        '.github/** @alice',
+        'CLAUDE.md @alice',
+        '',
+      ].join('\n'),
+    );
+  });
+
+  test('the checklist installs an app role and invites a PAT role; a starter zone never lists a reviewer', () => {
+    expect(
+      collaboratorChecklist(
+        twoBot,
+        { author: 'jm-author', reviewer: 'jm-reviewer' },
+        {
+          author: { slug: 'acme-jm-author' },
+        },
+      ).items,
+    ).toEqual([
+      'install the author GitHub App acme-jm-author on octo-org/demo (no invitation needed)',
+      'invite jm-reviewer with the Write role',
+      'accept the invitation as jm-reviewer',
+    ]);
+    expect(
+      collaboratorChecklist(
+        twoBot,
+        {},
+        {
+          author: { slug: 'a' },
+          reviewer: { slug: 'r' },
+        },
+      ).items,
+    ).toEqual([
+      'install the author GitHub App a on octo-org/demo (no invitation needed)',
+      'install the reviewer GitHub App r on octo-org/demo (no invitation needed)',
+    ]);
+    // In place of "nothing to invite" too.
+    expect(
+      collaboratorChecklist(
+        starter,
+        { author: 'octo' },
+        {
+          author: { slug: 'a' },
+          reviewer: { slug: 'r' },
+        },
+      ).items,
+    ).toEqual(['install the author GitHub App a on octo/demo (no invitation needed)']);
+    expect(
+      collaboratorChecklist(twoBot, { author: 'jm-author', reviewer: 'jm-reviewer' }, {}),
+    ).toEqual(collaboratorChecklist(twoBot, { author: 'jm-author', reviewer: 'jm-reviewer' }));
   });
 });

@@ -239,8 +239,10 @@ repository with the author token and gives you links and generated files.
   it on GitHub.
 - **Give the accounts access**: the collaborators page and a checklist of the bot logins.
 
-`ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | codeowners | checklist`
-prints each piece (`ctl github <zone> ruleset > ruleset.json`); before a zone exists,
+`ctl github <zone> recommend | pat <author|reviewer|read> | ruleset | merge-ruleset | codeowners | checklist`
+prints each piece (`ctl github <zone> ruleset > ruleset.json`). `merge-ruleset` is the second
+ruleset, `jumpmaster-merge`, of a zone whose author and reviewer are both GitHub Apps: only the
+author app and repository admins can merge; for any other zone it says so and fails. Before a zone exists,
 `ctl github recommend your-org/your-repo` gives the recommendation.
 
 ## The status line
@@ -363,7 +365,7 @@ token is always allowed.
 | Zones | `ctl backlog <zone> (open issues with no Jumpmaster label)` | `GET /api/control/zones/:id/backlog` |
 | Zones | `ctl queue <zone> <issue> (puts the ready label on)` | `POST /api/control/zones/:id/queue` |
 | Zones | `ctl intake <zone> stub <file.json> (prints the GOAL.md stub)`<br>`ctl intake <zone> issue <file.json> (files the issue ready)` | `POST /api/control/zones/:id/intake/goal-stub`<br>`POST /api/control/zones/:id/intake/issue` |
-| GitHub | `ctl github <zone> recommend \| pat <author\|reviewer\|read> \| ruleset \| codeowners [--reviewer <login>]… \| checklist`<br>`ctl github recommend <owner/name> [--paid-plan] [--identity starter\|two-bot]` | `GET /api/control/zones/:id/github`<br>`POST /api/control/github/recommend` |
+| GitHub | `ctl github <zone> recommend \| pat <author\|reviewer\|read> \| ruleset \| merge-ruleset \| codeowners [--reviewer <login>]… \| checklist`<br>`ctl github recommend <owner/name> [--paid-plan] [--identity starter\|two-bot]` | `GET /api/control/zones/:id/github`<br>`POST /api/control/github/recommend` |
 | Settings | `ctl settings set <path>=<json>… [--note <text>]` | `PATCH /api/control/config` |
 | Settings | `ctl public-url set <https://address>`<br>`ctl public-url clear`<br>`ctl public-url check` | `PUT /api/control/server/public-url`<br>`POST /api/control/server/public-url/check` |
 | Settings | `ctl mcp-tokens mint <zone> <read\|write> --days N [--label <text>]`<br>`ctl mcp-tokens list`<br>`ctl mcp-tokens revoke <id>` | `POST /api/control/mcp-tokens`<br>`GET /api/control/mcp-tokens`<br>`DELETE /api/control/mcp-tokens/:id` |

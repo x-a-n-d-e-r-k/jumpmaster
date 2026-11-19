@@ -14,9 +14,13 @@ import {
   EXPIRATION_NOTE,
   RESOURCE_OWNER_NOTE,
   STARTER_CODEOWNERS_NOTE,
+  zoneGuidance,
 } from '../github/guidance.js';
 import { MATRIX_AND_REUSABLE_NOTE } from '../github/workflows.js';
+import { APP_ENTRIES, APP_SECRETS, guidanceAppsOf } from '../test/app-guidance-fixture.js';
+import { makeZone } from '../test/fixtures.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
+import { mergeRulesetSection, zonePage } from './github.js';
 import { escapeHtml, FAVICON_HREF } from './pages.js';
 
 const TOKEN = 'o'.repeat(32);
@@ -290,5 +294,73 @@ describe('the GitHub page of a zone', () => {
     expect((await w.get('/')).body).toContain('href="/zones/demo"');
     expect((await w.get('/zones/demo')).body).toContain('href="/zones/demo/github"');
     expect((await w.get('/doctor')).body).toContain('href="/zones/demo/github"');
+  });
+});
+
+describe('the merge ruleset section (two-app zones)', () => {
+  const zone = makeZone({ id: 'demo', repo: 'octo-org/demo', identity: 'two-bot' });
+  const detection = {
+    defaultBranch: 'main',
+    ciJobs: [{ workflow: 'ci.yml', job: 'test' }],
+    ownerType: 'Organization' as const,
+    visibility: 'public' as const,
+  };
+  const logins = { author: 'jm-author', reviewer: 'jm-reviewer', codeowners: ['alice'] };
+
+  test('a two-app guidance renders the merge ruleset next to the main one; otherwise the page is unchanged', () => {
+    const g = zoneGuidance(zone, detection, logins, {}, guidanceAppsOf(APP_ENTRIES));
+    const html = zonePage(zone, [zone], g, '');
+    const merge = g.mergeRuleset;
+    if (!merge) throw new Error('no merge ruleset');
+    expect(html).toContain('<section id="merge-ruleset">');
+    expect(html.indexOf('id="ruleset"')).toBeLessThan(html.indexOf('id="merge-ruleset"'));
+    expect(html.indexOf('id="merge-ruleset"')).toBeLessThan(html.indexOf('id="codeowners"'));
+    const section = mergeRulesetSection(merge, g.rulesUrl);
+    expect(html).toContain(section);
+    expect(section).toContain(escapeHtml(merge.note));
+    expect(section).toContain('href="https://github.com/octo-org/demo/settings/rules"');
+    expect(section).toContain('New ruleset → Import a ruleset');
+    expect(section).toContain('<code>jumpmaster-demo-merge-ruleset.json</code>');
+    expect(section).toContain('download="jumpmaster-demo-merge-ruleset.json"');
+    expect(section).toContain('data-copy="merge-ruleset-text"');
+    expect(section).toContain(`<pre id="merge-ruleset-text">${escapeHtml(merge.text)}</pre>`);
+    expect(section).not.toMatch(/no bypass/i);
+    // The checklist installs the apps.
+    expect(html).toContain('install the author GitHub App acme-jm-author on octo-org/demo');
+    // Only the id and the slug went in: no key, secret or token comes out.
+    const json = JSON.stringify(g);
+    for (const s of Object.values(APP_SECRETS)) {
+      expect(json).not.toContain(s);
+      expect(html).not.toContain(s);
+      expect(html).not.toContain(escapeHtml(s));
+    }
+    expect(html).not.toContain('PRIVATE KEY');
+
+    // Without apps, no section, and the page is what it was.
+    const pat = zoneGuidance(zone, detection, logins);
+    const plain = zonePage(zone, [zone], pat, '');
+    expect(plain).not.toContain('merge-ruleset');
+    // The section is the only thing it adds.
+    const { mergeRuleset: _, ...without } = g;
+    expect(zonePage(zone, [zone], without, '')).toBe(html.replace(`${section}\n`, ''));
+  });
+
+  test('a slug with markup is escaped in the checklist and the note', () => {
+    const hostile = '<script>alert(1)</script>';
+    const g = zoneGuidance(
+      zone,
+      detection,
+      logins,
+      {},
+      {
+        author: { appId: 7, slug: hostile },
+        reviewer: { slug: hostile },
+      },
+    );
+    expect(g.mergeRuleset?.note).toContain(hostile);
+    expect(g.checklist.items.join('\n')).toContain(hostile);
+    const html = zonePage(zone, [zone], g, '');
+    expect(html).not.toContain(hostile);
+    expect(html).toContain(escapeHtml(hostile));
   });
 });

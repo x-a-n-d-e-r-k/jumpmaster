@@ -1,4 +1,5 @@
 import { type DropZoneConfig, STARTER_WARNING } from '../config.js';
+import { MERGE_RULESET } from '../flow/guards.js';
 import type { Detection } from '../zones/detect.js';
 
 /**
@@ -152,6 +153,35 @@ export function rulesetJson(
   return `${JSON.stringify(ruleset, null, 2)}\n`;
 }
 
+/** GitHub's Repository admin role, as a ruleset bypass actor. */
+const REPOSITORY_ADMIN_ROLE = 5;
+
+/**
+ * The second ruleset of a two-app zone (spec 2026-11-13-github-app-auth §5.2), in GitHub's import
+ * format: Restrict updates on the default branch, bypassed only by the author app and repository
+ * admins. Without it any approval lets anyone with write access merge.
+ */
+export function mergeRulesetJson(authorAppId: number): string {
+  if (!Number.isSafeInteger(authorAppId) || authorAppId <= 0)
+    throw new Error('an app id is a positive integer');
+  const ruleset = {
+    name: MERGE_RULESET,
+    target: 'branch',
+    enforcement: 'active',
+    bypass_actors: [
+      { actor_type: 'Integration', actor_id: authorAppId, bypass_mode: 'always' },
+      { actor_type: 'RepositoryRole', actor_id: REPOSITORY_ADMIN_ROLE, bypass_mode: 'always' },
+    ],
+    conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } },
+    rules: [{ type: 'update' }],
+  };
+  return `${JSON.stringify(ruleset, null, 2)}\n`;
+}
+
+/** What the page says beside the merge ruleset file, naming the author app. */
+export const mergeRulesetNote = (authorSlug: string): string =>
+  `This second ruleset, ${MERGE_RULESET}, lets only the author app (${authorSlug.replace(/[\r\n]+/g, ' ')}) and repository admins merge into the default branch: people with plain write access no longer can. You can add roles to its bypass list on GitHub, but adding a write role re-opens merges to anyone with write access.`;
+
 export const PRIVATE_PLAN_STOP =
   'rulesets on a private repository need a paid plan: make it public or upgrade before any token is created';
 export const PLAN_QUESTION =
@@ -248,7 +278,7 @@ const CATCH_ALL = new Set(['*', '**', '/', '/*', '/**', '**/*']);
 export function codeownersText(
   zone: Pick<DropZoneConfig, 'id' | 'protectedPaths' | 'identity'>,
   reviewers: string[],
-  opts: { reviewerBot?: string } = {},
+  opts: { reviewerBot?: string; reviewerApp?: { slug: string } } = {},
 ): string {
   const owners = reviewers.length > 0 ? reviewers.map(owner) : [CODEOWNERS_PLACEHOLDER];
   const catchAll = zone.protectedPaths.filter((p) => CATCH_ALL.has(p.trim()));
@@ -258,8 +288,11 @@ export function codeownersText(
   // Two-bot with a required code owner review: GitHub merges a pull request only when a code
   // owner of every file it touches approved, so the reviewer bot owns everything first and the
   // protected lines after it (the last match wins) take those paths back for people.
+  // An app reviewer can't be a code owner (spike F14), and its approval counts on unowned paths:
+  // no catch-all line, only the protected paths given to people.
+  const app = zone.identity !== 'starter' && opts.reviewerApp ? opts.reviewerApp : undefined;
   const bot =
-    zone.identity !== 'starter' && opts.reviewerBot && LOGIN.test(opts.reviewerBot)
+    !app && zone.identity !== 'starter' && opts.reviewerBot && LOGIN.test(opts.reviewerBot)
       ? opts.reviewerBot
       : undefined;
   return [
@@ -272,6 +305,12 @@ export function codeownersText(
       ? [
           '# The reviewer bot owns everything else, so its approval merges an ordinary pull request; the lines after this one give the protected paths back to people.',
           `* @${bot}`,
+        ]
+      : []),
+    ...(app
+      ? [
+          `# A GitHub App can't be a code owner, so unowned paths are approved by the reviewer app ${oneLine(app.slug)}; the lines below give the protected paths to people.`,
+          "# If the repository's own CODEOWNERS gives other paths to people or teams, use the hybrid (an app author with a machine-user reviewer token) rather than deleting those lines.",
         ]
       : []),
     ...(catchAll.length > 0
@@ -297,19 +336,28 @@ export function codeownersNewFileUrl(repo: Repo, branch: string): string {
 export function collaboratorChecklist(
   zone: Pick<DropZoneConfig, 'repo' | 'identity'>,
   logins: { author?: string; reviewer?: string },
+  apps: { author?: { slug: string }; reviewer?: { slug: string } } = {},
 ): { url: string; items: string[] } {
   const repo = repoOf(zone);
+  const full = `${repo.owner}/${repo.name}`;
   const name = (who: string | undefined, role: string) =>
     who && LOGIN.test(who) ? who : `the ${role} account`;
-  const accounts = [
-    name(logins.author, 'author'),
-    ...(zone.identity === 'starter' ? [] : [name(logins.reviewer, 'reviewer')]),
+  const roles: ('author' | 'reviewer')[] = [
+    'author',
+    ...(zone.identity === 'starter' ? [] : (['reviewer'] as const)),
   ];
-  const items = accounts.flatMap((a) =>
-    a.toLowerCase() === repo.owner.toLowerCase()
+  const items = roles.flatMap((role) => {
+    const app = apps[role];
+    // An app's installation grants its access: nothing to invite or accept.
+    if (app)
+      return [
+        `install the ${role} GitHub App ${oneLine(app.slug)} on ${full} (no invitation needed)`,
+      ];
+    const a = name(logins[role], role);
+    return a.toLowerCase() === repo.owner.toLowerCase()
       ? [`nothing to invite: ${a} owns the repository`]
-      : [`invite ${a} with the Write role`, `accept the invitation as ${a}`],
-  );
+      : [`invite ${a} with the Write role`, `accept the invitation as ${a}`];
+  });
   return { url: `${GITHUB}/${repo.owner}/${repo.name}/settings/access`, items };
 }
 
@@ -317,6 +365,8 @@ export type ZoneGuidance = {
   recommendation: Recommendation;
   pat: { author: string; reviewer: string; read: string };
   ruleset: { filename: string; text: string; note?: string };
+  /** A two-app zone's second ruleset, `jumpmaster-merge`: only the author app and admins merge. */
+  mergeRuleset?: { filename: string; text: string; note: string };
   codeowners: { filename: string; text: string; newFileUrl: string };
   checklist: { url: string; items: string[] };
   /** The repository's rulesets page, where the ruleset file is imported. */
@@ -330,14 +380,22 @@ export type GuidanceZone = Pick<
   'id' | 'repo' | 'identity' | 'protectedPaths' | 'reviewReadToken'
 >;
 
+/** The zone's GitHub App roles: only the public id and slug, never a key or a secret. */
+export type GuidanceApps = {
+  author?: { appId: number; slug: string };
+  reviewer?: { slug: string };
+};
+
 /** The five, for one zone: what the page, the route, `ctl github` and the doctor read. */
 export function zoneGuidance(
   zone: GuidanceZone,
   detection: Pick<Detection, 'defaultBranch' | 'ciJobs' | 'ownerType' | 'visibility'>,
   logins: { author?: string; reviewer?: string; codeowners?: string[] },
   opts: { paidPlan?: boolean } = {},
+  apps: GuidanceApps = {},
 ): ZoneGuidance {
   const repo = repoOf(zone);
+  const twoApp = zone.identity !== 'starter' && apps.author && apps.reviewer ? apps.author : null;
   const days = { expirationDays: PAT_EXPIRATION_DAYS };
   return {
     recommendation: recommendIdentity({
@@ -360,14 +418,27 @@ export function zoneGuidance(
           }
         : {}),
     },
+    ...(twoApp
+      ? {
+          mergeRuleset: {
+            filename: `jumpmaster-${zone.id}-merge-ruleset.json`,
+            text: mergeRulesetJson(twoApp.appId),
+            note: mergeRulesetNote(twoApp.slug),
+          },
+        }
+      : {}),
     codeowners: {
       filename: '.github/CODEOWNERS',
       text: codeownersText(zone, logins.codeowners ?? [], {
         ...(logins.reviewer ? { reviewerBot: logins.reviewer } : {}),
+        ...(apps.reviewer ? { reviewerApp: { slug: apps.reviewer.slug } } : {}),
       }),
       newFileUrl: codeownersNewFileUrl(repo, detection.defaultBranch),
     },
-    checklist: collaboratorChecklist(zone, logins),
+    checklist: collaboratorChecklist(zone, logins, {
+      ...(apps.author ? { author: { slug: apps.author.slug } } : {}),
+      ...(apps.reviewer ? { reviewer: { slug: apps.reviewer.slug } } : {}),
+    }),
     rulesUrl: `${GITHUB}/${repo.owner}/${repo.name}/settings/rules`,
     ciJobs: [...new Set(detection.ciJobs.map((j) => j.job))],
   };
