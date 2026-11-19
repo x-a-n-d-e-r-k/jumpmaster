@@ -28,6 +28,7 @@ import {
   reviewersOf,
   rulesetSection,
   tokensSection,
+  useTokensInstead,
 } from './github.js';
 import { linkTarget } from './links.js';
 import { escapeHtml, page } from './pages.js';
@@ -380,6 +381,8 @@ export function guideSection(
   action = '/setup/forge',
   /** The GitHub App buttons' inputs (#374); without them the section is as before. */
   apps?: AppCreateOptions,
+  /** The operator chose starter mode (one account): it stays on tokens, shown as they are. */
+  starter = false,
 ): string {
   const repo = guide?.repo ?? '';
   const plan = guide?.paidPlan ?? '';
@@ -391,14 +394,22 @@ export function guideSection(
   if (guide.error) return `${form}<p class="warn">${escapeHtml(guide.error)}</p>`;
   const a = guide.answer;
   if (!a) return form;
+  const onTokens = starter || a.recommendation.identity === 'starter';
   const roles = [
     'author' as const,
-    ...(a.recommendation.identity === 'starter' ? [] : (['reviewer'] as const)),
+    ...(onTokens ? [] : (['reviewer'] as const)),
     ...(a.visibility === 'private' ? (['read'] as const) : []),
   ];
+  // Two bots: the apps first, the token links folded under "Use tokens instead". Starter stays
+  // on tokens, shown as they are, with no app section.
+  const tokens = a.recommendation.stop
+    ? ''
+    : onTokens
+      ? tokensSection(a.pat, roles)
+      : useTokensInstead(tokensSection(a.pat, roles));
   return `${form}<p>${escapeHtml(a.repo)}: ${a.visible ? escapeHtml(a.visibility) : 'not visible without a token (private, or not there)'}, owned by ${a.ownerType === 'Organization' ? 'an organization' : 'a personal account'}.</p>
-${recommendationSection(a.recommendation)}${offersApps(a, apps) ? `\n${appCreateSection(a, apps)}` : ''}
-${a.recommendation.stop ? '' : tokensSection(a.pat, roles)}
+${recommendationSection(a.recommendation)}${!onTokens && offersApps(a, apps) ? `\n${appCreateSection(a, apps)}` : ''}
+${tokens}
 ${a.logins.author ? checklistSection(a.checklist) : ''}`;
 }
 
@@ -408,7 +419,8 @@ function forgePage(store: ConfigStore, sudo: boolean, wizard: Wizard, guide?: Fo
   const starter = wizard.starter ?? recommended === 'starter';
   const apps = appOptionsFor(store, guide, sudo);
   // A create button without sudo asks for the passphrase in the same field Save uses.
-  const appButtons = !!guide?.answer && !!apps?.vaultOn && offersApps(guide.answer, apps);
+  const appButtons =
+    wizard.starter !== true && !!guide?.answer && !!apps?.vaultOn && offersApps(guide.answer, apps);
   const fields = [
     credentialField('githubAuthorToken', 'Author token', r.githubAuthorToken),
     credentialField('githubReviewerToken', 'Reviewer token (two-bot mode)', r.githubReviewerToken),
@@ -423,7 +435,7 @@ function forgePage(store: ConfigStore, sudo: boolean, wizard: Wizard, guide?: Fo
   return frame(
     'forge',
     `<h3>Connect GitHub</h3>
-${guideSection(guide, '/setup/forge', apps)}
+${guideSection(guide, '/setup/forge', apps, wizard.starter === true)}
 <h4>The tokens</h4>
 <p><label><input type="checkbox" name="starter" value="1" form="advance"${starter ? ' checked' : ''}> Starter mode: one GitHub account, no reviewer</label> <small>Decides whether the reviewer token is needed; it is kept when you press Continue.</small></p>
 <p>Jumpmaster works on GitHub as an <strong>author</strong> account (opens and merges the agents' pull requests) and, in two-bot mode, a separate <strong>reviewer</strong> account (approves them). Use fine-grained tokens limited to your repositories. Each token is tested with GitHub before it is saved, and never shown back.</p>
@@ -432,7 +444,7 @@ ${guideSection(guide, '/setup/forge', apps)}
 <h4>Read token</h4>${credentialLine('githubReadToken', r.githubReadToken)}
 <form id="forge">${fields}
 ${fields || appButtons ? sudoField(sudo) : ''}<p><button>Save</button> <span id="forge-out" role="status"></span></p></form>
-${guide?.answer?.recommendation.identity === 'starter' ? '' : `<p class="warn" id="starter-warning"><strong>What starter mode costs:</strong> ${escapeHtml(STARTER_WARNING)}</p>`}
+${guide?.answer?.recommendation.identity === 'starter' || guide?.answer?.recommendation.reason.includes(STARTER_WARNING) ? '' : `<p class="warn" id="starter-warning"><strong>What starter mode costs:</strong> ${escapeHtml(STARTER_WARNING)}</p>`}
 ${SAVE_CREDENTIALS}
 <script>
 document.getElementById('forge').addEventListener('submit', async (e) => {
