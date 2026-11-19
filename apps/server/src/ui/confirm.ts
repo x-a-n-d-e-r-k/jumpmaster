@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { appliedDetail } from '../api/operator-actions.js';
 import { recordAudit } from '../auth/audit.js';
 import type { Backoff } from '../auth/backoff.js';
-import { withCsrf } from '../auth/guard.js';
+import { requireCsrf, withCsrf } from '../auth/guard.js';
 import { operatorHash, ScryptBusyError, verifyPassphrase } from '../auth/operator.js';
 import type { ConsumeFailure, Pending } from '../config/confirm.js';
 import type { ConfigStore } from '../config/store.js';
@@ -98,17 +98,33 @@ export const html = (reply: FastifyReply, status: number, body: string) =>
 export const notice = (title: string, body: string): string =>
   page(`<h2>${escapeHtml(title)}</h2><p>${body}</p>`);
 
-const GONE = notice(
-  'Nothing to confirm',
-  'This change is not waiting for confirmation: it was confirmed, it expired (after ten minutes), the server restarted, or it belongs to another session. Start the change again. <a href="/">Home</a>',
-);
+const GONE_TEXT =
+  'This change is not waiting for confirmation: it was confirmed, it expired (after ten minutes), the server restarted, or it belongs to another session. Start the change again.';
+const GONE = notice('Nothing to confirm', `${GONE_TEXT} <a href="/">Home</a>`);
+
+/**
+ * A frame's start: the `jm-csrf` meta `withCsrf` fills, so the dialog's script has the token its
+ * POST needs from the same response that minted the confirmation.
+ */
+const FRAME_CSRF = '<meta name="jm-csrf" content="">';
+/** The frame's GONE: the same words without the page around them (or a way off the thread). */
+const GONE_FRAME = `${FRAME_CSRF}<p><strong>Nothing to confirm.</strong> ${GONE_TEXT}</p>`;
 
 /** Where Cancel (and a refusal's way back) goes: the change's `cancelTo`, else home. */
 const cancelOf = (pending: Pending): string =>
   pending.cancelTo ? safeNext(pending.cancelTo) : '/';
 
-/** Each consequence verbatim, the notes beside them, the passphrase and the minted token. */
-export function renderConfirm(pending: Pending, token: string, error?: string): string {
+/**
+ * Each consequence verbatim, the notes beside them, the passphrase and the minted token. As a
+ * `frame` (the chat's confirm dialog, #503) it is the same content without the page: no heading
+ * (the dialog has its own), no navigation, and Cancel a button that closes the dialog.
+ */
+export function renderConfirm(
+  pending: Pending,
+  token: string,
+  error?: string,
+  o: { frame?: boolean } = {},
+): string {
   // A change proposed by the setup wizard says so, so the operator knows where they are.
   const setup = pending.returnTo?.startsWith('/setup/')
     ? '<p><strong>This is part of setting up Jumpmaster.</strong> Confirm to continue to the next step, or cancel to go back.</p>'
@@ -119,10 +135,19 @@ export function renderConfirm(pending: Pending, token: string, error?: string): 
       ? `<p>Also note:</p><ul>${pending.notes.map((n) => `<li><code>${escapeHtml(n.path)}</code>: ${escapeHtml(n.note)}</li>`).join('')}</ul>`
       : '';
   const err = error ? `<p class="error"><strong>${escapeHtml(error)}</strong></p>` : '';
-  return page(
-    `<h2>Confirm a guarded change</h2>${setup}<p>This change weakens a guard (§7.5). If you confirm it:</p><ul>${items}</ul>${notes}${err}<form method="post" action="/config/confirm/${escapeHtml(pending.id)}"><input type="hidden" name="token" value="${escapeHtml(token)}"><p><label>Operator passphrase <input type="password" name="passphrase" autocomplete="current-password" required autofocus></label></p><p><button>Confirm</button> <a href="${escapeHtml(cancelOf(pending))}">Cancel</a></p></form><p><small>The confirmation is good for five minutes and once. <code>jumpmaster ctl</code> makes the same change with the operator token.</small></p>`,
-  );
+  const cancel = o.frame
+    ? '<button type="button" data-cancel>Cancel</button>'
+    : `<a href="${escapeHtml(cancelOf(pending))}">Cancel</a>`;
+  const body = `${setup}<p>This change weakens a guard (§7.5). If you confirm it:</p><ul>${items}</ul>${notes}${err}<form method="post" action="/config/confirm/${escapeHtml(pending.id)}"><input type="hidden" name="token" value="${escapeHtml(token)}"><p><label>Operator passphrase <input type="password" name="passphrase" autocomplete="current-password" required autofocus></label></p><p><button class="primary">Confirm</button> ${cancel}</p></form><p><small>The confirmation is good for five minutes and once. <code>jumpmaster ctl</code> makes the same change with the operator token.</small></p>`;
+  return o.frame ? `${FRAME_CSRF}${body}` : page(`<h2>Confirm a guarded change</h2>${body}`);
 }
+
+/** Whether a POST asked for the dialog's JSON answers rather than the page's HTML. */
+const wantsJson = (req: FastifyRequest): boolean =>
+  /\bapplication\/json\b/i.test(String(req.headers.accept ?? ''));
+
+const json = (reply: FastifyReply, status: number, body: Record<string, unknown>) =>
+  reply.code(status).send(body);
 
 /**
  * `GET /config/confirm/:pendingId` renders the consequences of a session's pending guarded change
@@ -138,50 +163,90 @@ export function registerConfirmPages(app: FastifyInstance, deps: ConfirmPageDeps
     const sid = req.principal?.via === 'session' ? req.principal.sessionId : undefined;
     return sid ? store.confirmations.pending(req.params.id, sid) : undefined;
   };
-  const render = (req: FastifyRequest, pending: Pending, error?: string) =>
+  const render = (req: FastifyRequest, pending: Pending, error?: string, frame = false) =>
     withCsrf(
       req,
       renderConfirm(
         pending,
         store.confirmations.mintConfirmation(pending, pending.sessionIdHash),
         error,
+        { frame },
       ),
     );
 
-  app.get<{ Params: { id: string } }>('/config/confirm/:id', async (req, reply) => {
-    const pending = pendingOf(req);
-    if (!pending) return html(reply, 404, withCsrf(req, GONE));
-    return html(reply, 200, render(req, pending));
-  });
+  app.get<{ Params: { id: string }; Querystring: { frame?: string } }>(
+    '/config/confirm/:id',
+    async (req, reply) => {
+      const frame = req.query.frame === '1';
+      const pending = pendingOf(req);
+      if (!pending) return html(reply, 404, withCsrf(req, frame ? GONE_FRAME : GONE));
+      return html(reply, 200, render(req, pending, undefined, frame));
+    },
+  );
 
+  /*
+   * One handler for the page's form and the dialog's: every check, charge, audit and `onApplied`
+   * below runs the same for both. Only the answer differs: with `Accept: application/json` (the
+   * dialog, which must also carry the session's `x-jm-csrf`) it is JSON and never a redirect.
+   */
   app.post<{ Params: { id: string } }>('/config/confirm/:id', async (req, reply) => {
     const principal = req.principal;
+    const asJson = wantsJson(req);
+    if (asJson && (!principal || !requireCsrf(req, principal)))
+      return json(reply, 403, { error: 'csrf' });
     const pending = pendingOf(req);
-    if (!principal) return html(reply, 404, withCsrf(req, GONE));
+    if (!principal)
+      return asJson ? json(reply, 404, { error: 'gone' }) : html(reply, 404, withCsrf(req, GONE));
     const token = (req.body as { token?: unknown } | undefined)?.token;
     // A replay of a confirmation already used says so, rather than that nothing waits.
     if (!pending && typeof token === 'string' && store.confirmations.wasUsed(token))
-      return html(reply, 409, withCsrf(req, notice('Not applied', escapeHtml(REASON.used(0)))));
-    if (!pending) return html(reply, 404, withCsrf(req, GONE));
+      return asJson
+        ? json(reply, 409, { error: 'used' satisfies ConsumeFailure })
+        : html(reply, 409, withCsrf(req, notice('Not applied', escapeHtml(REASON.used(0)))));
+    if (!pending)
+      return asJson ? json(reply, 404, { error: 'gone' }) : html(reply, 404, withCsrf(req, GONE));
     const checked = await checkPassphrase(req, deps);
-    if (checked === 'backoff')
-      return html(
-        reply.header('retry-after', retryAfterSeconds(backoff, req, now())),
-        429,
-        render(req, pending, 'Too many wrong passphrases from here: wait a moment and try again.'),
-      );
-    if (checked === 'busy')
-      return html(reply.header('retry-after', '1'), 503, render(req, pending, BUSY));
+    if (checked === 'backoff') {
+      const retryAfter = retryAfterSeconds(backoff, req, now());
+      reply.header('retry-after', retryAfter);
+      return asJson
+        ? json(reply, 429, { error: 'backoff', retryAfter: Number(retryAfter) })
+        : html(
+            reply,
+            429,
+            render(
+              req,
+              pending,
+              'Too many wrong passphrases from here: wait a moment and try again.',
+            ),
+          );
+    }
+    if (checked === 'busy') {
+      reply.header('retry-after', '1');
+      return asJson
+        ? json(reply, 503, { error: 'busy' })
+        : html(reply, 503, render(req, pending, BUSY));
+    }
     const body = ConfirmBody.safeParse(req.body ?? {});
     if (checked === 'wrong' || !body.success)
-      return html(reply, 401, render(req, pending, 'That passphrase is not right.'));
+      return asJson
+        ? json(reply, 401, { error: 'passphrase' })
+        : html(reply, 401, render(req, pending, 'That passphrase is not right.'));
     const before = store.document();
-    const r = store.apply(pending.patch, {
-      ...pending.meta,
-      principal,
-      expectRevision: pending.expectRevision,
-      confirmation: { pendingId: pending.id, token: body.data.token },
-    });
+    let r: ReturnType<ConfigStore['apply']>;
+    try {
+      r = store.apply(pending.patch, {
+        ...pending.meta,
+        principal,
+        expectRevision: pending.expectRevision,
+        confirmation: { pendingId: pending.id, token: body.data.token },
+      });
+    } catch (e) {
+      // Nothing was applied: the page's answer is the server's usual 500, the dialog's says so.
+      if (!asJson) throw e;
+      req.log.error({ err: e }, 'applying a confirmed change failed');
+      return json(reply, 500, { error: 'failed' });
+    }
     if (r.ok) {
       deps.onApplied?.(pending, before, store.document(), r.revision);
       recordAudit(
@@ -201,6 +266,7 @@ export function registerConfirmPages(app: FastifyInstance, deps: ConfirmPageDeps
           ]),
         ],
       );
+      if (asJson) return json(reply, 200, { applied: true, revision: r.revision });
       if (pending.returnTo) return reply.redirect(safeNext(pending.returnTo), 303);
       return html(
         reply,
@@ -213,6 +279,12 @@ export function registerConfirmPages(app: FastifyInstance, deps: ConfirmPageDeps
           ),
         ),
       );
+    }
+    if (asJson) {
+      if ('confirmation' in r) return json(reply, 409, { error: r.confirmation });
+      if ('sessionForbidden' in r)
+        return json(reply, 403, { error: 'forbidden', paths: r.sessionForbidden });
+      return json(reply, 400, { error: 'invalid' });
     }
     if ('confirmation' in r)
       return html(

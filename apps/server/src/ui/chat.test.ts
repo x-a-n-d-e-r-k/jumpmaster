@@ -7,7 +7,8 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
 import { Backoff } from '../auth/backoff.js';
 import { SetupMode } from '../auth/operator.js';
-import { type ChatCard, recordCard } from '../chat/cards.js';
+import { sha256Hex } from '../auth/sessions.js';
+import { type ChatCard, listCards, recordCard } from '../chat/cards.js';
 import {
   appendMessage,
   type ChatMessage,
@@ -19,6 +20,7 @@ import {
 } from '../chat/store.js';
 import type { HubEvent } from '../chat/turns.js';
 import { loadBoot } from '../config/boot.js';
+import { PENDING_MS } from '../config/confirm.js';
 import { ConfigStore } from '../config/store.js';
 import { openDb } from '../db/open.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
@@ -92,7 +94,7 @@ function world(o: { service?: boolean } = {}) {
   const s = operatorSession(db, t0);
   const session = { host: HOST, ...s.headers };
   const bearer = { host: HOST, authorization: `Bearer ${TOKEN}` };
-  return { db, app: a, session, bearer, subscribed, listeners };
+  return { db, store, app: a, session, sid: s.id, bearer, subscribed, listeners };
 }
 
 /** The SSE frames of a body: each event's name, id and data. */
@@ -430,6 +432,7 @@ describe('/chat Markdown (#490)', () => {
       this.html = v;
       this.text = '';
       this.children = [];
+      FakeEl.parse?.(this, v);
     }
     get lastChild() {
       return this.children[this.children.length - 1];
@@ -470,18 +473,48 @@ describe('/chat Markdown (#490)', () => {
       const i = this.children.indexOf(ref);
       this.children.splice(i < 0 ? this.children.length : i, 0, e);
     }
-    querySelector(sel: string): FakeEl | null {
-      for (const c of this.children) {
-        if (
-          c.tagName === sel ||
-          (sel.startsWith('.') && c.className.split(' ').includes(sel.slice(1)))
-        )
-          return c;
-        const d = c.querySelector(sel);
-        if (d) return d;
-      }
-      return null;
+    /** A selector list of `tag`, `.class`, `[attr]` and `[attr=value]` parts, as the script uses. */
+    matches(sel: string): boolean {
+      return sel.split(',').some((one) => {
+        const m = /^([a-z0-9]*)((?:\.[\w-]+)*)((?:\[[\w-]+(?:=[\w-]+)?\])*)$/.exec(one.trim());
+        if (!m) throw new Error(`unsupported selector ${one}`);
+        const [, tag, classes, attrs] = m;
+        if (tag && this.tagName !== tag) return false;
+        const mine = this.className.split(' ');
+        for (const c of (classes ?? '').split('.').filter(Boolean))
+          if (!mine.includes(c)) return false;
+        for (const a of (attrs ?? '').match(/\[[^\]]+\]/g) ?? []) {
+          const [k = '', v] = a.slice(1, -1).split('=');
+          const got = k.startsWith('data-')
+            ? this.dataset[k.slice(5)]
+            : (this.attrs[k] ?? (this as unknown as Record<string, unknown>)[k]);
+          if (got === undefined || got === '' || (v !== undefined && got !== v)) return false;
+        }
+        return true;
+      });
     }
+    querySelectorAll(sel: string): FakeEl[] {
+      return this.children.flatMap((c) => [
+        ...(c.matches(sel) ? [c] : []),
+        ...c.querySelectorAll(sel),
+      ]);
+    }
+    querySelector(sel: string): FakeEl | null {
+      return this.querySelectorAll(sel)[0] ?? null;
+    }
+    get firstChild() {
+      return this.children[0];
+    }
+    type = '';
+    name = '';
+    href = '';
+    tabIndex = 0;
+    static focused: FakeEl | null = null;
+    focus() {
+      FakeEl.focused = this;
+    }
+    /** Builds the children a test says an innerHTML write stands for. */
+    static parse: ((el: FakeEl, html: string) => void) | undefined;
     /** Like the browser's: fires `submit` unless the required textarea is empty. */
     requestSubmit() {
       const box = this.querySelector('textarea');
@@ -492,12 +525,27 @@ describe('/chat Markdown (#490)', () => {
 
   type FakeResponse = { ok: boolean; status: number; json: () => Promise<unknown> };
 
+  /** A `<dialog>`: `showModal` opens it, `close` shuts it and fires `close`, as the browser's. */
+  class FakeDialog extends FakeEl {
+    open = false;
+    showModal() {
+      this.open = true;
+    }
+    close() {
+      if (!this.open) return;
+      this.open = false;
+      this.fire('close', {});
+    }
+  }
+
   /**
    * THREAD_SCRIPT in a vm with a fake DOM, following a busy thread; `emit` fires an SSE event.
    * `fetches` holds each `jmFetch` call's resolver; `scroller` is the page's scrolling element.
    */
-  function runScript() {
+  function runScript(o: { dialogApi?: boolean; now?: number; cards?: FakeEl[] } = {}) {
     FakeEl.htmlWrites = [];
+    FakeEl.focused = null;
+    FakeEl.parse = undefined;
     const root = new FakeEl('div');
     root.dataset = { thread: '1', last: '1', busy: '1' };
     const log = new FakeEl('div');
@@ -505,7 +553,33 @@ describe('/chat Markdown (#490)', () => {
     const box = new FakeEl('textarea');
     const button = new FakeEl('button');
     form.append(box, new FakeEl('small'), button);
-    const ids: Record<string, FakeEl> = { chat: root, messages: log, send: form };
+    for (const c of o.cards ?? []) log.append(c);
+    const dialog = new FakeDialog('dialog');
+    const dbody = new FakeEl('div');
+    dbody.className = 'confirm-body';
+    const heading = new FakeEl('h2');
+    heading.textContent = 'Confirm a guarded change';
+    dialog.append(heading, dbody);
+    const ids: Record<string, FakeEl> = {
+      chat: root,
+      messages: log,
+      send: form,
+      'confirm-dialog': dialog,
+    };
+    const clock = { now: o.now ?? 0 };
+    let tick: (() => void) | undefined;
+    let tickMs = 0;
+    const location = { href: '/chat/1' };
+    const pageFetches: {
+      url: string;
+      init: { method?: string; headers?: Record<string, string>; body?: string };
+      resolve: (r: {
+        ok: boolean;
+        status: number;
+        text?: () => Promise<string>;
+        json?: () => Promise<unknown>;
+      }) => void;
+    }[] = [];
     const scroller = { scrollHeight: 2000, clientHeight: 600, scrollTop: 1400 };
     const fetches: { url: string; body: unknown; resolve: (r: FakeResponse) => void }[] = [];
     const handlers: Record<string, (e: { data: string }) => void> = {};
@@ -522,7 +596,21 @@ describe('/chat Markdown (#490)', () => {
         createElement: (tag: string) => new FakeEl(tag),
         querySelector: () => null,
         scrollingElement: scroller,
+        get activeElement() {
+          return FakeEl.focused;
+        },
       },
+      ...(o.dialogApi === false ? {} : { HTMLDialogElement: FakeDialog }),
+      location,
+      URLSearchParams,
+      Date: { now: () => clock.now, parse: Date.parse },
+      setInterval: (fn: () => void, ms: number) => {
+        tick = fn;
+        tickMs = ms;
+        return 1;
+      },
+      fetch: (url: string, init: (typeof pageFetches)[number]['init'] = {}) =>
+        new Promise((resolve) => pageFetches.push({ url, init, resolve })),
       EventSource: FakeEventSource,
       jmFetch: (url: string, body: unknown) =>
         new Promise<FakeResponse>((resolve) => fetches.push({ url, body, resolve })),
@@ -536,7 +624,22 @@ describe('/chat Markdown (#490)', () => {
       if (!fn) throw new Error(`no ${ev} listener`);
       fn({ data: JSON.stringify(data) });
     };
-    return { log, emit, form, box, button, scroller, fetches };
+    return {
+      log,
+      emit,
+      form,
+      box,
+      button,
+      scroller,
+      fetches,
+      dialog,
+      dbody,
+      clock,
+      location,
+      pageFetches,
+      tickMs: () => tickMs,
+      tick: () => tick?.(),
+    };
   }
 
   test('the page script shows text events as textContent, then a message html replaces the live box', () => {
@@ -815,6 +918,327 @@ describe('/chat Markdown (#490)', () => {
     }
     expect(liveShape(log)).toEqual(storedShape(html));
     expect(liveShape(log)).toEqual(['owner', 'steps:3', 'assistant', 'steps:1', 'assistant']);
+  });
+
+  describe('the confirm dialog (#503)', () => {
+    const T = Date.parse('2026-01-01T00:00:00.000Z');
+    const MIN = 60_000;
+    const pendingCard = (o: Record<string, unknown> = {}) => ({
+      id: 7,
+      kind: 'setting',
+      state: 'pending',
+      summary: 'Turn off CI in main',
+      link: '/config/confirm/abc',
+      createdAt: new Date(T).toISOString(),
+      ...o,
+    });
+    const FRAME = '<meta name="jm-csrf" content="csrf-1"><form>…</form>';
+    /** What the frame's HTML stands for in the fake: the meta, the form and its fields. */
+    const parseFrame = (el: FakeEl) => {
+      const meta = new FakeEl('meta');
+      meta.attrs = { name: 'jm-csrf' };
+      (meta as unknown as { content: string }).content = 'csrf-1';
+      const form = new FakeEl('form');
+      const token = new FakeEl('input');
+      Object.assign(token, { type: 'hidden', name: 'token', value: 'tok-1' });
+      const pass = new FakeEl('input');
+      Object.assign(pass, { type: 'password', name: 'passphrase' });
+      const ok = new FakeEl('button');
+      ok.className = 'primary';
+      const cancel = new FakeEl('button');
+      cancel.dataset = { cancel: '1' };
+      form.append(token, pass, ok, cancel);
+      el.append(meta, form);
+    };
+    const text = (status: number, body: string) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      text: async () => body,
+    });
+    const json = (status: number, body: unknown) => ({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+    });
+    const press = (el: FakeEl | null) => {
+      if (!el) throw new Error('no such button');
+      el.fire('click', {});
+    };
+    const cardOf = (log: FakeEl) => log.querySelector('[data-card]') as FakeEl;
+    /** A thread with one streamed pending card, its Review pressed and the frame loaded. */
+    const opened = async () => {
+      const r = runScript({ now: T + MIN });
+      FakeEl.parse = (el) => parseFrame(el);
+      r.emit('card', { card: pendingCard() });
+      const review = cardOf(r.log).querySelector('.review') as FakeEl;
+      review.focus();
+      press(review);
+      r.pageFetches[0]?.resolve(text(200, FRAME));
+      await flush();
+      const form = r.dbody.querySelector('form') as FakeEl;
+      const submit = () => form.fire('submit', { preventDefault() {} });
+      return { ...r, review, form, submit };
+    };
+
+    test('Review and confirm opens the dialog and loads ?frame=1 into it, from the server only', async () => {
+      const r = await opened();
+      expect(r.dialog.open).toBe(true);
+      expect(r.pageFetches).toHaveLength(1);
+      expect(r.pageFetches[0]?.url).toBe('/config/confirm/abc?frame=1');
+      expect(r.pageFetches[0]?.init.method ?? 'GET').toBe('GET');
+      // The one HTML the dialog sets is that response's.
+      expect(FakeEl.htmlWrites).toEqual([{ el: r.dbody, value: FRAME }]);
+      expect(r.dialog.querySelector('h2')?.textContent).toBe('Confirm a guarded change');
+      expect(FakeEl.focused?.name).toBe('passphrase');
+    });
+
+    test('submitting posts the form as JSON with the CSRF header; 200 closes the dialog and the card event settles it', async () => {
+      const r = await opened();
+      (r.form.querySelector('input[type=password]') as FakeEl).value = 'pass phrase';
+      r.submit();
+      const post = r.pageFetches[1];
+      expect(post?.url).toBe('/config/confirm/abc');
+      expect(post?.init.method).toBe('POST');
+      expect(post?.init.headers).toMatchObject({
+        accept: 'application/json',
+        'content-type': 'application/x-www-form-urlencoded',
+        'x-jm-csrf': 'csrf-1',
+      });
+      expect(Object.fromEntries(new URLSearchParams(post?.init.body))).toEqual({
+        token: 'tok-1',
+        passphrase: 'pass phrase',
+      });
+      post?.resolve(json(200, { applied: true, revision: 4 }));
+      await flush();
+      expect(r.dialog.open).toBe(false);
+      expect(r.dbody.children).toEqual([]);
+      const card = cardOf(r.log);
+      expect(card.querySelector('.review')).toBeNull();
+      expect(FakeEl.focused).toBe(card);
+      r.emit('card', {
+        card: { id: 7, kind: 'setting', state: 'done', summary: 'Changed CI', link: null },
+      });
+      expect(r.log.querySelectorAll('[data-card]')).toHaveLength(1);
+      expect(cardOf(r.log).querySelector('.text')?.textContent).toBe('Changed CI');
+    });
+
+    test('401 keeps the dialog open with the error; 429 and 503 say why too', async () => {
+      const r = await opened();
+      r.submit();
+      r.pageFetches[1]?.resolve(json(401, { error: 'passphrase' }));
+      await flush();
+      expect(r.dialog.open).toBe(true);
+      const err = r.dbody.querySelector('.error') as FakeEl;
+      expect(err.attrs.role).toBe('alert');
+      expect(err.textContent).toBe('That passphrase is not right.');
+      expect(cardOf(r.log).querySelector('.review')).not.toBeNull();
+      r.submit();
+      r.pageFetches[2]?.resolve(json(429, { error: 'backoff', retryAfter: 4 }));
+      await flush();
+      expect(err.textContent).toContain('wait 4 s');
+      r.submit();
+      r.pageFetches[3]?.resolve(json(503, { error: 'busy' }));
+      await flush();
+      expect(r.dialog.open).toBe(true);
+      expect(r.dbody.querySelectorAll('.error')).toHaveLength(1);
+      expect(err.textContent).toContain('busy');
+    });
+
+    test.each([404, 409])('%i closes the dialog and marks the card Expired', async (status) => {
+      const r = await opened();
+      r.submit();
+      r.pageFetches[1]?.resolve(json(status, { error: status === 404 ? 'gone' : 'used' }));
+      await flush();
+      expect(r.dialog.open).toBe(false);
+      const card = cardOf(r.log);
+      expect(card.querySelector('.state')?.textContent).toBe('Expired');
+      expect(card.querySelector('.review')).toBeNull();
+      expect(card.querySelector('.restage')?.textContent).toBe('Stage it again');
+      expect(FakeEl.focused).toBe(card.querySelector('.restage'));
+    });
+
+    test('a 404 frame marks the card Expired without showing anything', async () => {
+      const r = runScript({ now: T });
+      r.emit('card', { card: pendingCard() });
+      press(cardOf(r.log).querySelector('.review'));
+      r.pageFetches[0]?.resolve(text(404, 'Nothing to confirm'));
+      await flush();
+      expect(r.dialog.open).toBe(false);
+      expect(FakeEl.htmlWrites).toEqual([]);
+      expect(cardOf(r.log).querySelector('.state')?.textContent).toBe('Expired');
+    });
+
+    test('Escape and Cancel close the dialog without posting, and focus returns to the button', async () => {
+      const r = await opened();
+      let prevented = false;
+      r.dialog.fire('keydown', { key: 'Escape', preventDefault: () => (prevented = true) });
+      expect([r.dialog.open, prevented]).toEqual([false, true]);
+      expect(FakeEl.focused).toBe(r.review);
+      press(r.review);
+      r.pageFetches[1]?.resolve(text(200, FRAME));
+      await flush();
+      expect(r.dialog.open).toBe(true);
+      press(r.dbody.querySelector('[data-cancel]'));
+      expect(r.dialog.open).toBe(false);
+      expect(FakeEl.focused).toBe(r.review);
+      // Only the two frame loads: nothing was posted.
+      expect(r.pageFetches.map((f) => f.init.method ?? 'GET')).toEqual(['GET', 'GET']);
+    });
+
+    test('Tab and Shift+Tab stay inside the open dialog', async () => {
+      const r = await opened();
+      const focusable = r.dialog
+        .querySelectorAll('button,input,a[href],textarea,select')
+        .filter((x) => x.type !== 'hidden');
+      const first = focusable[0] as FakeEl;
+      const last = focusable[focusable.length - 1] as FakeEl;
+      expect(first.name).toBe('passphrase');
+      last.focus();
+      let prevented = false;
+      r.dialog.fire('keydown', {
+        key: 'Tab',
+        shiftKey: false,
+        preventDefault: () => (prevented = true),
+      });
+      expect([FakeEl.focused, prevented]).toEqual([first, true]);
+      r.dialog.fire('keydown', { key: 'Tab', shiftKey: true, preventDefault() {} });
+      expect(FakeEl.focused).toBe(last);
+    });
+
+    test('without HTMLDialogElement the button navigates to the confirm page instead', () => {
+      const r = runScript({ dialogApi: false, now: T });
+      r.emit('card', { card: pendingCard() });
+      const review = cardOf(r.log).querySelector('.review') as FakeEl;
+      expect(review.tagName).toBe('button');
+      expect(review.type).toBe('button');
+      press(review);
+      expect(r.location.href).toBe('/config/confirm/abc');
+      expect(r.pageFetches).toEqual([]);
+      expect(r.dialog.open).toBe(false);
+    });
+
+    test('a card whose link is not a confirm path has no button and opens no dialog; nor does message text naming one', async () => {
+      const r = runScript({ now: T });
+      r.emit('card', { card: pendingCard({ id: 8, link: '/config/confirm/../zones' }) });
+      r.emit('card', { card: pendingCard({ id: 9, link: '/zones/main' }) });
+      r.emit('card', { card: pendingCard({ id: 10, state: 'done', link: '/config/confirm/abc' }) });
+      r.emit('message', {
+        seq: 2,
+        role: 'assistant',
+        state: 'done',
+        text: 'Open /config/confirm/abc',
+        html: renderChatMarkdown('Open /config/confirm/abc', {}),
+      });
+      expect(r.log.querySelectorAll('.review')).toEqual([]);
+      expect(r.log.querySelectorAll('[data-confirm]')).toEqual([]);
+      for (const a of r.log.querySelectorAll('a')) a.fire('click', {});
+      for (const c of r.log.children) c.fire('click', {});
+      await flush();
+      expect(r.pageFetches).toEqual([]);
+      expect(r.dialog.open).toBe(false);
+      expect(FakeEl.htmlWrites.filter((w) => w.el === r.dbody)).toEqual([]);
+      expect(r.location.href).toBe('/chat/1');
+    });
+
+    test('the countdown shows the minutes left, then Expired with Stage it again, which fills but does not send', () => {
+      const r = runScript({ now: T + 9 * MIN });
+      r.emit('card', { card: pendingCard() });
+      const card = cardOf(r.log);
+      expect(card.querySelector('.expiry')?.textContent).toBe('Confirm within 1 min');
+      expect(r.tickMs()).toBe(30_000);
+      r.clock.now = T + 10 * MIN;
+      r.tick();
+      expect(card.querySelector('.state')?.textContent).toBe('Expired');
+      expect(card.querySelector('.review')).toBeNull();
+      expect(card.querySelector('.expiry')).toBeNull();
+      press(card.querySelector('.restage'));
+      expect(r.box.value).toBe('Stage this change again: Turn off CI in main');
+      expect(FakeEl.focused).toBe(r.box);
+      expect(r.fetches).toEqual([]);
+      expect(r.pageFetches).toEqual([]);
+    });
+
+    test('a stored card from the page is wired the same: its countdown and its button', async () => {
+      const stored = new FakeEl('div');
+      stored.className = 'msg card pending';
+      stored.dataset = {
+        card: '7',
+        confirm: '/config/confirm/abc',
+        created: new Date(T).toISOString(),
+      };
+      const t = new FakeEl('div');
+      t.className = 'text';
+      t.textContent = 'Turn off CI in main';
+      const exp = new FakeEl('small');
+      exp.className = 'expiry';
+      const review = new FakeEl('button');
+      review.className = 'review';
+      stored.append(t, exp, review);
+      const r = runScript({ now: T + 4 * MIN + 1, cards: [stored] });
+      expect(exp.textContent).toBe('Confirm within 6 min');
+      press(review);
+      expect(r.pageFetches[0]?.url).toBe('/config/confirm/abc?frame=1');
+    });
+
+    test('server render: a pending card whose change is gone is Expired; one still pending has the button', async () => {
+      const w = world();
+      const th = createThread(w.db, { title: 'Settings' }, t0);
+      const owner = appendMessage(
+        w.db,
+        th.id,
+        { role: 'owner', text: 'ci off', state: 'done' },
+        t0,
+      );
+      const live = w.store.confirmations.addPending({
+        sessionIdHash: sha256Hex(w.sid),
+        patch: {},
+        expectRevision: w.store.revision(),
+        meta: { via: 'ui' } as never,
+        guarded: [],
+        notes: [],
+      });
+      const card = (id: string, summary: string) =>
+        recordCard(
+          w.db,
+          {
+            threadId: th.id,
+            messageId: owner.id,
+            kind: 'setting',
+            state: 'pending',
+            link: `/config/confirm/${id}`,
+            summary,
+            undo: { paths: ['x'], what: 'x' },
+          },
+          t0,
+        );
+      const gone = card('gone-id', 'Gone change');
+      const waiting = card(live.id, 'Live change');
+      const res = await w.app.inject({ method: 'GET', url: `/chat/${th.id}`, headers: w.session });
+      const of = (id: number, body = res.body) =>
+        new RegExp(
+          `<div class="msg card [^"]*" data-card="${id}"[^>]*>.*?</div>(?=<div class="msg|</div><form)`,
+        ).exec(body)?.[0] ?? '';
+      expect(of(gone.id)).toContain('Expired');
+      expect(of(gone.id)).toContain('Stage it again');
+      expect(of(gone.id)).not.toContain('Review and confirm');
+      expect(of(waiting.id)).toContain('Review and confirm');
+      expect(of(waiting.id)).toContain(`data-confirm="/config/confirm/${live.id}"`);
+      expect(of(waiting.id)).toContain('Confirm within 10 min');
+      expect(res.body).toContain('<dialog id="confirm-dialog"');
+      // The stored cards are unchanged.
+      expect(listCards(w.db, th.id).map((c) => c.state)).toEqual(['pending', 'pending']);
+      // Another session sees the live one as Expired too.
+      const other = operatorSession(w.db, t0);
+      const theirs = await w.app.inject({
+        method: 'GET',
+        url: `/chat/${th.id}`,
+        headers: { host: HOST, ...other.headers },
+      });
+      expect(of(waiting.id, theirs.body)).toContain('Expired');
+      expect(of(waiting.id, theirs.body)).not.toContain('Review and confirm');
+      // At createdAt + PENDING_MS the page says Expired by the clock alone.
+      expect(renderThread(th, [], [waiting], { now: plus(t0, PENDING_MS) })).toContain('Expired');
+    });
   });
 });
 

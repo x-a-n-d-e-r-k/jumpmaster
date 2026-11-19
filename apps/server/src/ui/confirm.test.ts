@@ -2,13 +2,15 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { createApp } from '../app.js';
 import { listAudit } from '../auth/audit.js';
 import { Backoff } from '../auth/backoff.js';
 import type { Principal } from '../auth/guard.js';
 import { SetupMode, setOperatorPassphrase } from '../auth/operator.js';
 import { sha256Hex } from '../auth/sessions.js';
+import { getCard, recordCard } from '../chat/cards.js';
+import { appendMessage, createThread } from '../chat/store.js';
 import { loadBoot } from '../config/boot.js';
 import { CONFIRM_MS, PENDING_MS } from '../config/confirm.js';
 import { ConfigStore } from '../config/store.js';
@@ -88,7 +90,13 @@ async function world() {
     });
   /** The token the render put into the form. */
   const tokenIn = (html: string) => /name="token" value="([\w-]+)"/.exec(html)?.[1] as string;
-  const confirm = (id: string, form: Record<string, string>, s = one, headers = {}) =>
+  const confirm = (
+    id: string,
+    form: Record<string, string>,
+    s = one,
+    headers = {},
+    remoteAddress?: string,
+  ) =>
     a.inject({
       method: 'POST',
       url: `/config/confirm/${id}`,
@@ -100,8 +108,31 @@ async function world() {
         ...headers,
       },
       payload: new URLSearchParams(form).toString(),
+      ...(remoteAddress ? { remoteAddress } : {}),
     });
-  return { db, store, clock, one, two, propose, page, tokenIn, confirm };
+  /** The dialog's frame: the confirm content alone. */
+  const frame = (id: string, s = one) =>
+    a.inject({
+      method: 'GET',
+      url: `/config/confirm/${id}?frame=1`,
+      headers: { host: HOST, cookie: s.cookie },
+    });
+  /** The dialog's POST: the same form, answered in JSON, with the session's CSRF header. */
+  const confirmJson = (
+    id: string,
+    form: Record<string, string>,
+    s = one,
+    headers: Record<string, string> = {},
+    remoteAddress?: string,
+  ) =>
+    confirm(
+      id,
+      form,
+      s,
+      { accept: 'application/json', 'x-jm-csrf': s.csrf, ...headers },
+      remoteAddress,
+    );
+  return { db, store, clock, one, two, propose, page, tokenIn, confirm, frame, confirmJson };
 }
 
 const weaken = { dropZones: [zone({ ciRequired: false, egress: { mode: 'off', allow: [] } })] };
@@ -268,5 +299,215 @@ describe('cancelTo', () => {
     const body = (await w.page(id2)).body;
     expect(body).toContain('<a href="/">Cancel</a>');
     expect(body).not.toContain('evil.example');
+  });
+});
+
+describe('the confirm dialog (#503)', () => {
+  const applies = (w: Awaited<ReturnType<typeof world>>) =>
+    listAudit(w.db).filter((a) => a.action === 'config.apply');
+
+  test('?frame=1 is the confirm content alone, minted like the page, with the CSRF token', async () => {
+    const w = await world();
+    const id = await w.propose(weaken);
+    const r = await w.frame(id);
+    expect(r.statusCode).toBe(200);
+    expect(r.headers['content-type']).toContain('text/html');
+    expect(r.body).toContain('Agent PRs in main will merge without CI');
+    expect(r.body).toContain('type="password" name="passphrase"');
+    expect(w.tokenIn(r.body)).toMatch(/^[\w-]{40,}$/);
+    expect(r.body).toContain('Confirm</button>');
+    expect(r.body).toContain('Cancel');
+    expect(r.body).toContain(`<meta name="jm-csrf" content="${w.one.csrf}">`);
+    for (const chrome of ['<header', '<nav', '<html', '<body', '<script', '<h2'])
+      expect(r.body).not.toContain(chrome);
+    // The frame's token is the live one: it confirms the change on the page's own POST.
+    const ok = await w.confirm(id, { token: w.tokenIn(r.body), passphrase: PASS });
+    expect(ok.statusCode).toBe(200);
+  });
+
+  test('the frame mints a fresh token each render, replacing the page one, as the page does', async () => {
+    const w = await world();
+    const id = await w.propose(weaken);
+    const fromPage = w.tokenIn((await w.page(id)).body);
+    const fromFrame = w.tokenIn((await w.frame(id)).body);
+    expect(fromFrame).not.toBe(fromPage);
+    const stale = await w.confirmJson(id, { token: fromPage, passphrase: PASS });
+    expect([stale.statusCode, stale.json()]).toEqual([409, { error: 'unknown' }]);
+  });
+
+  test('D1: an unknown, expired or other-session id is 404 GONE on the frame; the JSON POST of another session is 404 and applies nothing', async () => {
+    const w = await world();
+    const id = await w.propose(weaken);
+    const token = w.tokenIn((await w.frame(id)).body);
+    const theirs = await w.frame(id, w.two);
+    const unknown = await w.frame('nope');
+    expect([theirs.statusCode, unknown.statusCode]).toEqual([404, 404]);
+    expect(theirs.body).toBe(unknown.body.replace(w.one.csrf, w.two.csrf));
+    expect(theirs.body).toContain('Nothing to confirm');
+    expect(theirs.body).not.toContain('<nav');
+    const cross = await w.confirmJson(id, { token, passphrase: PASS }, w.two);
+    expect([cross.statusCode, cross.json()]).toEqual([404, { error: 'gone' }]);
+    expect(w.store.revision()).toBe(2);
+    expect(applies(w)).toEqual([]);
+    // Still this session's to confirm.
+    w.clock.now = plus(t0, PENDING_MS);
+    expect((await w.frame(id)).statusCode).toBe(404);
+    const late = await w.confirmJson(id, { token, passphrase: PASS });
+    expect([late.statusCode, late.json()]).toEqual([404, { error: 'gone' }]);
+    expect(w.store.revision()).toBe(2);
+  });
+
+  test('D2: a wrong passphrase is 401 JSON, applies nothing, and charges the backoff exactly as the HTML path', async () => {
+    const run = async (json: boolean) => {
+      const w = await world();
+      const id = await w.propose(weaken);
+      const token = w.tokenIn((await w.frame(id)).body);
+      const post = json ? w.confirmJson : w.confirm;
+      const wrong = await post(id, { token, passphrase: 'not the passphrase at all' });
+      const held = await post(id, {
+        token: json ? token : w.tokenIn(wrong.body),
+        passphrase: PASS,
+      });
+      const statuses = [wrong.statusCode, held.statusCode, held.headers['retry-after']];
+      const revision = w.store.revision();
+      const audit = applies(w).length;
+      w.clock.now = plus(t0, 2000);
+      const ok = await post(id, { token: json ? token : w.tokenIn(held.body), passphrase: PASS });
+      return { w, wrong, held, statuses, revision, audit, ok };
+    };
+    const j = await run(true);
+    const h = await run(false);
+    expect(j.wrong.json()).toEqual({ error: 'passphrase' });
+    expect(j.held.json()).toEqual({ error: 'backoff', retryAfter: 1 });
+    expect(j.statuses).toEqual(h.statuses);
+    expect(j.statuses.slice(0, 2)).toEqual([401, 429]);
+    expect([j.revision, j.audit]).toEqual([2, 0]);
+    expect([h.revision, h.audit]).toEqual([2, 0]);
+    expect([j.ok.statusCode, j.ok.json()]).toEqual([200, { applied: true, revision: 3 }]);
+    expect(h.ok.statusCode).toBe(200);
+  });
+
+  test('D2: an apply that throws is a 5xx JSON error, nothing applied, onApplied never called', async () => {
+    const w = await world();
+    const id = await w.propose(weaken);
+    const token = w.tokenIn((await w.frame(id)).body);
+    const before = w.store.document();
+    const spy = vi.spyOn(w.store, 'apply').mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    // A chat card waiting on this change: onApplied would settle it.
+    const th = createThread(w.db, { title: 't' }, t0);
+    const msg = appendMessage(w.db, th.id, { role: 'owner', text: 'x', state: 'done' }, t0);
+    const card = recordCard(
+      w.db,
+      {
+        threadId: th.id,
+        messageId: msg.id,
+        kind: 'setting',
+        state: 'pending',
+        link: `/config/confirm/${id}`,
+        summary: 'Turn off CI in main',
+        undo: { paths: ['dropZones[main].ciRequired'], what: 'CI in main' },
+      },
+      t0,
+    );
+    const r = await w.confirmJson(id, { token, passphrase: PASS });
+    spy.mockRestore();
+    expect(r.statusCode).toBeGreaterThanOrEqual(500);
+    expect(r.json()).toEqual({ error: 'failed' });
+    expect(r.body).not.toContain('disk full');
+    expect(w.store.revision()).toBe(2);
+    expect(w.store.document()).toEqual(before);
+    expect(applies(w)).toEqual([]);
+    expect(getCard(w.db, card.id)?.state).toBe('pending');
+  });
+
+  test('D3: two JSON POSTs with one token: exactly one applies, the other is 409 used', async () => {
+    const w = await world();
+    const id = await w.propose(weaken);
+    const token = w.tokenIn((await w.frame(id)).body);
+    const [a, b] = await Promise.all([
+      w.confirmJson(id, { token, passphrase: PASS }, w.one, {}, '10.0.0.1'),
+      w.confirmJson(id, { token, passphrase: PASS }, w.one, {}, '10.0.0.2'),
+    ]);
+    const answers = [a, b].map((r) => [r.statusCode, r.json()]);
+    expect(answers).toContainEqual([200, { applied: true, revision: 3 }]);
+    expect(answers).toContainEqual([409, { error: 'used' }]);
+    expect(w.store.revision()).toBe(3);
+    expect(applies(w)).toHaveLength(1);
+  });
+
+  test('the JSON path without the CSRF header, or cross-site, is refused before anything is charged, like the HTML path', async () => {
+    const w = await world();
+    const id = await w.propose(weaken);
+    const token = w.tokenIn((await w.frame(id)).body);
+    const noCsrf = await w.confirm(id, { token, passphrase: 'wrong' }, w.one, {
+      accept: 'application/json',
+    });
+    expect(noCsrf.statusCode).toBe(403);
+    const crossJson = await w.confirmJson(id, { token, passphrase: 'wrong' }, w.one, {
+      origin: 'http://evil.example',
+    });
+    const crossHtml = await w.confirm(id, { token, passphrase: 'wrong' }, w.one, {
+      origin: 'http://evil.example',
+    });
+    expect([crossJson.statusCode, crossHtml.statusCode]).toEqual([403, 403]);
+    // Nothing was charged: the right passphrase still goes straight through.
+    const ok = await w.confirmJson(id, { token, passphrase: PASS });
+    expect(ok.statusCode).toBe(200);
+  });
+
+  test('parity: the same change confirmed through HTML and through JSON makes the same revision and audit', async () => {
+    const h = await world();
+    const hid = await h.propose(weaken);
+    const hr = await h.confirm(hid, {
+      token: h.tokenIn((await h.page(hid)).body),
+      passphrase: PASS,
+    });
+    const j = await world();
+    const jid = await j.propose(weaken);
+    const jr = await j.confirmJson(jid, {
+      token: j.tokenIn((await j.frame(jid)).body),
+      passphrase: PASS,
+    });
+    expect([hr.statusCode, jr.statusCode]).toEqual([200, 200]);
+    expect(jr.json()).toEqual({ applied: true, revision: h.store.revision() });
+    expect(j.store.document()).toEqual(h.store.document());
+    const pick = (w: typeof h) =>
+      applies(w).map((a) => ({ via: a.via, action: a.action, detail: a.detail }));
+    expect(pick(j)).toEqual(pick(h));
+    expect(pick(j)).toHaveLength(1);
+  });
+
+  test('a JSON replay, a stale token and an expired token are 409 with their reason', async () => {
+    const w = await world();
+    const id = await w.propose(weaken);
+    const token = w.tokenIn((await w.frame(id)).body);
+    w.clock.now = plus(t0, CONFIRM_MS);
+    const late = await w.confirmJson(id, { token, passphrase: PASS });
+    expect([late.statusCode, late.json()]).toEqual([409, { error: 'expired' }]);
+    w.clock.now = t0;
+    const fresh = w.tokenIn((await w.frame(id)).body);
+    expect((await w.confirmJson(id, { token: fresh, passphrase: PASS })).statusCode).toBe(200);
+    const again = await w.confirmJson(id, { token: fresh, passphrase: PASS });
+    expect([again.statusCode, again.json()]).toEqual([409, { error: 'used' }]);
+  });
+
+  test('the HTML path with returnTo still redirects 303; JSON answers JSON instead', async () => {
+    const w = await world();
+    const id = await w.propose(weaken, w.one, { returnTo: '/setup/doctor' });
+    const r = await w.confirm(id, { token: w.tokenIn((await w.page(id)).body), passphrase: PASS });
+    expect([r.statusCode, r.headers.location]).toEqual([303, '/setup/doctor']);
+    const w2 = await world();
+    const id2 = await w2.propose(weaken, w2.one, { returnTo: '/setup/doctor' });
+    const r2 = await w2.confirmJson(id2, {
+      token: w2.tokenIn((await w2.frame(id2)).body),
+      passphrase: PASS,
+    });
+    expect([r2.statusCode, r2.headers.location, r2.json()]).toEqual([
+      200,
+      undefined,
+      { applied: true, revision: 3 },
+    ]);
   });
 });

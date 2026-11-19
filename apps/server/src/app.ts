@@ -1,4 +1,4 @@
-import Fastify, { type FastifyInstance } from 'fastify';
+import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import { type ControlDeps, registerControlRoutes, stderrSetupMode } from './api/control.js';
 import { runningSince } from './api/secrets.js';
 import { stickUpgradeView, upgradeTargetOf } from './api/stick-upgrade.js';
@@ -343,6 +343,17 @@ export function createApp(
   });
   /** The request's snapshot (taken by the guard). */
   const cfg = (req: { jmConfig: Config | null }): Config => req.jmConfig ?? live();
+  /** Whether a pending change still waits for this request's session (#503). */
+  const pendingLiveFor =
+    (req: FastifyRequest) =>
+    (pendingId: string): boolean => {
+      const sid = req.principal?.via === 'session' ? req.principal.sessionId : undefined;
+      return (
+        sid !== undefined &&
+        deps.config instanceof ConfigStore &&
+        deps.config.confirmations.pending(pendingId, sid) !== undefined
+      );
+    };
   // The login and setup pages post plain HTML forms.
   app.addContentTypeParser(
     'application/x-www-form-urlencoded',
@@ -809,6 +820,9 @@ export function createApp(
         req,
         renderThread(thread, listMessages(deps.db, thread.id), listCards(deps.db, thread.id), {
           zones: cfg(req).dropZones,
+          now: deps.now(),
+          // A pending card's change still waits only while the viewing session can confirm it.
+          ...(deps.config instanceof ConfigStore ? { pendingLive: pendingLiveFor(req) } : {}),
         }),
       ),
     );
