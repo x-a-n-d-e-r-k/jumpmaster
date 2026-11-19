@@ -623,6 +623,96 @@ describe('the store keeps only the blobs the index names (issue #426)', () => {
     expect(m.status().images.map((i) => i.state)).toEqual(['complete', 'complete']);
   });
 
+  /** A mirror whose first backoff sleep is held until `wake()`; `asleep` resolves when it starts. */
+  function heldSleep(dir: string, logs: string[] = []) {
+    let asleep = () => {};
+    let wake = () => {};
+    const sleeping = new Promise<void>((r) => {
+      asleep = r;
+    });
+    const m = mirrorOn(dir, {
+      logs,
+      sleep: () => {
+        asleep();
+        return new Promise<void>((r) => {
+          wake = r;
+        });
+      },
+    });
+    return { m, sleeping, wake: () => wake() };
+  }
+
+  test('a failed image keeps the blobs it fetched, and the retry does not fetch them again', async () => {
+    fake = await startFakeRegistry();
+    const a = fake.addImage('jumpmaster-trooper');
+    const amd = a.platforms['linux/amd64'] as { manifest: string; blobs: string[] };
+    const bad = a.platforms['linux/arm64']?.blobs[1] as string;
+    fake.corrupt(bad);
+    const dir = tmp();
+    const { m, sleeping, wake } = heldSleep(dir);
+    m.setLock(lockOf(a));
+    m.start();
+    await sleeping; // the first pass failed and its collection step has run
+    expect(m.status().images[0]?.state).toBe('failed');
+    for (const d of [a.digest, amd.manifest, ...amd.blobs]) expect(stored(dir), d).toContain(d);
+    fake.heal(bad);
+    const before = fake.requests.length;
+    wake();
+    await m.idle();
+    expect(m.status().images[0]?.state).toBe('complete');
+    for (const d of amd.blobs)
+      expect(
+        fake.requests.slice(before).filter((r) => r.path.endsWith(`/blobs/${d}`)),
+      ).toHaveLength(0);
+    expect(stored(dir)).toEqual(union(a));
+  });
+
+  test('once the failed image completes, the next pass collects an orphan blob', async () => {
+    fake = await startFakeRegistry();
+    const a = fake.addImage('jumpmaster-trooper');
+    const bad = a.platforms['linux/arm64']?.blobs[1] as string;
+    fake.corrupt(bad);
+    const dir = tmp();
+    const logs: string[] = [];
+    const { m, sleeping, wake } = heldSleep(dir, logs);
+    m.setLock(lockOf(a));
+    m.start();
+    await sleeping;
+    expect(m.status().images[0]?.state).toBe('failed');
+    const orphan = sha(Buffer.from('an old release'));
+    writeFileSync(join(blobDir(dir), hex(orphan)), 'an old release');
+    const runs = collected(logs).length;
+    fake.heal(bad);
+    wake();
+    await m.idle();
+    expect(m.status().images[0]?.state).toBe('complete');
+    expect(collected(logs).slice(runs)).toEqual([
+      { event: 'image-mirror-collect', removed: 1, bytes: 'an old release'.length },
+    ]);
+    expect(stored(dir)).toEqual(union(a));
+    expect(indexOf(dir).images[`${a.name}@${a.digest}`]?.partial).toBeUndefined();
+  });
+
+  test('a pending record of the previous lock only does not block collection', async () => {
+    fake = await startFakeRegistry();
+    const a = fake.addImage('jumpmaster-trooper');
+    const b = fake.addImage('jumpmaster-trooper');
+    const dir = tmp();
+    // A is pending, as after a restart mid-pass.
+    mirrorOn(dir).setLock(lockOf(a));
+    expect(indexOf(dir).images[`${a.name}@${a.digest}`]?.state).toBe('pending');
+    const logs: string[] = [];
+    const m = mirrorOn(dir, { logs });
+    const orphan = sha(Buffer.from('an old release'));
+    writeFileSync(join(blobDir(dir), hex(orphan)), 'an old release');
+    await pass(m, lockOf(b));
+    expect(indexOf(dir).previous).toEqual([`${a.name}@${a.digest}`]);
+    expect(collected(logs)).toHaveLength(1);
+    expect(stored(dir)).not.toContain(orphan);
+    expect(stored(dir)).toEqual(union(b));
+    expect(m.lookup(b.name, b.digest)).toMatchObject({ complete: true });
+  });
+
   test('the status reports the store’s size on disk', async () => {
     fake = await startFakeRegistry();
     const a = fake.addImage('jumpmaster-trooper');
