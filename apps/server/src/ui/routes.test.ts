@@ -364,11 +364,33 @@ Ship it.
     const h = await crewHarness();
     const res = await get(h, '/zones/main/intake');
     expect(res.statusCode).toBe(200);
-    expect(res.body).toContain("the first issue doesn't need GOAL.md merged first");
+    expect(res.body).toContain('GOAL.md stub: ');
+    expect(res.body).toContain('stub-form');
     expect((await get(h, '/zones/nope/intake')).statusCode).toBe(404);
   });
 
-  test.each(['/briefings', '/zones/main/goals', '/zones/main/intake'])(
+  test('/zones/:id/intake has no issue form and points to New issue (#500)', async () => {
+    const h = await crewHarness();
+    const body = (await get(h, '/zones/main/intake')).body;
+    expect(body).not.toContain('issue-form');
+    expect(body).toContain(
+      'To file an issue, use <a href="/zones/main/issues/new"><strong>New issue</strong></a>',
+    );
+  });
+
+  test('/zones/:id/issues/new is the issue form alone, and 404 for an unknown zone (#500)', async () => {
+    const h = await crewHarness();
+    const res = await get(h, '/zones/main/issues/new');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('New issue: ');
+    expect(res.body).toContain('<form id="issue-form">');
+    expect(res.body).toContain('maxlength="120"');
+    expect(res.body).toContain('data-base="/api/control/zones/main/intake"');
+    expect(res.body).not.toContain('stub-form');
+    expect((await get(h, '/zones/nope/issues/new')).statusCode).toBe(404);
+  });
+
+  test.each(['/briefings', '/zones/main/goals', '/zones/main/intake', '/zones/main/issues/new'])(
     'a foreign Host cannot read %s',
     async (url) => {
       const h = await crewHarness();

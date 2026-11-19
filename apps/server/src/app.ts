@@ -106,6 +106,7 @@ import {
   renderGoals,
   renderHome,
   renderIntake,
+  renderNewIssue,
   renderObservations,
   renderWorkItem,
   renderWorkList,
@@ -794,6 +795,13 @@ export function createApp(
     const zone = zones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, renderIntake(zone, zones)));
+  });
+
+  app.get<{ Params: { id: string } }>('/zones/:id/issues/new', async (req, reply) => {
+    const zones = cfg(req).dropZones;
+    const zone = zones.find((z) => z.id === req.params.id);
+    if (!zone) return reply.code(404).type('text/plain').send('not found');
+    return reply.type('text/html; charset=utf-8').send(withCsrf(req, renderNewIssue(zone, zones)));
   });
 
   // The crew chat's pages: without the chat service (an older compose file) `/chat` names the

@@ -355,7 +355,7 @@ ${field('overrideApprovers', 'Override approvers (logins)', textarea(f, 'overrid
   const base = zoneHref(id);
   const briefings = listBriefings(db, { zoneId: id, state: 'open' }).length;
   return page(
-    `<p><a href="/">Home</a> · <a href="/zones">Zones</a> · <a href="${base}/github">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${briefings} open)</a> · <a href="${base}/goals">Goals</a></p>
+    `<p><a href="/">Home</a> · <a href="/zones">Zones</a> · <a href="${base}/github">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${briefings} open)</a> · <a href="${base}/goals">Goals</a> · <a href="${base}/issues/new">New issue</a></p>
 <h2>${zoneName(resolved, all)}</h2><p>${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>
 ${askButton({ kind: 'zone', zoneId: id, ref: id })}
 ${stopping ? `<p><strong>${escapeHtml(stopping)}</strong> <small>Resume or Pause from the Zones list withdraws it.</small></p>` : ''}
