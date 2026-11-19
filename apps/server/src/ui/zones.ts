@@ -27,6 +27,28 @@ import { zoneName, zoneNameText } from './zone-name.js';
  */
 
 const EGRESS_WINDOW_MS = 14 * 86_400_000;
+/** How many drop links one observed host lists; the rest are a link to the zone's drops. */
+const OBSERVED_DROP_LINKS = 20;
+const COUNT_FORMAT = new Intl.NumberFormat('en-US');
+/** A count with en-US thousands separators (`19,510`), whatever the server's locale. */
+const formatCount = (n: number): string => COUNT_FORMAT.format(n);
+/**
+ * The Drops cell of the observed table: the count of distinct drops, then a disclosure linking the
+ * newest {@link OBSERVED_DROP_LINKS} (`drops` is oldest first, as `egressSeen` supplies it) and
+ * "and M more" to the zone's drops list when there are more.
+ */
+function dropsCell(zoneId: string, drops: string[]): string {
+  const newest = drops.slice(-OBSERVED_DROP_LINKS).reverse();
+  const rest = drops.length - newest.length;
+  const links = newest
+    .map((d) => `<a href="/drops/${encodeURIComponent(d)}">${escapeHtml(d.slice(0, 8))}</a>`)
+    .join(' ');
+  const more =
+    rest > 0
+      ? ` <a href="/drops?zone=${encodeURIComponent(zoneId)}">and ${formatCount(rest)} more</a>`
+      : '';
+  return `${formatCount(drops.length)} <details><summary>show ${formatCount(drops.length)}</summary>${links}${more}</details>`;
+}
 
 const scriptJson = (v: unknown): string =>
   JSON.stringify(v)
@@ -251,10 +273,10 @@ function zonePage(store: ConfigStore, db: Db, id: string, now: Date): string | u
       ? '<p><small>Egress is off for this zone, so no allow list is used: set the mode to monitor or enforce before adopting hosts.</small></p>'
       : '<p><button type="button" id="adopt-ticked">Adopt ticked</button> <small>Each host you tick is added to the allow list: drops will be able to send data to it, so it asks for confirmation. Each host was reached by one of this zone\'s drops, and a drop that misbehaved may have reached it: adopt only hosts you recognise.</small></p>';
   const observed = seen.length
-    ? `<table><tr><th>Host</th><th>Drops that reached it</th><th>Listed</th><th>Adopt</th></tr>${seen
+    ? `<table><tr><th>Host</th><th>Decision</th><th>Connections</th><th>Drops</th><th>Listed</th><th>Adopt</th></tr>${seen
         .map((h) => {
           const by = listedBy(h.host);
-          return `<tr><td>${escapeHtml(h.host)} <small>(${escapeHtml(h.decision)}, ${h.count}x)</small></td><td>${h.drops.map((d) => `<a href="/drops/${encodeURIComponent(d)}">${escapeHtml(d.slice(0, 8))}</a>`).join(' ')}</td><td>${by ? `listed by ${escapeHtml(by)}` : `<strong>${escapeHtml("not in this zone's lists")}</strong>`}</td><td>${by ? '-' : `<input type="checkbox" name="adopt" value="${escapeHtml(h.host)}">`}</td></tr>`;
+          return `<tr><td>${escapeHtml(h.host)}</td><td>${escapeHtml(h.decision)}</td><td>${formatCount(h.count)}</td><td>${dropsCell(id, h.drops)}</td><td>${by ? `listed by ${escapeHtml(by)}` : `<strong>${escapeHtml("not in this zone's lists")}</strong>`}</td><td>${by ? '-' : `<input type="checkbox" name="adopt" value="${escapeHtml(h.host)}">`}</td></tr>`;
         })
         .join('')}</table>${adoptControls}`
     : '<p>Nothing observed yet.</p>';
