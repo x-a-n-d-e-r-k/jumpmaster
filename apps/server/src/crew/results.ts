@@ -57,6 +57,7 @@ import {
   getCrewRetry,
   getTriageRequest,
   insertCrewRetry,
+  insertDoneClaim,
   listUnappliedCrewRetries,
   markCrewRerun,
   releaseArbitrationApply,
@@ -531,7 +532,9 @@ type DiagnoseWork = Extract<CrewInputJson['work'], { role: 'diagnose' }>;
  *   with `gateChange: 'remove'`: the crew never allows a gate change, only takes it out.
  * - a `rerun_checks` on an item with an open PR (not a gate park) leaves the briefing open: it is
  *   withdrawn once the item is retried, and says why if the forge refused.
- * A second action for the item is refused by the schema, and leaves the diagnosis only. Returns
+ * A second action for the item is refused by the schema, and leaves the diagnosis only. An
+ * `already_done` records a `verifying` claim with the briefing's basis (#536), on any parked item:
+ * nothing is written to the forge until the trail pass has verified its evidence. Returns
  * why it was discarded, if it was, or what the crew does.
  */
 function applyDiagnose(
@@ -586,6 +589,32 @@ function applyDiagnose(
     if (parkKind(db, deps.zone, work.itemId) !== 'pr') return undefined;
     record = () => insertCrewRetry(db, { ...base, kind: 'rerun', instruction: '', checks });
     note = `the crew re-runs ${checks.join(', ')} on this diagnosis`;
+  } else if (out.recommendation === 'already_done') {
+    const evidence = {
+      ...(out.evidence?.pulls?.length ? { pulls: out.evidence.pulls } : {}),
+      ...(out.evidence?.issues?.length ? { issues: out.evidence.issues } : {}),
+    };
+    // Recorded only: the trail pass verifies every cited item before anything is written (#536).
+    try {
+      insertDoneClaim(
+        db,
+        {
+          zoneId: deps.zone.id,
+          itemId: work.itemId,
+          briefingId: work.briefingId,
+          dropId: drop.id,
+          basis,
+          diagnosis: out.diagnosis,
+          evidence,
+        },
+        now,
+      );
+    } catch (e) {
+      // D3: a claim on the item is verifying already, or this drop recorded one.
+      if (isUniqueViolation(e)) return 'done claim not recorded: one is verifying already';
+      throw e;
+    }
+    return 'the crew claims the item already done; the server verifies it';
   } else {
     return undefined;
   }

@@ -48,6 +48,7 @@ import {
   getCrewIssue,
   getItemArbitration,
   getTriageRequest,
+  hasVerifyingDoneClaim,
   insertArbitration,
   insertAudit,
   insertAuditCursor,
@@ -206,6 +207,8 @@ export function nextDiagnose(
     // The basis ties the diagnosis to this why: one that lands after the why changed is dropped.
     if (!m) continue;
     const itemId = Number(m[1]);
+    // A claim that the item is already done waits for the trail pass to verify it (#536).
+    if (hasVerifyingDoneClaim(db, itemId)) continue;
     const row = getItemArbitration(db, itemId);
     if (row?.state === 'pending') {
       if (dropActive(db, row.dropId)) continue; // its drop is in flight: neither arbitrate nor diagnose
