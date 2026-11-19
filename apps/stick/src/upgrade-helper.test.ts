@@ -7,6 +7,7 @@ import { describe, expect, test } from 'vitest';
 import {
   type ContainerSpec,
   INSTALLED_TAG,
+  NoSuchContainer,
   runUpgrade,
   type UpgradeDeps,
   type UpgradeDocker,
@@ -63,7 +64,8 @@ class FakeDocker implements UpgradeDocker {
 
   private get(name: string): FakeContainer {
     const c = this.containers.get(name);
-    if (!c) throw Object.assign(new Error(`no such container: ${name}`), { statusCode: 404 });
+    // As the dockerode wiring reports it (onContainer in upgrade-docker.ts).
+    if (!c) throw new NoSuchContainer(name);
     return c;
   }
 
@@ -489,6 +491,62 @@ describe('runUpgrade: rollback (D2)', () => {
     expect(w.docker.containers.has('jm-stick-previous')).toBe(true);
   });
 
+  test('the new container disappears: the old stick is still restored', async () => {
+    const w = world();
+    // The new stick is removed out from under the helper right after it starts.
+    w.docker.onStart = (c, name) => {
+      if (c.image === NEW_IMAGE) w.docker.containers.delete(name);
+    };
+    const seen = watchOldStart(w);
+    const r = await runUpgrade(w.opts, w.deps);
+    expect(r.exitCode).toBe(1);
+    expectRolledBack(w, /^the new stick disappeared$/, seen);
+    expect(w.docker.containers.get(NAME)?.id).toBe('old-id');
+    expect(w.docker.containers.get(NAME)?.running).toBe(true);
+    expect(w.docker.containers.has(`${NAME}-previous`)).toBe(false);
+  });
+
+  test('the new container is gone between its stop and its remove: the old stick is restored', async () => {
+    const w = world();
+    w.docker.onStart = (c) => {
+      if (c.image === NEW_IMAGE) c.restartCount = 1;
+    };
+    const seen = watchOldStart(w);
+    const watchStart = w.docker.onCall;
+    w.docker.onCall = (call) => {
+      watchStart(call);
+      const [op, name] = call;
+      if (op === 'remove' && name === NAME && w.docker.containers.get(NAME)?.image === NEW_IMAGE)
+        w.docker.containers.delete(NAME);
+    };
+    const r = await runUpgrade(w.opts, w.deps);
+    expect(r.exitCode).toBe(1);
+    expectRolledBack(w, /^the new stick restarted$/, seen);
+    expect(w.docker.calls).toContainEqual(['stop', NAME, expect.any(Number)]);
+    expect(w.docker.containers.has(`${NAME}-previous`)).toBe(false);
+  });
+
+  test('a stop of the new container that always fails otherwise: "rollback failed", -previous kept', async () => {
+    const w = world();
+    w.docker.onStart = (c) => {
+      if (c.image === NEW_IMAGE) c.restartCount = 1;
+    };
+    w.docker.fail = (op, name) =>
+      op === 'stop' && name === NAME && w.docker.containers.get(NAME)?.image === NEW_IMAGE
+        ? Object.assign(new Error('engine busy'), { statusCode: 500 })
+        : undefined;
+    const r = await runUpgrade(w.opts, w.deps);
+    expect(r.exitCode).toBe(1);
+    expect(r.reason).toMatch(/^rollback failed: .*engine busy/);
+    expect(readResult(w).reason).toMatch(/^rollback failed: .*engine busy/);
+    expect(w.docker.calls.filter((c) => c[0] === 'stop' && c[1] === NAME).length).toBe(5);
+    expect(w.docker.containers.has(`${NAME}-previous`)).toBe(true);
+    expect(w.docker.calls.some((c) => c[0] === 'rename' && c[1] === `${NAME}-previous`)).toBe(
+      false,
+    );
+    expect(w.lines.some((l) => l.includes(`docker rename ${NAME}-previous ${NAME}`))).toBe(true);
+  });
+
   test('a long failure reason is cut to 500 characters', async () => {
     const w = world();
     w.docker.fail = (op) => (op === 'create' ? new Error('x'.repeat(2000)) : undefined);
@@ -655,14 +713,18 @@ describe('runUpgrade: secrets', () => {
       'JM_SERVER_URL=https://sentinel-host-7c1',
       'JM_IMAGE_SOURCE=server',
     ];
-    for (const crash of [false, true]) {
+    for (const outcome of ['ok', 'crash', 'gone'] as const) {
       const w = world({ oldEnv });
-      if (crash)
+      if (outcome === 'crash')
         w.docker.onStart = (c) => {
           if (c.image === NEW_IMAGE) c.restartCount = 1;
         };
+      if (outcome === 'gone')
+        w.docker.onStart = (c, name) => {
+          if (c.image === NEW_IMAGE) w.docker.containers.delete(name);
+        };
       const r = await runUpgrade(w.opts, w.deps);
-      expect(r.exitCode).toBe(crash ? 1 : 0);
+      expect(r.exitCode).toBe(outcome === 'ok' ? 0 : 1);
       expect(w.docker.created?.Env).toContain('JM_JOIN_TOKEN=sentinel-9f3a');
       const file = readFileSync(join(w.dir, 'helper.log'), 'utf8');
       expect(w.lines.length).toBeGreaterThan(3);
@@ -690,6 +752,19 @@ describe('upgrade helper entry point', () => {
 });
 
 describe('the dockerode wiring', () => {
+  test('a 404 from a container call is NoSuchContainer; other errors pass through', async () => {
+    const { onContainer } = await import('./upgrade-docker.js');
+    const status = (statusCode: number) =>
+      Object.assign(new Error(`HTTP ${statusCode}`), { statusCode });
+    await expect(onContainer('jm-stick', () => Promise.reject(status(404)))).rejects.toBeInstanceOf(
+      NoSuchContainer,
+    );
+    await expect(onContainer('jm-stick', () => Promise.reject(status(500)))).rejects.toThrow(
+      'HTTP 500',
+    );
+    await expect(onContainer('jm-stick', () => Promise.resolve())).resolves.toBeUndefined();
+  });
+
   test('splits a repo:tag for the tag call, a registry port included', async () => {
     const { splitRepoTag } = await import('./upgrade-docker.js');
     expect(splitRepoTag(INSTALLED_TAG)).toEqual({ repo: 'jumpmaster-stick', tag: 'installed' });

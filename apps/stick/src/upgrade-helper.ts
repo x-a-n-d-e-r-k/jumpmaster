@@ -69,7 +69,18 @@ export interface ContainerSpec {
   HostConfig: Record<string, unknown>;
 }
 
-/** The Docker calls the helper makes. Inspections return undefined for a missing object. */
+/** Thrown by a container call (start, stop, rename, remove) when no container has the name. */
+export class NoSuchContainer extends Error {
+  constructor(name: string) {
+    super(`no such container: ${name}`);
+    this.name = 'NoSuchContainer';
+  }
+}
+
+/**
+ * The Docker calls the helper makes. Inspections return undefined for a missing object;
+ * the other container calls throw {@link NoSuchContainer} for one.
+ */
 export interface UpgradeDocker {
   inspectContainer(name: string): Promise<OldContainer | undefined>;
   inspectImage(id: string): Promise<ImageInfo | undefined>;
@@ -406,9 +417,26 @@ export async function runUpgrade(opts: UpgradeOptions, deps: UpgradeDeps): Promi
     let rollbackError: unknown;
     try {
       const newName = swap.nextRenamed ? name : next;
-      await retried(`stop ${newName}`, () => docker.stop(newName, STOP_TIMEOUT_SECONDS));
-      await retried(`remove ${newName}`, () => docker.remove(newName));
-      step('removed-new', { container: newName });
+      // A new container that no longer exists counts as removed.
+      let gone = false;
+      const unlessGone = (call: () => Promise<void>) => async () => {
+        if (gone) return;
+        try {
+          await call();
+        } catch (e) {
+          if (!(e instanceof NoSuchContainer)) throw e;
+          gone = true;
+        }
+      };
+      await retried(
+        `stop ${newName}`,
+        unlessGone(() => docker.stop(newName, STOP_TIMEOUT_SECONDS)),
+      );
+      await retried(
+        `remove ${newName}`,
+        unlessGone(() => docker.remove(newName)),
+      );
+      step(gone ? 'new-already-gone' : 'removed-new', { container: newName });
     } catch (e) {
       rollbackError = e;
     }
