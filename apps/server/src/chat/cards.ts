@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { type ActionCtx, type ActionResult, configPatchAction } from '../api/operator-actions.js';
 import { recordAudit } from '../auth/audit.js';
 import type { Principal } from '../auth/guard.js';
+import { PENDING_MS } from '../config/confirm.js';
 import type { ConfigStore } from '../config/store.js';
 import type { Db } from '../db/open.js';
 import { getOutbox, getZoneMode, isKilled, type ZoneMode } from '../db/repo.js';
@@ -145,22 +146,57 @@ export function safeCardLink(link: string | null): string | null {
 export const cardUndoable = (c: ChatCard): boolean => c.undo !== null && c.state === 'done';
 
 /** The confirm page of a pending guarded change: the only link a pending card offers as Confirm. */
-const CONFIRM_LINK = /^\/config\/confirm\/[\w-]+$/;
+export const CONFIRM_LINK = /^\/config\/confirm\/[\w-]+$/;
+
+/** The pending change a card waits on: its id, when the card is pending and links its confirm page. */
+export const cardPendingId = (c: Pick<ChatCard, 'state' | 'link'>): string | undefined =>
+  c.state === 'pending' && c.link && CONFIRM_LINK.test(c.link)
+    ? c.link.slice('/config/confirm/'.length)
+    : undefined;
+
+/** A pending card's time left, in whole minutes rounded up; zero once its change has lapsed. */
+export const confirmMinutesLeft = (createdAt: string, now: Date): number =>
+  Math.max(0, Math.ceil((Date.parse(createdAt) + PENDING_MS - now.getTime()) / 60_000));
+
+/** What a pending card says while its change waits; the page script says the same. */
+export const confirmWithin = (minutes: number): string => `Confirm within ${minutes} min`;
 
 /** What a card's link is called: Confirm for a pending change's confirm page, else Open. */
 export const cardLinkText = (c: Pick<ChatCard, 'state' | 'link'>): string =>
   c.state === 'pending' && c.link && CONFIRM_LINK.test(c.link) ? 'Confirm' : 'Open';
 
-/** One card as HTML: every field escaped; Undo only where the action can be reversed. */
-export function renderCard(c: ChatCard): string {
+/**
+ * One card as HTML: every field escaped; Undo only where the action can be reversed. A pending
+ * card waiting on a confirm page (#503) offers Review and confirm (the page script opens that page
+ * as a dialog over the thread) and the time left; once its change has lapsed (`expired`, or no
+ * time left at `now`) it says Expired and offers Stage it again instead. The stored card is not
+ * changed either way.
+ */
+export function renderCard(c: ChatCard, o: { expired?: boolean; now?: Date } = {}): string {
   const link = safeCardLink(c.link);
-  const state = CARD_STATE_TEXT[c.state];
+  const pendingId = cardPendingId(c);
+  const left = pendingId && o.now ? confirmMinutesLeft(c.createdAt, o.now) : undefined;
+  const expired = pendingId !== undefined && (o.expired === true || left === 0);
+  const state = expired ? 'Expired' : CARD_STATE_TEXT[c.state];
+  const confirm =
+    pendingId === undefined
+      ? undefined
+      : expired
+        ? '<button type="button" class="restage">Stage it again</button>'
+        : `<small class="expiry">${left === undefined ? '' : confirmWithin(left)}</small>` +
+          '<button type="button" class="review">Review and confirm</button>' +
+          `<noscript><a href="${escapeHtml(c.link ?? '')}">Confirm</a></noscript>`;
+  const data = pendingId
+    ? expired
+      ? ' data-expired="1"'
+      : ` data-confirm="${escapeHtml(c.link ?? '')}" data-created="${escapeHtml(c.createdAt)}"`
+    : '';
   return (
-    `<div class="msg card ${escapeHtml(c.state)}" data-card="${c.id}">` +
+    `<div class="msg card ${escapeHtml(c.state)}${expired ? ' expired' : ''}" data-card="${c.id}"${data}>` +
     `<div class="who">${escapeHtml(CARD_TITLE[c.kind] ?? c.kind)}</div>` +
     `<div class="text">${escapeHtml(c.summary)}</div>` +
     (state ? `<small class="state">${escapeHtml(state)}</small>` : '') +
-    (link ? `<a href="${escapeHtml(link)}">${cardLinkText(c)}</a>` : '') +
+    (confirm ?? (link ? `<a href="${escapeHtml(link)}">${cardLinkText(c)}</a>` : '')) +
     (cardUndoable(c)
       ? ` <button type="button" class="undo" data-card="${c.id}">Undo</button>`
       : '') +
