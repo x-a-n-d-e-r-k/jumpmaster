@@ -7,10 +7,12 @@ import {
   createWriteStream,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
@@ -64,14 +66,41 @@ export class BlobTooLarge extends DigestMismatch {}
 
 export const imageKey = (name: string, digest: string): string => `${name}@${digest}`;
 
-const emptyIndex = (): MirrorIndex => ({ version: 1, current: [], previous: [], images: {} });
+const emptyIndex = (): MirrorIndex => ({
+  version: 1,
+  current: [],
+  previous: [],
+  images: {},
+});
+
+/** Every digest a record names: its index, each platform's manifest and blobs, each signature's. */
+export function referencedDigests(rec: ImageRecord): string[] {
+  return [
+    ...(rec.index ? [rec.index.digest] : []),
+    ...Object.values(rec.platforms ?? {}).flatMap((p) => [
+      p.manifest.digest,
+      ...p.blobs.map((b) => b.digest),
+    ]),
+    ...(rec.signatures ?? []).flatMap((s) => [s.manifest.digest, ...s.blobs.map((b) => b.digest)]),
+  ];
+}
+
+export type StoreOptions = {
+  /** Deletes one file (tests inject a failing one). */
+  unlink?: (path: string) => void;
+};
 
 export class ImageStore {
   readonly blobDir: string;
   readonly #tmp: string;
   readonly #indexPath: string;
+  readonly #unlink: (path: string) => void;
 
-  constructor(readonly dir: string) {
+  constructor(
+    readonly dir: string,
+    o: StoreOptions = {},
+  ) {
+    this.#unlink = o.unlink ?? unlinkSync;
     this.blobDir = join(dir, 'blobs', 'sha256');
     this.#tmp = join(dir, 'tmp');
     this.#indexPath = join(dir, 'index.json');
@@ -157,6 +186,47 @@ export class ImageStore {
       rmSync(tmp, { force: true });
       throw e;
     }
+  }
+
+  /** Bytes of every blob in the store, on disk. */
+  bytesOnDisk(): number {
+    let total = 0;
+    for (const e of readdirSync(this.blobDir, { withFileTypes: true })) {
+      if (!e.isFile()) continue;
+      try {
+        total += statSync(join(this.blobDir, e.name)).size;
+      } catch {
+        // Gone since the listing: it counts for nothing.
+      }
+    }
+    return total;
+  }
+
+  /**
+   * Deletes every file in the blob directory whose digest `keep` does not hold (issue #426). Only
+   * the blob directory is listed: the temporary directory and `index.json` are never touched. A
+   * file that cannot be deleted is reported to `onError` and the rest are still deleted; a failure
+   * to list the directory throws, having deleted nothing.
+   */
+  removeUnreferenced(
+    keep: Set<string>,
+    onError?: (file: string, e: unknown) => void,
+  ): { removed: number; bytes: number } {
+    let removed = 0;
+    let bytes = 0;
+    for (const e of readdirSync(this.blobDir, { withFileTypes: true })) {
+      if (!e.isFile() || keep.has(`sha256:${e.name}`)) continue;
+      const path = join(this.blobDir, e.name);
+      try {
+        const size = statSync(path).size;
+        this.#unlink(path);
+        removed++;
+        bytes += size;
+      } catch (err) {
+        onError?.(e.name, err);
+      }
+    }
+    return { removed, bytes };
   }
 
   readIndex(): MirrorIndex {
