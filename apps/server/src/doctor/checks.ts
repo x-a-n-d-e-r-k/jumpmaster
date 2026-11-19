@@ -2489,7 +2489,8 @@ function vaultKeyCheck(d: DoctorDeps): DoctorCheck {
 /**
  * The release images the server mirrors for sticks (issue #140): no lock is information (a
  * checkout has nothing to mirror), every image complete a pass, any failed a warn naming each
- * image and its reason, and a mirror still at work information.
+ * image and its reason, and a mirror still at work information. The pass names the store's size
+ * on disk (issue #426).
  */
 function imageMirrorCheck(status: MirrorStatus): DoctorCheck {
   const base = { id: 'server.image-mirror', zoneId: null };
@@ -2521,7 +2522,9 @@ function imageMirrorCheck(status: MirrorStatus): DoctorCheck {
   return {
     ...base,
     status: 'pass',
-    summary: `${current.length} release images mirrored for sticks (${platforms.join(', ')})`,
+    summary: `${current.length} release images mirrored for sticks (${platforms.join(', ')})${
+      status.storeBytes !== undefined ? `; store ${kib(status.storeBytes)}` : ''
+    }`,
   };
 }
 

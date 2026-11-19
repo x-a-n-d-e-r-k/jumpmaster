@@ -1923,6 +1923,20 @@ describe('server.image-mirror (issue #140)', () => {
     expect(c.summary).toBe('2 release images mirrored for sticks (linux/amd64, linux/arm64)');
   });
 
+  test('every image complete: the pass message adds the store size on disk (issue #426)', async () => {
+    const w = world();
+    w.deps.imageMirror = () => ({
+      lock: true,
+      images: [row('jumpmaster-trooper', 'complete'), row('jumpmaster-egress', 'complete')],
+      storeBytes: Math.round(2.9 * 1024 ** 3),
+    });
+    const c = one(await w.run(), 'server.image-mirror');
+    expect(c.status).toBe('pass');
+    expect(c.summary).toBe(
+      '2 release images mirrored for sticks (linux/amd64, linux/arm64); store 2.9 GiB',
+    );
+  });
+
   test('an image failed: warn naming it and the reason', async () => {
     const w = world();
     w.deps.imageMirror = () => ({

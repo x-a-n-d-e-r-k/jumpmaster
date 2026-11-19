@@ -415,6 +415,55 @@ cd ~/jumpmaster && docker compose exec -T jumpmaster jumpmaster ctl config expor
 `-T` keeps the file free of carriage returns. In db mode the server ignores the file (and says
 so); the doctor's `config.file` warns when it no longer matches the database.
 
+## Upgrading the server
+
+The steps on the server host, from the install directory. Drain the zones first
+([Upgrade](install.md#upgrade) has the drain and what carries over between releases).
+
+1. **Back up** the release files and the database. Copy the files of the release that runs now
+   into `upgrade-backup/`, and take the database copy from [Backup and restore](#backup-and-restore):
+
+   ```sh
+   mkdir -p upgrade-backup && cp -a compose.yaml images.lock.json SHA256SUMS SHA256SUMS.sigstore.json upgrade-backup/
+   docker compose exec jumpmaster node -e "require('better-sqlite3')('/data/jumpmaster.sqlite').exec(\"VACUUM INTO '/data/backup-$(date +%Y%m%d).sqlite'\")"
+   ```
+
+2. **Place the new release files.** Download the new release's four files over the old ones (the
+   download loop of [Upgrade](install.md#upgrade), step 2).
+3. **Check `SHA256SUMS`**: `cosign verify-blob` as in that step, then
+   `sha256sum -c SHA256SUMS` (macOS: `shasum -a 256 -c SHA256SUMS`). Stop on any failure and put
+   the backed-up files back.
+4. **Pull** the new images: `docker compose pull`.
+5. **Start only the server and chat services**: `docker compose up -d jumpmaster chat`. The
+   services they depend on start with them.
+6. **Confirm the new release is healthy**: `docker compose exec jumpmaster jumpmaster ctl doctor`
+   shows no `FAIL`, and `server.image-mirror` passes once the new images are mirrored (its message
+   ends with the mirror store's size; the server deletes the blobs of images no lock still names
+   after each complete pass). Resume the zones.
+7. **Remove the previous release's images** from the host. `docker compose pull` leaves them in
+   the host's Docker, and the server cannot remove them (it has no Docker socket). This lists the
+   image of each digest in the backed-up previous `images.lock.json`, skips any the new lock still
+   names and any a container (running or stopped) uses, and removes the rest with a plain
+   `docker image rm` (never `-f`, so Docker refuses anything still in use):
+
+   ```sh
+   prev=upgrade-backup/images.lock.json
+   registry=$(grep -o '"registry": *"[^"]*"' "$prev" | sed 's/.*"\([^"]*\)"$/\1/')
+   grep -o '"jumpmaster-[a-z0-9-]*": *"sha256:[0-9a-f]*"' "$prev" \
+     | sed 's/"\([^"]*\)": *"\([^"]*\)"/\1@\2/' \
+     | while read -r ref; do
+         digest=${ref#*@}
+         if grep -q "$digest" images.lock.json; then echo "kept (in the new lock): $ref"; continue; fi
+         id=$(docker image inspect --format '{{.Id}}' "$registry/$ref" 2>/dev/null) || continue
+         if [ -n "$(docker ps -aq --filter ancestor="$id")" ]; then echo "kept (in use): $ref"; continue; fi
+         echo "removing $id ($registry/$ref)"
+         docker image rm "$id"
+       done
+   ```
+
+   An image Docker refuses to remove stays; the message says what uses it. Keep `upgrade-backup/`
+   until you no longer want a way back.
+
 ## The operability session
 
 One page for a first-time operator: install Jumpmaster and run it through a project's life with

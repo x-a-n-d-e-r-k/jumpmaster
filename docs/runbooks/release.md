@@ -401,5 +401,10 @@ cosign verify-blob-attestation --bundle bundle.json --type https://sigstore.dev/
   --trusted-root images/sigstore/trusted_root.json --offline <identity flags> index.json
 ```
 
-Follow-up, not done yet: blobs are never garbage-collected. Images of neither the current nor the
-previous lock leave the index, but their blobs stay under `<dataDir>/images/blobs`.
+Collection (issue #426): images of neither the current nor the previous lock leave the index, and
+at the end of a mirror pass in which no image is pending or fetching, every blob under
+`<dataDir>/images/blobs` that no record in the index names is deleted (a blob a kept image shares
+stays). It logs `{"event":"image-mirror-collect","removed":n,"bytes":b}`; a blob it cannot delete
+is logged and the rest still go. The doctor's `server.image-mirror` names the store's size. Old
+release images in the host's Docker are the operator's to remove: see
+[Upgrading the server](operate.md#upgrading-the-server).
