@@ -762,7 +762,14 @@ export function listActiveDrops(db: Db, zoneId: string): Drop[] {
 /** Drops newest first, optionally of one zone, one work item and some states, at most `limit`. */
 export function listDrops(
   db: Db,
-  f: { zoneId?: string; workItemId?: number; states?: readonly DropState[]; limit: number },
+  f: {
+    zoneId?: string;
+    workItemId?: number;
+    states?: readonly DropState[];
+    /** Issue work (a work item), crew (no work item, not the doctor), or the doctor's drops. */
+    kind?: 'work' | 'crew' | 'doctor';
+    limit: number;
+  },
 ): Drop[] {
   const where: string[] = [];
   const args: (string | number)[] = [];
@@ -778,6 +785,9 @@ export function listDrops(
     where.push(`state IN (${f.states.map(() => '?').join(', ') || 'NULL'})`);
     args.push(...f.states);
   }
+  if (f.kind === 'work') where.push('work_item_id IS NOT NULL');
+  if (f.kind === 'crew') where.push("work_item_id IS NULL AND role != 'doctor'");
+  if (f.kind === 'doctor') where.push("work_item_id IS NULL AND role = 'doctor'");
   return db
     .prepare(
       `SELECT ${DROP_COLS} FROM drops ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
