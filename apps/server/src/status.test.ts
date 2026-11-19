@@ -281,9 +281,9 @@ const STEPS: Step[] = [
   [
     'idle',
     () => {},
-    'Idle: no ready issues. Label one drop-ready or file one from Intake',
+    'Idle: no ready issues. Label one drop-ready or file a new issue',
     'you',
-    '/zones/main/intake',
+    '/zones/main/issues/new',
   ],
 ];
 
@@ -420,7 +420,7 @@ describe('statusOf', () => {
 
   test("the idle headline names the zone's own ready label (#198)", () => {
     const s = statusOf(base({ zones: [zone({ items: [], readyLabel: 'go' })] }), NOW);
-    expect(s.headline).toBe('Idle: no ready issues. Label one go or file one from Intake');
+    expect(s.headline).toBe('Idle: no ready issues. Label one go or file a new issue');
   });
 
   test('the status names zones, issues and PRs and never a token', () => {
@@ -628,9 +628,14 @@ describe('ready work held in a paused or observing zone (#495)', () => {
     );
   });
 
+  test('the idle action is New issue on the first active zone (#500)', () => {
+    const s = statusOf(base({ zones: [zone({ id: 'docs', mode: 'paused' }), zone()] }), NOW);
+    expect(s.action).toEqual({ label: 'New issue', href: '/zones/main/issues/new' });
+  });
+
   test('with no ready items anywhere the idle line is unchanged', () => {
     const s = statusOf(base({ zones: [zone(), zone({ id: 'merlin', mode: 'paused' })] }), NOW);
-    expect(s.headline).toBe('Idle: no ready issues. Label one drop-ready or file one from Intake');
+    expect(s.headline).toBe('Idle: no ready issues. Label one drop-ready or file a new issue');
   });
 });
 

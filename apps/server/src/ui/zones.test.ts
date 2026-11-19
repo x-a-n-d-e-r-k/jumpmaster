@@ -173,6 +173,12 @@ describe('the zones page', () => {
     expect(body).toMatch(/Briefings \(\d+ open\)<\/a> · <a href="\/zones\/main\/goals">Goals<\/a>/);
   });
 
+  test('the zone page header links its New issue page (#500)', async () => {
+    const w = await world();
+    const body = (await w.get('/zones/main')).body;
+    expect(body).toContain('<a href="/zones/main/issues/new">New issue</a>');
+  });
+
   test('each section of the zone page is filled from the current config and posts a patch with expectRevision', async () => {
     const w = await world();
     const r = await w.get('/zones/main');

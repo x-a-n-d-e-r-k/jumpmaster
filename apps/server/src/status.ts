@@ -561,11 +561,11 @@ export function statusOf(input: StatusInput, now: Date): Status {
 
   const zoneOne = activeZones[0] ?? zones[0];
   return said({
-    headline: `Idle: no ready issues. Label one ${zoneOne?.readyLabel ?? DEFAULT_READY_LABEL} or file one from Intake`,
+    headline: `Idle: no ready issues. Label one ${zoneOne?.readyLabel ?? DEFAULT_READY_LABEL} or file a new issue`,
     detail: '',
     waitingOn: 'you',
     action: zoneOne
-      ? { label: 'Open Intake', href: `/zones/${encodeURIComponent(zoneOne.id)}/intake` }
+      ? { label: 'New issue', href: `/zones/${encodeURIComponent(zoneOne.id)}/issues/new` }
       : { label: 'Add a project', href: pages.zones ? '/zones' : '/setup/project' },
   });
 }

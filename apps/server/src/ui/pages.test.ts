@@ -41,6 +41,7 @@ import {
   renderGoals,
   renderHome,
   renderIntake,
+  renderNewIssue,
   renderObservations,
   renderWorkItem,
   renderWorkList,
@@ -1059,15 +1060,38 @@ describe('renderIntake', () => {
     repo: 'octo/<script>x</script>',
   } as DropZoneConfig;
 
-  test('three steps, every value escaped, no secret, and the first issue needs no merged GOAL.md', () => {
+  test('two steps, every value escaped, no secret, and a link to New issue instead of step 3', () => {
     const html = renderIntake(zone);
     expect(html).not.toContain('<script>x</script>');
-    expect(html).toContain('Intake: octo/&lt;script&gt;x&lt;/script&gt;');
-    expect(html).toContain("the first issue doesn't need GOAL.md merged first");
+    expect(html).toContain('GOAL.md stub: octo/&lt;script&gt;x&lt;/script&gt;');
     for (const t of ['existing', 'idea', 'partial']) expect(html).toContain(`value="${t}"`);
     expect(html).toMatch(/Step 1/);
     expect(html).toMatch(/Step 2/);
-    expect(html).toMatch(/Step 3/);
+    expect(html).not.toMatch(/Step 3/);
+    expect(html).not.toContain('issue-form');
+    expect(html).toContain(
+      'To file an issue, use <a href="/zones/main%22%3E%3Cscript%3Ex%3C%2Fscript%3E/issues/new"><strong>New issue</strong></a>',
+    );
+    expect(html).not.toContain('type="password"');
+    expect(html).toContain('const r = await jmFetch(base + path, body);');
+    expect(html).not.toMatch(/github_pat_|ghp_|sk-ant-/);
+    expect(html).not.toContain('innerHTML');
+  });
+});
+
+describe('renderNewIssue', () => {
+  const zone = {
+    id: 'main"><script>x</script>',
+    repo: 'octo/<script>x</script>',
+  } as DropZoneConfig;
+
+  test('the issue form alone, every value escaped, no secret, and the first issue needs no merged GOAL.md', () => {
+    const html = renderNewIssue(zone);
+    expect(html).not.toContain('<script>x</script>');
+    expect(html).toContain('New issue: octo/&lt;script&gt;x&lt;/script&gt;');
+    expect(html).toContain("it doesn't need GOAL.md merged first");
+    expect(html).not.toContain('stub-form');
+    expect(html).toContain('<button type="button" id="issue-again" hidden>File another</button>');
     expect(html).not.toContain('type="password"');
     expect(html).toContain('const r = await jmFetch(base + path, body);');
     expect(html).not.toMatch(/github_pat_|ghp_|sk-ant-/);
@@ -1089,6 +1113,7 @@ describe('the page shell and its forms', () => {
       rule: renderBriefings({ open: [briefing()], rulings: [], zones: [z] }),
       doctor: renderDoctor(null, [z]),
       intake: renderIntake(z),
+      newIssue: renderNewIssue(z),
     };
     for (const [name, html] of Object.entries(pages)) {
       expect([name, html]).not.toEqual([name, expect.stringMatching(/type="password"/)]);
@@ -1314,8 +1339,11 @@ describe('zones are named by their repository (#99)', () => {
     expect(goals).toContain('acme/widgets');
     expectNoBareId(goals);
     const intake = renderIntake(a, zones);
-    expect(intake).toContain('Intake: acme/shared <small>(zid-a)</small>');
+    expect(intake).toContain('GOAL.md stub: acme/shared <small>(zid-a)</small>');
     expectNoBareId(intake);
+    const newIssue = renderNewIssue(a, zones);
+    expect(newIssue).toContain('New issue: acme/shared <small>(zid-a)</small>');
+    expectNoBareId(newIssue);
     const doctor = renderDoctor(
       {
         id: 1,
