@@ -262,8 +262,42 @@ repository's owner.
 
 **Starter mode and tokens.** Starter-mode zones, and two-bot zones that chose "Use tokens
 instead", are unchanged: they keep using the token rows above ([Credentials and
-rotation](#credentials-and-rotation)), and nothing here applies to them. Rotating an app's private
-key is not covered here yet.
+rotation](#credentials-and-rotation)), and nothing here applies to them.
+
+#### Rotating an app's private key
+
+Rotate an app's key when the doctor's `forge.author` or `forge.reviewer` warns that it was
+imported more than 365 days ago, and at once if the key may have leaked. GitHub has no API for
+this, so the new key is made on GitHub and pasted into Jumpmaster:
+
+1. Open the app's page on GitHub (the row's **App** slug links to it) and go to **Private keys** →
+   **Generate a private key**. GitHub downloads a `.pem` file.
+2. On Settings → Credentials, under **GitHub App entries**, press **Replace key** on that owner and
+   role's row, paste the whole `.pem` file, and enter your passphrase when asked.
+3. Jumpmaster tests the key with GitHub before storing it. A key for another app, or a key GitHub
+   rejects, is refused and nothing changes: the old key stays in use.
+4. After the row shows the new **Imported** date and **Last test** result, delete the old key on
+   the app's GitHub page, under **Private keys**. Until then both keys are valid.
+5. Delete the downloaded `.pem` from the machine you pasted it from.
+
+Rotation does not change the app id, the slug, the installations or open pull requests: nothing
+else needs redoing, and the doctor's key-age warning clears.
+
+Tokens already minted from the old key run to their own expiry (an hour at most); deleting the old
+key on GitHub stops new mints with it, not those tokens. If the key leaked, turn on the
+[kill switch](#kill-switch) while you rotate: it suspends the app installations, which stops every
+live token, and `ctl unkill` resumes once the old key is deleted
+([Pending pushes](#pending-pushes)).
+
+**A file-sourced entry** (its **Source** is the file `secrets/github-app/<owner>/<role>.json`) has
+no **Replace key**: replace the PEM in that file (keep it at mode `0600`), run
+`ctl secrets reload`, press **Test** on the row, then delete the old key on the app's GitHub page
+as in step 4.
+
+**From a script.** There is no `ctl` verb for this, since the key spans many lines. A script sends
+`{"pem": "<the new key>"}` with `PUT` to `/api/control/secrets/github-app/<owner>/<role>/key`,
+with the control token, as the control route list says; the same test runs before anything is
+stored.
 
 ### Install settings
 

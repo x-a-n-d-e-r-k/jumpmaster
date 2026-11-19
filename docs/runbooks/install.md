@@ -1716,7 +1716,8 @@ server signs a request as the app and compares GitHub's answer with the imported
 naming the app by its slug, when:
 
 - GitHub rejects the key, or the key can't sign: the fix is a new private key from the app's page
-  on GitHub, then importing the app again with it;
+  on GitHub, pasted into the row's **Replace key** under Settings, Credentials
+  ([Rotating an app's private key](operate.md#rotating-an-apps-private-key));
 - the key belongs to another app than the entry's: re-import the app under Settings, Credentials;
 - GitHub names the app differently (the slug mismatch: the app was renamed, so it no longer acts
   as `<old-slug>[bot]`): re-import the app, and add the old login to the zone's
@@ -1728,8 +1729,9 @@ naming the app by its slug, when:
   and the app grants Contents: Read and write (accept the new permissions on the installation if
   GitHub asks).
 
-It warns when the private key was imported more than 365 days ago (the fix points to the app's
-page for a new key), and when the installation grant differs from the app's manifest: a
+It warns when the private key was imported more than 365 days ago (the fix is a new key from the
+app's page, pasted into **Replace key**:
+[Rotating an app's private key](operate.md#rotating-an-apps-private-key)), and when the installation grant differs from the app's manifest: a
 permission missing or below what the manifest asks (the account owner accepts the new permissions
 on the installation; the app keeps the old grant until then), or one beyond it (remove it on the
 app's page and accept the change on the installation). A grant it can't read is a warn too.
