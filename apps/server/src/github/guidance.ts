@@ -189,6 +189,8 @@ export const PLAN_QUESTION =
 
 export type Recommendation = {
   identity: 'two-bot' | 'starter';
+  /** What the accounts sign in with: two GitHub Apps, or fine-grained tokens. */
+  credentials: 'github-apps' | 'tokens';
   authorMayBeAdmin: boolean;
   reason: string;
   /** Do not go on: what to change first. */
@@ -198,44 +200,66 @@ export type Recommendation = {
   links?: { label: string; url: string }[];
 };
 
-/** The accounts to use, from the repository's owner type and visibility. */
-export function recommendIdentity(d: {
+type RecommendInput = {
   ownerType: 'User' | 'Organization';
   visibility: 'public' | 'private';
   paidPlan?: boolean;
   owner?: string;
-}): Recommendation {
-  const plan =
-    d.visibility === 'private'
-      ? d.paidPlan === false
-        ? { stop: PRIVATE_PLAN_STOP }
-        : d.paidPlan === undefined
-          ? { ask: PLAN_QUESTION }
-          : {}
-      : {};
-  if (d.ownerType === 'Organization')
-    return {
-      identity: 'two-bot',
-      authorMayBeAdmin: false,
-      reason:
-        "This repository belongs to an organization: use two bot accounts, an author and a reviewer, each with the Write role on the repository and a fine-grained token whose resource owner is the organization. The organization must allow fine-grained tokens (the organization's Settings → Personal access tokens → Settings) and may have to approve each token. Neither bot may be an admin.",
-      ...plan,
-      ...(d.owner && /^[A-Za-z0-9-]+$/.test(d.owner)
-        ? {
-            links: [
-              {
-                label: 'the organization (Settings → Personal access tokens)',
-                url: `${GITHUB}/${d.owner}`,
-              },
-            ],
-          }
-        : {}),
-    };
+};
+
+/** What a private repository's owner plan stops or asks first, whatever the accounts. */
+function planOf(d: RecommendInput): Pick<Recommendation, 'stop' | 'ask'> {
+  if (d.visibility !== 'private') return {};
+  if (d.paidPlan === false) return { stop: PRIVATE_PLAN_STOP };
+  if (d.paidPlan === undefined) return { ask: PLAN_QUESTION };
+  return {};
+}
+
+/** An organization's page, where it allows (and approves) fine-grained tokens. */
+function ownerLinks(d: RecommendInput): Pick<Recommendation, 'links'> {
+  return d.ownerType === 'Organization' && d.owner && /^[A-Za-z0-9-]+$/.test(d.owner)
+    ? {
+        links: [
+          {
+            label: 'the organization (Settings → Personal access tokens)',
+            url: `${GITHUB}/${d.owner}`,
+          },
+        ],
+      }
+    : {};
+}
+
+const TWO_APPS =
+  "Use two GitHub Apps: an author app and a reviewer app, registered under the repository's owner and installed on the repository. There are no tokens to make or renew: each app signs in with a short-lived token Jumpmaster asks GitHub for. Neither app is an admin, so the ruleset guards every merge.";
+
+/** The accounts to use, from the repository's owner type and visibility: two GitHub Apps for every owner (spec §5.2). */
+export function recommendIdentity(d: RecommendInput): Recommendation {
+  const reason =
+    d.ownerType === 'Organization'
+      ? `${TWO_APPS} To use tokens instead, the organization must allow fine-grained tokens (the organization's Settings → Personal access tokens → Settings) and may have to approve each token.`
+      : `${TWO_APPS} With one account only, starter mode remains the choice: your own account as the author with a fine-grained token, and no reviewer. What starter mode costs: ${STARTER_WARNING}`;
+  return {
+    identity: 'two-bot',
+    credentials: 'github-apps',
+    authorMayBeAdmin: false,
+    reason,
+    ...planOf(d),
+    ...ownerLinks(d),
+  };
+}
+
+/** Starter mode, as the operator chose it: one account on a fine-grained token, no reviewer. */
+export function starterRecommendation(d: RecommendInput): Recommendation {
+  const personal = d.ownerType === 'User';
   return {
     identity: 'starter',
-    authorMayBeAdmin: true,
-    reason: `This repository belongs to a personal account. A fine-grained token cannot serve a collaborator bot on another person's repository, so use your own account as the author in starter mode: the author account owns the repository, so it can merge (your account is its admin; the token itself gets no Administration permission). What starter mode costs: ${STARTER_WARNING}`,
-    ...plan,
+    credentials: 'tokens',
+    authorMayBeAdmin: personal,
+    reason: personal
+      ? `This repository belongs to a personal account. A fine-grained token cannot serve a collaborator bot on another person's repository, so use your own account as the author in starter mode: the author account owns the repository, so it can merge (your account is its admin; the token itself gets no Administration permission). What starter mode costs: ${STARTER_WARNING}`
+      : `Starter mode: one account as the author, with a fine-grained token whose resource owner is the organization and the Write role on the repository, and no reviewer. It is not an admin. What starter mode costs: ${STARTER_WARNING}`,
+    ...planOf(d),
+    ...ownerLinks(d),
   };
 }
 

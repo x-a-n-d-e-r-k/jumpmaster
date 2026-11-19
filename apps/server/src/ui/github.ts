@@ -63,7 +63,9 @@ export function recommendationSection(rec: Recommendation): string {
   const label =
     rec.identity === 'starter'
       ? 'Starter: your own account as the author, no reviewer account'
-      : 'Two bot accounts: an author and a reviewer';
+      : rec.credentials === 'github-apps'
+        ? 'Two bot accounts as GitHub Apps: an author app and a reviewer app'
+        : 'Two bot accounts: an author and a reviewer';
   return `<section id="recommendation"><h3>Which accounts</h3>
 <p><strong>Recommended: ${escapeHtml(label)}</strong>${rec.authorMayBeAdmin ? ' (the author account owns the repository, so it can merge)' : ''}.</p>
 <p>${escapeHtml(rec.reason)}</p>
@@ -92,6 +94,12 @@ export function tokensSection(pat: ZoneGuidance['pat'], roles: PatRole[]): strin
 </ol>
 <p><small>Expiry: ${escapeHtml(EXPIRATION_NOTE)}.</small></p>
 <ul>${items}</ul></section>`;
+}
+
+/** The token links behind a disclosure, where GitHub Apps are the recommendation (spec §6). */
+export function useTokensInstead(tokens: string): string {
+  return `<details id="use-tokens"><summary>Use tokens instead</summary>
+${tokens}</details>`;
 }
 
 /**
@@ -278,7 +286,7 @@ export function zonePage(
 <p>What Jumpmaster needs on GitHub, as links and files: nothing here changes GitHub; the clicks and the commit are yours. The doctor checks each part.</p>
 ${recommendationSection(g.recommendation)}
 <p>This zone runs as ${escapeHtml(zone.identity)}${zone.authorMayBeAdmin ? ' (the author account owns the repository, so it can merge)' : ''}${zone.identity === g.recommendation.identity ? '' : ': not the recommendation above. Changing it changes which tokens and rules it needs'}.</p>
-${tokensSection(g.pat, rolesOf(zone))}
+${zone.identity === 'starter' ? tokensSection(g.pat, rolesOf(zone)) : useTokensInstead(tokensSection(g.pat, rolesOf(zone)))}
 ${checklistSection(g.checklist)}
 ${rulesetSection(g.ruleset, g.rulesUrl, zone.identity)}
 ${g.mergeRuleset ? `${mergeRulesetSection(g.mergeRuleset, g.rulesUrl)}\n` : ''}${codeownersSection(g.codeowners, { action: `/zones/${encodeURIComponent(zone.id)}/github`, reviewer }, zone.identity)}

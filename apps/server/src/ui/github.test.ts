@@ -191,7 +191,7 @@ describe('the GitHub page of a zone', () => {
     expect(at('id="recommendation"')).toBeLessThan(at('id="tokens"'));
     expect(at('id="tokens"')).toBeLessThan(at('id="ruleset"'));
     expect(at('id="ruleset"')).toBeLessThan(at('id="codeowners"'));
-    expect(html).toContain('two bot accounts');
+    expect(html).toContain('Two bot accounts as GitHub Apps');
     // What the zone runs as now, beside the recommendation.
     expect(html).toContain('This zone runs as two-bot');
     expect(html).toContain(RESOURCE_OWNER_NOTE);
@@ -259,6 +259,27 @@ describe('the GitHub page of a zone', () => {
     expect(note).toBeLessThan(html.indexOf('download="'));
     expect(html).toContain('with zero approvals');
     expect(html).toContain(escapeHtml(STARTER_CODEOWNERS_NOTE));
+  });
+
+  test('a two-bot zone folds its token links under Use tokens instead; a starter zone shows them as before; a personal starter zone is not the recommendation', async () => {
+    const two = (await (await world()).get('/zones/demo/github')).body;
+    const details = two.indexOf('<details id="use-tokens"><summary>Use tokens instead</summary>');
+    expect(details).toBeGreaterThan(-1);
+    expect(details).toBeLessThan(two.indexOf('id="tokens"'));
+    expect(two.indexOf('id="tokens"')).toBeLessThan(two.indexOf('</details>'));
+    expect(two).toContain('The reviewer token');
+    expect(two).not.toContain('not the recommendation above');
+    await app?.close();
+    vi.restoreAllMocks();
+
+    const starter = (
+      await (await world({ ownerType: 'User', identity: 'starter' })).get('/zones/demo/github')
+    ).body;
+    expect(starter).toContain('id="tokens"');
+    expect(starter).not.toContain('id="use-tokens"');
+    expect(starter).not.toContain('The reviewer token');
+    expect(starter).toContain('This zone runs as starter');
+    expect(starter).toContain('not the recommendation above');
   });
 
   test('an app-author zone with no author PAT renders its guidance on the author app, not the no-author message', async () => {
