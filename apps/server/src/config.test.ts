@@ -506,6 +506,8 @@ describe('crew config', () => {
       auditPerCycle: 1,
       autoRetry: true,
       closeDone: true,
+      triageBacklog: true,
+      backlogSkipLabels: ['epic', 'idea', 'needs-design', 'needs-feedback', 'wontfix'],
     });
     expect(z?.botLogins).toEqual([]);
   });
@@ -1474,6 +1476,8 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
         auditPerCycle: 1,
         autoRetry: true,
         closeDone: true,
+        triageBacklog: true,
+        backlogSkipLabels: ['epic', 'idea', 'needs-design', 'needs-feedback', 'wontfix'],
       },
       botLogins: [],
       authorLoginAliases: [],

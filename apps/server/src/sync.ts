@@ -1,7 +1,13 @@
 import { createHash } from 'node:crypto';
+import { isBacklogIssue } from './backlog.js';
 import { type DropZoneConfig, triageGateOn } from './config.js';
 import { issueGateReasons } from './crew/actions.js';
-import { getCrewIssueByNumber, recordTriageRequest } from './crew/store.js';
+import {
+  getCrewIssueByNumber,
+  listTriageRequests,
+  recordTriageRequest,
+  setTriageRequest,
+} from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
   clearRequestChangesOnHead,
@@ -307,10 +313,15 @@ async function sendToTriage(
   }
 }
 
+/** Backlog-sent requests are recorded only while fewer open ones than this wait (#467). */
+export const BACKLOG_TRIAGE_PACE = 3;
+
 /**
  * Records a triage request for each open triage-labeled issue by a trusted author, once per body
- * text. An untrusted author's issue, or one whose trust lookup failed, is never recorded. A failed
- * listing is logged and tried again next pass.
+ * text. With `crew.triageBacklog` on, open backlog issues (no Jumpmaster label or body) are sent
+ * too, a few at a time, lowest number first, and an untouched open request whose issue has left
+ * both listings is superseded. An untrusted author's issue, or one whose trust lookup failed, is
+ * never recorded. A failed listing is logged and tried again next pass.
  */
 async function recordTriage(
   db: Db,
@@ -318,29 +329,71 @@ async function recordTriage(
   zone: DropZoneConfig,
   now: Date,
 ): Promise<void> {
-  let issues: ForgeIssue[];
+  const trust = new Map<string, boolean>();
+  /** Write access, read once per author per pass; a failed lookup counts as untrusted. */
+  const trusted = async (login: string): Promise<boolean> => {
+    let t = trust.get(login);
+    if (t === undefined) {
+      try {
+        t = await forges.author.isTrusted(login);
+      } catch {
+        t = false;
+      }
+      trust.set(login, t);
+    }
+    return t;
+  };
+  const gateOn = triageGateOn(zone);
+  /** Records the issue's current text; the same text gives the same gate reasons on either path. */
+  const record = (issue: ForgeIssue): number | null => {
+    // Why the gate holds it back, for the triage input.
+    const reasons = gateOn ? issueGateReasons(issue.title, issue.body, zone.protectedPaths) : [];
+    return recordTriageRequest(db, zone.id, issue, now, reasons);
+  };
+
+  let labeled: ForgeIssue[] | null = null;
   try {
-    issues = (await forges.author.listOpenIssues(zone.triageLabel)).filter(
-      (i) => !isCrewFiled(i, zone),
-    );
+    labeled = await forges.author.listOpenIssues(zone.triageLabel);
   } catch (err) {
     log(`zone ${zone.id}: listing triage issues failed: ${errorText(err)}`);
+  }
+  for (const issue of labeled ?? []) {
+    if (isCrewFiled(issue, zone)) continue;
+    if (!(await trusted(issue.author))) continue;
+    record(issue);
+  }
+
+  if (!zone.crew?.triageBacklog) return;
+  let open: ForgeIssue[];
+  try {
+    open = await forges.author.listOpenIssues();
+  } catch (err) {
+    log(`zone ${zone.id}: listing backlog issues failed: ${errorText(err)}`);
     return;
   }
-  const trust = new Map<string, boolean>();
-  for (const author of new Set(issues.map((i) => i.author))) {
-    try {
-      trust.set(author, await forges.author.isTrusted(author));
-    } catch {
-      trust.set(author, false); // a failed lookup counts as untrusted
+  const backlog = open.filter((i) => isBacklogIssue(i, zone)).sort((a, b) => a.number - b.number);
+  // An untouched request whose issue was closed, labeled ready or otherwise taken out of both
+  // listings before its drop ran: nothing is written to the forge for it.
+  if (labeled !== null) {
+    const present = new Set([...backlog, ...labeled].map((i) => i.number));
+    for (const r of listTriageRequests(db, zone.id)) {
+      if (r.state === 'open' && r.attempts === 0 && !present.has(r.issueNumber))
+        setTriageRequest(db, r.id, { state: 'done', reason: 'superseded' }, now);
     }
   }
-  const gateOn = triageGateOn(zone);
-  for (const issue of issues) {
-    if (trust.get(issue.author) !== true) continue;
-    // Why the gate holds it back, for the triage input; the same text gives the same reasons.
-    const reasons = gateOn ? issueGateReasons(issue.title, issue.body, zone.protectedPaths) : [];
-    recordTriageRequest(db, zone.id, issue, now, reasons);
+  const skip = new Set((zone.crew.backlogSkipLabels ?? []).map((l) => l.toLowerCase()));
+  // Paced on the open requests for backlog issues only: label-sent ones are not limited.
+  const inBacklog = new Set(backlog.map((i) => i.number));
+  const openCount = (): number =>
+    listTriageRequests(db, zone.id).filter(
+      (r) => r.state === 'open' && inBacklog.has(r.issueNumber),
+    ).length;
+  for (const issue of backlog) {
+    if (openCount() >= BACKLOG_TRIAGE_PACE) break;
+    if (isCrewFiled(issue, zone)) continue;
+    if (issue.labels.some((l) => skip.has(l.toLowerCase()))) continue;
+    if (!(await trusted(issue.author))) continue;
+    record(issue);
   }
 }
 

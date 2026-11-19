@@ -681,6 +681,18 @@ const WORDS: Words[] = [
     'Let crew triage close an issue it finds already done, after the server checks that the pull requests it cites merged to the default branch, or that the issues it cites were closed as completed.',
     'bool',
   ),
+  z_(
+    'crew.triageBacklog',
+    'Send unlabeled issues to crew triage',
+    'Send open issues that carry no Jumpmaster label to crew triage. The crew comments on each one, labels it jm-triaged, and splits it into work, asks you about it, closes it as already done, or sets it aside.',
+    'bool',
+  ),
+  z_(
+    'crew.backlogSkipLabels',
+    'Labels that keep an issue out of triage',
+    'An open issue carrying any of these labels is not sent to crew triage from the backlog. Compared without case.',
+    'list',
+  ),
 ];
 
 /** Every setting, in plain words, with its group. */
