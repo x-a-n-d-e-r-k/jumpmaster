@@ -1,7 +1,8 @@
 import { leaseLogger, StickClient } from './client.js';
 import { DockerDriver } from './docker.js';
-import { egressCapability } from './egress.js';
+import { egressCapability, egressImage } from './egress.js';
 import { stickPlatform } from './fetch-image.js';
+import { StickImages } from './image-gc.js';
 import { runLeaseLoop } from './lease-loop.js';
 import { imageSource } from './pull.js';
 import { createPushLoop, PendingPushes, PUSH_LOOP_MS, pushOnce } from './push.js';
@@ -47,6 +48,14 @@ async function main() {
   let stickId = saved?.stickId;
   const driver = new DockerDriver();
   const release = loadRelease();
+  // Release images the stick loads, removed once no longer needed (issue #425): only those it
+  // recorded, never the configured trooper and egress images.
+  const images = new StickImages({
+    driver,
+    stateDir: dir,
+    keep: [TROOPER_IMAGE, egressImage(process.env)],
+    log: (line) => console.log(line),
+  });
   // Under the signed policy this refuses to start (with the reason) unless cosign is the pinned
   // version, every pin is a digest and there is a trusted signer. The trooper image is verified
   // with the health check below: a refused one withholds push-v1, never startup.
@@ -75,6 +84,7 @@ async function main() {
       stateDir: dir,
       platform: stickPlatform(),
       log: (line) => console.log(line),
+      images,
     },
   };
   if (imageSource(process.env, undefined) === 'server') {
@@ -130,6 +140,10 @@ async function main() {
       `${reaped.unconfirmed.length} orphaned container(s) not confirmed removed: their drops' volumes wait for the sweep`,
     );
   if (pending.size() > 0) console.log(`rediscovered ${pending.size()} pending push(es)`);
+  // Then the image sweep, before anything starts a container (it logs its own line).
+  await images
+    .sweep()
+    .catch((e) => console.error(`image sweep failed: ${e instanceof Error ? e.message : e}`));
   // Health: the base image and the volume self-check, at startup, in every sweep and in each
   // wait below the floor; push-v1 follows the latest result.
   const health = new HealthMonitor(driver, {
@@ -215,6 +229,7 @@ async function main() {
         trust,
         pending,
         trooperImage: TROOPER_IMAGE,
+        images,
         baseImage: () => health.latest().base,
         heartbeatMs: 15_000,
         ...(process.env.JM_LOST_SERVER_KILL_BEATS
