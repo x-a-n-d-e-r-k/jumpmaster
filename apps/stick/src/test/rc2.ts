@@ -43,6 +43,8 @@ export type Rc2Case = {
    * certificate says something else (issue #270). Only a fake cosign accepts it.
    */
   bundle?: Buffer;
+  /** Several bundles in place of the rc.2 one, each in its own referrer manifest, in order. */
+  bundles?: Buffer[];
   /**
    * The signed index is this image's (with its platforms' blobs) instead of the rc.2 index, whose
    * platform blobs these fixtures lack: for tests that load. Only a fake cosign told
@@ -67,12 +69,13 @@ export type PlatformImage = {
   arm64: PlatformPart;
 };
 
-function platformPart(arch: string): PlatformPart {
+function platformPart(arch: string, labels?: Record<string, string>): PlatformPart {
   const layer = Buffer.from(`layer of ${arch} `.repeat(200));
   const config = Buffer.from(
     JSON.stringify({
       architecture: arch,
       os: 'linux',
+      ...(labels ? { config: { Labels: labels } } : {}),
       rootfs: { type: 'layers', diff_ids: [sha256(layer)] },
     }),
   );
@@ -106,10 +109,13 @@ function platformPart(arch: string): PlatformPart {
   };
 }
 
-/** A synthetic image laid out like the rc.2 one, with every platform's blobs present. */
-export function platformImage(): PlatformImage {
-  const amd64 = platformPart('amd64');
-  const arm64 = platformPart('arm64');
+/**
+ * A synthetic image laid out like the rc.2 one, with every platform's blobs present; `labels`
+ * go in each platform's image config.
+ */
+export function platformImage(labels?: Record<string, string>): PlatformImage {
+  const amd64 = platformPart('amd64', labels);
+  const arm64 = platformPart('arm64', labels);
   const entry = (p: PlatformPart, architecture: string) => ({
     mediaType: 'application/vnd.oci.image.manifest.v1+json',
     digest: p.manifestDigest,
@@ -146,24 +152,28 @@ export function rc2Layout(o: Rc2Case = {}, dir = mkdtempSync(join(tmpdir(), 'jm-
   const digest = o.relabelIndex ? sha256(appended) : sha256(signed);
   const indexBlob = put(digest, o.tamperIndex || o.relabelIndex ? appended : signed);
   if (o.image) for (const b of [...o.image.amd64.blobs, ...o.image.arm64.blobs]) put(sha256(b), b);
-  const bundle = o.bundle ?? RC2_BUNDLE;
   const manifest = JSON.parse(RC2_BUNDLE_MANIFEST.toString('utf8')) as {
     artifactType: string;
     layers: { digest: string; size: number }[];
   };
-  const bundleManifest = o.bundle
-    ? Buffer.from(
-        JSON.stringify({
-          ...manifest,
-          layers: [{ ...manifest.layers[0], digest: sha256(bundle), size: bundle.length }],
-        }),
-      )
-    : RC2_BUNDLE_MANIFEST;
-  put(sha256(bundleManifest), bundleManifest);
-  const bundleBlob = put(
-    sha256(bundle),
-    o.tamperBundle ? Buffer.concat([bundle, Buffer.from(' ')]) : bundle,
-  );
+  const custom = o.bundles ?? (o.bundle ? [o.bundle] : undefined);
+  const referrers = (custom ?? [RC2_BUNDLE]).map((bundle) => {
+    const bundleManifest = custom
+      ? Buffer.from(
+          JSON.stringify({
+            ...manifest,
+            layers: [{ ...manifest.layers[0], digest: sha256(bundle), size: bundle.length }],
+          }),
+        )
+      : RC2_BUNDLE_MANIFEST;
+    put(sha256(bundleManifest), bundleManifest);
+    const blob = put(
+      sha256(bundle),
+      o.tamperBundle ? Buffer.concat([bundle, Buffer.from(' ')]) : bundle,
+    );
+    return { bundleManifest, blob };
+  });
+  const bundleBlob = (referrers[0] as { blob: string }).blob;
   const index = {
     schemaVersion: 2,
     mediaType: 'application/vnd.oci.image.index.v1+json',
@@ -176,18 +186,16 @@ export function rc2Layout(o: Rc2Case = {}, dir = mkdtempSync(join(tmpdir(), 'jm-
       },
       ...(o.noBundle
         ? []
-        : [
-            {
-              mediaType: 'application/vnd.oci.image.manifest.v1+json',
-              digest: sha256(bundleManifest),
-              size: bundleManifest.length,
-              artifactType: manifest.artifactType,
-              annotations: {
-                'dev.sigstore.bundle.content': 'dsse-envelope',
-                'dev.jumpmaster.signature.of': digest,
-              },
+        : referrers.map(({ bundleManifest }) => ({
+            mediaType: 'application/vnd.oci.image.manifest.v1+json',
+            digest: sha256(bundleManifest),
+            size: bundleManifest.length,
+            artifactType: manifest.artifactType,
+            annotations: {
+              'dev.sigstore.bundle.content': 'dsse-envelope',
+              'dev.jumpmaster.signature.of': digest,
             },
-          ]),
+          }))),
     ],
   };
   writeFileSync(join(dir, 'oci-layout'), '{"imageLayoutVersion":"1.0.0"}');

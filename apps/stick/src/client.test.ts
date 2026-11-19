@@ -461,3 +461,72 @@ describe('server-hosted images (issue #141)', () => {
     });
   });
 });
+
+describe('the upgrade offer and report (issue #430)', () => {
+  const OFFER = {
+    version: '0.6.0',
+    image: `ghcr.io/o/jumpmaster-stick@sha256:${'e'.repeat(64)}`,
+  };
+  const answer = (header?: string, status = 204) =>
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(null, {
+            status,
+            headers: header === undefined ? {} : { 'x-jumpmaster-upgrade': header },
+          }),
+      ),
+    );
+
+  test('a valid header is held; an answer without it clears it', async () => {
+    const client = new StickClient('http://127.0.0.1:1', 't');
+    answer(JSON.stringify(OFFER));
+    await client.lease(0);
+    expect(client.upgradeOffer).toEqual(OFFER);
+    answer();
+    await client.lease(0);
+    expect(client.upgradeOffer).toBeUndefined();
+  });
+
+  test('a malformed header is ignored and logged', async () => {
+    const logs: string[] = [];
+    const client = new StickClient('http://127.0.0.1:1', 't', { log: (l) => logs.push(l) });
+    for (const bad of [
+      'not json',
+      JSON.stringify({ ...OFFER, version: '0.0.0-dev' }),
+      JSON.stringify({ ...OFFER, image: `ghcr.io/o/jumpmaster-trooper@sha256:${'e'.repeat(64)}` }),
+      JSON.stringify({ ...OFFER, image: 'ghcr.io/o/jumpmaster-stick:latest' }),
+    ]) {
+      answer(bad);
+      await client.lease(0);
+      expect(client.upgradeOffer, bad).toBeUndefined();
+    }
+    expect(logs).toHaveLength(4);
+    expect(JSON.parse(logs[0] as string)).toMatchObject({ event: 'upgrade-offer' });
+  });
+
+  test('every lease carries the report its hooks give; only a 2xx answer acknowledges it', async () => {
+    const bodies: { upgrade?: unknown }[] = [];
+    let status = 500;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: unknown, init: { body: string }) => {
+        bodies.push(JSON.parse(init.body));
+        return new Response(status === 204 ? null : '{}', { status });
+      }),
+    );
+    const client = new StickClient('http://127.0.0.1:1', 't');
+    const report = { version: '0.6.0', result: 'failed' as const, reason: 'rolled back' };
+    const acked: number[] = [];
+    client.upgradeHooks = {
+      beforeLease: () => ({ report, answered: () => acked.push(bodies.length) }),
+    };
+    await expect(client.lease(0)).rejects.toThrow(/500/);
+    expect(acked).toEqual([]);
+    status = 204;
+    await client.lease(0);
+    expect(acked).toEqual([2]);
+    expect(bodies.map((b) => b.upgrade)).toEqual([report, report]);
+  });
+});

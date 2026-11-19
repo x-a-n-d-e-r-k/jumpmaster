@@ -1,6 +1,6 @@
-import { expect, test } from 'vitest';
+import { describe, expect, test } from 'vitest';
 import { MAX_PENDING_PUSHES } from './push.js';
-import { advertisedCapabilities, healthLine, leaseTerms } from './state.js';
+import { advertisedCapabilities, canUpgrade, healthLine, leaseTerms } from './state.js';
 import { VOLUME_FREE_FLOOR_BYTES } from './volumes.js';
 
 const healthy = { selfCheck: true, freeBytes: VOLUME_FREE_FLOOR_BYTES };
@@ -71,4 +71,43 @@ test('the health line names the real cause', () => {
   expect(healthLine({ selfCheck: true, freeBytes: VOLUME_FREE_FLOOR_BYTES, base: ok })).toBe(
     'volume self-check passed: push-v1 advertised',
   );
+});
+
+describe('upgrade-v1 (issue #430)', () => {
+  const ID = 'a'.repeat(64);
+  const all: Parameters<typeof canUpgrade>[0] = {
+    policy: 'signed',
+    source: 'server',
+    containerId: ID,
+    version: '0.5.1',
+  };
+  const caps = (o: Partial<typeof all>) =>
+    leaseTerms({
+      egress: false,
+      policy: o.policy ?? all.policy,
+      health: healthy,
+      pending: 0,
+      upgrade: canUpgrade({ ...all, ...o }),
+    })?.capabilities;
+
+  test('advertised under the signed policy, server images, an own container and a release version', () => {
+    expect(caps({})).toEqual(['image-verify-v1', 'push-v1', 'upgrade-v1']);
+    expect(caps({ version: '0.6.0-rc.1' })).toContain('upgrade-v1');
+  });
+
+  test.each([
+    ['the allowlist policy', { policy: 'allowlist' as const }],
+    ['registry images', { source: 'registry' as const }],
+    ['no own container id', { containerId: undefined }],
+    ['a dev version', { version: '0.0.0-dev' }],
+    ['an unknown version', { version: 'unknown' }],
+  ])('not advertised with %s', (_, o) => {
+    expect(caps(o)).not.toContain('upgrade-v1');
+  });
+
+  test('never advertised under allowlist, even when asked', () => {
+    expect(advertisedCapabilities({ egress: false, policy: 'allowlist', upgrade: true })).toEqual(
+      [],
+    );
+  });
 });

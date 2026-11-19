@@ -130,3 +130,61 @@ describe('the lease loop while the first health check is pending (issue #157)', 
     expect(h.created).toEqual([]);
   });
 });
+
+describe('an upgrade offer holds the loop (issue #430)', () => {
+  test('while held, leases ask for no slot, no drop starts, and the running count is passed on', async () => {
+    const idle: number[] = [];
+    let held = false;
+    const leases: number[] = [];
+    const created: DropPayload[] = [];
+    let stop = false;
+    const offer = {
+      version: '0.6.0',
+      image: `ghcr.io/o/jumpmaster-stick@sha256:${'e'.repeat(64)}`,
+    };
+    const client = {
+      upgradeOffer: undefined as typeof offer | undefined,
+      reportStarting() {},
+      async lease(free: number) {
+        leases.push(free);
+        client.upgradeOffer = held ? offer : undefined;
+        return { drop: free > 0 ? DROP : null, skipped: [], slots: null };
+      },
+    };
+    const answered: (typeof offer | undefined)[] = [];
+    const done = runLeaseLoop({
+      client,
+      target: new SlotTarget(2, 4),
+      terms: () => ({ capabilities: [] }),
+      firstCheck: Promise.resolve(),
+      recheck: async () => {},
+      start: (drop) => {
+        created.push(drop);
+        return new Promise<void>(() => {});
+      },
+      image: IMAGE,
+      leaseLog: { skipped: () => {}, error: () => {} },
+      log: () => {},
+      stopped: () => stop,
+      upgrade: {
+        holding: () => held,
+        answered: (o) => answered.push(o),
+        idle: (running) => idle.push(running),
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(created).toHaveLength(2);
+    held = true;
+    const at = leases.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(created).toHaveLength(2);
+    expect(leases.length).toBeGreaterThan(at);
+    expect(leases.slice(at).every((f) => f === 0)).toBe(true);
+    expect(idle.length).toBeGreaterThan(0);
+    expect(idle.every((r) => r === 2)).toBe(true);
+    expect(answered.at(-1)).toEqual(offer);
+    stop = true;
+    await vi.advanceTimersByTimeAsync(60_000);
+    await done;
+  });
+});

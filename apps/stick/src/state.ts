@@ -4,10 +4,12 @@ import { join } from 'node:path';
 import {
   type ImagePolicy,
   ImagePolicySchema,
+  isReleaseVersion,
   readSecret,
   type StickCapability,
   type StickInfo,
 } from '@jumpmaster/protocol';
+import type { ImageSource } from './pull.js';
 import { MAX_PENDING_PUSHES } from './push.js';
 import { allowedImages, type StickHealth, type VolumeHealth } from './runner.js';
 import type { ReleaseInfo } from './verify.js';
@@ -99,18 +101,39 @@ const DIGEST_REF = /@sha256:[0-9a-f]{64}$/;
  * The capabilities a stick advertises from what its checks proved: `egress-v1` when the egress
  * check passed, `image-verify-v1` only under the signed policy (a stick that doesn't verify
  * signatures must never lease a drop from a zone that requires signed images), and `push-v1`
- * while the latest volume self-check passed above the free floor.
+ * while the latest volume self-check passed above the free floor. `upgrade-v1` when `upgrade`
+ * (see `canUpgrade`) and the policy is signed.
  */
 export function advertisedCapabilities(o: {
   egress: boolean;
   policy: ImagePolicy;
   push?: boolean;
+  upgrade?: boolean;
 }): StickCapability[] {
   return [
     ...(o.egress ? (['egress-v1'] as const) : []),
     ...(o.policy === 'signed' ? (['image-verify-v1'] as const) : []),
     ...(o.push ? (['push-v1'] as const) : []),
+    ...(o.upgrade && o.policy === 'signed' ? (['upgrade-v1'] as const) : []),
   ];
+}
+
+/**
+ * Whether this stick can upgrade itself in place (issue #430): it verifies signatures, fetches
+ * its images from the server, runs in a container it can name, and is a release.
+ */
+export function canUpgrade(o: {
+  policy: ImagePolicy;
+  source: ImageSource;
+  containerId: string | undefined;
+  version: string;
+}): boolean {
+  return (
+    o.policy === 'signed' &&
+    o.source === 'server' &&
+    o.containerId !== undefined &&
+    isReleaseVersion(o.version)
+  );
 }
 
 /**
@@ -133,6 +156,8 @@ export function leaseTerms(o: {
   policy: ImagePolicy;
   health: VolumeHealth;
   pending: number;
+  /** `canUpgrade` holds (issue #430). */
+  upgrade?: boolean;
 }): { capabilities: StickCapability[]; noPush?: true } | null {
   const space = freeSpace(o.health);
   if (space === 'below') return null;
@@ -140,6 +165,7 @@ export function leaseTerms(o: {
     egress: o.egress,
     policy: o.policy,
     push: space === 'ok' && o.health.selfCheck,
+    ...(o.upgrade ? { upgrade: true } : {}),
   });
   return o.pending >= MAX_PENDING_PUSHES ? { capabilities, noPush: true } : { capabilities };
 }
