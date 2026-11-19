@@ -309,6 +309,160 @@ describe('container starts and the image sweep (issue #425)', () => {
   });
 });
 
+describe('images a drop holds until it ends (issue #439)', () => {
+  const done = 'JM_RESULT {"status":"completed","gates":[]}';
+  const PG = 'ghcr.io/o/pg';
+  const P1 = `${PG}@sha256:${'1'.repeat(64)}`;
+  const P2 = `${PG}@sha256:${'2'.repeat(64)}`;
+  const P3 = `${PG}@sha256:${'3'.repeat(64)}`;
+  const day = (n: number) => new Date(Date.UTC(2026, 10, n)).toISOString();
+  /**
+   * Three recorded pg digests (P1 the least recently used), P1 on the engine, and the server
+   * serving a release trooper image not loaded yet. A service start from a removed image fails,
+   * as the engine's would.
+   */
+  function world() {
+    const r = release();
+    const stateDir = mkdtempSync(join(tmpdir(), 'jm-images-'));
+    writeFileSync(
+      join(stateDir, IMAGES_FILE),
+      JSON.stringify(
+        Object.fromEntries(
+          [P1, P2, P3].map((ref, i) => [ref, { repository: PG, lastUsedAt: day(i + 1) }]),
+        ),
+      ),
+    );
+    const d = fakeDriver([done], {
+      imageIds: { [P1]: 'sha256:id-1', [P2]: 'sha256:id-2', [P3]: 'sha256:id-3' },
+    });
+    const startServices = d.driver.startServices.bind(d.driver);
+    d.driver.startServices = async (...args: Parameters<typeof startServices>) => {
+      for (const svc of args[2])
+        if (d.gc.includes(`remove ${svc.image}`)) throw new Error(`image ${svc.image} is missing`);
+      return startServices(...args);
+    };
+    const clock = { day: 19 };
+    const images = new StickImages({
+      driver: d.driver,
+      stateDir,
+      keep: [],
+      log: () => {},
+      now: () => new Date(day(clock.day)),
+    });
+    const loaded = new Set<string>();
+    const deps: ServerImageDeps = {
+      client: {
+        async imageLayout() {
+          return new Response(tar(r.entries), { status: 200 });
+        },
+        async reportImageFetch() {},
+      },
+      loader: {
+        async imageExists(ref) {
+          return ref === P1 || loaded.has(ref);
+        },
+        async loadImage(t) {
+          for await (const _ of t);
+          loaded.add(r.ref);
+          return [r.configDigest];
+        },
+        async removeImage() {},
+        async tagImage() {},
+      },
+      stateDir,
+      platform: 'linux/amd64',
+      log: () => {},
+      images,
+    };
+    const trust: ImageTrust = {
+      policy: 'allowlist',
+      allowed: new Set([P1, r.ref, 'jumpmaster-trooper:test']),
+      server: { source: () => 'server', deps },
+    };
+    return { r, d, images, trust, stateDir, clock };
+  }
+  const db = { name: 'db', image: P1, port: 5432, readyTimeoutSeconds: 60 };
+
+  test("a present service image survives the sweep the drop's own trooper load starts", async () => {
+    const { r, d, images, trust } = world();
+    const client = fakeClient();
+    await runDrop(
+      { ...payload, image: r.ref, services: [db] },
+      { client, driver: d.driver, stickId: 's1', trust, images },
+    );
+    await images.idle();
+    expect(client.result).toMatchObject({ status: 'completed' });
+    expect(d.order).toContain('services');
+    expect(d.order).toContain('trooper');
+    // The load did start a sweep; it left the drop's service image alone.
+    expect(d.gc).toContain('containers');
+    expect(d.gc).not.toContain(`remove ${P1}`);
+  });
+
+  test("another drop's load does not sweep the image a running drop found present; its end releases it", async () => {
+    const { r, d, images, trust, stateDir, clock } = world();
+    // The first drop stops after its images are ready and before any container starts.
+    let reached: () => void = () => {};
+    const paused = new Promise<void>((res) => {
+      reached = res;
+    });
+    let resume: () => void = () => {};
+    const gate = new Promise<void>((res) => {
+      resume = res;
+    });
+    const labels = d.driver.imageLabels.bind(d.driver);
+    d.driver.imageLabels = async (image: string) => {
+      if (image === 'jumpmaster-trooper:test') {
+        reached();
+        await gate;
+      }
+      return labels(image);
+    };
+    const first = fakeClient();
+    const one = runDrop(
+      { ...payload, services: [db] },
+      { client: first, driver: d.driver, stickId: 's1', trust, images },
+    );
+    await paused;
+    const second = fakeClient();
+    await runDrop(
+      { ...payload, dropId: 'd2', image: r.ref },
+      { client: second, driver: d.driver, stickId: 's1', trust, images },
+    );
+    await images.idle();
+    expect(second.result).toMatchObject({ status: 'completed' });
+    expect(d.gc).toContain('containers');
+    expect(d.gc).not.toContain(`remove ${P1}`);
+    resume();
+    await one;
+    expect(first.result).toMatchObject({ status: 'completed' });
+    expect(d.order).toContain('services');
+    // The drop has ended. Once P2 and P3 are used again, P1 is beyond the two newest and no
+    // container uses it: the next sweep removes it.
+    clock.day = 20;
+    images.used(P2);
+    images.used(P3);
+    expect((await images.sweep()).removed).toContain(P1);
+    const records = JSON.parse(readFileSync(join(stateDir, IMAGES_FILE), 'utf8'));
+    expect(Object.keys(records)).not.toContain(P1);
+  });
+
+  test('a drop that fails before any container starts releases what it held', async () => {
+    const { d, images, trust } = world();
+    const client = fakeClient();
+    d.driver.imageLabels = async () => {
+      throw new Error('inspect failed');
+    };
+    await runDrop(
+      { ...payload, services: [db] },
+      { client, driver: d.driver, stickId: 's1', trust, images },
+    );
+    expect(client.result).toMatchObject({ status: 'failed' });
+    expect(d.order).not.toContain('services');
+    expect((await images.sweep()).removed).toEqual([P1]);
+  });
+});
+
 describe('artifacts', () => {
   const bytes = Buffer.from('artifact-bytes');
   const sha256 = createHash('sha256').update(bytes).digest('hex');
