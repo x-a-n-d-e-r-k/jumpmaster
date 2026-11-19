@@ -258,6 +258,14 @@ export function listWorkItems(db: Db, zoneId: string, state?: WorkItemState): Wo
   return rows.map(toWorkItem);
 }
 
+/** A zone's work item for an issue number, if it has one. */
+export function findWorkItem(db: Db, zoneId: string, issueNumber: number): WorkItem | undefined {
+  const row = db
+    .prepare(`SELECT ${WORK_ITEM_COLS} FROM work_items WHERE drop_zone_id = ? AND issue_number = ?`)
+    .get(zoneId, issueNumber) as WorkItemRow | undefined;
+  return row && toWorkItem(row);
+}
+
 export function getWorkItem(db: Db, id: number): WorkItem | undefined {
   const row = db.prepare(`SELECT ${WORK_ITEM_COLS} FROM work_items WHERE id = ?`).get(id) as
     | WorkItemRow
@@ -751,16 +759,20 @@ export function listActiveDrops(db: Db, zoneId: string): Drop[] {
     .all(zoneId) as Drop[];
 }
 
-/** Drops newest first, optionally of one zone and of some states, at most `limit`. */
+/** Drops newest first, optionally of one zone, one work item and some states, at most `limit`. */
 export function listDrops(
   db: Db,
-  f: { zoneId?: string; states?: readonly DropState[]; limit: number },
+  f: { zoneId?: string; workItemId?: number; states?: readonly DropState[]; limit: number },
 ): Drop[] {
   const where: string[] = [];
   const args: (string | number)[] = [];
   if (f.zoneId !== undefined) {
     where.push('drop_zone_id = ?');
     args.push(f.zoneId);
+  }
+  if (f.workItemId !== undefined) {
+    where.push('work_item_id = ?');
+    args.push(f.workItemId);
   }
   if (f.states !== undefined) {
     where.push(`state IN (${f.states.map(() => '?').join(', ') || 'NULL'})`);
