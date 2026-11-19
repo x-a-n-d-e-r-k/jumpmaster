@@ -152,21 +152,37 @@ describe('the ruleset file', () => {
 });
 
 describe('the identity recommendation', () => {
-  test('recommendIdentity: user and public is starter with authorMayBeAdmin and the starter warning; organization is two-bot; private on a free plan stops before any token; private with the plan unknown asks', () => {
+  test('recommendIdentity: user and organization are both two-bot with GitHub Apps and no admin; the personal reason keeps starter as the one-account choice with the starter warning; the organization keeps its owner link', () => {
     const user = recommendIdentity({ ownerType: 'User', visibility: 'public', owner: 'octo' });
-    expect(user).toMatchObject({ identity: 'starter', authorMayBeAdmin: true });
+    expect(user).toMatchObject({
+      identity: 'two-bot',
+      credentials: 'github-apps',
+      authorMayBeAdmin: false,
+    });
+    expect(user.reason).toContain('an author app and a reviewer app');
+    expect(user.reason).toContain('installed on the repository');
+    expect(user.reason).toContain('no tokens to make or renew');
+    expect(user.reason).toContain('Neither app is an admin');
+    expect(user.reason).toContain('starter mode');
+    expect(user.reason).toContain('one account');
     expect(user.reason).toContain(STARTER_WARNING);
-    expect(user.reason).toContain('fine-grained');
     expect(user.stop).toBeUndefined();
     expect(user.ask).toBeUndefined();
+    expect(user.links).toBeUndefined();
 
     const org = recommendIdentity({
       ownerType: 'Organization',
       visibility: 'public',
       owner: 'octo-org',
     });
-    expect(org).toMatchObject({ identity: 'two-bot', authorMayBeAdmin: false });
-    expect(org.reason).toContain('organization must allow fine-grained');
+    expect(org).toMatchObject({
+      identity: 'two-bot',
+      credentials: 'github-apps',
+      authorMayBeAdmin: false,
+    });
+    expect(org.reason).toContain('an author app and a reviewer app');
+    expect(org.reason).toContain('no tokens to make or renew');
+    expect(org.reason).not.toContain(STARTER_WARNING);
     expect(org.links).toEqual([
       {
         label: 'the organization (Settings → Personal access tokens)',

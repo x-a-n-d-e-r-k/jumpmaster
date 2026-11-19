@@ -11,6 +11,7 @@ import {
   patTemplateUrl,
   type Recommendation,
   recommendIdentity,
+  starterRecommendation,
   type ZoneGuidance,
   zoneGuidance,
 } from '../github/guidance.js';
@@ -398,12 +399,10 @@ export async function recommendFor(
   const { read, ownerType } = entry;
   const visibility = read?.visibility ?? 'private';
   const [owner = '', name = ''] = repo.split('/');
-  const recommendation = recommendIdentity({
-    ownerType,
-    visibility,
-    owner,
-    ...(paidPlan === undefined ? {} : { paidPlan }),
-  });
+  const facts = { ownerType, visibility, owner, ...(paidPlan === undefined ? {} : { paidPlan }) };
+  // The operator's choice of one account is starter on tokens; otherwise the recommendation.
+  const recommendation =
+    identity === 'starter' ? starterRecommendation(facts) : recommendIdentity(facts);
   const zone: GuidanceZone = {
     id: zoneIdOf(repo),
     repo,

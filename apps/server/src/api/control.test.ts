@@ -12,7 +12,7 @@ import { grantSudo, SUDO_MS, sha256Hex } from '../auth/sessions.js';
 import { listRulings, raiseBriefing } from '../briefings.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore, startVault } from '../config/store.js';
-import { type Config, type DropZoneConfig, secretList } from '../config.js';
+import { type Config, type DropZoneConfig, STARTER_WARNING, secretList } from '../config.js';
 import { nextCrewWork } from '../crew/schedule.js';
 import { insertCrewIssue, listCrewIssues } from '../crew/store.js';
 import { ctlRequest } from '../ctl.js';
@@ -2369,7 +2369,11 @@ describe('GitHub guidance routes (Task 7)', () => {
     expect(calls).toEqual(['repoAccess octo/secret', 'ownerType octo/secret']);
     const j = r.json();
     expect(j).toMatchObject({ ownerType: 'User', visibility: 'private', visible: false });
-    expect(j.recommendation).toMatchObject({ identity: 'starter', authorMayBeAdmin: true });
+    expect(j.recommendation).toMatchObject({
+      identity: 'two-bot',
+      credentials: 'github-apps',
+      authorMayBeAdmin: false,
+    });
     expect(j.recommendation.ask).toMatch(/paid GitHub plan/);
     expect(j.pat.author).toMatch(/target_name=octo&/);
     expect(j.guidance).toBeUndefined();
@@ -2380,6 +2384,46 @@ describe('GitHub guidance routes (Task 7)', () => {
     expect(free.json().recommendation.stop).toMatch(/need a paid plan/);
     const bad = await post('/api/control/github/recommend', { repo: 'octo/se cret' });
     expect(bad.statusCode).toBe(400);
+  });
+
+  test('POST github/recommend with identity starter on a personal repository returns starter on tokens with authorMayBeAdmin; without identity it is two-bot on GitHub Apps', async () => {
+    const { JM_GITHUB_AUTHOR_TOKEN: _a, JM_GITHUB_REVIEWER_TOKEN: _r, ...none } = genv;
+    guideApp({ env: none, ownerType: 'User', anonymous404: true });
+    const starter = await post('/api/control/github/recommend', {
+      repo: 'octo/secret',
+      identity: 'starter',
+    });
+    expect(starter.statusCode, starter.body).toBe(200);
+    const s = starter.json().recommendation;
+    expect(s).toMatchObject({ identity: 'starter', credentials: 'tokens', authorMayBeAdmin: true });
+    expect(s.reason).toContain('starter mode');
+    expect(s.reason).toContain(STARTER_WARNING);
+    expect(s.ask).toMatch(/paid GitHub plan/);
+    const free = await post('/api/control/github/recommend', {
+      repo: 'octo/secret',
+      identity: 'starter',
+      paidPlan: false,
+    });
+    expect(free.json().recommendation.stop).toMatch(/need a paid plan/);
+    const none2 = await post('/api/control/github/recommend', { repo: 'octo/secret' });
+    expect(none2.json().recommendation).toMatchObject({
+      identity: 'two-bot',
+      credentials: 'github-apps',
+    });
+  });
+
+  test('POST github/recommend with identity starter on an organization repository is starter without authorMayBeAdmin', async () => {
+    guideApp({ ownerType: 'Organization' });
+    const r = await post('/api/control/github/recommend', {
+      repo: 'octo-org/demo',
+      identity: 'starter',
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.json().recommendation).toMatchObject({
+      identity: 'starter',
+      credentials: 'tokens',
+      authorMayBeAdmin: false,
+    });
   });
 
   test('POST github/recommend with the author token returns the proposed zone guidance (ruleset and CODEOWNERS) and the checklist', async () => {

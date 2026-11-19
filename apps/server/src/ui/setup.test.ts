@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import vm from 'node:vm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
+import type { RecommendAnswer } from '../api/github.js';
 import { createApp } from '../app.js';
 import { Backoff } from '../auth/backoff.js';
 import { SetupMode, setOperatorPassphrase } from '../auth/operator.js';
@@ -14,11 +15,13 @@ import { STARTER_WARNING } from '../config.js';
 import { openDb } from '../db/open.js';
 import { insertStick, stampStick } from '../db/repo.js';
 import { DOC } from '../doctor/checks.js';
+import { recommendIdentity } from '../github/guidance.js';
 import { PRESET_EGRESS } from '../presets.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 import { openVault } from '../vault/vault.js';
 import { appCreateSection } from './github.js';
-import { getWizard, SAVE_CREDENTIALS } from './setup.js';
+import { escapeHtml } from './pages.js';
+import { getWizard, guideSection, SAVE_CREDENTIALS } from './setup.js';
 
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
@@ -721,22 +724,25 @@ describe('GitHub guidance in the wizard (Task 7)', () => {
     expect(blank.indexOf('id="recommend-form"')).toBeLessThan(
       blank.indexOf('name="githubAuthorToken"'),
     );
-    // A personal public repository, before any token: starter, read without a token.
+    // A personal public repository, before any token: two GitHub Apps, read without a token.
     const forge = (await w.get('/setup/forge?repo=octo%2Fdemo')).body;
     const rec = forge.indexOf('id="recommendation"');
     expect(rec).toBeGreaterThan(-1);
-    expect(rec).toBeLessThan(forge.indexOf('id="tokens"'));
+    expect(rec).toBeLessThan(forge.indexOf('id="github-apps"'));
+    expect(forge.indexOf('id="github-apps"')).toBeLessThan(forge.indexOf('id="use-tokens"'));
+    expect(forge.indexOf('id="use-tokens"')).toBeLessThan(forge.indexOf('id="tokens"'));
     expect(forge.indexOf('id="tokens"')).toBeLessThan(forge.indexOf('name="githubAuthorToken"'));
-    expect(forge).toContain('Starter: your own account as the author');
+    expect(forge).toContain('Two bot accounts as GitHub Apps');
     // The starter cost, once on the step: in the recommendation, not again beside the box.
     const escaped = STARTER_WARNING.replaceAll("'", '&#39;').replaceAll('"', '&quot;');
     expect(forge.split(escaped)).toHaveLength(2);
+    expect(forge).not.toContain('id="starter-warning"');
     expect(forge).toContain('href="https://github.com/settings/personal-access-tokens/new?');
     expect(forge).toContain(
       'check the Resource owner field: for an organization it may not pre-fill',
     );
-    // The recommendation chooses the starter box until the operator chooses otherwise.
-    expect(forge).toMatch(/name="starter" value="1" form="advance" checked/);
+    // Two bots are recommended: the starter box is left for the operator to choose.
+    expect(forge).toMatch(/name="starter" value="1" form="advance">/);
     // The checklist, once the author token resolves a login.
     expect(forge).not.toContain('id="checklist"');
     expect((await w.call('POST', '/api/control/sudo', { passphrase: PASS })).statusCode).toBe(200);
@@ -878,9 +884,10 @@ describe('the wizard says what it checked (#161)', () => {
 
   test('the forge step speaks plain words and puts the mode above the token fields', async () => {
     const w = await world({ github: { ownerType: 'User' } });
+    // The operator chose starter: its words come with the token links, still in plain words.
+    await w.form('/setup/advance', { from: 'forge', starter: '1' });
     const forge = (await w.get('/setup/forge?repo=octo%2Fdemo')).body;
-    expect(forge).toContain('the author account owns the repository, so it can merge');
-    expect(forge).toContain('owns the repository');
+    expect(forge).toContain('one account');
     const visible = forge.replace(/name="[^"]*"/g, '');
     expect(visible).not.toMatch(/\bauthorMayBeAdmin\b/);
     const text = forge
@@ -932,12 +939,21 @@ describe('creating the GitHub Apps from the forge step (#374, spec §4.1)', () =
     expect(held).not.toContain('data-sudo-first');
   });
 
-  test('a starter guide renders no create buttons and the token part as before', async () => {
+  test('a starter choice renders no create buttons and the token part as before, not folded', async () => {
     const w = await world({ github: { ownerType: 'User' } });
+    await w.form('/setup/advance', { from: 'forge', starter: '1' });
     const forge = (await w.get('/setup/forge?repo=octo%2Fdemo')).body;
     expect(forge).not.toContain('/setup/github-app/start');
     expect(forge).not.toContain('github-apps');
     expect(forge).toContain('id="tokens"');
+    expect(forge).not.toContain('id="use-tokens"');
+    const tokens = forge.slice(
+      forge.indexOf('id="tokens"'),
+      forge.indexOf('</section>', forge.indexOf('id="tokens"')),
+    );
+    expect(tokens).toContain('The author token');
+    expect(tokens).not.toContain('The reviewer token');
+    expect(forge).toMatch(/name="starter" value="1" form="advance" checked/);
     expect(forge).toContain(SUDO_FIELD);
     expect(forge).not.toContain('id="starter-warning"');
     const escaped = STARTER_WARNING.replaceAll("'", '&#39;').replaceAll('"', '&quot;');
@@ -988,5 +1004,101 @@ describe('creating the GitHub Apps from the forge step (#374, spec §4.1)', () =
     // Nothing secret on the page.
     expect(forge).not.toMatch(/[?&]state=|name="state"|PRIVATE KEY|github_pat_/);
     expect(forge).toContain('id="github-apps"');
+  });
+});
+
+describe('two bots on GitHub Apps, tokens under "Use tokens instead" (#446)', () => {
+  const pat = {
+    author: 'https://github.com/settings/personal-access-tokens/new?name=author',
+    reviewer: 'https://github.com/settings/personal-access-tokens/new?name=reviewer',
+    read: 'https://github.com/settings/personal-access-tokens/new?name=read',
+  };
+  const guide = (
+    o: { ownerType?: 'User' | 'Organization'; private?: boolean; paidPlan?: boolean } = {},
+  ) => {
+    const visibility = o.private ? ('private' as const) : ('public' as const);
+    const answer: RecommendAnswer = {
+      repo: 'octo/demo',
+      ownerType: o.ownerType ?? 'User',
+      visibility,
+      visible: true,
+      recommendation: recommendIdentity({
+        ownerType: o.ownerType ?? 'User',
+        visibility,
+        ...(o.paidPlan === undefined ? {} : { paidPlan: o.paidPlan }),
+      }),
+      pat,
+      checklist: { url: 'https://github.com/octo/demo/settings/access', items: [] },
+      logins: {},
+    };
+    return { repo: 'octo/demo', paidPlan: '', answer };
+  };
+  const apps = (vaultOn = true) => ({ vaultOn, sudo: true, existing: {} });
+  const DETAILS = '<details id="use-tokens"><summary>Use tokens instead</summary>';
+
+  test('a two-bot recommendation without the starter flag folds the token links after the app section', () => {
+    const html = guideSection(guide({ private: true, paidPlan: true }), '/setup/forge', apps());
+    const details = html.indexOf(DETAILS);
+    expect(details).toBeGreaterThan(-1);
+    expect(html.indexOf('id="github-apps"')).toBeGreaterThan(-1);
+    expect(html.indexOf('id="github-apps"')).toBeLessThan(details);
+    const inside = html.slice(details, html.indexOf('</details>'));
+    for (const role of ['author', 'reviewer', 'read'])
+      expect(inside).toContain(escapeHtml(pat[role as keyof typeof pat]));
+    expect(inside).toContain('Pull requests: Read and write');
+  });
+
+  test('the starter flag shows the token links as before, starter roles only, and no app section', () => {
+    const html = guideSection(
+      guide({ private: true, paidPlan: true }),
+      '/setup/forge',
+      apps(),
+      true,
+    );
+    expect(html).toContain('id="tokens"');
+    expect(html).not.toContain('id="use-tokens"');
+    expect(html).not.toContain('id="github-apps"');
+    expect(html).toContain(escapeHtml(pat.author));
+    expect(html).toContain(escapeHtml(pat.read));
+    expect(html).not.toContain(escapeHtml(pat.reviewer));
+  });
+
+  test('Settings passes no flag: the token links fold whenever two bots are recommended', () => {
+    for (const ownerType of ['User', 'Organization'] as const) {
+      const html = guideSection(guide({ ownerType }), '/settings/credentials', apps());
+      expect(html).toContain(DETAILS);
+    }
+  });
+
+  test('with the vault off the two-bot recommendation, the vault notice and the folded links all render', () => {
+    const html = guideSection(guide(), '/setup/forge', apps(false));
+    expect(html).toContain('Two bot accounts as GitHub Apps');
+    expect(html).toContain('id="apps-vault-off"');
+    expect(html).toContain(DETAILS);
+    expect(html.indexOf('id="apps-vault-off"')).toBeLessThan(html.indexOf(DETAILS));
+  });
+
+  test('a stop recommendation renders no token links, folded or not', () => {
+    for (const starter of [false, true]) {
+      const html = guideSection(
+        guide({ private: true, paidPlan: false }),
+        '/setup/forge',
+        apps(),
+        starter,
+      );
+      expect(html).toContain('data-stop');
+      expect(html).not.toContain('id="tokens"');
+      expect(html).not.toContain('id="use-tokens"');
+      expect(html).not.toContain('personal-access-tokens/new');
+    }
+  });
+
+  test('the forge page of an organization repository still shows the starter warning beside the box', async () => {
+    const w = await world({ github: { ownerType: 'Organization' } });
+    const forge = (await w.get('/setup/forge?repo=octo-org%2Fdemo')).body;
+    expect(forge).toContain('id="starter-warning"');
+    const escaped = STARTER_WARNING.replaceAll("'", '&#39;').replaceAll('"', '&quot;');
+    expect(forge.split(escaped)).toHaveLength(2);
+    expect(forge).toContain(DETAILS);
   });
 });
