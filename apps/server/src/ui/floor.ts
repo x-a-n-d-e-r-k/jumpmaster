@@ -1,3 +1,4 @@
+import { isNotice } from '../briefings.js';
 import { ACTIVE_DROP_STATES } from '../db/repo.js';
 import { STICK_LIVE_MS } from '../doctor/checks.js';
 import type { HomeState, StickLine } from './pages.js';
@@ -95,6 +96,8 @@ export function floorCounts(state: HomeState, now: Date): FloorCounts {
     const mode = state.modes?.[z.id] ?? 'active';
     const held = HELD_MODES.has(mode);
     const open = count(briefings, (b) => b.zoneId === z.id);
+    // A notice (a held promotion) goes ahead unless stopped: it never needs you (#449).
+    const needs = count(briefings, (b) => b.zoneId === z.id && !isNotice(b));
     const counts: ZoneCounts = {
       running: count(state.drops, (d) => d.dropZoneId === z.id && isRunning(d.state)),
       queued: count(items, (i) => i.dropZoneId === z.id && i.state === 'ready'),
@@ -103,7 +106,7 @@ export function floorCounts(state: HomeState, now: Date): FloorCounts {
       parked: count(items, (i) => i.dropZoneId === z.id && i.state === 'parked'),
       outbox: count(outbox, (o) => outboxZone(o) === z.id),
       noStick: live.length > 0 && live.every((s) => s.cannotRun.some((c) => c.zoneId === z.id)),
-      needsYou: held ? 0 : open,
+      needsYou: held ? 0 : needs,
       held: held ? (heldBriefings.get(z.id) ?? 0) + open : 0,
     };
     return { zoneId: z.id, mode, counts, held, state: cardState(counts) };
@@ -117,7 +120,7 @@ export function floorCounts(state: HomeState, now: Date): FloorCounts {
       prOpen: count(items, (i) => i.state === 'pr_open'),
       merged24h: merges ? merges.length : null,
       parked: count(items, (i) => i.state === 'parked'),
-      needsYou: count(briefings, (b) => !heldZones.has(b.zoneId)),
+      needsYou: count(briefings, (b) => !heldZones.has(b.zoneId) && !isNotice(b)),
     },
     zones,
   };
