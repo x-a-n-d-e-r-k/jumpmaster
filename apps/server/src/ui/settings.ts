@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { type GuidanceForge, githubGuidanceForge } from '../api/github.js';
-import { type AppEntryView, appEntryViews } from '../api/secrets.js';
+import { type AppEntryView, appEntryViews, DELETE_OLD_KEY } from '../api/secrets.js';
 import { withCsrf } from '../auth/guard.js';
 import type { BootOrigin } from '../config/boot.js';
 import { flagRows } from '../config/catalog.js';
@@ -228,6 +228,19 @@ function planSection(store: ConfigStore, config: Config): string {
 /** The link to a GitHub App's page, by its slug (URL-encoded, then escaped). */
 const appUrl = (slug: string) => escapeHtml(`https://github.com/apps/${encodeURIComponent(slug)}`);
 
+/**
+ * Replace key for a vault app entry (#487, ruling 103): a hidden form with a textarea for the new
+ * PEM, which travels in a `PUT` body only. A file entry is replaced in its file; a missing or
+ * undecryptable one has no key to replace.
+ */
+function appKeyForm(a: AppEntryView, owner: string, role: string): string {
+  const page =
+    a.slug === undefined
+      ? "the app's GitHub page"
+      : `the app's page, <a href="${appUrl(a.slug)}">${appUrl(a.slug)}</a>`;
+  return ` <button type="button" class="app-replace" data-owner="${owner}" data-role="${role}">Replace key</button><form class="app-key" data-owner="${owner}" data-role="${role}" hidden><p><small>Generate a new private key on ${page}, under <strong>Private keys</strong>, and paste the whole .pem file here. Jumpmaster tests it with GitHub before storing it; then delete the old key there.</small></p><textarea name="pem" rows="6" cols="64" autocomplete="off" spellcheck="false" aria-label="New private key for ${owner}/${role}"></textarea><br><button>Replace key</button> <span class="app-key-out" role="status"></span></form>`;
+}
+
 /** One app entry's row (#375): what identifies it, never its PEM or client id. */
 function appEntryRow(a: AppEntryView): string {
   const owner = escapeHtml(a.owner);
@@ -250,7 +263,7 @@ function appEntryRow(a: AppEntryView): string {
       ? a.undecryptable
         ? 'The stored entry does not decrypt with the vault key: create the app again, or restore the key it was stored with.'
         : 'Not created yet: one app pair per GitHub owner.'
-      : `<a href="${a.slug === undefined ? '#' : `${appUrl(a.slug)}/installations/new`}">Install</a> <button type="button" class="app-test" data-owner="${owner}" data-role="${role}">Test</button>`;
+      : `<a href="${a.slug === undefined ? '#' : `${appUrl(a.slug)}/installations/new`}">Install</a> <button type="button" class="app-test" data-owner="${owner}" data-role="${role}">Test</button>${a.source === 'vault' ? appKeyForm(a, owner, role) : ''}`;
   return `<tr data-app="${owner}/${role}"><td data-col="owner">${owner}</td><td data-col="role">${role}</td><td data-col="source">${source}</td><td data-col="slug">${slug}</td><td data-col="app-id">${a.appId === undefined ? '-' : escapeHtml(a.appId)}</td><td data-col="imported">${day(a.importedAt)}</td><td data-col="test">${test}</td><td data-col="actions">${actions}</td></tr>`;
 }
 
@@ -360,6 +373,35 @@ async function jmTestApp(owner, role, state, status) {
   jmRefreshLink(status);
   return j.tested ? 'tested' : 'failed';
 }
+// Replace key on a GitHub App entry (#487): the PEM goes in a PUT body only, tested before stored.
+async function jmReplaceAppKey(c, state, status) {
+  const name = 'github-app/' + c.owner + '/' + c.role;
+  if (!c.pem || !c.pem.trim()) { status.textContent = 'Paste the new private key first.'; return 'empty'; }
+  if (!(await jmSudo(state, status))) return 'sudo';
+  const r = await jmFetch('/api/control/secrets/github-app/' + encodeURIComponent(c.owner) + '/' + encodeURIComponent(c.role) + '/key', { pem: c.pem }, 'PUT');
+  if (!r.ok) {
+    if (await jmLapsed(r, state, status)) return 'sudo';
+    if (r.status === 403) state.sudo = false;
+    status.textContent = name + ': the key was not replaced (' + r.status + '): ' + (await jmWhy(r));
+    return 'refused';
+  }
+  const j = await jmBody(r);
+  status.textContent = name + ': the new key tested ' + j.result + '. ' + ${JSON.stringify(DELETE_OLD_KEY)};
+  return 'replaced';
+}
+// After a replace, the row's Imported and Last test cells from the list (never a key: it has none).
+async function jmRefreshAppRow(owner, role) {
+  try {
+    const r = await fetch('/api/control/secrets');
+    if (!r.ok) return;
+    const a = ((await r.json()).apps || []).find((x) => x.owner === owner && x.role === role);
+    const row = document.querySelector('tr[data-app="' + owner + '/' + role + '"]');
+    if (!a || !row) return;
+    const day = (iso) => (iso ? String(iso).slice(0, 10) : '-');
+    row.querySelector('td[data-col=imported]').textContent = day(a.importedAt);
+    row.querySelector('td[data-col=test]').textContent = a.testResult ? a.testResult + ' ' + day(a.testedAt) : '-';
+  } catch (e) {}
+}
 async function jmRemoveCredential(name, state, status) {
   if (!(await jmSudo(state, status))) return 'sudo';
   const r = await jmFetch('/api/control/secrets/' + encodeURIComponent(name), {}, 'DELETE');
@@ -403,6 +445,21 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   for (const b of document.querySelectorAll('button.app-test')) b.addEventListener('click', async () => {
     const s = state(); after(s, await jmTestApp(b.dataset.owner, b.dataset.role, s, status));
+  });
+  for (const b of document.querySelectorAll('button.app-replace')) b.addEventListener('click', () => {
+    const form = b.parentElement.querySelector('form.app-key');
+    form.hidden = !form.hidden;
+    if (!form.hidden) form.querySelector('textarea').focus();
+  });
+  for (const form of document.querySelectorAll('form.app-key')) form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const field = form.querySelector('textarea[name=pem]');
+    const out = form.querySelector('.app-key-out');
+    const s = state();
+    const outcome = await jmReplaceAppKey({ owner: form.dataset.owner, role: form.dataset.role, pem: field.value }, s, out);
+    if (outcome === 'replaced') field.value = '';
+    after(s, outcome);
+    if (outcome === 'replaced') await jmRefreshAppRow(form.dataset.owner, form.dataset.role);
   });
   for (const b of document.querySelectorAll('button.remove')) b.addEventListener('click', async () => {
     if (!confirm('Remove ' + b.dataset.name + ' from the vault? Jumpmaster refuses to remove it while a zone still needs it.')) return;

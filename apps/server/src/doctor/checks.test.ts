@@ -2495,6 +2495,18 @@ describe('forge.author and forge.reviewer for GitHub App roles (issue #435)', ()
     expect(fresh.status).toBe('pass');
   });
 
+  test('Replace key (#487): an old importedAt warns; the same entry with the fresh importedAt a replace writes does not', async () => {
+    getApp(byId);
+    const old = { ...AUTHOR_APP, importedAt: ago(400 * DAY).toISOString() };
+    expect(one(await appWorld({ author: old }).run(), 'forge.author').status).toBe('warn');
+    getApp(byId);
+    // The replace keeps appId, slug and clientId, sets the new PEM and importedAt = now.
+    const replaced = { ...old, importedAt: NOW.toISOString() };
+    const after = one(await appWorld({ author: replaced }).run(), 'forge.author');
+    expect(after.status).toBe('pass');
+    expect(after.summary).not.toContain('days ago');
+  });
+
   test('the write-role and reviewer-admin fixes name the app and its installation, not a PAT variable', async () => {
     getApp(byId);
     const w = appWorld({});

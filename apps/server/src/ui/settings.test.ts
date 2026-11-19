@@ -1979,6 +1979,96 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
     expect(html).not.toContain(AUTHOR_ENTRY.clientId);
   });
 
+  test('Replace key (#487): a vault row has the button and a PEM form naming the app page; file, missing and undecryptable rows have none', async () => {
+    const w = await twoOwners();
+    mkdirSync(join(w.secrets, 'github-app', 'alice'), { recursive: true, mode: 0o700 });
+    writeFileSync(
+      join(w.secrets, 'github-app', 'alice', 'author.json'),
+      serializeAppEntry({ ...AUTHOR_ENTRY, slug: 'jm-alice' }),
+      { mode: 0o600 },
+    );
+    w.store.refreshSecrets();
+    const html = (await w.get('/settings/credentials')).body;
+    const a = appRowOf(html, 'acme', 'author');
+    expect(a).toContain(
+      '<button type="button" class="app-test" data-owner="acme" data-role="author">Test</button> <button type="button" class="app-replace" data-owner="acme" data-role="author">Replace key</button>',
+    );
+    expect(a).toContain('<form class="app-key" data-owner="acme" data-role="author" hidden>');
+    expect(a).toMatch(/<textarea name="pem"[^>]*><\/textarea>/);
+    expect(a).toContain('https://github.com/apps/jm-a');
+    expect(a).toContain('<strong>Private keys</strong>');
+    expect(appRowOf(html, 'acme', 'reviewer')).toContain('class="app-replace"');
+    // A file row is replaced in its file; a missing row has no key.
+    expect(appRowOf(html, 'alice', 'author')).toContain('class="app-test"');
+    expect(appRowOf(html, 'alice', 'author')).not.toContain('Replace key');
+    expect(appRowOf(html, 'alice', 'reviewer')).not.toContain('Replace key');
+    expect(html).not.toContain('PRIVATE KEY');
+    for (const e of [AUTHOR_ENTRY, REVIEWER_ENTRY]) {
+      expect(html).not.toContain(e.clientId);
+      for (const l of linesOf(e.pem)) expect(html).not.toContain(l);
+    }
+    // An undecryptable row has none either.
+    const u = await world({ dbMode: true, doc: TWO_OWNERS });
+    const otherKey = join(mkdtempSync(join(tmpdir(), 'jm-other-')), 'other_key');
+    writeFileSync(otherKey, randomBytes(32).toString('base64url'), { mode: 0o600 });
+    openVault(otherKey, u.db).put(appEntryName('acme', 'author'), serializeAppEntry(AUTHOR_ENTRY), {
+      now: t0,
+    });
+    u.store.refreshSecrets();
+    const uh = (await u.get('/settings/credentials')).body;
+    expect(appRowOf(uh, 'acme', 'author')).not.toContain('Replace key');
+    expect(sectionOf(uh)).not.toContain('app-replace');
+  });
+
+  test('Replace key (#487): sudo first, the PEM in a PUT body, the result and the delete-the-old-key line; a refusal shows its error', async () => {
+    const pem = pemOf();
+    const ok = pageScript(CREDENTIALS_SCRIPT, (c) =>
+      c.path === '/api/control/sudo'
+        ? { ok: true, status: 200, json: { sudo: true } }
+        : { ok: true, status: 200, json: { replaced: true, result: 'ok', login: 'jm-a[bot]' } },
+    );
+    const fn = ok.ctx.jmReplaceAppKey as (...a: unknown[]) => Promise<string>;
+    const status = stubStatus();
+    const state = { sudo: false, passphrase: PASS };
+    expect(await fn({ owner: 'acme', role: 'author', pem }, state, status)).toBe('replaced');
+    expect(ok.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      'POST /api/control/sudo',
+      'PUT /api/control/secrets/github-app/acme/author/key',
+    ]);
+    expect(ok.calls[1]?.body).toEqual({ pem });
+    expect(status.textContent).toContain('github-app/acme/author: the new key tested ok');
+    expect(status.textContent).toContain('delete the old key');
+    expect(status.textContent).not.toContain(linesOf(pem)[0]);
+
+    const refused = pageScript(CREDENTIALS_SCRIPT, () => ({
+      ok: false,
+      status: 422,
+      json: { tested: false, status: 401, error: 'GitHub rejected this key' },
+    }));
+    const rfn = refused.ctx.jmReplaceAppKey as (...a: unknown[]) => Promise<string>;
+    const out = stubStatus();
+    expect(await rfn({ owner: 'acme', role: 'author', pem }, { sudo: true }, out)).toBe('refused');
+    expect(out.textContent).toBe(
+      'github-app/acme/author: the key was not replaced (422): GitHub rejected this key',
+    );
+    const lapsed = pageScript(CREDENTIALS_SCRIPT, () => ({
+      ok: false,
+      status: 403,
+      json: { error: 'replacing a key asks for your passphrase again', sudo: 'required' },
+    }));
+    const lfn = lapsed.ctx.jmReplaceAppKey as (...a: unknown[]) => Promise<string>;
+    const s2 = { sudo: true, passphrase: '' };
+    expect(await lfn({ owner: 'acme', role: 'author', pem }, s2, stubStatus())).toBe('sudo');
+    expect(s2.sudo).toBe(false);
+    const none = stubStatus();
+    expect(
+      await lfn({ owner: 'acme', role: 'author', pem }, { sudo: false, passphrase: '' }, none),
+    ).toBe('sudo');
+    expect(await lfn({ owner: 'acme', role: 'author', pem: '  ' }, { sudo: true }, none)).toBe(
+      'empty',
+    );
+  });
+
   test('only starter zones: the two-bot-mode line and no app rows', async () => {
     const w = await world({
       dbMode: true,
