@@ -3,20 +3,21 @@
  * two-bot zone owner's entries for both roles, and an entry can be tested with `GET /app`. No
  * answer, audit row or log line carries a PEM, a JWT or a client id.
  */
-import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { createPublicKey, generateKeyPairSync, randomBytes, verify } from 'node:crypto';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
 import Fastify, { type FastifyInstance } from 'fastify';
 import nock from 'nock';
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { listAudit } from '../auth/audit.js';
 import { registerGuard } from '../auth/guard.js';
 import { loadBoot } from '../config/boot.js';
-import { ConfigStore } from '../config/store.js';
+import { ConfigStore, VAULT_DISABLED } from '../config/store.js';
 import { openDb } from '../db/open.js';
 import { upsertDropZone } from '../db/repo.js';
+import { createAppBrokers } from '../forge/app-brokers.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { type GitHubAppEntry, serializeAppEntry } from '../vault/github-app-entries.js';
 import { fingerprintOf, openVault, type Vault } from '../vault/vault.js';
@@ -71,7 +72,7 @@ const keyFile = (dir: string, name: string) => {
  * on beta (two-bot: beta/author encrypted under another key, beta/reviewer missing), and `solo`
  * on a starter zone whose owner has a file that is never listed.
  */
-function world() {
+function world(o: { vaultOff?: boolean } = {}) {
   const db = openDb(tmpDbFile());
   const dir = mkdtempSync(join(tmpdir(), 'jm-secrets-apps-'));
   const secretsDir = join(dir, 'secrets');
@@ -93,7 +94,7 @@ function world() {
     db,
     boot: { ...loadBoot({}, undefined), secretsDir },
     env: { JM_JOIN_TOKEN: 'join-secret-value-4', JM_OPERATOR_TOKEN: TOKEN },
-    vault,
+    vault: o.vaultOff ? 'disabled' : vault,
     now: () => clock.now,
     imageLockPath: join(dir, 'no-lock.json'),
   });
@@ -339,5 +340,289 @@ describe('GitHub App entries in the secret routes (issue #235)', () => {
     expect((await testApp('beta', 'author')).statusCode).toBe(409);
     expect(listAudit(w.db).filter((a) => a.action === 'secret.test')).toHaveLength(0);
     expect(nock.pendingMocks()).toEqual([]);
+  });
+});
+
+describe('Replace key on a GitHub App entry (issue #487)', () => {
+  const NAME = 'github-app/acme/author';
+  const replaceKey = (
+    owner: string,
+    role: string,
+    payload: unknown,
+    headers: Record<string, string> = auth,
+  ) =>
+    (app as FastifyInstance).inject({
+      method: 'PUT',
+      url: `/api/control/secrets/github-app/${owner}/${role}/key`,
+      headers,
+      payload: payload as object,
+    });
+  /** Whether `jwt` is an RS256 JWT signed by `pem`'s key. */
+  const signedBy = (jwt: string, pem: string): boolean => {
+    const [h, p, sig] = jwt.split('.');
+    if (!h || !p || !sig) return false;
+    return verify(
+      'RSA-SHA256',
+      Buffer.from(`${h}.${p}`),
+      createPublicKey(pem),
+      Buffer.from(sig, 'base64url'),
+    );
+  };
+  /** A fake `GET /app` that answers acme-author only to a JWT signed with `pem`, else 401. */
+  function fakeAppFor(pem: string, body: object = { id: 1001, slug: 'acme-author' }) {
+    const jwts: string[] = [];
+    const rest = fakeOnlyFor(pem, () => nock(API, onlyKey(pem, jwts)).get('/app').reply(200, body));
+    return { jwts, rest };
+  }
+  /** nock options that match only a request whose bearer JWT `pem` signed. */
+  const onlyKey = (pem: string, jwts: string[] = []) => ({
+    reqheaders: {
+      authorization: (v: string) => {
+        const jwt = v.replace(/^Bearer /, '');
+        jwts.push(jwt);
+        return signedBy(jwt, pem);
+      },
+    },
+  });
+  /** `accept` answers a JWT `pem` signed; any other JWT is answered 401. */
+  function fakeOnlyFor(pem: string, accept: () => unknown, path = '/app') {
+    const jwts: string[] = [];
+    accept();
+    nock(API, {
+      reqheaders: {
+        authorization: (v: string) => {
+          jwts.push(v.replace(/^Bearer /, ''));
+          return !signedBy(v.replace(/^Bearer /, ''), pem);
+        },
+      },
+    })
+      .get(path)
+      .optionally()
+      .reply(401, { message: 'bad credentials' });
+    return jwts;
+  }
+  const replaceAudits = (w: ReturnType<typeof world>) =>
+    listAudit(w.db).filter((a) => a.action === 'secret.replace');
+  const allText = (w: ReturnType<typeof world>, ...bodies: string[]) =>
+    `${bodies.join('\n')}\n${JSON.stringify(listAudit(w.db))}\n${w.logs.join('\n')}`;
+  const expectNoKeys = (text: string, ...pems: string[]) => {
+    expectNoSecrets(text);
+    for (const p of pems) for (const l of pemLines(p)) expect(text).not.toContain(l);
+  };
+
+  test('a valid new key for the same app is tested, stored with a fresh importedAt, recorded and audited', async () => {
+    const w = world();
+    const newPem = pemOf();
+    const { jwts } = fakeAppFor(newPem);
+    const NOW = new Date('2026-11-19T12:00:00.000Z');
+    w.clock.now = NOW;
+    const r = await replaceKey('acme', 'author', { pem: newPem });
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ replaced: true, result: 'ok' });
+    expect(r.json().hint).toMatch(/delete the old key/);
+    expect(jwts.length).toBeGreaterThan(0);
+    const read = w.store.resolvedApps().get('acme')?.author;
+    if (read?.source !== 'vault') throw new Error('expected a vault entry');
+    expect(read.entry).toEqual({
+      appId: VAULT_ENTRY.appId,
+      slug: VAULT_ENTRY.slug,
+      clientId: VAULT_ENTRY.clientId,
+      pem: newPem,
+      importedAt: NOW.toISOString(),
+    });
+    expect(Date.parse(read.entry.importedAt)).toBeGreaterThan(Date.parse(VAULT_ENTRY.importedAt));
+    expect(w.vault.meta(NAME)).toMatchObject({
+      testedAt: NOW.toISOString(),
+      testResult: 'ok',
+    });
+    const newFingerprint = fingerprintOf(serializeAppEntry(read.entry));
+    expect(read.fingerprint).toBe(newFingerprint);
+    expect(replaceAudits(w).map((a) => a.detail)).toEqual([
+      { name: NAME, fingerprint: newFingerprint, result: 'stored' },
+    ]);
+    const listed = (await list()).json().apps[0];
+    expect(listed).toMatchObject({
+      importedAt: NOW.toISOString(),
+      testResult: 'ok',
+      fingerprint: newFingerprint,
+    });
+    expectNoKeys(allText(w, r.body), newPem);
+    for (const j of jwts) expect(allText(w, r.body)).not.toContain(j);
+  });
+
+  test('a key GitHub rejects (401): 422, tested false, and the stored entry is byte-identical', async () => {
+    const w = world();
+    const before = w.vault.snapshot(NAME);
+    const newPem = pemOf();
+    fakeApp(401, { message: 'A JSON web token could not be decoded' });
+    const r = await replaceKey('acme', 'author', { pem: newPem });
+    expect(r.statusCode).toBe(422);
+    const body = r.json();
+    expect(body).toMatchObject({ tested: false, status: 401 });
+    expect(body.problem).toMatch(/wrong key or it was revoked/);
+    expect(body.error).toBe(body.problem);
+    expect(w.vault.snapshot(NAME)).toEqual(before);
+    const candidate = fingerprintOf(
+      serializeAppEntry({ ...VAULT_ENTRY, pem: newPem, importedAt: t0.toISOString() }),
+    );
+    expect(replaceAudits(w).map((a) => a.detail)).toEqual([
+      { name: NAME, fingerprint: candidate, result: 'test failed (401)' },
+    ]);
+    expectNoKeys(allText(w, r.body), newPem);
+  });
+
+  test.each([
+    ['a different app id', { id: 9999, slug: 'acme-author' }, /different app/],
+    ['a different slug', { id: 1001, slug: 'someone-else' }, /names this app differently/],
+  ])(
+    'a key whose GET /app answers %s: 409, tested false, entry unchanged',
+    async (_, answer, why) => {
+      const w = world();
+      const before = w.vault.snapshot(NAME);
+      const newPem = pemOf();
+      fakeAppFor(newPem, answer);
+      const r = await replaceKey('acme', 'author', { pem: newPem });
+      expect(r.statusCode).toBe(409);
+      expect(r.json()).toMatchObject({ tested: false, status: 200 });
+      expect(r.json().problem).toMatch(why);
+      expect(r.json().error).toBe(r.json().problem);
+      expect(w.vault.snapshot(NAME)).toEqual(before);
+      expect(replaceAudits(w).map((a) => a.detail.result)).toEqual(['test failed (200)']);
+      expectNoKeys(allText(w, r.body), newPem);
+    },
+  );
+
+  test('when putAppEntry refuses, 400 with issues, audited refused, and the previous entry stays', async () => {
+    const w = world();
+    const before = w.vault.snapshot(NAME);
+    const newPem = pemOf();
+    fakeAppFor(newPem);
+    vi.spyOn(w.store, 'refreshSecrets').mockReturnValueOnce({
+      ok: false,
+      issues: [{ path: 'dropZones', message: 'refused in this test' }],
+    });
+    const r = await replaceKey('acme', 'author', { pem: newPem });
+    expect(r.statusCode).toBe(400);
+    expect(r.json()).toEqual({ issues: [{ path: 'dropZones', message: 'refused in this test' }] });
+    expect(w.vault.snapshot(NAME)).toEqual(before);
+    const read = w.store.resolvedApps().get('acme')?.author;
+    if (read?.source !== 'vault') throw new Error('expected a vault entry');
+    expect(read.entry.pem).toBe(VAULT_ENTRY.pem);
+    expect(replaceAudits(w).map((a) => a.detail.result)).toEqual(['refused']);
+    expectNoKeys(allText(w, r.body), newPem);
+  });
+
+  test('refusals store nothing: not a PEM, bad body, missing, undecryptable, file, bad name, unknown owner', async () => {
+    const w = world();
+    const snaps = () =>
+      ['acme/author', 'acme/reviewer', 'beta/author', 'beta/reviewer'].map((n) =>
+        w.vault.snapshot(`github-app/${n}`),
+      );
+    const before = snaps();
+    const newPem = pemOf();
+    const notPem = await replaceKey('acme', 'author', { pem: 'not a key at all' });
+    expect(notPem.statusCode).toBe(400);
+    expect(notPem.body).not.toContain('not a key at all');
+    // A public key, or a PEM with a line of junk, is not a private key.
+    const pub = createPublicKey(newPem).export({ type: 'spki', format: 'pem' }).toString();
+    expect((await replaceKey('acme', 'author', { pem: pub })).statusCode).toBe(400);
+    const bad = await replaceKey('acme', 'author', { pem: newPem, extra: 'sneaky-value' });
+    expect(bad.statusCode).toBe(400);
+    expect(bad.body).not.toContain('sneaky-value');
+    const big = await replaceKey('acme', 'author', { pem: 'x'.repeat(64 * 1024 + 1) });
+    expect(big.statusCode).toBe(400);
+    const junk = await (app as FastifyInstance).inject({
+      method: 'PUT',
+      url: '/api/control/secrets/github-app/acme/author/key',
+      headers: { ...auth, 'content-type': 'application/json' },
+      payload: '{"pem": sneaky-junk}',
+    });
+    expect(junk.statusCode).toBe(400);
+    expect(junk.body).not.toContain('sneaky-junk');
+    const missing = await replaceKey('beta', 'reviewer', { pem: newPem });
+    expect(missing.statusCode).toBe(409);
+    expect(missing.json().error).toMatch(/not set/);
+    const undecryptable = await replaceKey('beta', 'author', { pem: newPem });
+    expect(undecryptable.statusCode).toBe(409);
+    expect(undecryptable.json().error).toMatch(/does not decrypt/);
+    const file = await replaceKey('acme', 'reviewer', { pem: newPem });
+    expect(file.statusCode).toBe(409);
+    expect(file.json().error).toContain(
+      `managed by ${join(w.secretsDir, 'github-app', 'acme', 'reviewer.json')}`,
+    );
+    for (const [owner, role] of [
+      [encodeURIComponent('bad owner!'), 'author'],
+      ['Acme', 'author'],
+      ['acme', 'merger'],
+    ] as const) {
+      const r = await replaceKey(owner, role, { pem: newPem });
+      expect(r.statusCode).toBe(400);
+      expect(r.json().error).toBe(
+        'an app entry is github-app/<owner>/<role>: a lowercase GitHub owner name, and author or reviewer',
+      );
+    }
+    const unknown = await replaceKey('nobody', 'author', { pem: newPem });
+    expect(unknown.statusCode).toBe(404);
+    expect(unknown.json()).toEqual({ error: 'unknown app entry' });
+    expect((await replaceKey('solo', 'author', { pem: newPem })).statusCode).toBe(404);
+    expect(snaps()).toEqual(before);
+    expect(nock.pendingMocks()).toEqual([]);
+    expectNoKeys(allText(w, notPem.body, missing.body, file.body), newPem);
+  });
+
+  test('the vault off: 409 VAULT_DISABLED and nothing stored', async () => {
+    const w = world({ vaultOff: true });
+    const newPem = pemOf();
+    for (const role of ['author', 'reviewer']) {
+      const r = await replaceKey('acme', role, { pem: newPem });
+      expect(r.statusCode).toBe(409);
+      expect(r.json()).toEqual({ error: VAULT_DISABLED });
+    }
+    expect(w.vault.snapshot('github-app/acme/reviewer')).toBeUndefined();
+    expect(nock.pendingMocks()).toEqual([]);
+  });
+
+  test('a session needs sudo; with it, the replace goes through', async () => {
+    const w = world();
+    const newPem = pemOf();
+    const before = w.vault.snapshot(NAME);
+    const s = await replaceKey('acme', 'author', { pem: newPem }, w.asSession);
+    expect(s.statusCode).toBe(403);
+    expect(s.json()).toMatchObject({ sudo: 'required' });
+    expect(w.vault.snapshot(NAME)).toEqual(before);
+    expect(replaceAudits(w)).toHaveLength(0);
+    w.db.prepare('UPDATE sessions SET sudo_until = ?').run(plus(t0, 60_000).toISOString());
+    fakeAppFor(newPem);
+    const ok = await replaceKey('acme', 'author', { pem: newPem }, w.asSession);
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toMatchObject({ replaced: true });
+  });
+
+  test('after a replace, resolvedApps has the new key and the rebuilt broker signs with it', async () => {
+    const w = world();
+    const brokers = createAppBrokers({ apps: () => w.store.resolvedApps(), onSecret: () => {} });
+    const before = brokers.brokerFor('acme', 'author');
+    const newPem = pemOf();
+    fakeAppFor(newPem);
+    expect((await replaceKey('acme', 'author', { pem: newPem })).statusCode).toBe(200);
+    const read = w.store.resolvedApps().get('acme')?.author;
+    if (read?.source !== 'vault') throw new Error('expected a vault entry');
+    expect(read.entry.pem).toBe(newPem);
+    const after = brokers.brokerFor('acme', 'author');
+    expect(after).toBeDefined();
+    expect(after).not.toBe(before);
+    // A fake GitHub that knows only the new key.
+    const seen: string[] = [];
+    nock(API, onlyKey(newPem, seen))
+      .get('/repos/acme/web/installation')
+      .reply(200, { id: 77, permissions: {} });
+    nock(API).get('/repos/acme/web/installation').reply(401, { message: 'bad credentials' });
+    expect(await after?.installationFor('acme', 'web')).toMatchObject({
+      installed: true,
+      installationId: 77,
+    });
+    await expect(before?.installationFor('acme', 'web')).rejects.toThrow();
+    expect(seen.length).toBeGreaterThan(0);
+    expect(nock.isDone()).toBe(true);
   });
 });

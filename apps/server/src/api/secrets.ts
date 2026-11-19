@@ -5,8 +5,11 @@ import { type ConfigStore, VAULT_DISABLED } from '../config/store.js';
 import type { Db } from '../db/open.js';
 import { ACTIVE_STATES_SQL } from '../db/repo.js';
 import { GitHubForge } from '../forge/github.js';
+import { serverScrubSet } from '../forge/scrub-set.js';
 import { MAX_SECRET_FILE_BYTES } from '../secrets.js';
 import {
+  APP_ID_MISMATCH,
+  APP_SLUG_MISMATCH,
   CREDENTIAL_ROLES,
   type CredentialName,
   isCredentialName,
@@ -23,7 +26,10 @@ import {
   APP_ROLES,
   type AppEntryRead,
   type AppRole,
+  type GitHubAppEntry,
+  isPrivateKeyPem,
   parseAppEntryName,
+  serializeAppEntry,
 } from '../vault/github-app-entries.js';
 import { credentialProblems } from '../vault/problems.js';
 import { fingerprintOf } from '../vault/vault.js';
@@ -58,6 +64,14 @@ const PutBody = z.strictObject({
     .optional(),
   note: z.string().max(500).optional(),
 });
+
+/** A Replace key body (#487): one PEM, multi-line, at most 64 KiB. */
+const KeyBody = z.strictObject({ pem: z.string().min(1).max(MAX_SECRET_FILE_BYTES) });
+/** Said after a key is replaced: both keys stay valid on GitHub until the old one is deleted. */
+export const DELETE_OLD_KEY =
+  "The new key is stored and in use. Now delete the old key on the app's GitHub page, under Private keys: until then both keys stay valid.";
+const BAD_APP_NAME =
+  'an app entry is github-app/<owner>/<role>: a lowercase GitHub owner name, and author or reviewer';
 
 const PreferBody = z.strictObject({ prefer: z.boolean() });
 /** The queue the vault switches share (no credential is named this). */
@@ -355,11 +369,7 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       if (sudoRefused(req, reply, 'testing a credential')) return reply;
       // Fixed words: an owner or role in the wrong slot could be a secret.
       const parsed = parseAppEntryName(`github-app/${req.params.owner}/${req.params.role}`);
-      if (!parsed)
-        return reply.code(400).send({
-          error:
-            'an app entry is github-app/<owner>/<role>: a lowercase GitHub owner name, and author or reviewer',
-        });
+      if (!parsed) return reply.code(400).send({ error: BAD_APP_NAME });
       const { owner, role } = parsed;
       const name = `github-app/${owner}/${role}`;
       if (!store.resolvedApps().has(owner))
@@ -393,6 +403,98 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
               ...(t.problem ? { problem: t.problem } : {}),
               error: t.problem ?? refusalWords(t.status),
             };
+      });
+    },
+  );
+
+  /**
+   * Replace key on an app entry (#487, ruling 103): the new PEM is tested with `GET /app` against
+   * the entry's app id and slug before anything is stored; on success it is stored with a fresh
+   * `importedAt`, and the operator then deletes the old key on GitHub. Neither PEM is answered,
+   * logged or audited: both stay in the scrub set.
+   */
+  scope.put<{ Params: { owner: string; role: string } }>(
+    '/api/control/secrets/github-app/:owner/:role/key',
+    async (req, reply) => {
+      if (sudoRefused(req, reply, 'replacing a key')) return reply;
+      const parsed = parseAppEntryName(`github-app/${req.params.owner}/${req.params.role}`);
+      if (!parsed) return reply.code(400).send({ error: BAD_APP_NAME });
+      const { owner, role } = parsed;
+      const name = `github-app/${owner}/${role}`;
+      if (!store.resolvedApps().has(owner))
+        return reply.code(404).send({ error: 'unknown app entry' });
+      const body = KeyBody.safeParse(req.body ?? {});
+      // The message is ours: a zod issue could quote the key.
+      if (!body.success)
+        return reply
+          .code(400)
+          .send({ error: 'invalid body: {"pem": "<the PEM text, at most 64 KiB>"}' });
+      const { pem } = body.data;
+      serverScrubSet.addPem(pem);
+      if (!isPrivateKeyPem(pem))
+        return reply.code(400).send({
+          error:
+            'the key is not a private-key PEM: paste the whole .pem file GitHub downloaded, from -----BEGIN to -----END',
+        });
+      return serialized(name, async () => {
+        if (store.vault() === 'disabled') return reply.code(409).send({ error: VAULT_DISABLED });
+        const r = store.resolvedApps().get(owner)?.[role];
+        if (!r) return reply.code(404).send({ error: 'unknown app entry' });
+        if (r.source === 'missing')
+          return reply.code(409).send({
+            error: r.undecryptable
+              ? 'the app entry does not decrypt with this vault key'
+              : 'the app entry is not set',
+          });
+        if (r.source === 'file')
+          return reply.code(409).send({
+            error: `managed by ${r.path}: replace the key in that file and run \`ctl secrets reload\``,
+          });
+        // The old key stays scrubbed: a log line about it may still be written.
+        serverScrubSet.addPem(r.entry.pem);
+        const candidate: GitHubAppEntry = {
+          appId: r.entry.appId,
+          slug: r.entry.slug,
+          clientId: r.entry.clientId,
+          pem,
+          importedAt: deps.now().toISOString(),
+        };
+        const fingerprint = fingerprintOf(serializeAppEntry(candidate));
+        const t = await testApp(candidate);
+        if (!t.ok) {
+          audit(req, 'secret.replace', {
+            name,
+            fingerprint,
+            result: `test failed (${t.status ?? 'no answer'})`,
+          });
+          // A key for a different app is a conflict with the entry, not a failed test of its key.
+          const otherApp = t.problem === APP_ID_MISMATCH || t.problem === APP_SLUG_MISMATCH;
+          return reply.code(otherApp ? 409 : 422).send({
+            tested: false,
+            status: t.status,
+            ...(t.problem ? { problem: t.problem } : {}),
+            error: t.problem ?? refusalWords(t.status),
+          });
+        }
+        const stored = store.putAppEntry(owner, role, candidate);
+        if (!stored.ok) {
+          audit(req, 'secret.replace', { name, fingerprint, result: 'refused' });
+          return reply.code(400).send({ issues: stored.issues });
+        }
+        const vault = store.vault();
+        if (vault !== 'disabled') {
+          vault.recordTest(name, { at: deps.now(), result: t.result });
+          store.refreshSecrets();
+        }
+        audit(req, 'secret.replace', { name, fingerprint, result: 'stored' });
+        return {
+          replaced: true,
+          result: t.result,
+          ...(t.login ? { login: t.login } : {}),
+          fingerprint,
+          importedAt: candidate.importedAt,
+          hint: DELETE_OLD_KEY,
+        };
       });
     },
   );

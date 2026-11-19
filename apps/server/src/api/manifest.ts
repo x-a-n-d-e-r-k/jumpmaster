@@ -136,6 +136,13 @@ export const CONTROL_ROUTES: ControlRoute[] = [
     path: '/api/control/secrets/github-app/:owner/:role/test',
     ctl: 'ctl secrets test github-app/acme/author',
   },
+  {
+    method: 'PUT',
+    path: '/api/control/secrets/github-app/:owner/:role/key',
+    ctl: null,
+    reason:
+      'Replace key takes a multi-line PEM, which no ctl verb reads yet; a script sends {"pem": …} to this route with the control token',
+  },
   { method: 'DELETE', path: '/api/control/secrets/:name', ctl: 'ctl secrets remove claudeToken' },
   { method: 'POST', path: '/api/control/secrets/reload', ctl: 'ctl secrets reload' },
   { method: 'POST', path: '/api/control/secrets/vault/on', ctl: 'ctl secrets vault on' },
