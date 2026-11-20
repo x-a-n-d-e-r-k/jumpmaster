@@ -349,6 +349,11 @@ export async function startFakeRegistry(
       }
       return { name, digest: index.digest, platforms: out, signature };
     },
-    close: () => new Promise<void>((r) => server.close(() => r())),
+    // Every connection, idle keep-alive ones included: otherwise teardown waits on a keep-alive timer.
+    close: () =>
+      new Promise<void>((r) => {
+        server.close(() => r());
+        server.closeAllConnections();
+      }),
   };
 }
