@@ -35,6 +35,7 @@ import {
   type HubEvent,
   historySummary,
   SERVICE_STOPPED,
+  stripConfirmPaths,
 } from './turns.js';
 
 // Built at runtime so no token-shaped literal sits in the tracked file.
@@ -766,6 +767,45 @@ describe('chat usage', () => {
       ]);
       expect(stored).toEqual([streamed.join('\n\n')]);
       for (const t of [...streamed, ...stored]) expect(t).not.toContain(ID);
+    });
+
+    const RUN = 200_000;
+    test.each([
+      ['backticks', '`'.repeat(RUN)],
+      ['backticks then a confirm path', `${'`'.repeat(RUN)} /config/confirm/abc`],
+      ['open brackets', '['.repeat(RUN)],
+      ['open brackets then a confirm path', `${'['.repeat(RUN)} /config/confirm/abc`],
+    ])('a long run of %s is stripped in linear time', (_name, input) => {
+      const start = performance.now();
+      const out = stripConfirmPaths(input);
+      expect(performance.now() - start).toBeLessThan(500);
+      expect(out).not.toContain('/config/confirm/abc');
+    });
+
+    test('a long run with no confirm path is returned unchanged', () => {
+      for (const ch of ['`', '[', '<', ' ', 'h']) {
+        const input = `${ch.repeat(RUN)} /config/confirm and ](`;
+        expect(stripConfirmPaths(input)).toBe(input);
+      }
+    });
+
+    test.each([
+      ['plain', 'See /config/confirm/abc.', 'See the card below.'],
+      ['double backticks', 'See `` /config/confirm/abc ``.', 'See the card below.'],
+      ['link with angle target', 'Use [x](</config/confirm/abc>) now.', 'Use the card below now.'],
+      ["link with a ' title", "Use [x](/config/confirm/abc 'T') now.", 'Use the card below now.'],
+      ['link text with [', 'a [b [c](/config/confirm/abc) d', 'a the card below d'],
+      [
+        'two links',
+        '[a](/config/confirm/a) [b](/config/confirm/b)',
+        'the card below the card below',
+      ],
+      ['link with an unclosed title', '[a](/config/confirm/a "t', '[a](the card below "t'],
+      ['link broken by a newline', '[a\n](/config/confirm/a)', '[a\n](the card below)'],
+      ['lone backtick', 'x `/config/confirm/a y', 'x `the card below y'],
+      ['autolink', 'x <http://h/config/confirm/a> y', 'x the card below y'],
+    ])('stripConfirmPaths: %s', (_name, input, want) => {
+      expect(stripConfirmPaths(input)).toBe(want);
     });
 
     test('paths that are not a confirm path with an id are left alone', async () => {

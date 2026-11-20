@@ -133,25 +133,75 @@ export const chatMcpUrl = (port: number): string => `http://jumpmaster:${port}/m
 export const CONFIRM_PATH_WORDS = 'the card below';
 
 // An optional origin, then `/config/confirm/<id>`. The id is a session-bound capability (#508).
-const CONFIRM_URL = String.raw`(?:https?:\/\/[^\s/<>()\[\]\x60]+)?\/config\/confirm\/[A-Za-z0-9_-]+`;
-const CONFIRM_PATH = new RegExp(
-  [
-    // A Markdown link, with an optional <target> and title: the whole link collapses.
-    String.raw`\[[^\]\n]*\]\(\s*<?${CONFIRM_URL}>?(?:\s+(?:"[^"\n]*"|'[^'\n]*'))?\s*\)`,
-    // Backticked, or an autolink.
-    String.raw`\x60+\s*${CONFIRM_URL}\s*\x60+`,
-    String.raw`<${CONFIRM_URL}>`,
-    CONFIRM_URL,
-  ].join('|'),
-  'g',
-);
+// Linear: a host stops at the next `/`, so no two attempts rescan the same text.
+const CONFIRM_URL = /(?:https?:\/\/[^\s/<>()[\]`]+)?\/config\/confirm\/[A-Za-z0-9_-]+/g;
+
+const isSpace = (c: string | undefined): boolean => c !== undefined && /\s/.test(c);
+
+/**
+ * The start of a Markdown link around the URL at `[s, e)`, and the end past its `)`:
+ * `[text](<url> "title")`, with the target's angle brackets and the title optional.
+ * Scans back no further than `floor`, so each character is scanned back over at most once.
+ */
+function linkAround(t: string, s: number, e: number, floor: number): [number, number] | null {
+  let i = s;
+  if (i > floor && t[i - 1] === '<') i--;
+  while (i > floor && isSpace(t[i - 1])) i--;
+  if (i - 2 < floor || t[i - 1] !== '(' || t[i - 2] !== ']') return null;
+  // The earliest `[` before the `]` with no `]` or newline between: where a left-to-right match starts.
+  let open = -1;
+  for (let j = i - 3; j >= floor && t[j] !== ']' && t[j] !== '\n'; j--) if (t[j] === '[') open = j;
+  if (open < 0) return null;
+  let k = e;
+  if (t[k] === '>') k++;
+  let m = k;
+  while (isSpace(t[m])) m++;
+  const q = t[m];
+  if (m > k && (q === '"' || q === "'")) {
+    let n = m + 1;
+    while (n < t.length && t[n] !== q && t[n] !== '\n') n++;
+    if (t[n] === q) k = n + 1;
+  }
+  while (isSpace(t[k])) k++;
+  return t[k] === ')' ? [open, k + 1] : null;
+}
+
+/** The backticks around the URL at `[s, e)`, with spaces inside them, scanning back to `floor`. */
+function backticksAround(t: string, s: number, e: number, floor: number): [number, number] | null {
+  let i = s;
+  while (i > floor && isSpace(t[i - 1])) i--;
+  if (i <= floor || t[i - 1] !== '`') return null;
+  while (i > floor && t[i - 1] === '`') i--;
+  let k = e;
+  while (isSpace(t[k])) k++;
+  if (t[k] !== '`') return null;
+  while (t[k] === '`') k++;
+  return [i, k];
+}
 
 /**
  * Replaces each `/config/confirm/<id>` in assistant text, with or without an origin, in
  * backticks or as a Markdown link, by plain words: the id belongs on the card, not in prose.
+ * Finds each URL first, then widens the match to its link, backticks, or autolink, so its
+ * cost stays linear in the text however the text is shaped (#569).
  */
-export function stripConfirmPaths(s: string): string {
-  return s.replace(CONFIRM_PATH, CONFIRM_PATH_WORDS);
+export function stripConfirmPaths(t: string): string {
+  const url = new RegExp(CONFIRM_URL);
+  let out = '';
+  let last = 0;
+  for (let m = url.exec(t); m; m = url.exec(t)) {
+    const s = m.index;
+    const e = s + m[0].length;
+    const span =
+      linkAround(t, s, e, last) ??
+      backticksAround(t, s, e, last) ??
+      (s > last && t[s - 1] === '<' && t[e] === '>' ? [s - 1, e + 1] : [s, e]);
+    out += t.slice(last, span[0]) + CONFIRM_PATH_WORDS;
+    last = span[1];
+    // A widened match may cover a later URL, as in a link's title: carry on past it.
+    url.lastIndex = last;
+  }
+  return out + t.slice(last);
 }
 
 /** The most lines of a tool result the server keeps (#502). */
