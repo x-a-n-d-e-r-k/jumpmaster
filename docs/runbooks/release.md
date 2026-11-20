@@ -408,9 +408,13 @@ while an image is fetching or an image of the current lock is pending; the next 
 pending image of the previous lock only does not hold it back (no pass fetches it). A failed
 image's record names every blob its attempts stored (issue #451), so they are kept and its retry
 resumes without fetching them again. Blobs of a signature artifact the mirror refused are not kept
-(issue #486): no retry uses them, so the collection deletes them unless another record names them
-(a refused artifact's `{}` config shared with an accepted signature stays). Once it completes, or leaves the index, they are collected as
-usual if no record names them. It logs `{"event":"image-mirror-collect","removed":n,"bytes":b}`; a blob it cannot delete
+(issues #486, #557): no retry uses them, so an attempt that refuses an artifact also drops its
+manifest and blobs from what earlier failed attempts named (a record written before #557
+included), and the collection deletes them unless another record names them. One the same attempt
+also needs, for a platform or an accepted signature (a refused artifact's `{}` config shared with
+an accepted signature), stays. An attempt that fails before it reads the signatures drops nothing.
+Once the image completes, or leaves the index, its blobs are collected as usual if no record
+names them. It logs `{"event":"image-mirror-collect","removed":n,"bytes":b}`; a blob it cannot delete
 is logged and the rest still go. The doctor's `server.image-mirror` names the store's size. Old
 release images in the host's Docker are the operator's to remove: see
 [Upgrading the server](operate.md#upgrading-the-server).
