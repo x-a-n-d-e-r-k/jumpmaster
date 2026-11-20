@@ -1,5 +1,5 @@
 import { createVerify, generateKeyPairSync, randomBytes } from 'node:crypto';
-import { chmodSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import nock from 'nock';
@@ -14,6 +14,7 @@ import {
   refusalWords,
   resolveCredentials,
   SECRET_FILES,
+  shadowedAppEntries,
   shadowedCredentials,
   testAppEntry,
   testCredential,
@@ -492,6 +493,102 @@ describe('preferring the vault', () => {
     db.prepare("UPDATE vault SET nonce = zeroblob(12) WHERE name = 'claudeToken'").run();
     const r = resolveCredentials({ JM_CLAUDE_TOKEN: CLAUDE }, undefined, v, { preferVault: true });
     expect(r.claudeToken).toMatchObject({ value: CLAUDE, source: 'env' });
+  });
+});
+
+describe('shadowedAppEntries (issue #551)', () => {
+  const pemOf = (): string =>
+    generateKeyPairSync('rsa', { modulusLength: 2048 })
+      .privateKey.export({ type: 'pkcs8', format: 'pem' })
+      .toString();
+  const PEM_A = pemOf();
+  const PEM_B = pemOf();
+  const CLIENT_ID = 'Iv23liCLIENTIDVALUE551';
+  const app = (pem: string): GitHubAppEntry => ({
+    appId: '551',
+    slug: 'acme-author',
+    clientId: CLIENT_ID,
+    pem,
+    importedAt: '2026-11-15T10:00:00.000Z',
+  });
+  const NAME = 'github-app/acme/author';
+  const writeFile = (dir: string, entry: GitHubAppEntry): string => {
+    mkdirSync(join(dir, 'github-app', 'acme'), { recursive: true });
+    const path = join(dir, 'github-app', 'acme', 'author.json');
+    // Not canonical on purpose: whitespace and key order differ from serializeAppEntry.
+    writeFileSync(path, JSON.stringify({ importedAt: entry.importedAt, ...entry }, null, 2), {
+      mode: 0o600,
+    });
+    chmodSync(path, 0o600);
+    return path;
+  };
+  const appsOf = (v: Vault | 'disabled', dir: string | undefined, preferVault = false) =>
+    resolveAppEntries([{ repo: 'acme/x' }], {
+      vault: v,
+      ...(dir ? { secretsDir: dir } : {}),
+      preferVault,
+      scrubSet: new ScrubSet(),
+    });
+
+  test('a file and a differing vault entry give one item, with the name, the path and both fingerprints', () => {
+    const v = vault();
+    v.put(NAME, serializeAppEntry(app(PEM_B)), { now: t0 });
+    const dir = secretsDir({});
+    const path = writeFile(dir, app(PEM_A));
+    const s = shadowedAppEntries(appsOf(v, dir), v);
+    expect(s).toEqual([
+      {
+        name: NAME,
+        path,
+        fileFingerprint: fingerprintOf(serializeAppEntry(app(PEM_A))),
+        vaultFingerprint: fingerprintOf(serializeAppEntry(app(PEM_B))),
+        inUse: 'file',
+      },
+    ]);
+    expect(s[0]?.fileFingerprint).not.toBe(s[0]?.vaultFingerprint);
+    const text = JSON.stringify(s);
+    for (const secret of [CLIENT_ID, ...PEM_A.split('\n'), ...PEM_B.split('\n')].filter(
+      (l) => l.length > 0,
+    ))
+      expect(text).not.toContain(secret);
+  });
+
+  test('under prefer-vault the vault entry is in use, and the file is still fingerprinted canonically', () => {
+    const v = vault();
+    v.put(NAME, serializeAppEntry(app(PEM_B)), { now: t0 });
+    const dir = secretsDir({});
+    const path = writeFile(dir, app(PEM_A));
+    expect(shadowedAppEntries(appsOf(v, dir, true), v)).toEqual([
+      {
+        name: NAME,
+        path,
+        fileFingerprint: fingerprintOf(serializeAppEntry(app(PEM_A))),
+        vaultFingerprint: fingerprintOf(serializeAppEntry(app(PEM_B))),
+        inUse: 'vault',
+      },
+    ]);
+  });
+
+  test('the same entry in both sources gives none, in either order', () => {
+    const v = vault();
+    v.put(NAME, serializeAppEntry(app(PEM_A)), { now: t0 });
+    const dir = secretsDir({});
+    writeFile(dir, app(PEM_A));
+    expect(shadowedAppEntries(appsOf(v, dir), v)).toEqual([]);
+    expect(shadowedAppEntries(appsOf(v, dir, true), v)).toEqual([]);
+  });
+
+  test('a file alone, a vault entry alone, or a disabled vault gives none', () => {
+    const dir = secretsDir({});
+    writeFile(dir, app(PEM_A));
+    const empty = vault();
+    expect(shadowedAppEntries(appsOf(empty, dir), empty)).toEqual([]);
+    const v = vault();
+    v.put(NAME, serializeAppEntry(app(PEM_B)), { now: t0 });
+    expect(shadowedAppEntries(appsOf(v, undefined), v)).toEqual([]);
+    expect(shadowedAppEntries(appsOf(v, secretsDir({})), v)).toEqual([]);
+    expect(shadowedAppEntries(appsOf('disabled', dir), 'disabled')).toEqual([]);
+    expect(shadowedAppEntries(appsOf(v, dir), 'disabled')).toEqual([]);
   });
 });
 

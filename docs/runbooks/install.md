@@ -1625,6 +1625,13 @@ A credential is set both by a file under `secrets/` (or a variable) and in the v
 values. The file wins. Remove whichever you do not mean: the file (then `jumpmaster ctl secrets
 reload`), or the vault entry (`jumpmaster ctl secrets remove <name>`).
 
+GitHub App entry files count too: when `secrets/github-app/<owner>/<role>.json` and the vault entry
+`github-app/<owner>/<role>` both exist and hold different entries, the check names the entry, the
+file and both fingerprints, and says which one is in use (the file, or the vault entry when "Prefer
+the vault" is on). Keep the one you mean: delete the file (then `jumpmaster ctl secrets reload`), or
+replace the vault entry on Settings → Credentials (`/settings/credentials`). `ctl secrets remove`
+does not take an app entry's name.
+
 ### `vault.key`
 
 **Action:** Open Settings, Credentials (`/settings/credentials`).

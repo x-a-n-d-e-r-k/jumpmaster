@@ -136,3 +136,29 @@ describe('SECURITY.md in app mode', () => {
     expect(section(heading)).toBe(recorded);
   });
 });
+
+describe('credential.shadowed covers GitHub App entry files (issue #551)', () => {
+  const INSTALL = readFileSync(
+    new URL('../../../docs/runbooks/install.md', import.meta.url),
+    'utf8',
+  );
+
+  test('SECURITY.md\'s "File secrets by name" names the app entry file with credential.shadowed', () => {
+    const start = SECURITY.indexOf('\n### File secrets by name\n');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = SECURITY.indexOf('\n#', start + 1);
+    const text = SECURITY.slice(start, end < 0 ? undefined : end).replace(/\s+/g, ' ');
+    expect(text).toContain('`secrets/github-app/<owner>/<role>.json`');
+    expect(text).toContain('`credential.shadowed`');
+  });
+
+  test("the install runbook's credential.shadowed section mentions app entry files and how to resolve them", () => {
+    const start = INSTALL.indexOf('\n### `credential.shadowed`\n');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = INSTALL.indexOf('\n### ', start + 1);
+    const text = INSTALL.slice(start, end < 0 ? undefined : end).replace(/\s+/g, ' ');
+    expect(text).toContain('`secrets/github-app/<owner>/<role>.json`');
+    expect(text).toContain('`jumpmaster ctl secrets reload`');
+    expect(text).toContain('`/settings/credentials`');
+  });
+});

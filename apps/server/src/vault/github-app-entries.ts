@@ -238,6 +238,14 @@ function parseFrom(where: string, text: string): GitHubAppEntry {
 }
 
 /**
+ * The canonical fingerprint of the app entry file at `path` (`fingerprintOf(serializeAppEntry(..))`),
+ * read with the same checks as `readAppEntry`; throws its secret-free error when the file is refused.
+ */
+export function appEntryFileFingerprint(path: string): string {
+  return fingerprintOf(serializeAppEntry(parseFrom(path, readEntryFile(path))));
+}
+
+/**
  * An owner's app entry for a role, from the file `<secretsDir>/github-app/<owner>/<role>.json` or
  * the vault entry `github-app/<owner>/<role>`, as `pick` in credentials.ts orders them: the file
  * wins, or with `preferVault` the vault does, and the other one is listed in `overriding`. A

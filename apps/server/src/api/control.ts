@@ -118,7 +118,12 @@ import {
 } from '../transcripts.js';
 import { safeNext } from '../ui/auth-pages.js';
 import { MODE_LABELS } from '../ui/pages.js';
-import { credentialCreatedAt, shadowedCredentials, type TestDeps } from '../vault/credentials.js';
+import {
+  credentialCreatedAt,
+  shadowedAppEntries,
+  shadowedCredentials,
+  type TestDeps,
+} from '../vault/credentials.js';
 import type { AppRole, GitHubAppEntry } from '../vault/github-app-entries.js';
 import type { ResolvedApps } from '../vault/resolution.js';
 import {
@@ -279,7 +284,10 @@ function credentialsOf(store: ConfigStore): NonNullable<DoctorDeps['credentials'
   const keyFile = store.vaultKeyFile();
   return {
     problems: store.problems(),
-    shadowed: shadowedCredentials(resolved, vault),
+    shadowed: [
+      ...shadowedCredentials(resolved, vault),
+      ...shadowedAppEntries(store.resolvedApps(), vault),
+    ],
     vaultKey: vault === 'disabled' ? { status: 'disabled' } : vault.keyStatus(),
     ...(keyFile ? { vaultKeyFile: keyFile } : {}),
     ...(created ? { claudeTokenCreatedAt: created } : {}),
