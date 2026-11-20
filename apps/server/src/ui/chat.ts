@@ -194,6 +194,11 @@ function messageHtml(m: ChatMessage): string {
  * (the settled card follows as a `card` event); 401, 429 and 503 say why inside it; 404 and 409
  * mean the change is gone, so the card turns Expired with Stage it again, which fills the composer
  * without sending. Without the dialog API, the button goes to the confirm page instead.
+ *
+ * Text streamed mid-turn shows in a live reply bubble that stays last in the log: tool steps, cards
+ * and messages arriving after it go before it, and live text does not end a steps group (#573).
+ * The server stores a turn's text as one assistant message after its tool lines, so this keeps the
+ * streamed log the same as the stored page a reload shows.
  */
 export const THREAD_SCRIPT = `<script>{const root=document.getElementById('chat');const id=root.dataset.thread;const log=document.getElementById('messages');let last=Number(root.dataset.last)||0;let es=null;let live=null;const WHO=${JSON.stringify(WHO)};const CARD_TITLE=${JSON.stringify(CARD_TITLE)};const STATE=${JSON.stringify(CARD_STATE_TEXT)};const form=document.getElementById('send');const box=form.querySelector('textarea');const btn=form.querySelector('button');let err=null;
 const sc=()=>document.scrollingElement||document.documentElement;const toEnd=()=>{const s=sc();s.scrollTop=s.scrollHeight;};
@@ -205,8 +210,9 @@ const FIELDS=${JSON.stringify(STEP_FIELDS)};const VMAX=${STEP_VALUE_MAX};const s
 const inputEl=(name,i)=>{if(i._truncated){const d=el('div','input');d.append(el('code','',i.preview??''),el('small','note','input truncated'));return d;}if(name==='Bash'&&typeof i.command==='string'){const p=el('pre','input');p.append(el('code','',i.command));return p;}const f=FIELDS[name];const d=el('div','input');if(f&&typeof i[f[0]]==='string'){d.append(el('code','',i[f[0]]));for(const k of f.slice(1))if(set(i[k]))d.append(el('div','',k+': '+String(i[k])));}else for(const k of Object.keys(i)){const j=String(JSON.stringify(i[k]));d.append(el('div','',k+': '+(j.length>VMAX?j.slice(0,VMAX)+'…':j)));}return d.children.length?d:null;};
 const linesText=(r)=>{const n=Number(r.lines)||0;const text=String(r.text??'');if(r.truncated)return 'showing the first '+(text===''?0:text.split('\\n').length)+' of '+n+' lines';return n+(n===1?' line':' lines');};
 const stepEl=(m)=>{const li=el('li');li.dataset.seq=String(m.seq);const i=m.input&&typeof m.input==='object'?m.input:null;const r=m.result&&typeof m.result==='object'?m.result:null;const pr=typeof m.resultPrunedAt==='string'?m.resultPrunedAt:null;if(!i&&!r&&!pr){li.textContent=String(m.text);return li;}const d=el('details');d.append(el('summary','',m.text));const x=i?inputEl(String(m.toolName||''),i):null;if(x)d.append(x);if(r){const b=el('div',r.isError?'result error':'result');b.append(el('small','',(r.isError?'Error · ':'')+linesText(r)),el('pre','',r.text??''));d.append(b);}else if(pr)d.append(el('small','note','result pruned on '+pr.slice(0,10)));else d.append(el('small','pending','running…'));li.append(d);return li;};
-const step=(m)=>{const seq=String(m.seq);for(const g of log.children){if(g.className!=='steps')continue;const old=[...g.querySelector('ol').children].find((li)=>li.dataset.seq===seq);if(old){const n=stepEl(m);const o=old.querySelector('details');const nd=n.querySelector('details');if(o&&nd&&o.open)nd.open=true;old.replaceWith(n);return;}}let g=log.lastElementChild;if(!g||g.className!=='steps'){g=el('details','steps');g.append(el('summary'),el('ol'));log.append(g);}const ol=g.querySelector('ol');ol.append(stepEl(m));g.querySelector('summary').textContent='Worked through '+ol.children.length+(ol.children.length===1?' step':' steps');};
-const put=(m)=>{last=Math.max(last,Number(m.seq)||0);if(m.role==='tool')return step(m);const old=[...log.children].find((c)=>c.dataset.seq===String(m.seq));if(m.role==='assistant'&&live&&!old&&typeof m.html==='string'){live.lastChild.innerHTML=m.html;live.className='msg assistant';live.dataset.seq=String(m.seq);if(m.state!=='done')live.append(el('small','state',m.error?m.state+': '+m.error:m.state));live=null;return;}const node=msgEl(m);if(old)old.replaceWith(node);else log.append(node);if(m.role==='assistant'&&live){live.remove();live=null;}};
+const add=(n)=>{if(live)log.insertBefore(n,live);else log.append(n);};
+const step=(m)=>{const seq=String(m.seq);for(const g of log.children){if(g.className!=='steps')continue;const old=[...g.querySelector('ol').children].find((li)=>li.dataset.seq===seq);if(old){const n=stepEl(m);const o=old.querySelector('details');const nd=n.querySelector('details');if(o&&nd&&o.open)nd.open=true;old.replaceWith(n);return;}}const k=log.children;let g=k[k.length-(live?2:1)];if(!g||g.className!=='steps'){g=el('details','steps');g.append(el('summary'),el('ol'));add(g);}const ol=g.querySelector('ol');ol.append(stepEl(m));g.querySelector('summary').textContent='Worked through '+ol.children.length+(ol.children.length===1?' step':' steps');};
+const put=(m)=>{last=Math.max(last,Number(m.seq)||0);if(m.role==='tool')return step(m);const old=[...log.children].find((c)=>c.dataset.seq===String(m.seq));if(m.role==='assistant'&&live&&!old&&typeof m.html==='string'){live.lastChild.innerHTML=m.html;live.className='msg assistant';live.dataset.seq=String(m.seq);if(m.state!=='done')live.append(el('small','state',m.error?m.state+': '+m.error:m.state));live=null;return;}const node=msgEl(m);if(old)old.replaceWith(node);else add(node);if(m.role==='assistant'&&live){live.remove();live=null;}};
 const PENDING_MS=${PENDING_MS};const CONFIRM=new RegExp(${JSON.stringify(CONFIRM_LINK.source)});const dlg=document.getElementById('confirm-dialog');const dbody=dlg?dlg.querySelector('.confirm-body'):null;let dcard=null;let dmsg=null;
 const drop=(d)=>{for(const s of ['.review','.expiry','noscript']){const x=d.querySelector(s);if(x)x.remove();}};
 const setState=(d,t)=>{const st=d.querySelector('.state');if(st)st.textContent=t;else d.append(el('small','state',t));};
@@ -231,7 +237,7 @@ const follow=()=>{if(es)return;es=new EventSource('/api/chat/threads/'+encodeURI
 es.addEventListener('message',keep((e)=>put(JSON.parse(e.data))));
 es.addEventListener('tool',keep((e)=>put({...JSON.parse(e.data),role:'tool'})));
 es.addEventListener('text',keep((e)=>{const t=JSON.parse(e.data);if(!live){live=el('div','msg assistant live');live.append(el('div','who',WHO.assistant),el('div','text',''));log.append(live);}const box=live.lastChild;box.textContent=box.textContent?box.textContent+'\\n\\n'+t.text:t.text;}));
-es.addEventListener('card',keep((e)=>{const c=JSON.parse(e.data).card;if(!c)return;const old=[...log.children].find((x)=>x.dataset&&x.dataset.card===String(Number(c.id)));if(old&&old.dataset.expired&&c.state==='pending')return;const d=cardEl(c);if(old){if(dcard===old&&dlg.open)dlg.close();old.replaceWith(d);}else log.append(d);wire(d);}));
+es.addEventListener('card',keep((e)=>{const c=JSON.parse(e.data).card;if(!c)return;const old=[...log.children].find((x)=>x.dataset&&x.dataset.card===String(Number(c.id)));if(old&&old.dataset.expired&&c.state==='pending')return;const d=cardEl(c);if(old){if(dcard===old&&dlg.open)dlg.close();old.replaceWith(d);}else add(d);wire(d);}));
 es.addEventListener('done',()=>{for(const p of log.querySelectorAll('.pending'))p.textContent='no result recorded';es.close();es=null;});};
 const showErr=(t)=>{if(!err){err=el('p','error');err.setAttribute('role','alert');form.insertBefore(err,box);}err.textContent=t;};
 form.addEventListener('submit',async(e)=>{e.preventDefault();const text=box.value;if(!text.trim()||btn.disabled)return;btn.disabled=true;try{const r=await jmFetch('/api/chat/threads/'+encodeURIComponent(id)+'/messages',{text});if(r.ok){box.value='';if(err){err.remove();err=null;}put((await r.json()).message);toEnd();follow();}else showErr('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));}catch(x){showErr('Not sent: '+((x&&x.message)||x));}finally{btn.disabled=false;}});
@@ -241,7 +247,8 @@ toEnd();if(root.dataset.busy==='1')follow();}</script>`;
 /**
  * The thread's stored messages and cards in the order they happened: each card after the messages
  * stored up to when it was recorded. Each run of consecutive tool lines is one steps group; any
- * other message or a card ends it, as a streamed one does in the page script.
+ * other message or a card ends it, as it does in the page script, where live text (stored later, as
+ * the turn's one assistant message) neither ends a group nor sits before one.
  */
 function logHtml(
   messages: ChatMessage[],
