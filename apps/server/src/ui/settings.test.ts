@@ -2069,6 +2069,36 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
     );
   });
 
+  test('Replace key (#559): a key with blank lines around it is sent and replaced; a whitespace-only paste sends nothing', async () => {
+    const pem = pemOf();
+    const padded = `\n\n${pem}\n  \n`;
+    const ok = pageScript(CREDENTIALS_SCRIPT, () => ({
+      ok: true,
+      status: 200,
+      json: { replaced: true, result: 'ok', login: 'jm-a[bot]' },
+    }));
+    const fn = ok.ctx.jmReplaceAppKey as (...a: unknown[]) => Promise<string>;
+    const status = stubStatus();
+    expect(await fn({ owner: 'acme', role: 'author', pem: padded }, { sudo: true }, status)).toBe(
+      'replaced',
+    );
+    expect(ok.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+      'PUT /api/control/secrets/github-app/acme/author/key',
+    ]);
+    const sent = (ok.calls[0]?.body as { pem: string }).pem;
+    expect([padded, padded.trim()]).toContain(sent);
+    expect(status.textContent).not.toContain(linesOf(pem)[0]);
+
+    const blank = pageScript(CREDENTIALS_SCRIPT, () => ({ ok: true, status: 200, json: {} }));
+    const bfn = blank.ctx.jmReplaceAppKey as (...a: unknown[]) => Promise<string>;
+    const out = stubStatus();
+    expect(
+      await bfn({ owner: 'acme', role: 'author', pem: '\n  \r\n\t\n' }, { sudo: true }, out),
+    ).toBe('empty');
+    expect(out.textContent).toBe('Paste the new private key first.');
+    expect(blank.calls).toEqual([]);
+  });
+
   test('only starter zones: the two-bot-mode line and no app rows', async () => {
     const w = await world({
       dbMode: true,
