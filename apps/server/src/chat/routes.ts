@@ -7,6 +7,7 @@ import type { ConfigStore } from '../config/store.js';
 import type { Db } from '../db/open.js';
 import type { ForgePair } from '../outbox.js';
 import { redactionList } from '../scrub.js';
+import { sliceWhole } from '../slice-whole.js';
 import { messageTextHtml } from '../ui/chat.js';
 import {
   type ChatCard,
@@ -52,13 +53,6 @@ export function titleFromMessage(text: string): string {
   const space = room.lastIndexOf(' ');
   const cut = space > 0 ? room.slice(0, space) : room;
   return `${sliceWhole(cut.trimEnd(), MESSAGE_TITLE_CHARS - 1)}…`;
-}
-
-/** The first `max` UTF-16 units of `text`, one fewer when the cut would split a surrogate pair. */
-function sliceWhole(text: string, max: number): string {
-  if (text.length <= max) return text;
-  const high = text.charCodeAt(max - 1);
-  return text.slice(0, high >= 0xd800 && high <= 0xdbff ? max - 1 : max);
 }
 
 export interface ChatRouteDeps {

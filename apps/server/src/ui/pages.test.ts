@@ -265,6 +265,20 @@ describe('dropRows (#497)', () => {
     expect(dropRows([drop], [item], [z], now)).toContain('<td>#7 plain</td>');
   });
 
+  test('a title cut never splits a surrogate pair', () => {
+    const title = `${'x'.repeat(59)}\u{1F600}${'y'.repeat(10)}`;
+    const html = dropRows([drop], [{ ...item, title }], [z], now);
+    expect(html.isWellFormed()).toBe(true);
+    expect(html).toContain(`<td>#7 ${'x'.repeat(59)}…</td>`);
+  });
+
+  test('an emoji ending exactly at the cut is kept whole', () => {
+    const title = `${'x'.repeat(58)}\u{1F600}${'y'.repeat(10)}`;
+    const html = dropRows([drop], [{ ...item, title }], [z], now);
+    expect(html.isWellFormed()).toBe(true);
+    expect(html).toContain(`<td>#7 ${'x'.repeat(58)}\u{1F600}…</td>`);
+  });
+
   test('crew and doctor drops say so in the Work column', () => {
     const crew = dropRows([{ ...drop, workItemId: null, role: 'audit' }], [], [z], now);
     expect(crew).toContain('<td>crew</td>');

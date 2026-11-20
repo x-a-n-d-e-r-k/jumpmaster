@@ -32,6 +32,7 @@ import { fableWindow, isFableWindow, modelFamily, PER_MODEL_WINDOWS } from '../f
 import type { GoalChange } from '../goal-change.js';
 import { currentObjective, type GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
+import { sliceWhole } from '../slice-whole.js';
 import type { Status } from '../status.js';
 import type { Gate } from '../usage.js';
 import {
@@ -1204,7 +1205,7 @@ function dropWork(d: Drop, itemById: Map<number, WorkItem>): string {
   const wi = d.workItemId === null ? undefined : itemById.get(d.workItemId);
   if (!wi) return dropTarget(d, itemById);
   const title =
-    wi.title.length > DROP_TITLE_MAX ? `${wi.title.slice(0, DROP_TITLE_MAX)}…` : wi.title;
+    wi.title.length > DROP_TITLE_MAX ? `${sliceWhole(wi.title, DROP_TITLE_MAX)}…` : wi.title;
   return `#${escapeHtml(wi.issueNumber)} ${escapeHtml(title)}`;
 }
 
