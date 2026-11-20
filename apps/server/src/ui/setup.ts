@@ -94,7 +94,9 @@ export function wizardActive(db: Db, config: Pick<Config, 'dropZones'>): boolean
 export function firstUnfinished(store: ConfigStore, db: Db): Step {
   const r = store.resolved();
   if (r.claudeToken.source === 'missing') return 'claude';
-  if (r.githubAuthorToken.source === 'missing') return 'forge';
+  // An install on GitHub Apps holds no author token: an author and a reviewer app for some owner
+  // finish this step (#549); detection then reads through the author app.
+  if (r.githubAuthorToken.source === 'missing' && !store.hasAppPair()) return 'forge';
   if (!listSticks(db).some((s) => s.lastSeenAt !== null)) return 'stick';
   return 'project';
 }
@@ -554,7 +556,9 @@ document.getElementById('detect').addEventListener('submit', async (e) => {
   const j = await r.json().catch(() => ({}));
   if (!r.ok) {
     out.textContent = (j.error || ('Not read (' + r.status + ')')) + ' ';
-    if (r.status === 409) { const a = document.createElement('a'); a.href = '/setup/forge'; a.className = 'button primary'; a.textContent = 'Go to the GitHub step'; out.append(a); }
+    // The author app is not installed on the repository: its install link, not the GitHub step.
+    if (r.status === 409 && typeof j.installUrl === 'string' && j.installUrl.startsWith('https://github.com/apps/')) { const a = document.createElement('a'); a.href = j.installUrl; a.className = 'button primary'; a.textContent = 'Install the author app'; out.append(a); }
+    else if (r.status === 409) { const a = document.createElement('a'); a.href = '/setup/forge'; a.className = 'button primary'; a.textContent = 'Go to the GitHub step'; out.append(a); }
     return;
   }
   out.textContent = '';

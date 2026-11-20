@@ -40,6 +40,7 @@ import {
   type AppRole,
   appEntryName,
   type GitHubAppEntry,
+  parseAppEntryName,
   readAppEntry,
   serializeAppEntry,
 } from '../vault/github-app-entries.js';
@@ -624,22 +625,49 @@ export class ConfigStore implements ConfigSource {
   appSlugs(owner: string): Partial<Record<AppRole, { slug: string }>> {
     const out: Partial<Record<AppRole, { slug: string }>> = {};
     for (const role of APP_ROLES) {
-      try {
-        const r = readAppEntry(
-          {
-            vault: this.vault(),
-            ...(this.o.boot.secretsDir ? { secretsDir: this.o.boot.secretsDir } : {}),
-            preferVault: this.preferVault(),
-          },
-          owner,
-          role,
-        );
-        if (r.source !== 'missing') out[role] = { slug: r.entry.slug };
-      } catch {
-        // A broken entry counts as none.
-      }
+      const entry = this.appEntry(owner, role);
+      if (entry) out[role] = { slug: entry.slug };
     }
     return out;
+  }
+
+  /**
+   * An owner's app entry for a role, read directly (vault or secrets-directory file) like
+   * `appSlugs`, for a read before any zone of that owner exists (issue #549: detection on the
+   * author app). A missing, undecryptable or unreadable entry is undefined, and nothing is logged.
+   * The PEM it holds is the caller's to keep out of every response and log line.
+   */
+  appEntry(owner: string, role: AppRole): GitHubAppEntry | undefined {
+    try {
+      const r = readAppEntry(
+        {
+          vault: this.vault(),
+          ...(this.o.boot.secretsDir ? { secretsDir: this.o.boot.secretsDir } : {}),
+          preferVault: this.preferVault(),
+        },
+        owner,
+        role,
+      );
+      return r.source === 'missing' ? undefined : r.entry;
+    } catch {
+      // A broken entry counts as none.
+      return undefined;
+    }
+  }
+
+  /** Whether the vault holds both an author and a reviewer app entry for some owner (#549). */
+  hasAppPair(): boolean {
+    const vault = this.vault();
+    if (vault === 'disabled') return false;
+    const roles = new Map<string, Set<AppRole>>();
+    for (const m of vault.list()) {
+      const n = parseAppEntryName(m.name);
+      if (!n) continue;
+      const set = roles.get(n.owner) ?? new Set<AppRole>();
+      set.add(n.role);
+      roles.set(n.owner, set);
+    }
+    return [...roles.values()].some((set) => APP_ROLES.every((r) => set.has(r)));
   }
 
   /** The vault, or `'disabled'` when there is no key file. */

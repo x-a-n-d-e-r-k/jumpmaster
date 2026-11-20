@@ -415,6 +415,25 @@ describe('two-app zones (spec 2026-11-13-github-app-auth §5.2)', () => {
     );
   });
 
+  test("the runbook's project step on the apps path: Detect needs the author app installed and no token (#549)", () => {
+    const md = readFileSync(
+      new URL('../../../../docs/runbooks/install.md', import.meta.url),
+      'utf8',
+    ).replace(/\s+/g, ' ');
+    const step4 = md.slice(md.indexOf('4. **Project**'), md.indexOf('5. **Doctor**'));
+    expect(step4).toContain(
+      '**On the apps path, Detect needs the author app installed on the repository and no token**',
+    );
+    expect(step4).toContain('https://github.com/apps/<slug>/installations/new');
+    expect(step4).toContain('**Create the project** needs no token either');
+    expect(step4).toContain('`/zones/<zone>/github` (step 5), once the zone exists');
+    // Find the installations comes after Create the project.
+    expect(step4.indexOf('**Create the project** needs no token')).toBeLessThan(
+      step4.indexOf('**Find the installations**'),
+    );
+    expect(md).toContain('After **Create the project** (step 4 below), find the installations');
+  });
+
   test('a two-app zone gets both rulesets; hybrid, PAT two-bot and starter get only the main one', () => {
     const g = zoneGuidance(twoBot, detection, logins, {}, APPS);
     expect(g.mergeRuleset).toEqual({

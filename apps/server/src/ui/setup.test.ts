@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,10 +15,14 @@ import { STARTER_WARNING } from '../config.js';
 import { openDb } from '../db/open.js';
 import { insertStick, stampStick } from '../db/repo.js';
 import { DOC } from '../doctor/checks.js';
+import { USE_PERMISSIONS } from '../forge/github-app.js';
 import { recommendIdentity } from '../github/guidance.js';
 import { PRESET_EGRESS } from '../presets.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
+import { appEntryName, serializeAppEntry } from '../vault/github-app-entries.js';
 import { openVault } from '../vault/vault.js';
+import { NO_AUTHOR } from '../zones/detect.js';
+import type { DetectAppBroker } from '../zones/detect-app.js';
 import { appCreateSection } from './github.js';
 import { escapeHtml } from './pages.js';
 import { getWizard, guideSection, SAVE_CREDENTIALS } from './setup.js';
@@ -50,6 +54,8 @@ async function world(
     file?: Record<string, unknown>;
     /** What GitHub says of the repository the guidance asks about. */
     github?: { ownerType?: 'User' | 'Organization'; private?: boolean };
+    /** The broker detection reads through on the owner's author app (#549). */
+    appBroker?: DetectAppBroker;
   } = {},
 ) {
   const db = openDb(tmpDbFile());
@@ -69,6 +75,9 @@ async function world(
   });
   const codes: string[] = [];
   const tested: string[] = [];
+  /** Each token detection read the repository with. */
+  const detectTokens: string[] = [];
+  const logs: string[] = [];
   const setup = new SetupMode((c) => codes.push(c));
   const a = createApp({
     db,
@@ -89,14 +98,19 @@ async function world(
       },
       repoAccess: async () => ({}),
     }),
-    detectForge: () => ({
-      repoAccess: async () => ({
-        private: false,
-        defaultBranch: 'main',
-        permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
-        scopes: null,
-        tokenExpiresAt: null,
-      }),
+    log: (m) => logs.push(m),
+    ...(o.appBroker ? { detectAppBroker: () => o.appBroker as DetectAppBroker } : {}),
+    detectForge: (_repo: string, t: string) => ({
+      repoAccess: async () => {
+        detectTokens.push(t);
+        return {
+          private: false,
+          defaultBranch: 'main',
+          permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
+          scopes: null,
+          tokenExpiresAt: null,
+        };
+      },
       listDir: async () => Object.keys(NODE_FILES),
       getFileAt: async (_ref: string, path: string) => NODE_FILES[path] ?? null,
     }),
@@ -143,7 +157,20 @@ async function world(
     });
   const call = (method: 'POST' | 'PUT' | 'PATCH', url: string, body: unknown) =>
     a.inject({ method, url, headers: api, payload: body as object });
-  return { db, store, codes, setup, tested, get, form, call, session: s, filePath };
+  return {
+    db,
+    store,
+    codes,
+    setup,
+    tested,
+    detectTokens,
+    logs,
+    get,
+    form,
+    call,
+    session: s,
+    filePath,
+  };
 }
 
 const zoneDoc = (id: string) => ({
@@ -1177,5 +1204,177 @@ describe('two bots on GitHub Apps, tokens under "Use tokens instead" (#446)', ()
     const escaped = STARTER_WARNING.replaceAll("'", '&#39;').replaceAll('"', '&quot;');
     expect(forge.split(escaped)).toHaveLength(2);
     expect(forge).toContain(DETAILS);
+  });
+});
+
+// Issue #549: an install on GitHub Apps holds no author token; detection before the first zone
+// reads through the owner's author app.
+describe('the project step on GitHub Apps with no author token (#549)', () => {
+  // One key for the file: an entry's PEM must load, and generating one per test is slow.
+  let pemOnce: string | undefined;
+  const pem = () =>
+    (pemOnce ??= generateKeyPairSync('rsa', { modulusLength: 1024 })
+      .privateKey.export({ type: 'pkcs8', format: 'pem' })
+      .toString());
+  const MINTED = ['ghs', 'DETECTMINTEDTOKEN0123456789abcdefgh'].join('_');
+  const SLUG = 'octo-jm-author';
+
+  /** A fake author app's broker: the calls it took, installed on octo/demo (id 9001) or not. */
+  function fakeBroker(installed = true) {
+    const calls: { installationFor: string[]; mint: unknown[]; revoked: string[] } = {
+      installationFor: [],
+      mint: [],
+      revoked: [],
+    };
+    const broker: DetectAppBroker = {
+      installationFor: async (owner, repo) => {
+        calls.installationFor.push(`${owner}/${repo}`);
+        return installed
+          ? { installed: true, installationId: 77, permissions: { contents: 'read' } }
+          : { installed: false };
+      },
+      repositoryIdOf: async (installationId, owner, repo) => {
+        expect([installationId, owner, repo]).toEqual([77, 'octo', 'demo']);
+        return 9001;
+      },
+      mint: async (args) => {
+        calls.mint.push(args);
+        return { token: MINTED, expiresAt: new Date(t0.getTime() + 3600_000) };
+      },
+      revoke: async (t) => {
+        calls.revoked.push(t);
+      },
+    };
+    return { broker, calls };
+  }
+
+  async function appsWorld(o: { installed?: boolean; roles?: ('author' | 'reviewer')[] } = {}) {
+    const { broker, calls } = fakeBroker(o.installed ?? true);
+    const w = await world({ appBroker: broker });
+    const vault = w.store.vault();
+    if (vault === 'disabled') throw new Error('expected a vault');
+    for (const role of o.roles ?? ['author'])
+      vault.put(
+        appEntryName('octo', role),
+        serializeAppEntry({
+          appId: role === 'author' ? '4242' : '4343',
+          slug: role === 'author' ? SLUG : 'octo-jm-reviewer',
+          clientId: `Iv1.${role}`,
+          pem: pem(),
+          importedAt: '2026-11-15T10:00:00.000Z',
+        }),
+        { now: t0 },
+      );
+    return { ...w, calls, pem: pem() };
+  }
+
+  const pemBody = (p: string) => p.split('\n').filter((l) => l !== '' && !l.startsWith('-----'));
+  /** Neither the minted token nor any line of the PEM is in `text`. */
+  function secretFree(text: string, p: string) {
+    expect(text).not.toContain(MINTED);
+    for (const line of pemBody(p)) expect(text).not.toContain(line);
+  }
+
+  test('detect answers 200 through the author app, on a token for the repository id with contents: read, shown nowhere', async () => {
+    const w = await appsWorld();
+    expect(w.store.resolved().githubAuthorToken.source).toBe('missing');
+    expect(w.store.current().dropZones).toEqual([]);
+    const d = await w.call('POST', '/api/control/detect', { repo: 'octo/demo' });
+    expect(d.statusCode, d.body).toBe(200);
+    expect(d.json()).toMatchObject({ preset: 'node', defaultBranch: 'main' });
+    expect(d.body).not.toContain(NO_AUTHOR);
+    expect(w.calls.installationFor).toEqual(['octo/demo']);
+    expect(w.calls.mint).toEqual([
+      { installationId: 77, repositoryId: 9001, use: 'drop-read-author' },
+    ]);
+    expect(USE_PERMISSIONS['drop-read-author']).toEqual({ contents: 'read' });
+    // Read with the minted token, then revoked: used for this one detection only.
+    expect(w.detectTokens).toEqual([MINTED]);
+    expect(w.calls.revoked).toEqual([MINTED]);
+    secretFree(d.body, w.pem);
+    secretFree(w.logs.join('\n'), w.pem);
+    secretFree((await w.get('/setup/project')).body, w.pem);
+  });
+
+  test('POST /api/control/zones creates the two-bot zone through the apply path', async () => {
+    const w = await appsWorld();
+    const add = await w.call('POST', '/api/control/zones', {
+      zone: { repo: 'octo/demo', identity: 'two-bot' },
+      returnTo: '/setup/doctor',
+    });
+    expect(add.statusCode, add.body).toBe(409);
+    const body = add.json();
+    expect(body.error).toBeUndefined();
+    expect(body.guarded.map((g: { path: string }) => g.path)).toContain('dropZones[demo].repo');
+    secretFree(add.body, w.pem);
+    const confirm = await w.get(body.confirm);
+    secretFree(confirm.body, w.pem);
+    const tokenIn = /name="token" value="([\w-]+)"/.exec(confirm.body)?.[1] as string;
+    const done = await w.form(body.confirm, { token: tokenIn, passphrase: PASS });
+    expect(done.statusCode).toBe(303);
+    expect(w.store.current().dropZones[0]).toMatchObject({
+      id: 'demo',
+      repo: 'octo/demo',
+      identity: 'two-bot',
+      preset: 'node',
+    });
+    expect(w.calls.mint).toHaveLength(1);
+    secretFree(w.logs.join('\n'), w.pem);
+  });
+
+  test('an author app not installed on the repository: its install link, not NO_AUTHOR, and the page shows it', async () => {
+    const w = await appsWorld({ installed: false });
+    const d = await w.call('POST', '/api/control/detect', { repo: 'octo/demo' });
+    expect(d.statusCode).toBe(409);
+    const j = d.json();
+    expect(j.error).not.toBe(NO_AUTHOR);
+    expect(j.error).toContain(SLUG);
+    expect(j.error).toContain('not installed on octo/demo');
+    expect(j.error).toContain(`/apps/${SLUG}/installations/new`);
+    expect(j.installUrl).toBe(`https://github.com/apps/${SLUG}/installations/new`);
+    expect(w.calls.mint).toEqual([]);
+    const page = (await w.get('/setup/project')).body;
+    expect(page).toContain('a.href = j.installUrl');
+  });
+
+  test('no app entry and no token: still 409 NO_AUTHOR', async () => {
+    const w = await appsWorld({ roles: [] });
+    const d = await w.call('POST', '/api/control/detect', { repo: 'octo/demo' });
+    expect(d.statusCode).toBe(409);
+    expect(d.json()).toEqual({ error: NO_AUTHOR });
+    expect(w.calls.installationFor).toEqual([]);
+  });
+
+  test('a starter zone with no token is never read through the app', async () => {
+    const w = await appsWorld();
+    const add = await w.call('POST', '/api/control/zones', {
+      zone: { repo: 'octo/demo', identity: 'starter' },
+    });
+    expect(add.statusCode).toBe(409);
+    expect(add.json()).toEqual({ error: NO_AUTHOR });
+    expect(w.calls.installationFor).toEqual([]);
+  });
+
+  test('with the author token set, detection reads with the PAT and never calls the app', async () => {
+    const w = await appsWorld({ roles: ['author', 'reviewer'] });
+    await w.call('POST', '/api/control/sudo', { passphrase: PASS });
+    await w.call('PUT', '/api/control/secrets/githubAuthorToken', { value: AUTHOR });
+    const d = await w.call('POST', '/api/control/detect', { repo: 'octo/demo' });
+    expect(d.statusCode, d.body).toBe(200);
+    expect(w.detectTokens).toEqual([AUTHOR]);
+    expect(w.calls.installationFor).toEqual([]);
+    expect(w.calls.mint).toEqual([]);
+  });
+
+  test('/setup/next passes the GitHub step with an author and a reviewer app and no token, and not without', async () => {
+    const next = async (roles: ('author' | 'reviewer')[]) => {
+      const w = await appsWorld({ roles });
+      await w.call('POST', '/api/control/sudo', { passphrase: PASS });
+      await w.call('PUT', '/api/control/secrets/claudeToken', { value: CLAUDE });
+      return (await w.get('/setup/next')).headers.location;
+    };
+    expect(await next(['author', 'reviewer'])).toBe('/setup/stick');
+    expect(await next(['author'])).toBe('/setup/forge');
+    expect(await next([])).toBe('/setup/forge');
   });
 });

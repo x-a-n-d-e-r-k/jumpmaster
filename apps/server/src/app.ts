@@ -283,6 +283,8 @@ export function createApp(
     backoff?: Backoff;
     /** The forge detection reads through (tests); default GitHub on the author token. */
     detectForge?: ControlDeps['detectForge'];
+    /** The broker detection reads through on the owner's author app (tests); default GitHub's. */
+    detectAppBroker?: ControlDeps['detectAppBroker'];
     /** The forge the GitHub guidance reads through (tests); default GitHub. */
     guidanceForge?: ControlDeps['guidanceForge'];
     /** The forge a credential test reads through (tests); default GitHub. */
