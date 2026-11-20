@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import {
   chmodSync,
   mkdirSync,
@@ -13,6 +13,7 @@ import nock from 'nock';
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import type { ConfigStatus } from '../config/source.js';
 import { type DropZoneConfig, STARTER_WARNING } from '../config.js';
+import { openDb } from '../db/open.js';
 import {
   appendEvents,
   insertDrop,
@@ -23,13 +24,15 @@ import {
   stampStick,
 } from '../db/repo.js';
 import { InstallationCheckError } from '../forge/installation-verifier.js';
+import { ScrubSet } from '../forge/scrub-set.js';
 import { APP_MANIFEST_PERMISSIONS } from '../github/app-manifest.js';
 import { AUTHOR_TOKEN, ago, NOW, one, PG, world } from '../test/doctorWorld.js';
 import { okProbes } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
+import { tmpDbFile } from '../test/helpers.js';
 import { addTranscriptDrop } from '../test/transcriptWorld.js';
 import { prunePass } from '../transcripts.js';
-import type { Resolved } from '../vault/credentials.js';
+import { type Resolved, shadowedAppEntries } from '../vault/credentials.js';
 import {
   type AppEntryRead,
   type GitHubAppEntry,
@@ -37,7 +40,8 @@ import {
   serializeAppEntry,
 } from '../vault/github-app-entries.js';
 import { credentialProblems } from '../vault/problems.js';
-import type { ResolvedApps } from '../vault/resolution.js';
+import { type ResolvedApps, resolveAppEntries } from '../vault/resolution.js';
+import { openVault } from '../vault/vault.js';
 import {
   ADD_CHAT_SERVICE,
   CHECK_IDS,
@@ -1674,6 +1678,145 @@ describe('credential checks (Task 4)', () => {
       'githubAuthorToken is set by /secrets/github_author_token (aaaa1111) and in the vault (bbbb2222): the file is in use',
     );
     expect(JSON.stringify(c)).not.toContain(AUTHOR_TOKEN);
+  });
+
+  test('the token case keeps its fix text (issue #551 regression)', async () => {
+    const w = world();
+    w.deps.credentials = creds({
+      shadowed: [
+        {
+          name: 'githubAuthorToken',
+          path: '/secrets/github_author_token',
+          fileFingerprint: 'aaaa1111',
+          vaultFingerprint: 'bbbb2222',
+        },
+      ],
+    });
+    expect(one(await w.run(), 'credential.shadowed')).toMatchObject({
+      status: 'warn',
+      credentials: ['githubAuthorToken'],
+      fix: 'Remove the one you do not mean: delete the file (then jumpmaster ctl secrets reload), or remove the vault entry with jumpmaster ctl secrets remove <name>.',
+    });
+    w.deps.credentials = creds();
+    expect(one(await w.run(), 'credential.shadowed')).toMatchObject({
+      status: 'pass',
+      summary: 'no credential is set both in a file and in the vault',
+    });
+  });
+
+  describe('credential.shadowed for a GitHub App entry (issue #551)', () => {
+    const pemOf = (): string =>
+      generateKeyPairSync('rsa', { modulusLength: 2048 })
+        .privateKey.export({ type: 'pkcs8', format: 'pem' })
+        .toString();
+    const FILE_PEM = pemOf();
+    const VAULT_PEM = pemOf();
+    const CLIENT_ID = 'Iv23liSHADOWEDCLIENT551';
+    const app = (pem: string): GitHubAppEntry => ({
+      appId: '551',
+      slug: 'acme-author',
+      clientId: CLIENT_ID,
+      pem,
+      importedAt: '2026-11-15T10:00:00.000Z',
+    });
+    const setup = (filePem: string | undefined, vaultPem: string | undefined, prefer = false) => {
+      const keyFile = join(mkdtempSync(join(tmpdir(), 'jm-key-')), 'vault_key');
+      writeFileSync(keyFile, randomBytes(32).toString('base64url'), { mode: 0o600 });
+      const v = openVault(keyFile, openDb(tmpDbFile()));
+      if (v === 'disabled') throw new Error('no vault');
+      if (vaultPem) v.put('github-app/acme/author', serializeAppEntry(app(vaultPem)), { now: NOW });
+      const dir = mkdtempSync(join(tmpdir(), 'jm-secrets-'));
+      const path = join(dir, 'github-app', 'acme', 'author.json');
+      if (filePem) {
+        mkdirSync(join(dir, 'github-app', 'acme'), { recursive: true });
+        writeFileSync(path, JSON.stringify(app(filePem), null, 2), { mode: 0o600 });
+        chmodSync(path, 0o600);
+      }
+      const apps = resolveAppEntries([{ repo: 'acme/x' }], {
+        vault: v,
+        secretsDir: dir,
+        preferVault: prefer,
+        scrubSet: new ScrubSet(),
+      });
+      return { shadowed: shadowedAppEntries(apps, v), path };
+    };
+    const expectNoSecret = (c: DoctorCheck): void => {
+      const text = `${c.summary}\n${c.fix ?? ''}\n${JSON.stringify(c)}`;
+      expect(text).not.toContain(CLIENT_ID);
+      for (const pem of [FILE_PEM, VAULT_PEM]) {
+        expect(text).not.toContain(pem);
+        for (const line of pem.split('\n').filter((l) => l.length > 0))
+          expect(text).not.toContain(line);
+        expect(text).not.toContain(JSON.stringify(pem));
+      }
+    };
+
+    test('a differing file and vault entry warns, naming the entry, the file and the source in use', async () => {
+      const { shadowed, path } = setup(FILE_PEM, VAULT_PEM);
+      const w = world();
+      w.deps.credentials = creds({ shadowed });
+      const c = one(await w.run(), 'credential.shadowed');
+      expect(c).toMatchObject({
+        status: 'warn',
+        zoneId: null,
+        credentials: ['github-app/acme/author'],
+      });
+      const [s] = shadowed;
+      expect(c.summary).toBe(
+        `github-app/acme/author is set by ${path} (${s?.fileFingerprint}) and in the vault (${s?.vaultFingerprint}): the file is in use`,
+      );
+      expect(c.fix).toContain('jumpmaster ctl secrets reload');
+      expect(c.fix).toContain('/settings/credentials');
+      expect(c.fix).not.toContain('ctl secrets remove');
+      expectNoSecret(c);
+    });
+
+    test('under prefer-vault the summary says the vault entry is in use', async () => {
+      const { shadowed, path } = setup(FILE_PEM, VAULT_PEM, true);
+      const w = world();
+      w.deps.credentials = creds({ shadowed });
+      const c = one(await w.run(), 'credential.shadowed');
+      expect(c.status).toBe('warn');
+      expect(c.summary).toContain(`github-app/acme/author is set by ${path}`);
+      expect(c.summary).toMatch(/: the vault entry is in use$/);
+      expectNoSecret(c);
+    });
+
+    test('equal entries, or one source alone, pass with the existing summary', async () => {
+      for (const [f, v] of [
+        [FILE_PEM, FILE_PEM],
+        [FILE_PEM, undefined],
+        [undefined, VAULT_PEM],
+      ] as const) {
+        const w = world();
+        w.deps.credentials = creds({ shadowed: setup(f, v).shadowed });
+        expect(one(await w.run(), 'credential.shadowed')).toMatchObject({
+          status: 'pass',
+          summary: 'no credential is set both in a file and in the vault',
+        });
+      }
+    });
+
+    test('a token and an app entry both shadowed: each fix is given, and remove is offered for the token only', async () => {
+      const { shadowed } = setup(FILE_PEM, VAULT_PEM);
+      const w = world();
+      w.deps.credentials = creds({
+        shadowed: [
+          {
+            name: 'githubAuthorToken',
+            path: '/secrets/github_author_token',
+            fileFingerprint: 'aaaa1111',
+            vaultFingerprint: 'bbbb2222',
+          },
+          ...shadowed,
+        ],
+      });
+      const c = one(await w.run(), 'credential.shadowed');
+      expect(c.credentials).toEqual(['githubAuthorToken', 'github-app/acme/author']);
+      expect(c.fix).toContain('jumpmaster ctl secrets remove <name>');
+      expect(c.fix).toContain('/settings/credentials');
+      expectNoSecret(c);
+    });
   });
 
   test('a wrong key fails vault.key, naming no value', async () => {

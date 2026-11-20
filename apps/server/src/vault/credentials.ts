@@ -4,7 +4,12 @@ import { join } from 'node:path';
 import { readSecret, readSecretFile } from '@jumpmaster/protocol';
 import { appJwt } from '../forge/github-app.js';
 import { type ScrubSet, serverScrubSet } from '../forge/scrub-set.js';
-import { APP_ROLES, appEntryName, type GitHubAppEntry } from './github-app-entries.js';
+import {
+  APP_ROLES,
+  appEntryFileFingerprint,
+  appEntryName,
+  type GitHubAppEntry,
+} from './github-app-entries.js';
 import type { ResolvedApps } from './resolution.js';
 import { fingerprintOf, type Vault, VaultKeyError, type VaultMeta } from './vault.js';
 
@@ -262,6 +267,63 @@ export function shadowedCredentials(resolved: Resolved, vault: Vault | 'disabled
         vaultFingerprint: meta.fingerprint,
       });
   }
+  return out;
+}
+
+/** A GitHub App entry set by its file and in the vault with a different entry (issue #551). */
+export type ShadowedAppEntry = {
+  /** `github-app/<owner>/<role>`. */
+  name: string;
+  path: string;
+  fileFingerprint: string;
+  vaultFingerprint: string;
+  /** The source the store resolved: the file, or the vault under prefer-vault. */
+  inUse: 'file' | 'vault';
+};
+
+/**
+ * The resolved app entries (`ConfigStore.resolvedApps()`) whose file and vault entry both exist
+ * and differ, by canonical fingerprint: the file's is of its serialized entry, the vault's is
+ * `vault.meta(name).fingerprint` (`putAppEntry` stores the serialization). Holds no secret. A file
+ * the vault overrides that cannot be read is skipped: the vault entry is the one in use.
+ */
+export function shadowedAppEntries(
+  apps: ResolvedApps,
+  vault: Vault | 'disabled',
+): ShadowedAppEntry[] {
+  if (vault === 'disabled') return [];
+  const out: ShadowedAppEntry[] = [];
+  for (const [owner, reads] of apps)
+    for (const role of APP_ROLES) {
+      const r = reads[role];
+      if (r.source === 'missing') continue;
+      const name = appEntryName(owner, role);
+      const meta = vault.meta(name);
+      if (!meta) continue;
+      let path: string | undefined;
+      let fileFingerprint: string | undefined;
+      if (r.source === 'file') {
+        if (!r.overriding?.some((o) => o.source === 'vault')) continue;
+        path = r.path;
+        fileFingerprint = r.fingerprint;
+      } else {
+        path = r.overriding?.find((o) => o.source === 'file')?.path;
+        if (!path) continue;
+        try {
+          fileFingerprint = appEntryFileFingerprint(path);
+        } catch {
+          continue;
+        }
+      }
+      if (!path || fileFingerprint === meta.fingerprint) continue;
+      out.push({
+        name,
+        path,
+        fileFingerprint,
+        vaultFingerprint: meta.fingerprint,
+        inUse: r.source,
+      });
+    }
   return out;
 }
 

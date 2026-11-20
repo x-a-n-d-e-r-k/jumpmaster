@@ -72,6 +72,7 @@ import {
   APP_SIGN_FAILED,
   APP_SLUG_MISMATCH,
   type Shadowed,
+  type ShadowedAppEntry,
   testAppEntry,
 } from '../vault/credentials.js';
 import type { GitHubAppEntry } from '../vault/github-app-entries.js';
@@ -224,7 +225,8 @@ export type DoctorDeps = {
   /** The credentials as the store resolved them (Task 4); absent, the credential checks don't run. */
   credentials?: {
     problems: CredentialProblem[];
-    shadowed: Shadowed[];
+    /** Install credentials and gate secrets (`Shadowed`), and app entries (`ShadowedAppEntry`). */
+    shadowed: (Shadowed | ShadowedAppEntry)[];
     vaultKey: { status: 'ok' | 'empty' | 'disabled' } | { status: 'mismatch'; names: string[] };
     /**
      * The key file the vault opened (`ConfigStore.vaultKeyFile`): the one it read, `JM_VAULT_KEY_FILE` or the
@@ -3139,6 +3141,13 @@ function credentialChecks(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck[] {
   });
 }
 
+const SHADOWED_TOKEN_FIX =
+  'Remove the one you do not mean: delete the file (then jumpmaster ctl secrets reload), or remove the vault entry with jumpmaster ctl secrets remove <name>.';
+const SHADOWED_APP_FIX =
+  'For a GitHub App entry (github-app/<owner>/<role>), keep the one you mean: delete the file secrets/github-app/<owner>/<role>.json (then jumpmaster ctl secrets reload), or replace the vault entry on Settings → Credentials (/settings/credentials).';
+
+const isAppShadow = (s: Shadowed | ShadowedAppEntry): s is ShadowedAppEntry => 'inUse' in s;
+
 function shadowedCheck(d: DoctorDeps): DoctorCheck {
   const base = { id: 'credential.shadowed', zoneId: null, doc: doc('tokens') };
   const list = d.credentials?.shadowed ?? [];
@@ -3148,6 +3157,11 @@ function shadowedCheck(d: DoctorDeps): DoctorCheck {
       status: 'pass',
       summary: 'no credential is set both in a file and in the vault',
     };
+  // Names, paths and fingerprints only: never an entry's value.
+  const fix = [
+    ...(list.some((s) => !isAppShadow(s)) ? [SHADOWED_TOKEN_FIX] : []),
+    ...(list.some(isAppShadow) ? [SHADOWED_APP_FIX] : []),
+  ].join(' ');
   return {
     ...base,
     status: 'warn',
@@ -3155,10 +3169,10 @@ function shadowedCheck(d: DoctorDeps): DoctorCheck {
     summary: list
       .map(
         (s) =>
-          `${s.name} is set by ${s.path} (${s.fileFingerprint}) and in the vault (${s.vaultFingerprint}): the file is in use`,
+          `${s.name} is set by ${s.path} (${s.fileFingerprint}) and in the vault (${s.vaultFingerprint}): ${isAppShadow(s) && s.inUse === 'vault' ? 'the vault entry' : 'the file'} is in use`,
       )
       .join('; '),
-    fix: 'Remove the one you do not mean: delete the file (then jumpmaster ctl secrets reload), or remove the vault entry with jumpmaster ctl secrets remove <name>.',
+    fix,
   };
 }
 
