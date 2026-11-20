@@ -216,13 +216,14 @@ Saving a credential asks for your passphrase again (sudo, good for five minutes)
       Install each app on the repository's owner and choose **All repositories** or **Only select
       repositories** (then the repository). Either is fine: every token Jumpmaster mints is
       narrowed to one zone's repository.
-   5. After an install GitHub sends you to **The GitHub App is installed**. Press **Find the
-      installations**: Jumpmaster asks GitHub for each two-bot zone's installation and repository
-      ids and proposes them as a guarded change, which records nothing until you confirm it with
-      your passphrase (**Review and confirm**). It looks only at zones that already exist, so
-      if you install the apps before the Project step below, it says no zone uses GitHub Apps:
-      after **Create the project**, open `/setup/github-app/installed` and press **Find the
-      installations** again. Do the same whenever you add a zone for the same owner.
+   5. You need no author token on this path: go on to the Runner and Project steps. After
+      **Create the project** (step 4 below), find the installations: open
+      `/setup/github-app/installed` (GitHub sends you to this page, **The GitHub App is
+      installed**, after an install) and press **Find the installations**. Jumpmaster asks GitHub
+      for each two-bot zone's installation and repository ids and proposes them as a guarded
+      change, which records nothing until you confirm it with your passphrase (**Review and
+      confirm**). It looks only at zones that already exist: before **Create the project** it
+      says no zone uses GitHub Apps. Do the same whenever you add a zone for the same owner.
 
    **Tokens (starter mode, or "Use tokens instead").** Starter mode shows the token links
    directly; for two-bot they are folded under **Use tokens instead**. The token links open
@@ -238,8 +239,19 @@ Saving a credential asks for your passphrase again (sudo, good for five minutes)
    every change must pass**. Review them, pick the **Accounts**, and press **Create the
    project**. This adds a zone; it asks for confirmation first (see
    [Guarded changes](operate.md#guarded-changes-and-the-confirmation-page)). Egress starts in
-   `monitor`. Under **On GitHub: the ruleset and the code owners**, enter your GitHub login and
-   press **Show** for the two files of step 5.
+   `monitor`.
+
+   **With tokens**, Detect reads with the author token. Under **On GitHub: the ruleset and the
+   code owners**, enter your GitHub login and press **Show** for the two files of step 5.
+
+   **On the apps path, Detect needs the author app installed on the repository and no token**:
+   Jumpmaster reads the repository through the author app, with a token narrowed to that
+   repository and to reading its contents, used for this one detection and never stored. If the
+   app is not installed there, Detect says so and links its install page
+   (`https://github.com/apps/<slug>/installations/new`); install it and press **Detect** again.
+   **Create the project** needs no token either. Then **Find the installations** (step 2.5
+   above), and take the ruleset and CODEOWNERS from the zone's GitHub page,
+   `/zones/<zone>/github` (step 5), once the zone exists.
 5. **Doctor** (`/setup/doctor`). **Run the doctor**; see step 6.
 
 ### Step 5: The GitHub page

@@ -119,7 +119,7 @@ import {
 import { safeNext } from '../ui/auth-pages.js';
 import { MODE_LABELS } from '../ui/pages.js';
 import { credentialCreatedAt, shadowedCredentials, type TestDeps } from '../vault/credentials.js';
-import type { AppRole } from '../vault/github-app-entries.js';
+import type { AppRole, GitHubAppEntry } from '../vault/github-app-entries.js';
 import type { ResolvedApps } from '../vault/resolution.js';
 import {
   type DetectForge,
@@ -130,6 +130,11 @@ import {
   REPO,
   zoneIdOf,
 } from '../zones/detect.js';
+import {
+  authorAppToken,
+  type DetectAppBroker,
+  defaultDetectAppBroker,
+} from '../zones/detect-app.js';
 import { removalNote, stopZone } from '../zones/stop.js';
 import {
   NO_TARGET_REASON,
@@ -201,6 +206,11 @@ export interface ControlDeps {
   credentialForge?: TestDeps['forge'];
   /** The forge detection reads through, on the author token (default: GitHub, timed out). */
   detectForge?(repo: string, token: string): DetectForge;
+  /**
+   * The broker over an owner's author app entry, for detection with no author token before a zone
+   * exists (issue #549); default GitHub's, every secret in the scrub set.
+   */
+  detectAppBroker?(entry: Pick<GitHubAppEntry, 'appId' | 'pem'>): DetectAppBroker;
   /** The forge the GitHub guidance reads through; an empty token reads anonymously (tests). */
   guidanceForge?(repo: string, token: string): GuidanceForge;
   /** The operator's log (scrubbed); the secret routes never write a value to it. */
@@ -1216,7 +1226,13 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         actx,
         tokenOnly,
         deps.detectForge ?? githubDetectForge,
-        { db, now, ...(deps.reach ? { reach: deps.reach } : {}) },
+        {
+          db,
+          now,
+          ...(deps.reach ? { reach: deps.reach } : {}),
+          detectAppBroker: deps.detectAppBroker ?? defaultDetectAppBroker,
+          log: deps.log ?? (() => {}),
+        },
       );
       // GitHub guidance (Task 7): reads only, never a forge write.
       registerGuidanceRoutes(scope, {
@@ -1330,7 +1346,13 @@ function registerConfigRoutes(
   actx: (req: FastifyRequest) => ActionCtx,
   tokenOnly: (req: FastifyRequest, reply: FastifyReply) => boolean,
   detectForge: (repo: string, token: string) => DetectForge,
-  ctx: { db: Db; now(): Date; reach?: ReachDeps },
+  ctx: {
+    db: Db;
+    now(): Date;
+    reach?: ReachDeps;
+    detectAppBroker: (entry: Pick<GitHubAppEntry, 'appId' | 'pem'>) => DetectAppBroker;
+    log: (msg: string) => void;
+  },
 ): void {
   const { db, now } = ctx;
   // The guard sets a principal on every control route or answers 401; never assume one.
@@ -1355,27 +1377,56 @@ function registerConfigRoutes(
   const invalid = (reply: FastifyReply, shape: string) =>
     reply.code(400).send({ issues: [{ path: '', message: `invalid body: ${shape}` }] });
 
-  /** Detection on the author token, or the reason it cannot run (409 no token, 502 GitHub). */
+  /**
+   * Detection on the author token, or, with none, through the owner's author app (issue #549: an
+   * install on GitHub Apps before its first zone); or the reason it cannot run (409 no token and no
+   * author app, or the app not installed on the repository; 502 GitHub). A starter zone is never
+   * read through an app.
+   */
   const detect = async (
     req: FastifyRequest,
     reply: FastifyReply,
     repo: string,
     preset?: string,
+    identity?: unknown,
   ): Promise<Detection | undefined> => {
     const token = (req.jmConfig ?? store.current()).secrets.githubAuthorToken;
-    if (!token) {
+    const read = async (t: string) => {
+      try {
+        return await detectRepo(
+          detectForge(repo, t),
+          repo,
+          preset ? { preset: preset as Detection['candidates'][number] } : {},
+        );
+      } catch (e) {
+        void reply.code(502).send({ error: detectFailure(e, repo) });
+        return undefined;
+      }
+    };
+    if (token) return read(token);
+    const entry =
+      identity === 'starter' ? undefined : store.appEntry(repo.split('/')[0] ?? '', 'author');
+    if (!entry) {
       void reply.code(409).send({ error: NO_AUTHOR });
       return undefined;
     }
-    try {
-      return await detectRepo(
-        detectForge(repo, token),
-        repo,
-        preset ? { preset: preset as Detection['candidates'][number] } : {},
-      );
-    } catch (e) {
-      void reply.code(502).send({ error: detectFailure(e, repo) });
+    const minted = await authorAppToken({
+      entry,
+      broker: ctx.detectAppBroker(entry),
+      repo,
+      log: ctx.log,
+    });
+    if (!minted.ok) {
+      void reply.code(minted.status).send({
+        error: minted.error,
+        ...(minted.installUrl ? { installUrl: minted.installUrl } : {}),
+      });
       return undefined;
+    }
+    try {
+      return await read(minted.token);
+    } finally {
+      await minted.done();
     }
   };
 
@@ -1431,6 +1482,7 @@ function registerConfigRoutes(
         reply,
         repo,
         typeof add.preset === 'string' ? add.preset : undefined,
+        add.identity,
       );
       if (!d) return reply;
       if (!d.preset && add.preset === undefined)
