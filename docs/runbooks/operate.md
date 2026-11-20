@@ -195,7 +195,9 @@ too. A token entered here is dated the day it is entered, or the **Made on** dat
 
 Two-bot zones that use GitHub Apps (see [GitHub Apps](install.md#github-apps)) use one author app
 and one reviewer app per GitHub owner, and every zone on that owner's repositories shares the
-pair. Credentials lists each pair under **GitHub App entries**, one row per owner and role:
+pair. Credentials lists each pair under **GitHub App entries**, one row per owner and role. The
+rows are listed only for the owners of configured two-bot zones: an owner whose pair exists but
+who has no two-bot zone yet has no rows here.
 
 - **Owner**: the personal account or organization the app belongs to.
 - **Role**: `author` or `reviewer`.
@@ -221,13 +223,21 @@ reviewer app** (see [step 4](install.md#step-4-the-setup-wizard)). An owner whos
 exists gets an **Install it on the repository** link there instead.
 
 **Adding a repository on an owner that already has a pair.** The pair is already there; the new
-zone only needs its installation and repository ids.
+zone only needs its installation and repository ids. With no author token, **Detect** reads the
+repository through the author app, so the author app's installation must cover the repository
+before you add the zone (the order of [step 4](install.md#step-4-the-setup-wizard), the Project
+step on the apps path).
 
-1. Add the zone: [Add a project](#add-a-project), with two-bot accounts.
-2. If the apps' installations cover **Only select repositories**, add the new repository to each
-   app's installation on GitHub: follow the author row's **Install** link, choose
-   **Configure** on the owner where the app is installed, add the repository and save; then the
-   same for the reviewer row. An installation that covers **All repositories** needs nothing.
+1. If the apps' installations cover **Only select repositories**, add the new repository to each
+   app's installation on GitHub first, the author app before you press **Detect**: follow the
+   author row's **Install** link (or, if the owner has no two-bot zone yet and so no rows, the
+   **Install it on the repository** link on `/setup/forge`), choose **Configure** on the owner
+   where the app is installed, add the repository and save; then the same for the reviewer app.
+   An installation that covers **All repositories** needs nothing.
+2. Add the zone: [Add a project](#add-a-project), with two-bot accounts. If the author app's
+   installation does not cover the repository, **Detect** answers that the author app "is not
+   installed on" the repository and links its install page; add the repository to the
+   installation (step 1) and press **Detect** again.
 3. Open `/setup/github-app/installed` (GitHub also sends you there after an installation update)
    and press **Find the installations**. Jumpmaster asks GitHub for each two-bot zone's
    installation and repository ids and proposes them as one guarded change: follow **Review and
@@ -241,16 +251,23 @@ zone only needs its installation and repository ids.
 Whatever the installation covers, each token Jumpmaster mints is narrowed to the one zone's
 repository: All repositories does not give a drop the owner's other repositories.
 
-**Adding an owner** (another personal account or organization).
+**Adding an owner** (another personal account or organization). With no author token, the zone
+can only be added once the owner's pair exists and its author app is installed on the
+repository; before that, **Detect** answers that no author token is set (no pair) or that the
+author app is not installed on the repository. So the pair and the installations come first:
 
-1. Add the zone for the new owner's repository ([Add a project](#add-a-project)).
-2. Create that owner's pair: open `/setup/forge`, name the new repository and press
+1. Create that owner's pair: open `/setup/forge`, name the new repository and press
    **Recommend**; under **Register the apps under** choose **My personal account** or **The
    organization**, then press **Create the author app** and **Create the reviewer app**, and
    finish each on Jumpmaster's **Finish** page, as in
-   [step 4](install.md#step-4-the-setup-wizard). The new owner's rows then appear under Settings →
-   Credentials, **GitHub App entries**.
-3. Install both apps on the new owner, through each row's **Install** link.
+   [step 4](install.md#step-4-the-setup-wizard).
+2. Install both apps on the new owner, choosing **All repositories** or **Only select
+   repositories** with the new repository. The owner has no zone yet, so it has no rows under
+   **GitHub App entries**: use the install link on the saved page after **Finish**, or the
+   **Install it on the repository** link beside each created app on `/setup/forge`.
+3. Add the zone for the new owner's repository ([Add a project](#add-a-project)), with two-bot
+   accounts. The owner's rows appear under Settings → Credentials, **GitHub App entries**, once
+   this zone exists.
 4. Run discovery as above: `/setup/github-app/installed`, **Find the installations**, confirm with
    your passphrase.
 5. Set up the rulesets and CODEOWNERS the install runbook describes:

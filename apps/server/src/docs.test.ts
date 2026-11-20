@@ -162,3 +162,99 @@ describe('credential.shadowed covers GitHub App entry files (issue #551)', () =>
     expect(text).toContain('`/settings/credentials`');
   });
 });
+
+describe('operate runbook: adding a repository or an owner on GitHub Apps (issue #553)', () => {
+  const OPERATE = readFileSync(
+    new URL('../../../docs/runbooks/operate.md', import.meta.url),
+    'utf8',
+  );
+  const flat = (s: string) => s.replace(/\s+/g, ' ');
+
+  /** The text of the GitHub Apps section, from its heading to the next `#### ` heading. */
+  function appsSection(): string {
+    const start = OPERATE.indexOf('\n### GitHub Apps\n');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = OPERATE.indexOf('\n#### ', start + 1);
+    return OPERATE.slice(start, end < 0 ? undefined : end);
+  }
+
+  /** The numbered steps of the procedure that starts at `lead`, each flattened to one line. */
+  function steps(lead: string): string[] {
+    const text = appsSection();
+    const start = text.indexOf(lead);
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = text.indexOf('\n\n**', start + lead.length);
+    const body = text.slice(start, end < 0 ? undefined : end);
+    return body
+      .split(/\n(?=\d+\. )/)
+      .slice(1)
+      .map(flat);
+  }
+
+  /** The index of the first step containing `needle`; fails when none does. */
+  function stepOf(list: string[], needle: string): number {
+    const i = list.findIndex((s) => s.includes(needle));
+    expect(i, `no step mentions ${needle}`).toBeGreaterThanOrEqual(0);
+    return i;
+  }
+
+  const ADD_ZONE = '[Add a project](#add-a-project)';
+
+  test('Adding an owner: create the pair, install both apps, add the zone, then find the installations', () => {
+    const s = steps('**Adding an owner**');
+    const pair = stepOf(s, '**Create the author app**');
+    const install = stepOf(s, '**Install it on the repository**');
+    const zone = stepOf(s, ADD_ZONE);
+    const find = stepOf(s, '**Find the installations**');
+    const rules = stepOf(s, '[Branch rules](install.md#branch-rules)');
+    expect(pair).toBeLessThan(zone);
+    expect(install).toBeLessThan(zone);
+    expect(pair).toBeLessThanOrEqual(install);
+    expect(zone).toBeLessThan(find);
+    expect(find).toBeLessThan(rules);
+    expect(s[rules]).toMatch(/doctor/);
+  });
+
+  test('Adding an owner: the install step names a link that exists before the zone, not the Credentials rows', () => {
+    const s = steps('**Adding an owner**');
+    const install = s[stepOf(s, '**Install it on the repository**')] as string;
+    expect(install).toContain('`/setup/forge`');
+    expect(install).toContain('**Finish**');
+    expect(install).not.toContain("row's **Install** link");
+    for (const step of s.slice(0, stepOf(s, ADD_ZONE)))
+      expect(step).not.toMatch(/rows (then )?appear/);
+  });
+
+  test('the GitHub App entries rows are listed for the owners of configured two-bot zones', () => {
+    expect(flat(appsSection())).toContain(
+      'rows are listed only for the owners of configured two-bot zones',
+    );
+  });
+
+  test('Adding a repository on an owner with a pair: the installation covers it before the zone is added', () => {
+    const s = steps('**Adding a repository on an owner that already has a pair.**');
+    const cover = stepOf(s, '**Only select repositories**');
+    const zone = stepOf(s, ADD_ZONE);
+    expect(cover).toBeLessThan(zone);
+    expect(s[cover]).toMatch(/author app/);
+    // What Detect answers when the author app's installation does not cover the repository.
+    expect(s[zone]).toContain('is not installed on');
+    expect(s[zone]).toContain('**Detect**');
+  });
+
+  test("the operate runbook points at the install runbook's Project step for the order", () => {
+    expect(appsSection()).toContain('(install.md#step-4-the-setup-wizard)');
+  });
+
+  test('starter mode and "Use tokens instead" text is unchanged, and no secret appears', () => {
+    expect(flat(appsSection())).toContain(
+      flat(`**Starter mode and tokens.** Starter-mode zones, and two-bot zones that chose "Use tokens
+instead", are unchanged: they keep using the token rows above ([Credentials and
+rotation](#credentials-and-rotation)), and nothing here applies to them.`),
+    );
+    const text = appsSection();
+    expect(text).not.toMatch(/-----BEGIN/);
+    expect(text).not.toMatch(/\bgh[pousr]_[A-Za-z0-9]{20,}/);
+    expect(text).not.toMatch(/github_pat_[A-Za-z0-9_]{20,}/);
+  });
+});
