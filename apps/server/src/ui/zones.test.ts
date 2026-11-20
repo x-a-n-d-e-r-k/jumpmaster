@@ -439,7 +439,17 @@ describe('the zones page', () => {
       expect(row).toContain(`>${id.slice(0, 8)}</a>`);
     }
     for (const id of ids.slice(0, 5)) expect(row).not.toContain(`/drops/${id}`);
-    expect(row).toContain('<a href="/drops?zone=main">and 5 more</a>');
+    expect(row).toContain('<a href="/drops?zone=main&amp;kind=all">and 5 more</a>');
+  });
+
+  test('"and M more" opens a drops list that includes the doctor drops it counts', async () => {
+    const w = await world();
+    const ids = seedEgress(w.db, [{ host: 'new.example.com' }], 25);
+    const row = rowOf(section((await w.get('/zones/main')).body, 'egress'), 'new.example.com');
+    const href = /<a href="(\/drops\?[^"]+)">and 5 more<\/a>/.exec(row)?.[1];
+    expect(href).toBeDefined();
+    const list = (await w.get(href!.replaceAll('&amp;', '&'))).body;
+    for (const id of ids.slice(0, 5)) expect(list).toContain(`/drops/${id}`);
   });
 
   test('a host with 3 drops links all three and no "more" line', async () => {

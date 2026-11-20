@@ -12,6 +12,7 @@ import { BASE_EGRESS } from '../payloads.js';
 import { PRESET_EGRESS } from '../presets.js';
 import { FORM_SCRIPT, zoneToForm } from '../zones/form.js';
 import { renderFlags } from './flags.js';
+import { listHref } from './floor.js';
 import { askButton, escapeHtml, MODE_LABELS, page, zoneBriefingsHref, zoneHref } from './pages.js';
 import { getWizard, projectBody } from './setup.js';
 import { zoneName, zoneNameText } from './zone-name.js';
@@ -27,7 +28,7 @@ import { zoneName, zoneNameText } from './zone-name.js';
  */
 
 const EGRESS_WINDOW_MS = 14 * 86_400_000;
-/** How many drop links one observed host lists; the rest are a link to the zone's drops. */
+/** How many drop links one observed host lists; the rest are a link to the zone's drops of every kind. */
 const OBSERVED_DROP_LINKS = 20;
 const COUNT_FORMAT = new Intl.NumberFormat('en-US');
 /** A count with en-US thousands separators (`19,510`), whatever the server's locale. */
@@ -35,7 +36,8 @@ const formatCount = (n: number): string => COUNT_FORMAT.format(n);
 /**
  * The Drops cell of the observed table: the count of distinct drops, then a disclosure linking the
  * newest {@link OBSERVED_DROP_LINKS} (`drops` is oldest first, as `egressSeen` supplies it) and
- * "and M more" to the zone's drops list when there are more.
+ * "and M more" to the zone's drops list when there are more. The list shows every kind, since the
+ * hosts come from drops of every kind (doctor and crew drops included).
  */
 function dropsCell(zoneId: string, drops: string[]): string {
   const newest = drops.slice(-OBSERVED_DROP_LINKS).reverse();
@@ -45,7 +47,7 @@ function dropsCell(zoneId: string, drops: string[]): string {
     .join(' ');
   const more =
     rest > 0
-      ? ` <a href="/drops?zone=${encodeURIComponent(zoneId)}">and ${formatCount(rest)} more</a>`
+      ? ` <a href="${escapeHtml(listHref('/drops', zoneId))}">and ${formatCount(rest)} more</a>`
       : '';
   return `${formatCount(drops.length)} <details><summary>show ${formatCount(drops.length)}</summary>${links}${more}</details>`;
 }
