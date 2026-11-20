@@ -168,6 +168,12 @@ function descriptor(d: unknown, what: string): Descriptor {
   };
 }
 
+/** The digests a manifest's config and layers declare, as far as they are strings (data). */
+const blobDigests = (m: ManifestJson | undefined): string[] =>
+  [m?.config, ...(Array.isArray(m?.layers) ? m.layers : [])]
+    .map((d) => (d as { digest?: unknown } | undefined)?.digest)
+    .filter((d): d is string => typeof d === 'string');
+
 const parse = (bytes: Buffer, what: string): ManifestJson => {
   try {
     return JSON.parse(bytes.toString()) as ManifestJson;
@@ -201,6 +207,8 @@ export class ImageMirror {
   #storeBytes: number | undefined;
   /** Digests the running attempt stored or found in the store (issue #451). */
   #touched = new Set<string>();
+  /** Digests of the signature artifacts the running attempt refused (issue #557). */
+  #refusedDigests = new Set<string>();
 
   constructor(deps: MirrorDeps) {
     this.#deps = deps;
@@ -407,6 +415,7 @@ export class ImageMirror {
     rec.updatedAt = this.#now();
     this.#persist();
     this.#touched = new Set();
+    this.#refusedDigests = new Set();
     try {
       const got = await this.#fetch(rec);
       rec.index = got.index;
@@ -421,7 +430,9 @@ export class ImageMirror {
       return true;
     } catch (e) {
       rec.state = 'failed';
-      rec.partial = [...new Set([...(rec.partial ?? []), ...this.#touched])].sort();
+      // What earlier attempts stored stays named (issue #451), but for a refused artifact's.
+      const carried = (rec.partial ?? []).filter((d) => !this.#refusedDigests.has(d));
+      rec.partial = [...new Set([...carried, ...this.#touched])].sort();
       rec.error = this.#clean(errorText(e));
       rec.updatedAt = this.#now();
       this.#persist();
@@ -590,11 +601,12 @@ export class ImageMirror {
       }
       seen.add(desc.digest);
       const mark = this.#mark();
+      let body: ManifestJson | undefined;
       try {
         this.#manifestSize(desc.size);
         const m = await client.manifest(desc.digest);
         this.#manifestSize(m.bytes.length);
-        const body = parse(m.bytes, `referrer ${desc.digest}`);
+        body = parse(m.bytes, `referrer ${desc.digest}`);
         // A referrer of another digest is not this image's signature.
         if (body.subject?.digest !== digest) continue;
         const type = body.artifactType ?? body.config?.mediaType;
@@ -613,7 +625,7 @@ export class ImageMirror {
         });
       } catch (e) {
         if (!(e instanceof SignatureRefused)) throw e;
-        this.#unnote(mark);
+        this.#unnote(mark, [desc.digest, ...blobDigests(body)]);
         refuse(desc.digest, e.message);
       }
     }
@@ -628,9 +640,10 @@ export class ImageMirror {
     const legacy = await client.signatureTag(digest, '.sig');
     if (legacy && !seen.has(legacy.digest)) {
       const mark = this.#mark();
+      let body: ManifestJson | undefined;
       try {
         this.#manifestSize(legacy.bytes.length);
-        const body = parse(legacy.bytes, 'the .sig manifest');
+        body = parse(legacy.bytes, 'the .sig manifest');
         const blobs = await this.#blobs(client, body, 'the .sig manifest', true);
         this.#put(legacy.digest, legacy.bytes);
         out.push({
@@ -646,7 +659,7 @@ export class ImageMirror {
         });
       } catch (e) {
         if (!(e instanceof SignatureRefused)) throw e;
-        this.#unnote(mark);
+        this.#unnote(mark, [legacy.digest, ...blobDigests(body)]);
         refuse(legacy.digest, e.message);
       }
     }
@@ -667,12 +680,21 @@ export class ImageMirror {
   }
 
   /**
-   * Forgets what the attempt noted since `mark`: a refused signature artifact's blobs (issue
-   * #486). No retry uses them, so a failed record does not name them and collection deletes them;
-   * one noted before `mark` (shared with a platform or an accepted artifact) stays noted.
+   * Forgets a refused signature artifact: what the attempt noted since `mark` (issue #486), and,
+   * with `named` (its manifest and the blobs it declares), each digest from the `partial` an
+   * earlier attempt left (issue #557). No retry uses them. A failed record is written as that
+   * `partial` less every digest an attempt refused, plus what it noted: one noted before `mark`
+   * (shared with a platform or an accepted artifact) or noted again later in the attempt stays
+   * named and kept; the others are named by no record of their own and collection deletes them.
+   * An attempt that fails before the signatures refuses nothing, so it drops nothing (issue #451).
    */
-  #unnote(mark: Set<string>): void {
-    for (const d of this.#touched) if (!mark.has(d)) this.#touched.delete(d);
+  #unnote(mark: Set<string>, named: string[]): void {
+    for (const d of this.#touched)
+      if (!mark.has(d)) {
+        this.#touched.delete(d);
+        this.#refusedDigests.add(d);
+      }
+    for (const d of named) this.#refusedDigests.add(d);
   }
 
   /** Stores a manifest the running attempt fetched, noting it for a retry (issue #451). */

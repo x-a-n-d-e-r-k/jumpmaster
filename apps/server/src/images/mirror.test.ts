@@ -803,6 +803,167 @@ describe('the store keeps only the blobs the index names (issue #426)', () => {
     expect(partial).not.toContain(refused.manifest);
   });
 
+  test('a refused artifact’s blob noted by an earlier failed attempt leaves `partial`', async () => {
+    const MiB = 1024 * 1024;
+    fake = await startFakeRegistry();
+    const img = fake.addImage('jumpmaster-trooper', { signatures: 'none' });
+    const refused = fake.addSignature(img, {
+      via: 'referrers-api',
+      config: Buffer.from('{"refused":true}'),
+      layer: Buffer.alloc(5 * MiB, 1),
+      declaredSize: 1024,
+    });
+    const [config, layer] = refused.blobs as [string, string];
+    const dir = tmp();
+    let flaky = true;
+    let waits = 0;
+    const partials: string[][] = [];
+    const m = mirrorOn(dir, {
+      backoffMs: [1],
+      // Attempt 1: the layer fetch fails after the config is stored, so the attempt notes it.
+      fetch: (async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        if (flaky && String(url).includes(layer)) throw new Error('connection reset');
+        return fetch(url, init);
+      }) as typeof fetch,
+      sleep: async () => {
+        waits++;
+        partials.push(indexOf(dir).images[`${img.name}@${img.digest}`]?.partial ?? []);
+        flaky = false;
+        if (waits >= 2) m.stop();
+      },
+    });
+    m.setLock(lockOf(img));
+    m.start();
+    await m.idle();
+    expect(partials[0]).toContain(config); // attempt 1: not refused yet, kept for the retry
+    expect(m.status().images[0]?.error).toMatch(/no cosign signature/); // attempt 2: refused
+    expect(partials[1]).not.toContain(config);
+    expect(stored(dir)).not.toContain(config);
+    for (const p of Object.values(img.platforms))
+      for (const d of p.blobs) {
+        expect(partials[1]).toContain(d);
+        expect(stored(dir)).toContain(d);
+      }
+  });
+
+  /**
+   * One failed attempt at `img` in `dir`, then the record's `partial` widened with the digests of
+   * `extra` and each written to the store, as a mirror before issue #557 could leave them.
+   */
+  async function preFix(dir: string, img: FakeImage, extra: Buffer[]) {
+    const first = mirrorOn(dir, { backoffMs: [1], sleep: async () => first.stop() });
+    await pass(first, lockOf(img));
+    const file = join(dir, 'images', 'index.json');
+    const idx = indexOf(dir);
+    const rec = idx.images[`${img.name}@${img.digest}`];
+    if (!rec) throw new Error('no record');
+    rec.partial = [...new Set([...(rec.partial ?? []), ...extra.map(sha)])].sort();
+    writeFileSync(file, JSON.stringify(idx));
+    for (const b of extra) writeFileSync(join(blobDir(dir), hex(sha(b))), b);
+    return rec.partial;
+  }
+
+  test('a failed record written before the fix sheds its refused artifacts’ blobs in one attempt', async () => {
+    const MiB = 1024 * 1024;
+    fake = await startFakeRegistry();
+    const img = fake.addImage('jumpmaster-trooper', { signatures: 'none' });
+    // Refused when its layer is delivered over its declared size.
+    const configs = [Buffer.from('{"refused":"delivered"}'), Buffer.from('{"refused":"declared"}')];
+    const delivered = fake.addSignature(img, {
+      via: 'referrers-api',
+      config: configs[0],
+      layer: Buffer.alloc(5 * MiB, 1),
+      declaredSize: 1024,
+    });
+    // Refused on its declared size, before anything is fetched.
+    const declared = fake.addSignature(img, {
+      via: 'referrers-api',
+      config: configs[1],
+      layer: Buffer.from('small'),
+      declaredSize: MAX_SIGNATURE_BLOB_BYTES + 1,
+    });
+    const extra = configs.map(sha);
+    expect(extra).toEqual([delivered.blobs[0], declared.blobs[0]]);
+    const dir = tmp();
+    await preFix(dir, img, configs);
+    for (const d of extra) expect(stored(dir), d).toContain(d);
+    const m = mirrorOn(dir, { backoffMs: [1], sleep: async () => m.stop() });
+    await pass(m, lockOf(img));
+    expect(m.status().images[0]?.error).toMatch(/no cosign signature/);
+    const partial = indexOf(dir).images[`${img.name}@${img.digest}`]?.partial ?? [];
+    for (const d of extra) {
+      expect(partial, d).not.toContain(d);
+      expect(stored(dir), d).not.toContain(d);
+    }
+    for (const p of Object.values(img.platforms))
+      for (const d of [p.manifest, ...p.blobs]) {
+        expect(partial, d).toContain(d);
+        expect(stored(dir), d).toContain(d);
+      }
+  });
+
+  test('a carried-over blob a refused artifact shares with an accepted one stays', async () => {
+    const MiB = 1024 * 1024;
+    fake = await startFakeRegistry();
+    const img = fake.addImage('jumpmaster-trooper', { signatures: 'none' });
+    // Refused before the accepted artifact sharing its `{}` config is read: noted again later.
+    const sharing = fake.addSignature(img, {
+      via: 'referrers-api',
+      layer: Buffer.alloc(5 * MiB, 2),
+      declaredSize: 1024,
+    });
+    const accepted = fake.addSignature(img, { via: 'referrers-api' });
+    const broken = fake.addSignature(img, { via: 'referrers-api' });
+    fake.corrupt(broken.blobs[1] as string);
+    expect(sharing.blobs[0]).toBe(accepted.blobs[0]);
+    const shared = sharing.blobs[0] as string;
+    const dir = tmp();
+    const before = await preFix(dir, img, []);
+    expect(before).toContain(shared);
+    const m = mirrorOn(dir, { backoffMs: [1], sleep: async () => m.stop() });
+    await pass(m, lockOf(img));
+    expect(m.status().images[0]?.state).toBe('failed');
+    const partial = indexOf(dir).images[`${img.name}@${img.digest}`]?.partial ?? [];
+    for (const d of [shared, accepted.manifest, ...accepted.blobs]) {
+      expect(partial, d).toContain(d);
+      expect(stored(dir), d).toContain(d);
+    }
+    expect(partial).not.toContain(sharing.blobs[1]);
+  });
+
+  test('an attempt that fails before the signatures keeps every digest of the previous `partial`', async () => {
+    const MiB = 1024 * 1024;
+    fake = await startFakeRegistry();
+    const img = fake.addImage('jumpmaster-trooper', { signatures: 'none' });
+    const config = Buffer.from('{"refused":true}');
+    const refused = fake.addSignature(img, {
+      via: 'referrers-api',
+      config,
+      layer: Buffer.alloc(5 * MiB, 1),
+      declaredSize: 1024,
+    });
+    const dir = tmp();
+    const before = await preFix(dir, img, [config]);
+    expect(before).toContain(refused.blobs[0]);
+    // The arm64 manifest cannot be fetched: the attempt fails before the signatures.
+    const arm = img.platforms['linux/arm64']?.manifest as string;
+    const m = mirrorOn(dir, {
+      backoffMs: [1],
+      sleep: async () => m.stop(),
+      fetch: (async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        if (String(url).includes(arm)) throw new Error('connection reset');
+        return fetch(url, init);
+      }) as typeof fetch,
+    });
+    await pass(m, lockOf(img));
+    expect(m.status().images[0]?.error).toMatch(/could not be reached/);
+    const partial = indexOf(dir).images[`${img.name}@${img.digest}`]?.partial ?? [];
+    for (const d of before) {
+      expect(partial, d).toContain(d);
+      expect(stored(dir), d).toContain(d);
+    }
+  });
+
   test('the status reports the store’s size on disk', async () => {
     fake = await startFakeRegistry();
     const a = fake.addImage('jumpmaster-trooper');
