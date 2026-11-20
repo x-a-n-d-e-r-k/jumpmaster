@@ -805,7 +805,7 @@ describe('/chat Markdown (#490)', () => {
     const log = /<div id="messages"[^>]*>([\s\S]*)<\/div><form id="send"/.exec(html)?.[1] ?? '';
     return [
       ...log.matchAll(
-        /<div class="msg (\w+)"|<details class="steps"><summary>[^<]*<\/summary><ol>((?:<li data-seq="\d+">[^<]*<\/li>)*)<\/ol><\/details>/g,
+        /<div class="msg (\w+)[" ]|<details class="steps"><summary>[^<]*<\/summary><ol>((?:<li data-seq="\d+">[^<]*<\/li>)*)<\/ol><\/details>/g,
       ),
     ].map((m) => (m[1] ?? `steps:${(m[2]?.match(/<li /g) ?? []).length}`) as string);
   }
@@ -898,14 +898,92 @@ describe('/chat Markdown (#490)', () => {
     expect(log.children[0]?.querySelector('summary')?.textContent).toBe('Worked through 2 steps');
   });
 
-  test('text and card events close the open group', () => {
+  test('live text keeps the open group, a card closes it, and the live reply stays last', () => {
     const { log, emit } = runScript();
     emit('tool', { seq: 2, text: 'a' });
     emit('text', { seq: 2, text: 'thinking' });
     emit('tool', { seq: 3, text: 'b' });
+    expect(liveShape(log)).toEqual(['steps:2', 'assistant']);
+    expect(log.children[0]?.querySelector('summary')?.textContent).toBe('Worked through 2 steps');
     emit('card', { card: { id: 9, kind: 'x', state: 'pending', summary: 's' } });
     emit('tool', { seq: 4, text: 'c' });
-    expect(liveShape(log)).toEqual(['steps:1', 'assistant', 'steps:1', 'card', 'steps:1']);
+    expect(liveShape(log)).toEqual(['steps:2', 'card', 'steps:1', 'assistant']);
+    expect(log.children[2]?.querySelector('summary')?.textContent).toBe('Worked through 1 step');
+    expect((log.children[3] as FakeEl).className).toBe('msg assistant live');
+  });
+
+  test('a card between tool lines with live text splits the group the same streamed and stored', () => {
+    const msgs = [
+      stored(1, 'owner', 'go'),
+      stored(2, 'tool', 'a'),
+      stored(3, 'tool', 'b'),
+      stored(4, 'assistant', 'thinking'),
+    ];
+    msgs[2] = { ...(msgs[2] as ChatMessage), createdAt: plus(t0, 2000).toISOString() };
+    msgs[3] = { ...(msgs[3] as ChatMessage), createdAt: plus(t0, 3000).toISOString() };
+    const card = {
+      id: 9,
+      threadId: 1,
+      kind: 'x',
+      state: 'pending',
+      summary: 's',
+      link: null,
+      createdAt: plus(t0, 1000).toISOString(),
+    } as unknown as ChatCard;
+    const html = renderThread(THREAD, msgs, [card]);
+    const { log, emit } = runScript();
+    emit('message', { ...msgs[0], html: messageTextHtml(msgs[0] as ChatMessage) });
+    emit('tool', { seq: 2, text: 'a' });
+    emit('text', { seq: 2, text: 'thinking' });
+    emit('card', { card: { id: 9, kind: 'x', state: 'pending', summary: 's' } });
+    emit('tool', { seq: 3, text: 'b' });
+    emit('message', { ...msgs[3], html: messageTextHtml(msgs[3] as ChatMessage) });
+    expect(liveShape(log)).toEqual(storedShape(html));
+    expect(liveShape(log)).toEqual(['owner', 'steps:1', 'card', 'steps:1', 'assistant']);
+  });
+
+  test('a turn with text between tool calls groups the same streamed and stored', () => {
+    // What the server stores for the turn: both tool lines, then the one assistant message.
+    const msgs = [
+      stored(1, 'owner', 'go'),
+      stored(2, 'tool', 'read a'),
+      stored(3, 'tool', 'read b'),
+      stored(4, 'assistant', 'thinking\n\ndone'),
+    ];
+    const html = renderThread(THREAD, msgs);
+    // What the server streams for it: the text arrives between the tool lines.
+    const { log, emit } = runScript();
+    emit('message', { ...msgs[0], html: messageTextHtml(msgs[0] as ChatMessage) });
+    emit('tool', { seq: 2, text: 'read a' });
+    emit('text', { seq: 2, text: 'thinking' });
+    emit('tool', { seq: 3, text: 'read b' });
+    emit('text', { seq: 3, text: 'done' });
+    emit('message', { ...msgs[3], html: messageTextHtml(msgs[3] as ChatMessage) });
+    expect(liveShape(log)).toEqual(storedShape(html));
+    expect(liveShape(log)).toEqual(['owner', 'steps:2', 'assistant']);
+  });
+
+  test('the final reply lands after the last tool step live, as stored, when text streamed before it', () => {
+    const msgs = [
+      stored(1, 'owner', 'go'),
+      stored(2, 'tool', 'read a'),
+      stored(3, 'tool', 'read b'),
+      stored(4, 'assistant', 'thinking'),
+    ];
+    const html = renderThread(THREAD, msgs);
+    const { log, emit } = runScript();
+    emit('message', { ...msgs[0], html: messageTextHtml(msgs[0] as ChatMessage) });
+    emit('text', { seq: 1, text: 'thinking' });
+    emit('tool', { seq: 2, text: 'read a' });
+    emit('tool', { seq: 3, text: 'read b' });
+    expect(liveShape(log)).toEqual(['owner', 'steps:2', 'assistant']);
+    emit('message', { ...msgs[3], html: '<p>thinking</p>' });
+    expect(liveShape(log)).toEqual(storedShape(html));
+    const reply = log.children[2] as FakeEl;
+    expect(reply.className).toBe('msg assistant');
+    expect(reply.dataset.seq).toBe('4');
+    expect(log.children.filter((c) => c.className.includes('live'))).toEqual([]);
+    expect(FakeEl.htmlWrites.map((w) => w.value)).toEqual(['<p>thinking</p>']);
   });
 
   test('stored and streamed rendering give the same groups for the same sequence', () => {
