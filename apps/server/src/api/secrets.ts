@@ -67,6 +67,11 @@ const PutBody = z.strictObject({
 
 /** A Replace key body (#487): one PEM, multi-line, at most 64 KiB. */
 const KeyBody = z.strictObject({ pem: z.string().min(1).max(MAX_SECRET_FILE_BYTES) });
+
+/** A pasted PEM with LF line ends, no surrounding whitespace, and exactly one final newline. */
+function canonicalPem(pem: string): string {
+  return `${pem.replace(/\r\n/g, '\n').trim()}\n`;
+}
 /** Said after a key is replaced: both keys stay valid on GitHub until the old one is deleted. */
 export const DELETE_OLD_KEY =
   "The new key is stored and in use. Now delete the old key on the app's GitHub page, under Private keys: until then both keys stay valid.";
@@ -429,7 +434,11 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
         return reply
           .code(400)
           .send({ error: 'invalid body: {"pem": "<the PEM text, at most 64 KiB>"}' });
-      const { pem } = body.data;
+      // Copying from an editor or a terminal adds blank lines, spaces or CRLF line ends (#559):
+      // the key is checked and stored in its canonical form. Both texts stay scrubbed.
+      const received = body.data.pem;
+      serverScrubSet.addPem(received);
+      const pem = canonicalPem(received);
       serverScrubSet.addPem(pem);
       if (!isPrivateKeyPem(pem))
         return reply.code(400).send({

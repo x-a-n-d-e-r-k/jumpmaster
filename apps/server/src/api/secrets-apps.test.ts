@@ -19,7 +19,11 @@ import { openDb } from '../db/open.js';
 import { upsertDropZone } from '../db/repo.js';
 import { createAppBrokers } from '../forge/app-brokers.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
-import { type GitHubAppEntry, serializeAppEntry } from '../vault/github-app-entries.js';
+import {
+  type GitHubAppEntry,
+  parseAppEntry,
+  serializeAppEntry,
+} from '../vault/github-app-entries.js';
 import { fingerprintOf, openVault, type Vault } from '../vault/vault.js';
 import { type ControlDeps, registerControlRoutes } from './control.js';
 
@@ -568,6 +572,59 @@ describe('Replace key on a GitHub App entry (issue #487)', () => {
     expect(snaps()).toEqual(before);
     expect(nock.pendingMocks()).toEqual([]);
     expectNoKeys(allText(w, notPem.body, missing.body, file.body), newPem);
+  });
+
+  test.each([
+    ['a trailing blank line', (p: string) => `${p}\n`],
+    ['a leading blank line', (p: string) => `\n${p}`],
+    ['trailing spaces after the END line', (p: string) => `${p.trimEnd()}   `],
+    ['CRLF line ends and a trailing blank line', (p: string) => `${p.replace(/\n/g, '\r\n')}\r\n`],
+  ])(
+    'a valid key pasted with %s is tested and stored in canonical form (issue #559)',
+    async (_, pad) => {
+      const w = world();
+      const newPem = pemOf();
+      fakeAppFor(newPem);
+      const r = await replaceKey('acme', 'author', { pem: pad(newPem) });
+      expect(r.statusCode).toBe(200);
+      const read = w.store.resolvedApps().get('acme')?.author;
+      if (read?.source !== 'vault') throw new Error('expected a vault entry');
+      expect(read.entry.pem).toBe(`${newPem.replace(/\r\n/g, '\n').trim()}\n`);
+      expect(parseAppEntry(serializeAppEntry(read.entry))).toEqual(read.entry);
+      expectNoKeys(allText(w, r.body), newPem);
+    },
+  );
+
+  test('padding does not make a non-key acceptable: padded junk, a junk line, two blocks (issue #559)', async () => {
+    const w = world();
+    const snaps = () =>
+      ['acme/author', 'acme/reviewer', 'beta/author', 'beta/reviewer'].map((n) =>
+        w.vault.snapshot(`github-app/${n}`),
+      );
+    const before = snaps();
+    const newPem = pemOf();
+    const other = pemOf();
+    const lines = newPem.split('\n');
+    const junkLine = [...lines.slice(0, 3), 'not base64 at all!', ...lines.slice(3)].join('\n');
+    const bodies: string[] = [];
+    for (const pem of [
+      '\n  not a key  \n',
+      junkLine,
+      `${newPem}${other}`,
+      `${newPem}\n${other}\n`,
+    ]) {
+      const r = await replaceKey('acme', 'author', { pem });
+      expect(r.statusCode).toBe(400);
+      expect(r.json()).toEqual({
+        error:
+          'the key is not a private-key PEM: paste the whole .pem file GitHub downloaded, from -----BEGIN to -----END',
+      });
+      expect(r.body).not.toContain('not a key');
+      bodies.push(r.body);
+    }
+    expect(snaps()).toEqual(before);
+    expect(replaceAudits(w)).toEqual([]);
+    expectNoKeys(allText(w, ...bodies), newPem, other);
   });
 
   test('the vault off: 409 VAULT_DISABLED and nothing stored', async () => {
