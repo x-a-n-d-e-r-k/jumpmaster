@@ -37,21 +37,28 @@ const DEFAULT_TITLE = 'New chat';
 export const MESSAGE_TITLE_CHARS = 60;
 
 /**
- * A thread's title from its first owner message (#492): whitespace collapsed, leading heading
- * markers off, and cut at a word boundary with `…` to at most MESSAGE_TITLE_CHARS. Empty when
- * nothing is left.
+ * A thread's title from its first owner message (#492): whitespace collapsed, a leading heading
+ * marker (`#`s then whitespace or the end) off, so `#105` stays, and cut at a word boundary with
+ * `…` to at most MESSAGE_TITLE_CHARS, never inside a surrogate pair. Empty when nothing is left.
  */
 export function titleFromMessage(text: string): string {
   const flat = text
     .replace(/\s+/g, ' ')
     .trim()
-    .replace(/^#+\s*/, '')
+    .replace(/^#+(?:\s+|$)/, '')
     .trim();
   if (flat.length <= MESSAGE_TITLE_CHARS) return flat;
   const room = flat.slice(0, MESSAGE_TITLE_CHARS);
   const space = room.lastIndexOf(' ');
-  const cut = space > 0 ? room.slice(0, space) : room.slice(0, MESSAGE_TITLE_CHARS - 1);
-  return `${cut.trimEnd().slice(0, MESSAGE_TITLE_CHARS - 1)}…`;
+  const cut = space > 0 ? room.slice(0, space) : room;
+  return `${sliceWhole(cut.trimEnd(), MESSAGE_TITLE_CHARS - 1)}…`;
+}
+
+/** The first `max` UTF-16 units of `text`, one fewer when the cut would split a surrogate pair. */
+function sliceWhole(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const high = text.charCodeAt(max - 1);
+  return text.slice(0, high >= 0xd800 && high <= 0xdbff ? max - 1 : max);
 }
 
 export interface ChatRouteDeps {
