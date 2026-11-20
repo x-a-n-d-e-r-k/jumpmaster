@@ -298,7 +298,9 @@ this, so the new key is made on GitHub and pasted into Jumpmaster:
 5. Delete the downloaded `.pem` from the machine you pasted it from.
 
 Rotation does not change the app id, the slug, the installations or open pull requests: nothing
-else needs redoing, and the doctor's key-age warning clears.
+else needs redoing. **Replace key** sets the entry's **Imported** date to now, so the doctor's
+key-age warning clears; for a file-sourced entry it clears once the file's `importedAt` is set, as
+below.
 
 Tokens already minted from the old key run to their own expiry (an hour at most); deleting the old
 key on GitHub stops new mints with it, not those tokens. If the key leaked, turn on the
@@ -307,9 +309,25 @@ live token, and `ctl unkill` resumes once the old key is deleted
 ([Pending pushes](#pending-pushes)).
 
 **A file-sourced entry** (its **Source** is the file `secrets/github-app/<owner>/<role>.json`) has
-no **Replace key**: replace the PEM in that file (keep it at mode `0600`), run
-`ctl secrets reload`, press **Test** on the row, then delete the old key on the app's GitHub page
-as in step 4.
+no **Replace key**: you edit the file instead. It is JSON, and the key is its `pem` field, one JSON
+string with the key's line ends written as `\n`: pasting the multi-line `.pem` over the old value
+breaks the file, and the server refuses it. In the same edit set `importedAt` to the current
+ISO-8601 date-time (UTC, for example `2026-11-20T09:30:00Z`): the doctor's key-age warning is read
+from that field, and nothing else updates it, so a file with only a new `pem` keeps the warning.
+From the install directory, with `jq` 1.6 or later, this writes both fields from the downloaded
+`.pem` without showing the key on the terminal or putting it in shell history, and keeps the file
+at mode `0600`:
+
+```sh
+f=secrets/github-app/<owner>/<role>.json
+( umask 077 && jq --rawfile pem /path/to/downloaded.pem \
+    --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.pem = $pem | .importedAt = $at' "$f" > "$f.new" ) \
+  && chmod 600 "$f.new" && mv "$f.new" "$f" || rm -f "$f.new"
+```
+
+Then run `ctl secrets reload`, press **Test** on the row (its **Imported** date is now today and
+the doctor's key-age warning clears), delete the old key on the app's GitHub page as in step 4, and
+delete the downloaded `.pem` as in step 5.
 
 **From a script.** There is no `ctl` verb for this, since the key spans many lines. A script sends
 `{"pem": "<the new key>"}` with `PUT` to `/api/control/secrets/github-app/<owner>/<role>/key`,

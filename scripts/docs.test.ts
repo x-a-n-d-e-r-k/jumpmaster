@@ -2,6 +2,7 @@
 // and docs point at exists (GitHub's heading slugs), every doctor check id has a troubleshooting
 // entry, no image is named by tag, and the cosign commands match what the stick verifies.
 import { spawnSync } from 'node:child_process';
+import { generateKeyPairSync } from 'node:crypto';
 import {
   chmodSync,
   existsSync,
@@ -21,6 +22,7 @@ import { STARTER_WARNING } from '../apps/server/src/config.js';
 import { actionFor, type Pages } from '../apps/server/src/doctor/actions.js';
 import { CHECK_IDS, DOC } from '../apps/server/src/doctor/checks.js';
 import { makeZone } from '../apps/server/src/test/fixtures.js';
+import { parseAppEntry } from '../apps/server/src/vault/github-app-entries.js';
 import { healthLine } from '../apps/stick/src/state.js';
 import { GITHUB_ISSUER, identityRegexp } from '../apps/stick/src/verify.js';
 import { walk } from './repo-files.js';
@@ -751,6 +753,50 @@ describe('rotating a GitHub App private key (issue 504)', () => {
     // The wrong-app and slug-mismatch bullets stay.
     expect(author).toContain("the key belongs to another app than the entry's: re-import the app");
     expect(author).toContain("add the old login to the zone's `authorLoginAliases`");
+  });
+
+  const fileSourced = () => {
+    const text = flat(rotation());
+    const start = text.indexOf('**A file-sourced entry**');
+    expect(start).toBeGreaterThan(-1);
+    const end = text.indexOf('**From a script.**', start);
+    return text.slice(start, end === -1 ? undefined : end);
+  };
+
+  test('the file-sourced steps set importedAt, which the key-age warning reads', () => {
+    const file = fileSourced();
+    expect(file).toContain('`importedAt`');
+    expect(file).toContain('`pem`');
+    expect(file).toMatch(/\\n/);
+    expect(file).toMatch(/JSON/);
+    expect(file).toMatch(/key-age warning/);
+    expect(file).toContain('0600');
+    expect(file).toContain('`ctl secrets reload`');
+    // One copy-paste command that builds the values from the downloaded .pem without echoing it.
+    expect(file).toContain('--rawfile pem');
+    expect(file).toMatch(/umask 077/);
+    expect(file).not.toMatch(/\bcat\b|\becho\b/);
+  });
+
+  test('the fields the file-sourced steps name are fields parseAppEntry requires', () => {
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const good = {
+      appId: '123456',
+      slug: 'acme-jumpmaster-author',
+      clientId: 'Iv23liClientId0001',
+      pem: privateKey.export({ type: 'pkcs8', format: 'pem' }).toString(),
+      importedAt: '2026-11-15T10:00:00.000Z',
+    };
+    expect(parseAppEntry(JSON.stringify(good)).importedAt).toBe(good.importedAt);
+    const file = fileSourced();
+    for (const f of ['pem', 'importedAt'] as const) {
+      const { [f]: _dropped, ...rest } = good;
+      expect(() => parseAppEntry(JSON.stringify(rest)), f).toThrow(`field ${f} is missing`);
+      expect(file, f).toContain(`\`${f}\``);
+    }
+    // The doctor's key-age check reads the same field.
+    const checks = read('apps/server/src/doctor/checks.ts');
+    expect(checks).toContain('Date.parse(entry.importedAt)');
   });
 
   test('the rotation docs show no key or token literal', () => {
