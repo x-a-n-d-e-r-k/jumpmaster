@@ -16,7 +16,7 @@ import { setZoneMode } from '../db/repo.js';
 import { usageCfg, zoneWorld } from '../test/fixtures.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 import { listCards, recordCard } from './cards.js';
-import { registerChatRoutes } from './routes.js';
+import { registerChatRoutes, titleFromMessage } from './routes.js';
 import { appendMessage, createThread, getThread, listMessages } from './store.js';
 import { ChatTurns, chatMcpUrl, type HubEvent } from './turns.js';
 
@@ -345,6 +345,20 @@ describe('a thread titled from its first message', () => {
     const id = await newThread(w);
     await post(w, id, '## What\n is   next?');
     expect(getThread(w.db, id)?.title).toBe('What is next?');
+  });
+
+  test('a leading issue reference keeps its #', async () => {
+    const w = world();
+    const id = await newThread(w);
+    await post(w, id, '#105 is stuck in review, why?');
+    expect(getThread(w.db, id)?.title).toBe('#105 is stuck in review, why?');
+  });
+
+  test('a title is never cut inside a character', () => {
+    const title = titleFromMessage('\u{1F600}'.repeat(40));
+    expect(title.isWellFormed()).toBe(true);
+    expect(title.length).toBeLessThanOrEqual(60);
+    expect(title.endsWith('…')).toBe(true);
   });
 
   test('a thread created with a focus keeps its focus title after a message', async () => {
