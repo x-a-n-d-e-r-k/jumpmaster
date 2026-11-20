@@ -1938,15 +1938,17 @@ const mergeRulesetFix = (author: string, branch: string): string =>
 function mergeRulesetFails(read: BranchRulesRead): string[] | null {
   const bypass = read.kind === 'ok' ? read.rules.bypass : undefined;
   if (!bypass) return null;
-  const entry = bypass.find((b) => b.name === MERGE_RULESET);
-  if (!entry)
+  // Every active ruleset named jumpmaster-merge counts (one may come from the organization), the
+  // same entries onlyMergeBypass reads (issue #555).
+  const entries = bypass.filter((b) => b.name === MERGE_RULESET);
+  if (entries.length === 0)
     return [
       `no ${MERGE_RULESET} ruleset: anyone with write access can merge an approved pull request`,
     ];
   const out: string[] = [];
-  if (!entry.restrictUpdatesOnly)
+  if (entries.some((b) => !b.restrictUpdatesOnly))
     out.push(`${MERGE_RULESET} must hold only the Restrict updates rule`);
-  if (entry.can === 'no')
+  if (entries.some((b) => b.can === 'no'))
     out.push(
       `the author app can't bypass ${MERGE_RULESET}: the author app must be on its bypass list or nothing merges`,
     );
@@ -2021,8 +2023,13 @@ async function branchRulesCheck(
   const twoApp = zone.identity === 'starter' ? undefined : twoAppAuthorOf(d, zone);
   // The author app bypassing a jumpmaster-merge that holds extra rules is a merge-ruleset problem,
   // not a "bot can bypass" one (issue #478): its fix keeps the author app on the bypass list.
-  const mergeBypass =
-    twoApp !== undefined && problems.includes('bot can bypass') && onlyMergeBypass(rules);
+  // "bot can bypass" goes only when the merge-ruleset problems that replace it are non-empty, so
+  // the check never passes while the merge guard would park for it (issue #555).
+  const mergeBypassFails =
+    twoApp !== undefined && problems.includes('bot can bypass') && onlyMergeBypass(rules)
+      ? (mergeRulesetFails(rules.author) ?? [])
+      : [];
+  const mergeBypass = mergeBypassFails.length > 0;
   if (mergeBypass) problems.splice(problems.indexOf('bot can bypass'), 1);
   if (problems.length === 0) {
     const ok = rules.author.kind === 'ok' ? rules.author.rules : null;
@@ -2084,7 +2091,7 @@ async function branchRulesCheck(
     ),
   ];
   if (mergeBypass && twoApp !== undefined) {
-    problems.push(...(mergeRulesetFails(rules.author) ?? []));
+    problems.push(...mergeBypassFails);
     fixes.push(mergeRulesetFix(twoApp, branch));
   }
   return {

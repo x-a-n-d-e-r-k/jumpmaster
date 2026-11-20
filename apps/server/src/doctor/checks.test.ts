@@ -3039,6 +3039,64 @@ describe('forge.branch-rules in a two-app zone needs jumpmaster-merge (issue #43
     noSecrets(c);
   });
 
+  test('a second jumpmaster-merge with extra rules that the author app bypasses never passes', async () => {
+    const extra: Bypass = {
+      rulesetId: 3,
+      name: 'jumpmaster-merge',
+      restrictUpdatesOnly: false,
+      can: 'yes',
+    };
+    const c = await check(appWorld({ author: [main(), merge('yes'), extra] }));
+    expect(c.status).toBe('fail');
+    expect(c.summary).toMatch(
+      /bot can bypass|jumpmaster-merge must hold only the Restrict updates rule/,
+    );
+    noSecrets(c);
+  });
+
+  test('the same two rulesets beside another rules problem still name the bypass', async () => {
+    const extra: Bypass = {
+      rulesetId: 3,
+      name: 'jumpmaster-merge',
+      restrictUpdatesOnly: false,
+      can: 'yes',
+    };
+    const w = appWorld({ author: [main(), merge('yes'), extra] });
+    const r = w.f.state.rules.author;
+    if (r.kind === 'ok') r.rules = { ...r.rules, dismissStaleOnPush: false };
+    const c = await check(w);
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('stale approvals not dismissed');
+    expect(c.summary).toMatch(
+      /bot can bypass|jumpmaster-merge must hold only the Restrict updates rule/,
+    );
+  });
+
+  test('two jumpmaster-merge rulesets, the extra-rules one listed first, fail alone and beside another problem', async () => {
+    const extra: Bypass = {
+      rulesetId: 3,
+      name: 'jumpmaster-merge',
+      restrictUpdatesOnly: false,
+      can: 'yes',
+    };
+    const c = await check(appWorld({ author: [main(), extra, merge('yes')] }));
+    expect(c.status).toBe('fail');
+    expect(c.summary).toMatch(
+      /bot can bypass|jumpmaster-merge must hold only the Restrict updates rule/,
+    );
+    noSecrets(c);
+    const w = appWorld({ author: [main(), extra, merge('yes')] });
+    const r = w.f.state.rules.author;
+    if (r.kind === 'ok') r.rules = { ...r.rules, dismissStaleOnPush: false };
+    const c2 = await check(w);
+    expect(c2.status).toBe('fail');
+    expect(c2.summary).toContain('stale approvals not dismissed');
+    expect(c2.summary).toMatch(
+      /bot can bypass|jumpmaster-merge must hold only the Restrict updates rule/,
+    );
+    noSecrets(c2);
+  });
+
   test('an author app that can bypass the main ruleset still fails as bot can bypass', async () => {
     const c = await check(appWorld({ author: [main('yes'), merge('yes')] }));
     expect(c.status).toBe('fail');
