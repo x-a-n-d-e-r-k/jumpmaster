@@ -112,6 +112,39 @@ describe('renderChatMarkdown', () => {
     );
   });
 
+  test('long adversarial lines render in linear time, still inert', () => {
+    const n = 200_000;
+    for (const text of [
+      `a | b\n|-${' '.repeat(n)}x`,
+      `a | b\nc${' '.repeat(n)}|x`,
+      '[a '.repeat(n / 3),
+      '[a](b '.repeat(n / 6),
+      '**a '.repeat(n / 4),
+      '*a '.repeat(n / 3),
+      ' _a'.repeat(n / 3),
+      '`a '.repeat(n / 3),
+      `# a${' '.repeat(n)}x`,
+      `\`\`\`${' '.repeat(n)}!`,
+      `- a${' '.repeat(n)}x`,
+      `<script>${'*a '.repeat(n / 3)}`,
+    ]) {
+      const t = performance.now();
+      const html = md(text);
+      expect(performance.now() - t).toBeLessThan(500);
+      assertInert(html);
+      expect(html).not.toMatch(/<script/i);
+    }
+  });
+
+  test('asterisks and underscores in globs, arithmetic and bare URLs stay text', () => {
+    expect(md('globs apps/*/src/*.ts here')).toBe('<p>globs apps/*/src/*.ts here</p>');
+    expect(md('2*3*4')).toBe('<p>2*3*4</p>');
+    expect(md('see https://example.com/_next_/x')).toBe('<p>see https://example.com/_next_/x</p>');
+    expect(md('a/_b_ c')).toBe('<p>a/_b_ c</p>');
+    expect(md('*one* and _two_')).toBe('<p><em>one</em> and <em>two</em></p>');
+    expect(md('(*one*), _two_.')).toBe('<p>(<em>one</em>), <em>two</em>.</p>');
+  });
+
   describe('XSS inputs render inert', () => {
     const cases: [string, string][] = [
       ['<script>alert(1)</script>', '&lt;script&gt;'],

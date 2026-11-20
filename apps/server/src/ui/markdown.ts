@@ -12,42 +12,159 @@ import { escapeHtml, type LinkRefs, linkify } from './pages.js';
  * `https://`, `http://` or a same-origin `/path`. Plain text runs go through `linkify`.
  */
 
-const FENCE_OPEN = /^\s{0,3}```\s*[\w+#.-]*\s*$/;
+// Every pattern here is linear on one line: no two quantifiers can split the same run of text.
+// The inline constructs and the table delimiter are scanned by hand (#561).
+const FENCE_OPEN = /^\s{0,3}```\s*[\w+#.-]*$/;
 const FENCE_CLOSE = /^\s{0,3}```\s*$/;
-const HEADING = /^\s{0,3}(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$/;
+const HEADING_OPEN = /^\s{0,3}(#{1,6})[ \t]/;
 const BULLET = /^\s{0,3}[-*][ \t]+(.*)$/;
 const ORDERED = /^\s{0,3}\d{1,9}[.)][ \t]+(.*)$/;
-const DELIMITER = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
+const DELIMITER_CELL = /^:?-+:?$/;
 
 /** A link's url, allowed only as an absolute http(s) URL or a same-origin path (not `//`, `/\`). */
 const SAFE_URL = /^(?:https?:\/\/|\/(?![/\\]))[^\s\x00-\x1f\x7f"'<>\\`]*$/i;
 
-/**
- * The inline constructs, leftmost first, earlier alternatives first at one position: a code span,
- * a link, bold, `*italic*`, `_italic_` (not inside a word, so snake_case stays text).
- */
-const INLINE =
-  /`([^`\n]+)`|\[([^\]\n]*)\]\(([^)\n]*)\)|\*\*(?=\S)(.+?)\*\*|\*(?=[^\s*])([^*\n]*?[^\s*])\*|(?<![\p{L}\p{N}_])_(?=[^\s_])([^_\n]*?[^\s_])_(?![\p{L}\p{N}_])/gu;
+const isSpaceOrTab = (c: string | undefined) => c === ' ' || c === '\t';
 
-/** One line's inline Markdown as HTML; inside a link's text, plain runs are only escaped. */
+/** `s` without the spaces and tabs at its end, scanned by hand (a `[ \t]+$` regex is quadratic). */
+function trimTabsEnd(s: string): string {
+  let end = s.length;
+  while (end > 0 && isSpaceOrTab(s[end - 1])) end--;
+  return s.slice(0, end);
+}
+
+const isFenceOpen = (line: string) => FENCE_OPEN.test(line.trimEnd());
+
+/** An ATX heading's level and text, without the optional closing `#` run; undefined otherwise. */
+function heading(line: string): { level: number; text: string } | undefined {
+  const m = HEADING_OPEN.exec(line);
+  if (!m) return undefined;
+  const level = (m[1] as string).length;
+  // `rest` keeps the one required separator at index 0, so a closing run needs its own.
+  let rest = trimTabsEnd(line.slice(m[0].length - 1));
+  let k = rest.length;
+  while (k > 0 && rest[k - 1] === '#') k--;
+  if (k < rest.length && k > 1 && isSpaceOrTab(rest[k - 1])) rest = trimTabsEnd(rest.slice(0, k));
+  let start = 0;
+  while (isSpaceOrTab(rest[start])) start++;
+  return { level, text: rest.slice(start) };
+}
+
+/** A GFM delimiter row: optional outer pipes around one or more `:?-+:?` cells. */
+function isDelimiterRow(line: string): boolean {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|')) s = s.slice(0, -1);
+  return s.split('|').every((c) => DELIMITER_CELL.test(c.trim()));
+}
+
+/** A letter, digit, `_` or `/`: `*` and `_` emphasis does not open after or close before one. */
+const WORD_BEFORE = /[\p{L}\p{N}_/]$/u;
+const WORD_AFTER = /^[\p{L}\p{N}_/]/u;
+
+/**
+ * `indexOf` for scans whose start never moves back: each needle remembers its last answer, so
+ * repeated searches past an unclosed delimiter cost one pass over the line, not one per opener.
+ */
+function forwardFinder(text: string): (needle: string, from: number) => number {
+  const memo = new Map<string, { from: number; at: number }>();
+  return (needle, from) => {
+    const m = memo.get(needle);
+    if (m && from >= m.from && (m.at === -1 || m.at >= from)) return m.at;
+    const at = text.indexOf(needle, from);
+    memo.set(needle, { from, at });
+    return at;
+  };
+}
+
+/** For each index, whether it sits in a whitespace-free run holding `://` (a bare URL). */
+function bareUrlMask(text: string): Uint8Array {
+  const mask = new Uint8Array(text.length);
+  for (const m of text.matchAll(/\S+/g)) {
+    if (m[0].includes('://')) mask.fill(1, m.index, m.index + m[0].length);
+  }
+  return mask;
+}
+
+/**
+ * One line's inline Markdown as HTML; inside a link's text, plain runs are only escaped.
+ *
+ * Scanned left to right; at each position the first construct that closes wins: a code span,
+ * a link `[text](url)`, `**bold**`, `*italic*`, `_italic_`. Every closing delimiter is the
+ * first one after the opener, found through `forwardFinder`, so the scan is linear.
+ * `*` and `_` emphasis opens only after a non-word character other than `/`, closes only before
+ * one, and never inside a bare URL, so globs, `2*3*4`, snake_case and URLs stay text.
+ */
 function inline(text: string, refs: LinkRefs, inLink = false): string {
   const plain = (s: string) => (inLink ? escapeHtml(s) : linkify(s, refs));
+  const next = forwardFinder(text);
+  const url = bareUrlMask(text);
+  const opensAt = (i: number) =>
+    url[i] !== 1 && !WORD_BEFORE.test(text.slice(Math.max(0, i - 2), i));
+  const closesAt = (j: number) => !WORD_AFTER.test(text.slice(j + 1, j + 3));
+  const nonSpace = (c: string | undefined) => c !== undefined && !/\s/.test(c);
+
   let out = '';
   let last = 0;
-  for (const m of text.matchAll(INLINE)) {
-    const [all, code, linkText, url, bold, star, under] = m;
-    out += plain(text.slice(last, m.index));
-    last = m.index + all.length;
-    if (code !== undefined) out += `<code>${escapeHtml(code)}</code>`;
-    else if (linkText !== undefined && url !== undefined) {
-      out +=
-        !inLink && SAFE_URL.test(url)
-          ? `<a href="${escapeHtml(url)}"${linkTarget(url)}>${inline(linkText, refs, true)}</a>`
-          : plain(all);
-    } else if (bold !== undefined) out += `<strong>${inline(bold, refs, inLink)}</strong>`;
-    else out += `<em>${inline(star ?? under ?? '', refs, inLink)}</em>`;
+  const emit = (i: number, end: number, html: string) => {
+    out += plain(text.slice(last, i)) + html;
+    last = end;
+    return end;
+  };
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '`') {
+      const j = next('`', i + 1);
+      if (j > i + 1) {
+        i = emit(i, j + 1, `<code>${escapeHtml(text.slice(i + 1, j))}</code>`);
+        continue;
+      }
+    } else if (c === '[') {
+      const j = next(']', i + 1);
+      const k = j !== -1 && text[j + 1] === '(' ? next(')', j + 2) : -1;
+      if (k !== -1) {
+        const href = text.slice(j + 2, k);
+        i = emit(
+          i,
+          k + 1,
+          !inLink && SAFE_URL.test(href)
+            ? `<a href="${escapeHtml(href)}"${linkTarget(href)}>${inline(text.slice(i + 1, j), refs, true)}</a>`
+            : plain(text.slice(i, k + 1)),
+        );
+        continue;
+      }
+    } else if (c === '*') {
+      if (text[i + 1] === '*' && nonSpace(text[i + 2])) {
+        const j = next('**', i + 3);
+        if (j !== -1) {
+          i = emit(i, j + 2, `<strong>${inline(text.slice(i + 2, j), refs, inLink)}</strong>`);
+          continue;
+        }
+      }
+      const em = emphasis(i, '*');
+      if (em !== undefined) {
+        i = em;
+        continue;
+      }
+    } else if (c === '_') {
+      const em = emphasis(i, '_');
+      if (em !== undefined) {
+        i = em;
+        continue;
+      }
+    }
+    i++;
   }
   return out + plain(text.slice(last));
+
+  /** `*italic*` or `_italic_` opening at `i`: the index past it, or undefined. */
+  function emphasis(i: number, mark: '*' | '_'): number | undefined {
+    if (!nonSpace(text[i + 1]) || text[i + 1] === mark || !opensAt(i)) return undefined;
+    const j = next(mark, i + 1);
+    if (j === -1 || !nonSpace(text[j - 1]) || !closesAt(j)) return undefined;
+    return emit(i, j + 1, `<em>${inline(text.slice(i + 1, j), refs, inLink)}</em>`);
+  }
 }
 
 /** A table row's cells: the outer pipes dropped, split on the rest. */
@@ -62,7 +179,7 @@ function cells(line: string): string[] {
 function tableAt(lines: string[], i: number): boolean {
   const head = lines[i] ?? '';
   const delim = lines[i + 1] ?? '';
-  return head.includes('|') && delim.includes('|') && DELIMITER.test(delim);
+  return head.includes('|') && delim.includes('|') && isDelimiterRow(delim);
 }
 
 const blank = (line: string) => line.trim() === '';
@@ -71,8 +188,8 @@ const blank = (line: string) => line.trim() === '';
 const opensBlock = (lines: string[], i: number): boolean => {
   const line = lines[i] ?? '';
   return (
-    FENCE_OPEN.test(line) ||
-    HEADING.test(line) ||
+    isFenceOpen(line) ||
+    heading(line) !== undefined ||
     BULLET.test(line) ||
     ORDERED.test(line) ||
     tableAt(lines, i)
@@ -90,7 +207,7 @@ export function renderChatMarkdown(text: string, refs: LinkRefs): string {
       i++;
       continue;
     }
-    if (FENCE_OPEN.test(line)) {
+    if (isFenceOpen(line)) {
       const body: string[] = [];
       i++;
       while (i < lines.length && !FENCE_CLOSE.test(lines[i] as string))
@@ -99,11 +216,10 @@ export function renderChatMarkdown(text: string, refs: LinkRefs): string {
       out.push(`<pre><code>${escapeHtml(body.join('\n'))}</code></pre>`);
       continue;
     }
-    const heading = HEADING.exec(line);
-    if (heading) {
-      const level = (heading[1] as string).length;
-      const tag = level <= 2 ? 'h3' : level === 3 ? 'h4' : 'h5';
-      out.push(`<${tag}>${inline(heading[2] as string, refs)}</${tag}>`);
+    const head = heading(line);
+    if (head) {
+      const tag = head.level <= 2 ? 'h3' : head.level === 3 ? 'h4' : 'h5';
+      out.push(`<${tag}>${inline(head.text, refs)}</${tag}>`);
       i++;
       continue;
     }
