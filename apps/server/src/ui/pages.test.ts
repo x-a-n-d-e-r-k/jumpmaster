@@ -140,6 +140,21 @@ describe('renderHome', () => {
     );
   });
 
+  test("the Crew table links each zone's New issue page and its GOAL.md stub, the id encoded (#581)", () => {
+    const id = 'a"<>&/b';
+    const html = renderHome({
+      zones: [z],
+      items: [],
+      drops: [],
+      crew: [{ zoneId: id, enabled: true, lastCycle: null, nextDue: null, fable: 'available' }],
+    });
+    const enc = encodeURIComponent(id);
+    expect(html).toContain(`<a href="/zones/${enc}/issues/new">New issue</a>`);
+    expect(html).toContain(`<a href="/zones/${enc}/intake">GOAL.md stub</a>`);
+    expect(html).not.toContain(`/intake">Intake</a>`);
+    expect(html).not.toContain(id);
+  });
+
   test('escapes issue titles', () => {
     const html = renderHome({
       zones: [z],
