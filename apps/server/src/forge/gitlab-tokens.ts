@@ -137,6 +137,9 @@ async function call(
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
+      // PRIVATE-TOKEN is a custom header, so fetch would forward it across a cross-origin
+      // redirect. The token goes only to the base URL's host: a redirect is never followed.
+      redirect: 'manual',
     });
   } catch {
     // The cause may echo the request; it is not reported.
@@ -145,6 +148,12 @@ async function call(
   const text = await res.text().catch(() => '');
   if (res.status === 401 || res.status === 403) throw new GitLabAuthError(what, res.status);
   if (res.status === 404) throw new GitLabNotFoundError(what);
+  // An opaque redirect (status 0, browsers) or a 3xx; its Location is never reported.
+  if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400))
+    throw new GitLabTokenError(
+      `${what} failed: HTTP ${res.status} (redirect not followed)`,
+      res.status,
+    );
   if (res.status < 200 || res.status >= 300)
     throw new GitLabTokenError(`${what} failed: HTTP ${res.status}`, res.status);
   try {
