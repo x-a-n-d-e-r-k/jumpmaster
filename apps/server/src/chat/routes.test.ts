@@ -17,7 +17,14 @@ import { usageCfg, zoneWorld } from '../test/fixtures.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 import { listCards, recordCard } from './cards.js';
 import { registerChatRoutes, titleFromMessage } from './routes.js';
-import { appendMessage, createThread, getThread, listMessages } from './store.js';
+import {
+  appendMessage,
+  createThread,
+  getThread,
+  listMessages,
+  setMessage,
+  setToolResult,
+} from './store.js';
 import { ChatTurns, chatMcpUrl, type HubEvent } from './turns.js';
 
 const TOKEN = 'o'.repeat(32);
@@ -29,7 +36,7 @@ afterEach(async () => {
   app = undefined;
 });
 
-function world() {
+function world(o: { chatTurns?: Parameters<typeof createApp>[0]['chatTurns'] } = {}) {
   const db = openDb(tmpDbFile());
   const dir = mkdtempSync(join(tmpdir(), 'jm-chat-'));
   const env = {
@@ -58,7 +65,7 @@ function world() {
     backoff: new Backoff(),
     leaseWaitMs: 0,
     leasePollMs: 0,
-    chatTurns: { enqueue: (id) => enqueued.push(id) },
+    chatTurns: o.chatTurns ?? { enqueue: (id) => enqueued.push(id) },
   });
   app = a;
   const s = operatorSession(db, t0);
@@ -579,6 +586,171 @@ describe('tool steps (#502)', () => {
     for (const body of [JSON.stringify(hub), got.body, sse.body]) {
       for (let k = 8; k <= SECRET.length; k++) expect(body).not.toContain(SECRET.slice(0, k));
     }
+  });
+
+  /**
+   * #583: an earlier turn (owner, step with result, reply), then a turn whose step 5 got its
+   * result while no browser was subscribed, an older step 6 with no input or result, and a step 7
+   * with no result at all.
+   */
+  function missedResult(w: ReturnType<typeof world>) {
+    const th = createThread(w.db, { title: 't' }, t0);
+    const add = (m: Parameters<typeof appendMessage>[2]) => appendMessage(w.db, th.id, m, t0);
+    const r = (text: string) => ({ text, truncated: false, lines: 1, isError: false });
+    add({ role: 'owner', text: 'first', state: 'done', sessionHash: 'h' });
+    const early = add({
+      role: 'tool',
+      text: 'read e.ts',
+      state: 'done',
+      tool: { name: 'Read', useId: 'tu_0', inputJson: '{"file_path":"e.ts"}' },
+    });
+    setToolResult(w.db, early.id, r('early'), t0);
+    add({ role: 'assistant', text: 'ok', state: 'done' });
+    const owner = add({ role: 'owner', text: 'again', state: 'running', sessionHash: 'h' });
+    const step = add({
+      role: 'tool',
+      text: 'read a.ts',
+      state: 'done',
+      tool: { name: 'Read', useId: 'tu_1', inputJson: '{"file_path":"a.ts"}' },
+    });
+    const old = add({ role: 'tool', text: 'old step', state: 'done' });
+    const none = add({
+      role: 'tool',
+      text: 'read b.ts',
+      state: 'done',
+      tool: { name: 'Read', useId: 'tu_2', inputJson: '{"file_path":"b.ts"}' },
+    });
+    // The result lands while no browser is subscribed.
+    setToolResult(w.db, step.id, r('one'), t0);
+    return { th, owner, early, step, old, none };
+  }
+
+  for (const how of ['last-event-id', 'after'] as const) {
+    test(`#583: a stream opened with ${how} past a step gets the result stored since, before done`, async () => {
+      const w = world();
+      const { th, step, none } = missedResult(w);
+      for (const seen of [step.seq, none.seq]) {
+        const res = await w.app.inject({
+          method: 'GET',
+          url: `/api/chat/threads/${th.id}/events${how === 'after' ? `?after=${seen}` : ''}`,
+          headers: {
+            ...w.session,
+            ...(how === 'last-event-id' ? { 'last-event-id': String(seen) } : {}),
+          },
+        });
+        expect(res.body).toMatch(new RegExp(`event: tool\nid: ${step.seq}\ndata: [^\n]*"result"`));
+        const events = sseEvents(res.body);
+        const tools = events.filter((e) => e.event === 'tool');
+        // The result's step, re-sent; then only what follows the seq the browser saw.
+        expect(tools.map((e) => e.data.seq)).toEqual(
+          seen === step.seq ? [step.seq, step.seq + 1, none.seq] : [step.seq],
+        );
+        expect(tools[0]?.data).toEqual({
+          seq: step.seq,
+          text: 'read a.ts',
+          createdAt: step.createdAt,
+          toolName: 'Read',
+          input: { file_path: 'a.ts' },
+          result: { text: 'one', truncated: false, lines: 1, isError: false },
+        });
+        const done = events.findIndex((e) => e.event === 'done');
+        expect(done).toBe(events.length - 1);
+        expect(events[done]?.data).toEqual({ seq: none.seq });
+      }
+    });
+  }
+
+  test('#583: a subscribed reconnect gets the result too; earlier turns and older steps are not re-sent', async () => {
+    const turnsDb: { db?: ReturnType<typeof world>['db'] } = {};
+    const w = world({
+      chatTurns: {
+        enqueue: () => {},
+        subscribe: (id, after, fn) => {
+          for (const message of listMessages(turnsDb.db as never, id, after))
+            fn({ seq: message.seq, event: { type: 'message', message } });
+          return () => {};
+        },
+      },
+    });
+    turnsDb.db = w.db;
+    const { th, owner, early, step, old, none } = missedResult(w);
+    // The turn ended while the browser was away.
+    setMessage(w.db, owner.id, { state: 'done' }, t0);
+    const res = await w.app.inject({
+      method: 'GET',
+      url: `/api/chat/threads/${th.id}/events`,
+      headers: { ...w.session, 'last-event-id': String(none.seq) },
+    });
+    const events = sseEvents(res.body);
+    expect(events.map((e) => [e.event, e.data.seq])).toEqual([
+      ['tool', step.seq],
+      ['done', none.seq],
+    ]);
+    for (const m of [early, old, none])
+      expect(events.some((e) => e.data.seq === m.seq)).toBe(m === none);
+  });
+
+  test('#583: a result re-sent to a reconnect arrives redacted, as its first send', async () => {
+    const w = world();
+    const SECRET = 'join-secret-value-4';
+    const config = {
+      listen: { host: '0.0.0.0', port: 7420 },
+      dataDir: '/data',
+      pollSeconds: 60,
+      dropZones: [],
+      usage: { throttleUtilization: 0.9, probeJitterSeconds: [30, 90] },
+      claude: { plan: 'max', fableWeeklyDropCap: 0 },
+      chat: {},
+      secrets: {
+        claudeToken: ['sk', 'ant', 'oat01', 'ROUTESCLAUDETOKEN0123456789'].join('-'),
+        joinToken: SECRET,
+        operatorToken: TOKEN,
+      },
+    } as unknown as Config;
+    const turns = new ChatTurns({
+      db: w.db,
+      config,
+      now: () => t0,
+      service: {
+        async *runTurn() {
+          yield { type: 'tool', name: 'Grep', summary: 'grep', id: 't1', input: { pattern: 'x' } };
+          yield {
+            type: 'tool_result',
+            id: 't1',
+            text: `hit: ${SECRET}`,
+            truncated: false,
+            totalLines: 1,
+            isError: false,
+          };
+          yield { type: 'result', isError: false };
+        },
+        health: async () => null,
+      },
+      mcpUrl: chatMcpUrl(7420),
+      resolvedApps: () => new Map(),
+      log: () => {},
+    });
+    const th = createThread(w.db, { title: 't' }, t0);
+    appendMessage(
+      w.db,
+      th.id,
+      { role: 'owner', text: 'go', state: 'queued', sessionHash: 'h' },
+      t0,
+    );
+    turns.enqueue(th.id);
+    await turns.idle();
+    const step = listMessages(w.db, th.id).find((m) => m.role === 'tool');
+    const sse = await w.app.inject({
+      method: 'GET',
+      url: `/api/chat/threads/${th.id}/events`,
+      headers: { ...w.session, 'last-event-id': String(step?.seq) },
+    });
+    const tool = sseEvents(sse.body).find((e) => e.event === 'tool');
+    expect(tool?.data).toMatchObject({
+      seq: step?.seq,
+      result: { text: 'hit: [REDACTED]', truncated: false, lines: 1, isError: false },
+    });
+    expect(sse.body).not.toContain(SECRET);
   });
 
   test('an older tool message streams as before, with no tool fields', async () => {

@@ -268,6 +268,27 @@ export function listMessages(db: Db, threadId: number, afterSeq = 0): ChatMessag
   ).map(messageOf);
 }
 
+/**
+ * The tool steps at or before `uptoSeq` that have a stored result, of the turn a browser that saw
+ * up to `uptoSeq` was following: those after the last assistant or system message it saw (#583).
+ * A result is stored on its step's row under the step's seq, so a stream that starts after that
+ * seq would never send it.
+ */
+export function resultStepsUpTo(db: Db, threadId: number, uptoSeq: number): ChatMessage[] {
+  if (uptoSeq <= 0) return [];
+  return (
+    db
+      .prepare(
+        `SELECT ${MESSAGE_COLS} FROM chat_messages WHERE thread_id = ? AND role = 'tool'
+           AND result_text IS NOT NULL AND seq <= ?
+           AND seq > (SELECT COALESCE(MAX(seq), 0) FROM chat_messages WHERE thread_id = ?
+             AND seq <= ? AND role IN ('assistant', 'system'))
+         ORDER BY seq`,
+      )
+      .all(threadId, uptoSeq, threadId, uptoSeq) as MessageRow[]
+  ).map(messageOf);
+}
+
 /** Sets the thread's title and marks it updated. The caller titles a thread once (#492). */
 export function setThreadTitle(db: Db, id: number, title: string, now: Date): void {
   db.prepare('UPDATE chat_threads SET title = ?, updated_at = ? WHERE id = ?').run(

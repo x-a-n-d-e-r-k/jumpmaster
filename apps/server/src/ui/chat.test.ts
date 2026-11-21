@@ -1239,6 +1239,64 @@ describe('/chat Markdown (#490)', () => {
       expect(log.children[0]?.textContent).not.toContain('running…');
     });
 
+    /** The stored page's steps group, as `stepsHtml` renders it, with each step still running. */
+    function storedRunningGroup(steps: ChatMessage[]): FakeEl {
+      const make = (tag: string, cls = '', text?: string) => {
+        const e = new FakeEl(tag);
+        e.className = cls;
+        if (text !== undefined) e.textContent = text;
+        return e;
+      };
+      const group = make('details', 'steps');
+      const ol = make('ol');
+      group.append(make('summary', '', `Worked through ${steps.length} steps`), ol);
+      for (const m of steps) {
+        const item = make('li');
+        item.dataset.seq = String(m.seq);
+        const d = make('details');
+        const code = make('code', '', String(m.input?.file_path));
+        const input = make('div', 'input');
+        input.append(code);
+        d.append(make('summary', '', m.text), input, make('small', 'pending', 'running…'));
+        item.append(d);
+        ol.append(item);
+      }
+      return group;
+    }
+
+    test('#583: a busy page reconnecting gets a result stored meanwhile; done leaves it, as stored', () => {
+      const input = { file_path: 'a.ts' };
+      const got = step(2, { text: 'read a.ts', toolName: 'Read', input });
+      const none = step(3, { text: 'read b.ts', toolName: 'Read', input: { file_path: 'b.ts' } });
+      const group = storedRunningGroup([got, none]) as FakeEl & { open?: boolean };
+      group.open = true;
+      const { log, emit } = runScript({ cards: [group] });
+      const ol = group.querySelector('ol') as FakeEl;
+      const before = ol.children[0] as FakeEl;
+      expect(before.textContent).toContain('running…');
+      // The reconnect's replay: the step under its own seq, now with its result; then done.
+      const withResult = { ...got, result: ok('one') };
+      emit('tool', withResult);
+      emit('done', {});
+      expect(log.children).toEqual([group]);
+      expect(group.open).toBe(true);
+      expect(group.querySelector('summary')?.textContent).toBe('Worked through 2 steps');
+      expect(ol.children.map((c) => c.dataset.seq)).toEqual(['2', '3']);
+      const now = ol.children[0] as FakeEl;
+      expect(now).not.toBe(before);
+      expect(now.tagName).toBe('li');
+      expect(now.querySelector('pre')?.textContent).toBe('one');
+      expect(now.textContent).not.toContain('no result recorded');
+      expect(now.textContent).not.toContain('running…');
+      // A step that truly has no stored result still ends as no result recorded.
+      expect(ol.children[1]?.textContent).toContain('no result recorded');
+      // The same step text as the stored page of the thread at rest.
+      const html = renderThread(THREAD, [stored(1, 'owner', 'go'), withResult, none]);
+      const plain = (h: string) => h.replace(/<[^>]+>/g, '');
+      expect(now.textContent).toBe(plain(li(html, 2)));
+      expect(ol.children[1]?.textContent).toBe(plain(li(html, 3)));
+    });
+
     test('a pruned step says "result pruned on" with the date, and has no <pre> (#515)', () => {
       const html = renderThread(THREAD, [
         step(1, {
