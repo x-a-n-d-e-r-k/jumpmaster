@@ -1041,6 +1041,90 @@ describe('tool step input and result (#502)', () => {
     expect(tool?.result?.text).toBe('got [REDACTED]');
   });
 
+  describe('a truncated input (#575)', () => {
+    // As the chat service cuts an input: its JSON's first 4096 characters, as a preview.
+    const cut = (input: Record<string, unknown>) => ({
+      _truncated: true,
+      preview: JSON.stringify(input).slice(0, 4096),
+    });
+    // A secret whose JSON form differs from its value: a quote and a newline.
+    const ODD = 'odd"NOTSHAPED\nvalue-0123456789abcdef';
+    const esc = (s: string) => JSON.stringify(s).slice(1, -1);
+    const oddConfig = (): Config => {
+      const c = secretConfig();
+      return { ...c, secrets: { ...c.secrets, joinToken: ODD } };
+    };
+    const prefixes = (s: string) =>
+      Array.from({ length: s.length - 7 }, (_, i) => s.slice(0, i + 8));
+    const hubTools = (hub: HubEvent[]) =>
+      hub
+        .map((e) => e.event)
+        .filter((e) => e.type === 'message' && e.message.role === 'tool')
+        .map((e) => (e.type === 'message' ? e.message : undefined));
+
+    test('a preview cut through a secret keeps no prefix of 8 or more of it', async () => {
+      const input = cut({ command: 'x'.repeat(4070) + SECRET });
+      expect(input.preview.endsWith(SECRET.slice(0, 14))).toBe(true);
+      const { w, tool, hub } = await run([toolEvent('t1', input)]);
+      const json = String(rawRow(w.db, tool?.id ?? 0).input_json);
+      for (const p of prefixes(SECRET)) {
+        expect(json).not.toContain(p);
+        expect(JSON.stringify(hub)).not.toContain(p);
+      }
+      expect(tool?.input).toEqual({
+        _truncated: true,
+        preview: input.preview.slice(0, -14),
+      });
+      expect(hubTools(hub)[0]?.input).toEqual(tool?.input);
+    });
+
+    test('a whole secret in JSON-escaped form in a preview is redacted', async () => {
+      const input = cut({ command: `run ${ODD} now`, pad: 'y'.repeat(5000) });
+      expect(input.preview).toContain(esc(ODD));
+      const { w, tool, hub } = await run([toolEvent('t1', input)], oddConfig());
+      const json = String(rawRow(w.db, tool?.id ?? 0).input_json);
+      for (const body of [json, JSON.stringify(hub)]) {
+        expect(body).not.toContain(ODD);
+        expect(body).not.toContain(esc(ODD));
+        expect(body).not.toContain(esc(esc(ODD)));
+        expect(body).not.toContain('NOTSHAPED');
+      }
+      expect(String((tool?.input as { preview: string }).preview)).toContain(
+        '{"command":"run [REDACTED] now"',
+      );
+    });
+
+    test('a preview cut through the escaped form after its escaped quote and newline keeps no prefix', async () => {
+      const head = '{"command":"';
+      const filler = 'x'.repeat(4096 - head.length - esc(ODD).length + 6);
+      const input = cut({ command: filler + ODD });
+      const tail = esc(ODD).slice(0, 4096 - head.length - filler.length);
+      expect(input.preview.endsWith(tail)).toBe(true);
+      expect(tail).toContain('\\"');
+      expect(tail).toContain('\\n');
+      const { w, tool } = await run([toolEvent('t1', input)], oddConfig());
+      const preview = String((tool?.input as { preview: string }).preview);
+      expect(preview).toBe(input.preview.slice(0, -tail.length));
+      const json = String(rawRow(w.db, tool?.id ?? 0).input_json);
+      for (const p of prefixes(esc(ODD))) {
+        expect(preview).not.toContain(p);
+        expect(json).not.toContain(esc(p));
+      }
+    });
+
+    test('a short trailing run under 8 characters of a secret is kept', async () => {
+      const preview = `{"command":"x ${SECRET.slice(0, 7)}`;
+      const { tool } = await run([toolEvent('t1', { _truncated: true, preview })]);
+      expect(tool?.input).toEqual({ _truncated: true, preview });
+    });
+
+    test('an input that is not truncated is stored as before, even with a preview key', async () => {
+      const input = { preview: `x ${SECRET.slice(0, 12)}` };
+      const { w, tool } = await run([toolEvent('t1', input)]);
+      expect(rawRow(w.db, tool?.id ?? 0).input_json).toBe(JSON.stringify(input));
+    });
+  });
+
   test('a result for an unknown id stores nothing', async () => {
     const { w, tool } = await run([toolEvent('t1'), resultEvent('other', 'x')]);
     expect(tool?.result).toBeUndefined();

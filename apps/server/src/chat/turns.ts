@@ -270,12 +270,27 @@ function cleanDeep(v: unknown, clean: (s: string) => string): unknown {
   return v;
 }
 
+/** Each secret and its JSON-escaped form, as it appears inside JSON text. */
+const withJsonForms = (secrets: readonly string[]): string[] =>
+  secrets.filter((s) => s.length > 0).flatMap((s) => [s, JSON.stringify(s).slice(1, -1)]);
+
 /**
  * A tool input as stored: each string redacted (a secret's JSON escape differs from its value),
- * then the JSON redacted once more.
+ * then the JSON redacted once more. An input the chat service cut to `{ _truncated, preview }`
+ * holds JSON text in `preview`: each secret is redacted there in its raw and JSON-escaped forms,
+ * then any start of one left at the end of the cut is removed (#575).
  */
-export function storedInput(input: Record<string, unknown>, clean: (s: string) => string): string {
-  return clean(JSON.stringify(cleanDeep(input, clean)));
+export function storedInput(
+  input: Record<string, unknown>,
+  clean: (s: string) => string,
+  secrets: readonly string[] = [],
+): string {
+  let v = input;
+  if (input._truncated === true && typeof input.preview === 'string') {
+    const forms = withJsonForms(secrets);
+    v = { ...input, preview: dropPartialSecret(redact(input.preview, forms), forms) };
+  }
+  return clean(JSON.stringify(cleanDeep(v, clean)));
 }
 
 const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -680,7 +695,9 @@ export class ChatTurns {
                 : {
                     name: clean(e.name),
                     useId: e.id,
-                    ...(e.input === undefined ? {} : { inputJson: storedInput(e.input, clean) }),
+                    ...(e.input === undefined
+                      ? {}
+                      : { inputJson: storedInput(e.input, clean, secrets()) }),
                   };
             const row = this.append(threadId, {
               role: 'tool',
