@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { type AuditDetail, auditedReadds } from '../auth/audit.js';
 import type { Principal } from '../auth/guard.js';
@@ -36,6 +36,7 @@ import {
   resolveCredentials,
 } from '../vault/credentials.js';
 import {
+  APP_ENTRY_DIR,
   APP_ROLES,
   type AppRole,
   appEntryName,
@@ -655,19 +656,31 @@ export class ConfigStore implements ConfigSource {
     }
   }
 
-  /** Whether the vault holds both an author and a reviewer app entry for some owner (#549). */
+  /**
+   * Whether some owner has both an author and a reviewer app entry that `appEntry()` reads (#549,
+   * #597): a vault entry or a `github-app/<owner>/<role>.json` file in the secrets directory, as
+   * detection resolves it. Candidate owners are the vault's app entry names and the owner
+   * directories under the secrets directory. An unreadable or undecryptable entry counts as none,
+   * and nothing is logged.
+   */
   hasAppPair(): boolean {
+    const owners = new Set<string>();
     const vault = this.vault();
-    if (vault === 'disabled') return false;
-    const roles = new Map<string, Set<AppRole>>();
-    for (const m of vault.list()) {
-      const n = parseAppEntryName(m.name);
-      if (!n) continue;
-      const set = roles.get(n.owner) ?? new Set<AppRole>();
-      set.add(n.role);
-      roles.set(n.owner, set);
+    if (vault !== 'disabled')
+      for (const m of vault.list()) {
+        const n = parseAppEntryName(m.name);
+        if (n) owners.add(n.owner);
+      }
+    const dir = this.o.boot.secretsDir;
+    if (dir) {
+      try {
+        for (const d of readdirSync(join(dir, APP_ENTRY_DIR), { withFileTypes: true }))
+          if (d.isDirectory()) owners.add(d.name);
+      } catch {
+        // No app entry directory: no file-sourced owner.
+      }
     }
-    return [...roles.values()].some((set) => APP_ROLES.every((r) => set.has(r)));
+    return [...owners].some((owner) => APP_ROLES.every((role) => this.appEntry(owner, role)));
   }
 
   /** The vault, or `'disabled'` when there is no key file. */

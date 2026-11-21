@@ -1,5 +1,5 @@
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
@@ -56,6 +56,10 @@ async function world(
     github?: { ownerType?: 'User' | 'Organization'; private?: boolean };
     /** The broker detection reads through on the owner's author app (#549). */
     appBroker?: DetectAppBroker;
+    /** A secrets directory (`JM_SECRETS_DIR`), for file-sourced app entries (#597). */
+    secretsDir?: string;
+    /** No vault key file: the vault is disabled (#597). */
+    noVault?: boolean;
   } = {},
 ) {
   const db = openDb(tmpDbFile());
@@ -66,10 +70,10 @@ async function world(
   if (o.file) writeFileSync(filePath, JSON.stringify({ dataDir: './data', ...o.file }));
   const store = ConfigStore.open({
     db,
-    boot: loadBoot({}, filePath),
+    boot: loadBoot(o.secretsDir ? { JM_SECRETS_DIR: o.secretsDir } : {}, filePath),
     filePath,
     env: { JM_JOIN_TOKEN: 'join-secret-value-4', JM_OPERATOR_TOKEN: TOKEN, JM_DEV_IMAGES: '1' },
-    vault: openVault(keyFile, db),
+    vault: openVault(o.noVault ? undefined : keyFile, db),
     now: () => t0,
     imageLockPath: join(dir, 'no-lock.json'),
   });
@@ -1248,23 +1252,60 @@ describe('the project step on GitHub Apps with no author token (#549)', () => {
     return { broker, calls };
   }
 
-  async function appsWorld(o: { installed?: boolean; roles?: ('author' | 'reviewer')[] } = {}) {
+  type Role = 'author' | 'reviewer';
+  const entryText = (role: Role) =>
+    serializeAppEntry({
+      appId: role === 'author' ? '4242' : '4343',
+      slug: role === 'author' ? SLUG : 'octo-jm-reviewer',
+      clientId: `Iv1.${role}`,
+      pem: pem(),
+      importedAt: '2026-11-15T10:00:00.000Z',
+    });
+
+  async function appsWorld(
+    o: {
+      installed?: boolean;
+      roles?: Role[];
+      /** Entries written as `<secretsDir>/github-app/<owner>/<role>.json` files (#597). */
+      files?: { owner?: string; role: Role; text?: string }[];
+      /** Vault entries for another owner than octo, or holding other text than an entry. */
+      vaultFor?: { owner: string; role: Role; text?: string }[];
+      noVault?: boolean;
+    } = {},
+  ) {
     const { broker, calls } = fakeBroker(o.installed ?? true);
-    const w = await world({ appBroker: broker });
+    const secretsDir = o.files ? mkdtempSync(join(tmpdir(), 'jm-wizard-secrets-')) : undefined;
+    if (secretsDir) chmodSync(secretsDir, 0o700);
+    for (const f of o.files ?? []) {
+      const dir = join(secretsDir as string, 'github-app', f.owner ?? 'octo');
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      chmodSync(dir, 0o700);
+      chmodSync(join(secretsDir as string, 'github-app'), 0o700);
+      writeFileSync(join(dir, `${f.role}.json`), f.text ?? entryText(f.role), { mode: 0o600 });
+    }
+    // With no vault to hold it, the Claude token is a secrets-directory file.
+    if (o.noVault && secretsDir)
+      writeFileSync(join(secretsDir, 'claude_token'), CLAUDE, { mode: 0o600 });
+    const w = await world({
+      appBroker: broker,
+      ...(secretsDir ? { secretsDir } : {}),
+      ...(o.noVault ? { noVault: true } : {}),
+    });
     const vault = w.store.vault();
-    if (vault === 'disabled') throw new Error('expected a vault');
-    for (const role of o.roles ?? ['author'])
-      vault.put(
-        appEntryName('octo', role),
-        serializeAppEntry({
-          appId: role === 'author' ? '4242' : '4343',
-          slug: role === 'author' ? SLUG : 'octo-jm-reviewer',
-          clientId: `Iv1.${role}`,
-          pem: pem(),
-          importedAt: '2026-11-15T10:00:00.000Z',
-        }),
-        { now: t0 },
-      );
+    const puts = [
+      ...(o.roles ?? (o.files || o.vaultFor ? [] : ['author' as const])).map((role) => ({
+        owner: 'octo',
+        role,
+      })),
+      ...(o.vaultFor ?? []),
+    ];
+    if (puts.length > 0 && vault === 'disabled') throw new Error('expected a vault');
+    if (vault !== 'disabled')
+      for (const p of puts)
+        vault.put(appEntryName(p.owner, p.role), ('text' in p && p.text) || entryText(p.role), {
+          now: t0,
+        });
+    if (secretsDir) w.store.refreshSecrets();
     return { ...w, calls, pem: pem() };
   }
 
@@ -1376,5 +1417,62 @@ describe('the project step on GitHub Apps with no author token (#549)', () => {
     expect(await next(['author', 'reviewer'])).toBe('/setup/stick');
     expect(await next(['author'])).toBe('/setup/forge');
     expect(await next([])).toBe('/setup/forge');
+  });
+
+  // Issue #597: the pair check resolves like appEntry(): vault entries and secrets-directory files.
+  describe('/setup/next counts app entries the way detection reads them (#597)', () => {
+    const next = async (o: Parameters<typeof appsWorld>[0]) => {
+      const w = await appsWorld(o);
+      expect(w.store.resolved().githubAuthorToken.source).toBe('missing');
+      await w.call('POST', '/api/control/sudo', { passphrase: PASS });
+      if (w.store.vault() !== 'disabled')
+        await w.call('PUT', '/api/control/secrets/claudeToken', { value: CLAUDE });
+      const r = await w.get('/setup/next');
+      secretFree(r.body, w.pem);
+      secretFree(JSON.stringify(r.headers), w.pem);
+      secretFree(w.logs.join('\n'), w.pem);
+      return r.headers.location;
+    };
+
+    test('file-sourced author and reviewer entries pass the GitHub step; the author alone does not', async () => {
+      expect(await next({ files: [{ role: 'author' }, { role: 'reviewer' }] })).toBe(
+        '/setup/stick',
+      );
+      expect(await next({ files: [{ role: 'author' }] })).toBe('/setup/forge');
+    });
+
+    test('an author in the vault and a reviewer file for the same owner pass', async () => {
+      expect(await next({ roles: ['author'], files: [{ role: 'reviewer' }] })).toBe('/setup/stick');
+    });
+
+    test('with the vault disabled, file-sourced entries pass', async () => {
+      expect(await next({ noVault: true, files: [{ role: 'author' }, { role: 'reviewer' }] })).toBe(
+        '/setup/stick',
+      );
+    });
+
+    test('a reviewer file holding invalid JSON leaves the step unfinished', async () => {
+      expect(
+        await next({ roles: ['author'], files: [{ role: 'reviewer', text: '{not json' }] }),
+      ).toBe('/setup/forge');
+    });
+
+    test('a listed vault entry that cannot be read as an entry leaves the step unfinished', async () => {
+      expect(
+        await next({
+          roles: ['author'],
+          vaultFor: [{ owner: 'octo', role: 'reviewer', text: '{x' }],
+        }),
+      ).toBe('/setup/forge');
+    });
+
+    test('an author and a reviewer of different owners leave the step unfinished', async () => {
+      expect(
+        await next({ roles: ['author'], vaultFor: [{ owner: 'other', role: 'reviewer' }] }),
+      ).toBe('/setup/forge');
+      expect(
+        await next({ files: [{ role: 'author' }, { owner: 'other', role: 'reviewer' }] }),
+      ).toBe('/setup/forge');
+    });
   });
 });
