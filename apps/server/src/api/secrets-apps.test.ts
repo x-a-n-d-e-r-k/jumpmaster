@@ -4,7 +4,7 @@
  * answer, audit row or log line carries a PEM, a JWT or a client id.
  */
 import { createPublicKey, generateKeyPairSync, randomBytes, verify } from 'node:crypto';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
@@ -17,6 +17,7 @@ import { loadBoot } from '../config/boot.js';
 import { ConfigStore, VAULT_DISABLED } from '../config/store.js';
 import { openDb } from '../db/open.js';
 import { upsertDropZone } from '../db/repo.js';
+import type { DoctorCheck } from '../doctor/checks.js';
 import { createAppBrokers } from '../forge/app-brokers.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import {
@@ -53,7 +54,9 @@ const VAULT_ENTRY = entryOf('1001', 'acme-author', 'Iv23liVAULTCLIENT0001');
 const FILE_ENTRY = entryOf('1002', 'acme-reviewer', 'Iv23liFILECLIENT00002');
 const STARTER_ENTRY = entryOf('1003', 'solo-author', 'Iv23liSTARTERCLIENT03');
 const OTHER_KEY_ENTRY = entryOf('1004', 'beta-author', 'Iv23liOTHERKEYCLIENT4');
-const ALL = [VAULT_ENTRY, FILE_ENTRY, STARTER_ENTRY, OTHER_KEY_ENTRY];
+/** A vault copy of acme/reviewer that differs from its file (issue #599). */
+const SHADOW_ENTRY = entryOf('1002', 'acme-reviewer', 'Iv23liSHADOWCLIENT0005');
+const ALL = [VAULT_ENTRY, FILE_ENTRY, STARTER_ENTRY, OTHER_KEY_ENTRY, SHADOW_ENTRY];
 
 beforeAll(() => nock.disableNetConnect());
 afterAll(() => nock.enableNetConnect());
@@ -681,5 +684,136 @@ describe('Replace key on a GitHub App entry (issue #487)', () => {
     await expect(before?.installationFor('acme', 'web')).rejects.toThrow();
     expect(seen.length).toBeGreaterThan(0);
     expect(nock.isDone()).toBe(true);
+  });
+});
+
+describe('credential.shadowed for an app entry: every named action clears it (issue #599)', () => {
+  const REVIEWER = 'github-app/acme/reviewer';
+  const SHADOW_PEM = pemOf();
+  /** The world, with a vault copy of acme/reviewer that differs from its file. */
+  const shadowWorld = () => {
+    const w = world();
+    w.vault.put(REVIEWER, serializeAppEntry(SHADOW_ENTRY), { now: t0 });
+    w.store.refreshSecrets();
+    return w;
+  };
+  const inject = (
+    method: 'POST' | 'DELETE' | 'PUT',
+    url: string,
+    payload?: object,
+    headers = auth,
+  ) =>
+    (app as FastifyInstance).inject({
+      method,
+      url,
+      headers,
+      ...(payload ? { payload } : {}),
+    });
+  const removeCopy = (headers = auth) =>
+    inject('DELETE', '/api/control/secrets/github-app/acme/reviewer', undefined, headers);
+  const shadowed = async (): Promise<DoctorCheck> => {
+    const r = await inject('POST', '/api/control/doctor', {});
+    expect(r.statusCode).toBe(200);
+    const c = (r.json().run.checks as DoctorCheck[]).find((x) => x.id === 'credential.shadowed');
+    if (!c) throw new Error('no credential.shadowed');
+    return c;
+  };
+  const leakText = (w: ReturnType<typeof world>, bodies: string[], checks: DoctorCheck[]) =>
+    `${bodies.join('\n')}\n${JSON.stringify(checks)}\n${JSON.stringify(listAudit(w.db))}\n${w.logs.join('\n')}`;
+
+  for (const prefer of [false, true]) {
+    const inUse = prefer ? 'the vault entry' : 'the file';
+    describe(prefer ? 'under prefer-vault, the vault entry in use' : 'the file in use', () => {
+      const setup = async () => {
+        const w = shadowWorld();
+        if (prefer)
+          expect(
+            (await inject('POST', '/api/control/secrets/vault/prefer', { prefer: true }))
+              .statusCode,
+          ).toBe(200);
+        const before = await shadowed();
+        expect(before.status).toBe('warn');
+        expect(before.summary).toContain(`${REVIEWER} is set by`);
+        expect(before.summary).toContain(`: ${inUse} is in use`);
+        expect(before.fix).toContain('jumpmaster ctl secrets remove github-app/<owner>/<role>');
+        return { w, before };
+      };
+
+      test('removing the vault copy (the route ctl secrets remove github-app/<owner>/<role> calls) keeps the file and passes', async () => {
+        const { w, before } = await setup();
+        const r = await removeCopy();
+        expect(r.statusCode).toBe(200);
+        expect(r.json()).toMatchObject({ removed: true, name: REVIEWER });
+        expect(w.vault.meta(REVIEWER)).toBeUndefined();
+        const read = w.store.resolvedApps().get('acme')?.reviewer;
+        expect(read?.source).toBe('file');
+        if (read?.source !== 'file') throw new Error('expected the file');
+        expect(read.entry.clientId).toBe(FILE_ENTRY.clientId);
+        const after = await shadowed();
+        expect(after.status).toBe('pass');
+        const audits = listAudit(w.db).filter((a) => a.action === 'secret.remove');
+        expect(audits).toHaveLength(1);
+        expect(JSON.stringify(audits[0])).toContain(REVIEWER);
+        expectNoSecrets(leakText(w, [r.body], [before, after]));
+      });
+
+      test('deleting the file and reloading passes', async () => {
+        const { w } = await setup();
+        rmSync(join(w.secretsDir, 'github-app', 'acme', 'reviewer.json'));
+        expect((await inject('POST', '/api/control/secrets/reload', {})).statusCode).toBe(200);
+        expect((await shadowed()).status).toBe('pass');
+        expect(w.store.resolvedApps().get('acme')?.reviewer.source).toBe('vault');
+      });
+    });
+  }
+
+  test('the file in use: the fix does not name Replace key, which the server refuses with 409 managed by', async () => {
+    const w = shadowWorld();
+    const c = await shadowed();
+    const r = await inject('PUT', '/api/control/secrets/github-app/acme/reviewer/key', {
+      pem: SHADOW_PEM,
+    });
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toMatch(/^managed by /);
+    expect(c.fix).not.toMatch(/replace/i);
+    expect(c.fix).not.toContain('/key');
+    expect(c.fix).not.toContain('/settings/credentials');
+    expect(w.vault.meta(REVIEWER)).toBeDefined();
+  });
+
+  test('refused with nothing removed: no file sets the entry, no vault copy, the vault off, a session without sudo', async () => {
+    const w = world();
+    // acme/author lives only in the vault: removing it would leave the role without an entry.
+    const only = await inject('DELETE', '/api/control/secrets/github-app/acme/author');
+    expect(only.statusCode).toBe(409);
+    expect(only.json().error).toContain('no file sets github-app/acme/author');
+    expect(w.vault.meta('github-app/acme/author')).toBeDefined();
+    // acme/reviewer has its file and no vault copy.
+    const none = await removeCopy();
+    expect(none.statusCode).toBe(409);
+    expect(none.json().error).toBe('the vault holds no such app entry');
+    expect((await inject('DELETE', '/api/control/secrets/github-app/zzz/author')).statusCode).toBe(
+      404,
+    );
+    expect((await inject('DELETE', '/api/control/secrets/github-app/acme/admin')).statusCode).toBe(
+      400,
+    );
+    w.vault.put(REVIEWER, serializeAppEntry(SHADOW_ENTRY), { now: t0 });
+    w.store.refreshSecrets();
+    const s = await removeCopy(w.asSession);
+    expect(s.statusCode).toBe(403);
+    expect(s.json()).toMatchObject({ sudo: 'required' });
+    expect(w.vault.meta(REVIEWER)).toBeDefined();
+    expect(listAudit(w.db).filter((a) => a.action === 'secret.remove')).toHaveLength(0);
+    w.db.prepare('UPDATE sessions SET sudo_until = ?').run(plus(t0, 60_000).toISOString());
+    expect((await removeCopy(w.asSession)).statusCode).toBe(200);
+    expectNoSecrets(`${only.body}\n${none.body}\n${s.body}\n${w.logs.join('\n')}`);
+  });
+
+  test('the vault off: 409 VAULT_DISABLED', async () => {
+    world({ vaultOff: true });
+    const r = await removeCopy();
+    expect(r.statusCode).toBe(409);
+    expect(r.json().error).toBe(VAULT_DISABLED);
   });
 });

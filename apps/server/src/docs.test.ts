@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 import { DEFAULT_READY_LABEL } from './config.js';
+import { SHADOWED_APP_FIX, SHADOWED_TOKEN_FIX } from './doctor/checks.js';
 
 /**
  * SECURITY.md's statements about GitHub App mode (issue #471), and the sections that must not
@@ -160,7 +161,31 @@ describe('credential.shadowed covers GitHub App entry files (issue #551)', () =>
     const text = INSTALL.slice(start, end < 0 ? undefined : end).replace(/\s+/g, ' ');
     expect(text).toContain('`secrets/github-app/<owner>/<role>.json`');
     expect(text).toContain('`jumpmaster ctl secrets reload`');
-    expect(text).toContain('`/settings/credentials`');
+  });
+
+  /** The `jumpmaster ctl …` commands a text names, and whether it tells to replace the entry. */
+  const actionsOf = (text: string) => ({
+    commands: [
+      ...new Set(
+        [...text.matchAll(/jumpmaster ctl secrets (reload|remove [^\s`.,)]+)/g)].map((m) => m[1]),
+      ),
+    ].sort(),
+    deletesFile: /delete the file/.test(text),
+  });
+
+  test("the runbook's app entry paragraph names the same actions as the doctor's fix, and no Replace key (issue #599)", () => {
+    const start = INSTALL.indexOf('\n### `credential.shadowed`\n');
+    const end = INSTALL.indexOf('\n### ', start + 1);
+    const section = INSTALL.slice(start, end);
+    const app = section.slice(section.indexOf('GitHub App entry files')).replace(/\s+/g, ' ');
+    const token = section.slice(0, section.indexOf('GitHub App entry files')).replace(/\s+/g, ' ');
+    expect(actionsOf(app)).toEqual(actionsOf(SHADOWED_APP_FIX));
+    expect(actionsOf(app).commands).toEqual(['reload', 'remove github-app/<owner>/<role>']);
+    expect(actionsOf(token).commands).toEqual(actionsOf(SHADOWED_TOKEN_FIX).commands);
+    // Replace key is named only to say it does not clear the warning.
+    expect(app).not.toMatch(/replace the vault entry/i);
+    expect(app).toContain('Replace key does not');
+    expect(app).not.toContain("does not take an app entry's name");
   });
 });
 

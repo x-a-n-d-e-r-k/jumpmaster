@@ -1766,9 +1766,23 @@ describe('credential checks (Task 4)', () => {
         `github-app/acme/author is set by ${path} (${s?.fileFingerprint}) and in the vault (${s?.vaultFingerprint}): the file is in use`,
       );
       expect(c.fix).toContain('jumpmaster ctl secrets reload');
-      expect(c.fix).toContain('/settings/credentials');
-      expect(c.fix).not.toContain('ctl secrets remove');
+      expect(c.fix).toContain('jumpmaster ctl secrets remove github-app/<owner>/<role>');
       expectNoSecret(c);
+    });
+
+    test('the fix names no action refused for a file-sourced entry: no Replace key, no Settings control (issue #599)', async () => {
+      for (const prefer of [false, true]) {
+        const { shadowed } = setup(FILE_PEM, VAULT_PEM, prefer);
+        const w = world();
+        w.deps.credentials = creds({ shadowed });
+        const c = one(await w.run(), 'credential.shadowed');
+        expect(c.fix).toBe(
+          'For a GitHub App entry (github-app/<owner>/<role>), keep the one you mean: delete the file secrets/github-app/<owner>/<role>.json (then jumpmaster ctl secrets reload), or remove the vault copy with jumpmaster ctl secrets remove github-app/<owner>/<role>.',
+        );
+        expect(c.fix).not.toMatch(/replace/i);
+        expect(c.fix).not.toContain('/settings/credentials');
+        expect(c.fix).not.toContain('/key');
+      }
     });
 
     test('under prefer-vault the summary says the vault entry is in use', async () => {
@@ -1797,7 +1811,7 @@ describe('credential checks (Task 4)', () => {
       }
     });
 
-    test('a token and an app entry both shadowed: each fix is given, and remove is offered for the token only', async () => {
+    test('a token and an app entry both shadowed: each fix is given, each with its own remove', async () => {
       const { shadowed } = setup(FILE_PEM, VAULT_PEM);
       const w = world();
       w.deps.credentials = creds({
@@ -1814,7 +1828,7 @@ describe('credential checks (Task 4)', () => {
       const c = one(await w.run(), 'credential.shadowed');
       expect(c.credentials).toEqual(['githubAuthorToken', 'github-app/acme/author']);
       expect(c.fix).toContain('jumpmaster ctl secrets remove <name>');
-      expect(c.fix).toContain('/settings/credentials');
+      expect(c.fix).toContain('jumpmaster ctl secrets remove github-app/<owner>/<role>');
       expectNoSecret(c);
     });
   });

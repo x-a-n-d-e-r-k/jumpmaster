@@ -288,17 +288,23 @@ function mcpTokensRequest(args: string[]): Raw | null {
  * encoded on its own; any other name is one segment.
  */
 function secretTestPath(name: string): string {
+  return `${secretPath(name)}/test`;
+}
+
+/** The route of a credential, or of an app entry (`github-app/<owner>/<role>`, issue #599). */
+function secretPath(name: string): string {
   const app = /^github-app\/([^/]+)\/([^/]+)$/.exec(name);
   if (app) {
     const [, owner = '', role = ''] = app;
-    return `/api/control/secrets/github-app/${encodeURIComponent(owner)}/${encodeURIComponent(role)}/test`;
+    return `/api/control/secrets/github-app/${encodeURIComponent(owner)}/${encodeURIComponent(role)}`;
   }
-  return `/api/control/secrets/${encodeURIComponent(name)}/test`;
+  return `/api/control/secrets/${encodeURIComponent(name)}`;
 }
 
 /**
  * `ctl secrets list | set <name> | test <name> | remove <name> | reload | vault on|off |
- * vault prefer on|off | copy-to-vault <name>`. `set` takes its value
+ * vault prefer on|off | copy-to-vault <name>`; `test` and `remove` also take
+ * `github-app/<owner>/<role>`. `set` takes its value
  * from stdin or a file, never argv: `runSecrets` sends it.
  */
 function secretsRequest(args: string[]): Raw | null {
@@ -310,7 +316,7 @@ function secretsRequest(args: string[]): Raw | null {
   if (!name || name.startsWith('--')) return null;
   const at = `${path}/${encodeURIComponent(name)}`;
   if (verb === 'test' && rest.length === 0) return { path: secretTestPath(name), body: {} };
-  if (verb === 'remove' && rest.length === 0) return { path: at, method: 'DELETE' };
+  if (verb === 'remove' && rest.length === 0) return { path: secretPath(name), method: 'DELETE' };
   if (verb === 'copy-to-vault' && rest.length === 0)
     return { path: `${at}/copy-to-vault`, body: {} };
   if (verb === 'set') return { path: at, method: 'PUT' };
@@ -1222,7 +1228,7 @@ async function runSecrets(
     return show(await call('POST', `${at(name)}/copy-to-vault`, {}));
   if (verb === 'test' && rest.length === 0)
     return show(await call('POST', secretTestPath(name), {}));
-  if (verb === 'remove' && rest.length === 0) return show(await call('DELETE', at(name)));
+  if (verb === 'remove' && rest.length === 0) return show(await call('DELETE', secretPath(name)));
   if (verb !== 'set') return usage();
   let file: string | undefined;
   let created: string | undefined;

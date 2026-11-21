@@ -878,6 +878,27 @@ export class ConfigStore implements ConfigSource {
     return { ok: true };
   }
 
+  /**
+   * Removes the vault copy of a GitHub App entry (`github-app/<owner>/<role>`) and swaps the
+   * credentials, as `deleteCredential` does: when the new set does not load, the entry is put back.
+   */
+  deleteAppEntry(
+    owner: string,
+    role: AppRole,
+  ): { ok: true; deleted: boolean } | { ok: false; issues: ConfigIssue[] } {
+    const vault = this.vault();
+    if (vault === 'disabled') return { ok: false, issues: [{ path: '', message: VAULT_DISABLED }] };
+    const name = appEntryName(owner, role);
+    const before = vault.snapshot(name);
+    const deleted = vault.delete(name);
+    const r = this.refreshSecrets();
+    if (!r.ok) {
+      vault.restore(name, before);
+      return { ok: false, issues: 'issues' in r ? r.issues : [] };
+    }
+    return { ok: true, deleted };
+  }
+
   /** Removes a vault entry and swaps the credentials; refused when the vault is off. */
   deleteCredential(
     name: CredentialName,
