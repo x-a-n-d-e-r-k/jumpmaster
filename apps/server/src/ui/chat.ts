@@ -8,6 +8,7 @@ import {
 } from '../chat/cards.js';
 import type { ChatMessage, ChatThread, ToolStepResult } from '../chat/store.js';
 import { PENDING_MS } from '../config/confirm.js';
+import { FRAME_START } from './confirm.js';
 import { renderChatMarkdown } from './markdown.js';
 import { escapeHtml, linkify, page } from './pages.js';
 import { relativeTime } from './time.js';
@@ -195,6 +196,12 @@ function messageHtml(m: ChatMessage): string {
  * mean the change is gone, so the card turns Expired with Stage it again, which fills the composer
  * without sending. Without the dialog API, the button goes to the confirm page instead.
  *
+ * A frame response is set as markup only when it is not redirected and starts as the server's frame
+ * does (`FRAME_START`). Once the session has ended, the frame GET is redirected to the login or
+ * setup page, and the POST is a 401 without `{ error: 'passphrase' }` (or, in setup mode, redirected):
+ * the dialog then drops its form and says the session ended, with a log-in link back to the thread
+ * (#579). Only `{ error: 'passphrase' }` is a wrong passphrase.
+ *
  * Text streamed mid-turn shows in a live reply bubble that stays last in the log: tool steps, cards
  * and messages arriving after it go before it, and live text does not end a steps group (#573).
  * The server stores a turn's text as one assistant message after its tool lines, so this keeps the
@@ -213,20 +220,22 @@ const stepEl=(m)=>{const li=el('li');li.dataset.seq=String(m.seq);const i=m.inpu
 const add=(n)=>{if(live)log.insertBefore(n,live);else log.append(n);};
 const step=(m)=>{const seq=String(m.seq);for(const g of log.children){if(g.className!=='steps')continue;const old=[...g.querySelector('ol').children].find((li)=>li.dataset.seq===seq);if(old){const n=stepEl(m);const o=old.querySelector('details');const nd=n.querySelector('details');if(o&&nd&&o.open)nd.open=true;old.replaceWith(n);return;}}const k=log.children;let g=k[k.length-(live?2:1)];if(!g||g.className!=='steps'){g=el('details','steps');g.append(el('summary'),el('ol'));add(g);}const ol=g.querySelector('ol');ol.append(stepEl(m));g.querySelector('summary').textContent='Worked through '+ol.children.length+(ol.children.length===1?' step':' steps');};
 const put=(m)=>{last=Math.max(last,Number(m.seq)||0);if(m.role==='tool')return step(m);const old=[...log.children].find((c)=>c.dataset.seq===String(m.seq));if(m.role==='assistant'&&live&&!old&&typeof m.html==='string'){live.lastChild.innerHTML=m.html;live.className='msg assistant';live.dataset.seq=String(m.seq);if(m.state!=='done')live.append(el('small','state',m.error?m.state+': '+m.error:m.state));live=null;return;}const node=msgEl(m);if(old)old.replaceWith(node);else add(node);if(m.role==='assistant'&&live){live.remove();live=null;}};
-const PENDING_MS=${PENDING_MS};const CONFIRM=new RegExp(${JSON.stringify(CONFIRM_LINK.source)});const dlg=document.getElementById('confirm-dialog');const dbody=dlg?dlg.querySelector('.confirm-body'):null;let dcard=null;let dmsg=null;
+const PENDING_MS=${PENDING_MS};const CONFIRM=new RegExp(${JSON.stringify(CONFIRM_LINK.source)});const dlg=document.getElementById('confirm-dialog');const dbody=dlg?dlg.querySelector('.confirm-body'):null;const FRAME_START=${JSON.stringify(FRAME_START)};let dcard=null;let dmsg=null;
 const drop=(d)=>{for(const s of ['.review','.expiry','noscript']){const x=d.querySelector(s);if(x)x.remove();}};
 const setState=(d,t)=>{const st=d.querySelector('.state');if(st)st.textContent=t;else d.append(el('small','state',t));};
 const restage=(d)=>{box.value='Stage this change again: '+d.querySelector('.text').textContent;box.focus();};
 const expire=(d)=>{if(d.dataset.expired)return;d.dataset.expired='1';delete d.dataset.confirm;d.className+=' expired';drop(d);setState(d,'Expired');const b=el('button','restage','Stage it again');b.type='button';b.addEventListener('click',()=>restage(d));d.append(b);if(dcard===d&&dlg.open)dlg.close();};
 const tick=(d)=>{if(!d.dataset.confirm)return;const n=Math.ceil((Date.parse(d.dataset.created)+PENDING_MS-Date.now())/60000);if(!(n>0))return expire(d);const x=d.querySelector('.expiry');if(x)x.textContent='Confirm within '+n+' min';};
 const dErr=(t)=>{if(!dmsg){dmsg=el('p','error');dmsg.setAttribute('role','alert');dbody.insertBefore(dmsg,dbody.firstChild);}dmsg.textContent=t;};
-const send=async(d,url,f)=>{const q=new URLSearchParams();for(const i of f.querySelectorAll('input'))if(i.name)q.append(i.name,i.value);const m=dbody.querySelector('meta[name=jm-csrf]')||document.querySelector('meta[name=jm-csrf]');let r;try{r=await fetch(url,{method:'POST',credentials:'same-origin',headers:{accept:'application/json','content-type':'application/x-www-form-urlencoded','x-jm-csrf':m?m.content:''},body:q.toString()});}catch(x){return dErr('Not sent: '+((x&&x.message)||x));}if(dcard!==d)return;const j=await r.json().catch(()=>({}));
+const ended=()=>{dbody.textContent='';dmsg=el('p','error','Your session has ended, so nothing was applied. ');dmsg.setAttribute('role','alert');const a=el('a','','Log in again');a.href='/login?next='+encodeURIComponent('/chat/'+encodeURIComponent(id));dmsg.append(a);dbody.append(dmsg);a.focus();};
+const send=async(d,url,f)=>{const q=new URLSearchParams();for(const i of f.querySelectorAll('input'))if(i.name)q.append(i.name,i.value);const m=dbody.querySelector('meta[name=jm-csrf]')||document.querySelector('meta[name=jm-csrf]');let r;try{r=await fetch(url,{method:'POST',credentials:'same-origin',headers:{accept:'application/json','content-type':'application/x-www-form-urlencoded','x-jm-csrf':m?m.content:''},body:q.toString()});}catch(x){return dErr('Not sent: '+((x&&x.message)||x));}if(dcard!==d)return;if(r.redirected)return ended();const j=await r.json().catch(()=>({}));if(dcard!==d)return;
+if(r.status===401&&j.error!=='passphrase')return ended();
 if(r.status===200){delete d.dataset.confirm;drop(d);setState(d,'Confirmed');d.tabIndex=-1;dlg.close();return;}
 if(r.status===404||r.status===409)return expire(d);
 dErr(r.status===401?'That passphrase is not right.':r.status===429?'Too many wrong passphrases from here: wait '+(Number(j.retryAfter)||1)+' s and try again.':r.status===503?'The passphrase check is busy: try again in a moment.':'Not applied: '+r.status+' '+(j.error||''));const p=f.querySelector('input[type=password]');if(p){p.value='';p.focus();}};
 const review=async(d)=>{const url=d.dataset.confirm;if(!url||!CONFIRM.test(url))return;if(typeof HTMLDialogElement!=='function'||!dlg||typeof dlg.showModal!=='function'){location.href=url;return;}
 dcard=d;dmsg=null;dbody.textContent='Loading…';if(!dlg.open)dlg.showModal();let r;try{r=await fetch(url+'?frame=1',{credentials:'same-origin',headers:{accept:'text/html'}});}catch(x){return dErr('Could not load the change: '+((x&&x.message)||x));}if(dcard!==d)return;
-if(r.status===404)return expire(d);if(!r.ok)return dErr('Could not load the change: '+r.status);const html=await r.text();if(dcard!==d)return;dbody.innerHTML=html;dmsg=null;
+if(r.redirected)return ended();if(r.status===404)return expire(d);if(!r.ok)return dErr('Could not load the change: '+r.status);const html=await r.text();if(dcard!==d)return;if(!html.startsWith(FRAME_START))return dErr('Could not load the change: the answer was not the confirm form.');dbody.innerHTML=html;dmsg=null;
 const f=dbody.querySelector('form');const c=dbody.querySelector('[data-cancel]');if(c)c.addEventListener('click',()=>dlg.close());if(f)f.addEventListener('submit',(e)=>{e.preventDefault();send(d,url,f);});const p=dbody.querySelector('input[type=password]');if(p)p.focus();};
 const wire=(d)=>{const b=d.querySelector('.review');if(b&&d.dataset.confirm)b.addEventListener('click',()=>review(d));const r=d.querySelector('.restage');if(r)r.addEventListener('click',()=>restage(d));tick(d);};
 const cardEl=(c)=>{const d=el('div','msg card '+c.state);d.dataset.card=String(c.id);d.append(el('div','who',CARD_TITLE[c.kind]||'Action'),el('div','text',c.summary));if(STATE[c.state])d.append(el('small','state',STATE[c.state]));if(c.state==='pending'&&typeof c.link==='string'&&CONFIRM.test(c.link)){d.dataset.confirm=c.link;d.dataset.created=String(c.createdAt);const b=el('button','review','Review and confirm');b.type='button';d.append(el('small','expiry',''),b);}else if(c.link){const a=el('a','','Open');a.href=c.link;d.append(a);}return d;};

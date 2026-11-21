@@ -576,6 +576,8 @@ describe('/chat Markdown (#490)', () => {
       resolve: (r: {
         ok: boolean;
         status: number;
+        redirected?: boolean;
+        url?: string;
         text?: () => Promise<string>;
         json?: () => Promise<unknown>;
       }) => void;
@@ -1413,6 +1415,103 @@ describe('/chat Markdown (#490)', () => {
       expect(card.querySelector('.review')).toBeNull();
       expect(card.querySelector('.restage')?.textContent).toBe('Stage it again');
       expect(FakeEl.focused).toBe(card.querySelector('.restage'));
+    });
+
+    /** The dialog's "session ended" notice: its text and the log-in link's target. */
+    const ended = (r: { dbody: FakeEl }) => {
+      const err = r.dbody.querySelector('.error') as FakeEl;
+      return { text: err?.textContent, href: (err?.querySelector('a') as { href?: string })?.href };
+    };
+
+    test('#579: a frame fetch redirected to the login page is not put into the dialog; it says to log in again', async () => {
+      const r = runScript({ now: T + MIN });
+      let parsed = 0;
+      FakeEl.parse = () => {
+        parsed++;
+      };
+      r.emit('card', { card: pendingCard() });
+      press(cardOf(r.log).querySelector('.review'));
+      r.pageFetches[0]?.resolve({
+        ok: true,
+        status: 200,
+        redirected: true,
+        url: 'http://x/login?next=%2Fconfig%2Fconfirm%2Fabc%3Fframe%3D1',
+        text: async () =>
+          '<h2>Log in</h2><form method="post" action="/login"><input type="password" name="passphrase"></form>',
+      });
+      await flush();
+      expect(parsed).toBe(0);
+      expect(FakeEl.htmlWrites).toEqual([]);
+      expect(r.dbody.querySelector('form')).toBeNull();
+      expect(r.dialog.open).toBe(true);
+      const e = ended(r);
+      expect(e.text).toMatch(/session has ended/i);
+      expect(e.text).toMatch(/log in/i);
+      expect(e.href).toBe('/login?next=%2Fchat%2F1');
+      // Nothing was posted, and the card is still waiting.
+      expect(r.pageFetches).toHaveLength(1);
+      expect(cardOf(r.log).querySelector('.review')).not.toBeNull();
+    });
+
+    test('#579: a 200 frame that is not the server frame is not put into the dialog', async () => {
+      const r = runScript({ now: T + MIN });
+      r.emit('card', { card: pendingCard() });
+      press(cardOf(r.log).querySelector('.review'));
+      r.pageFetches[0]?.resolve(text(200, '<h2>Something else</h2><form></form>'));
+      await flush();
+      expect(FakeEl.htmlWrites).toEqual([]);
+      expect(r.dbody.querySelector('form')).toBeNull();
+      expect(r.dbody.querySelector('.error')?.textContent).toMatch(/could not load/i);
+    });
+
+    test('#579: a 401 that is not a wrong passphrase says to log in, and removes the form', async () => {
+      const r = await opened();
+      (r.form.querySelector('input[type=password]') as FakeEl).value = 'pass phrase';
+      r.submit();
+      r.pageFetches[1]?.resolve({
+        ok: false,
+        status: 401,
+        json: async () => {
+          throw new Error('not json');
+        },
+      });
+      await flush();
+      const e = ended(r);
+      expect(e.text).not.toMatch(/passphrase is not right/);
+      expect(e.text).toMatch(/log in/i);
+      expect(e.text).not.toContain('pass phrase');
+      expect(e.href).toBe('/login?next=%2Fchat%2F1');
+      expect(r.dbody.querySelector('form')).toBeNull();
+      expect(r.dialog.open).toBe(true);
+      expect(cardOf(r.log).querySelector('.review')).not.toBeNull();
+    });
+
+    test('#579: a 401 { error: passphrase } still says the passphrase is not right', async () => {
+      const r = await opened();
+      r.submit();
+      r.pageFetches[1]?.resolve(json(401, { error: 'passphrase' }));
+      await flush();
+      expect(r.dbody.querySelector('.error')?.textContent).toBe('That passphrase is not right.');
+      expect(r.dbody.querySelector('form')).not.toBeNull();
+    });
+
+    test('#579: a POST redirected (setup mode) is not taken as confirmed; it says to log in', async () => {
+      const r = await opened();
+      r.submit();
+      r.pageFetches[1]?.resolve({
+        ok: true,
+        status: 200,
+        redirected: true,
+        url: 'http://x/setup',
+        json: async () => {
+          throw new Error('not json');
+        },
+      });
+      await flush();
+      expect(r.dialog.open).toBe(true);
+      expect(ended(r).text).toMatch(/log in/i);
+      expect(cardOf(r.log).querySelector('.state')?.textContent).not.toBe('Confirmed');
+      expect(cardOf(r.log).querySelector('.review')).not.toBeNull();
     });
 
     test('a 404 frame marks the card Expired without showing anything', async () => {
