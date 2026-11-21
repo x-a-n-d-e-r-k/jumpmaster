@@ -187,8 +187,8 @@ const FLOOR = `
 .bar{height:.375rem;border-radius:999px;background:var(--bg-soft-200);margin-top:.375rem;overflow:hidden}
 .bar i{display:block;height:100%;border-radius:inherit;background:var(--primary-base)}
 .bar i.hot{background:var(--warning-base)}.bar i.full{background:var(--error-base)}
-dl.kv{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:.375rem 1rem;margin:.5rem 0 0}
-dl.kv dt{color:var(--text-sub-600)}dl.kv dd{margin:0;overflow-wrap:anywhere}
+dl.kv,dl.drop-summary{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:.375rem 1rem;margin:.5rem 0 0}
+dl.kv dt,dl.drop-summary dt{color:var(--text-sub-600)}dl.kv dd,dl.drop-summary dd{margin:0;overflow-wrap:anywhere}
 .section-h{margin:2rem 0 .75rem;display:flex;align-items:baseline;gap:.5rem;flex-wrap:wrap}
 .quick{display:flex;gap:.5rem;flex-wrap:wrap;margin:0 0 1rem}
 .doctor-drops{list-style:none;padding:0;margin:0 0 1rem;display:flex;flex-direction:column;align-items:flex-start;gap:.5rem}
@@ -225,6 +225,7 @@ details.sticks[open]>summary{margin-bottom:.75rem}
 .transcript details>summary{cursor:pointer;color:var(--text-sub-600)}
 .transcript pre{background:var(--bg-weak-50);border-radius:8px;padding:.5rem .625rem}
 .t-text p{white-space:pre-wrap;overflow-wrap:anywhere}
+.t-system{margin:.5rem 0}.t-system[open]{border-left:2px solid var(--stroke-soft-200);padding-left:.75rem}
 .t-tool,.t-gate,.t-end{margin:.5rem 0;overflow-wrap:anywhere}
 .t-phase{border-top:1px solid var(--stroke-soft-200);margin:1rem 0 .5rem;padding-top:.25rem;font-size:.75rem;color:var(--text-sub-600);text-transform:uppercase}
 .t-cut{font-size:.75rem;color:var(--state-warning-base,#b45309)}

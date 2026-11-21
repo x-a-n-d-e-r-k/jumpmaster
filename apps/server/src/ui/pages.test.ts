@@ -2436,6 +2436,24 @@ describe('the drop page header and system-event groups (#499)', () => {
     expect(html).not.toContain('href="/">Back');
   });
 
+  const styleOf = (html: string) => html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+
+  test('the summary list is styled as a key/value grid (#577)', () => {
+    const html = renderDrop(implement, [], [], null, { item: issue, zones: [jm], now });
+    const cls = /<dl class="([^"]+)">/.exec(html.slice(html.indexOf('<h2 title=')))?.[1] ?? '';
+    expect(cls).not.toBe('');
+    const css = styleOf(html);
+    const classes = cls.split(/\s+/);
+    expect(classes.some((c) => new RegExp(`dl\\.${c}\\{[^}]*display:grid`).test(css))).toBe(true);
+    expect(classes.some((c) => css.includes(`dl.${c} dd{margin:0`))).toBe(true);
+  });
+
+  test('the stylesheet sets an opened system-event group apart (#577)', () => {
+    const html = renderDrop(drop, [sys(1), sys(2)]);
+    expect(html).toContain('<details class="t-system">');
+    expect(styleOf(html)).toMatch(/\.t-system[^{]*\{[^}]*(border|margin-left|padding-left)/);
+  });
+
   test('a crew drop shows crew and the Drops breadcrumb', () => {
     const html = renderDrop({ ...implement, role: 'crew', workItemId: null }, [], [], null, {
       zones: [jm],
