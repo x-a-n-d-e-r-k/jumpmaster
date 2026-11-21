@@ -335,6 +335,60 @@ describe('the confirm dialog (#503)', () => {
     expect([stale.statusCode, stale.json()]).toEqual([409, { error: 'unknown' }]);
   });
 
+  test('#579: without a session the frame GET is a redirect to /login (or /setup) and the JSON POST a plain-text 401, never { error: passphrase }', async () => {
+    const w = await world();
+    const id = await w.propose(weaken);
+    const token = w.tokenIn((await w.frame(id)).body);
+    const frame = await app?.inject({
+      method: 'GET',
+      url: `/config/confirm/${id}?frame=1`,
+      headers: { host: HOST },
+    });
+    expect(frame?.statusCode).toBe(302);
+    expect(frame?.headers.location).toBe(
+      `/login?next=${encodeURIComponent(`/config/confirm/${id}?frame=1`)}`,
+    );
+    const post = await app?.inject({
+      method: 'POST',
+      url: `/config/confirm/${id}`,
+      headers: {
+        host: HOST,
+        origin: ORIGIN,
+        accept: 'application/json',
+        'content-type': 'application/x-www-form-urlencoded',
+        'x-jm-csrf': w.one.csrf,
+      },
+      payload: new URLSearchParams({ token, passphrase: PASS }).toString(),
+    });
+    expect(post?.statusCode).toBe(401);
+    expect(post?.headers['content-type']).toMatch(/^text\/plain/);
+    expect(post?.body).toBe('log in first');
+    expect(post?.body).not.toContain(PASS);
+    expect(w.store.revision()).toBe(2);
+    expect(applies(w)).toEqual([]);
+    // Setup mode, still without a session: both go to /setup (a redirect `fetch` follows).
+    w.db.prepare('DELETE FROM operator').run();
+    const inSetup = await app?.inject({
+      method: 'GET',
+      url: `/config/confirm/${id}?frame=1`,
+      headers: { host: HOST },
+    });
+    expect([inSetup?.statusCode, inSetup?.headers.location]).toEqual([302, '/setup']);
+    const postInSetup = await app?.inject({
+      method: 'POST',
+      url: `/config/confirm/${id}`,
+      headers: {
+        host: HOST,
+        origin: ORIGIN,
+        accept: 'application/json',
+        'content-type': 'application/x-www-form-urlencoded',
+      },
+      payload: new URLSearchParams({ token, passphrase: PASS }).toString(),
+    });
+    expect([postInSetup?.statusCode, postInSetup?.headers.location]).toEqual([302, '/setup']);
+    expect(w.store.revision()).toBe(2);
+  });
+
   test('D1: an unknown, expired or other-session id is 404 GONE on the frame; the JSON POST of another session is 404 and applies nothing', async () => {
     const w = await world();
     const id = await w.propose(weaken);

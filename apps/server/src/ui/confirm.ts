@@ -107,6 +107,11 @@ const GONE = notice('Nothing to confirm', `${GONE_TEXT} <a href="/">Home</a>`);
  * POST needs from the same response that minted the confirmation.
  */
 const FRAME_CSRF = '<meta name="jm-csrf" content="">';
+/**
+ * How every frame begins, whatever token `withCsrf` fills in: the chat's dialog injects a response
+ * only when it starts so (#579), never a login or setup page a redirect led to.
+ */
+export const FRAME_START = '<meta name="jm-csrf" content="';
 /** The frame's GONE: the same words without the page around them (or a way off the thread). */
 const GONE_FRAME = `${FRAME_CSRF}<p><strong>Nothing to confirm.</strong> ${GONE_TEXT}</p>`;
 
