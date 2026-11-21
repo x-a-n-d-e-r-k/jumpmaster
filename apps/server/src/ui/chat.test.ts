@@ -1317,9 +1317,11 @@ describe('/chat Markdown (#490)', () => {
 
     test('streamed: a pruned step says "result pruned on" with the date, and has no <pre>', () => {
       const { log, emit } = runScript();
+      // The shape the events route sends for a pruned step (#587): no result, a prune date.
       emit('tool', {
         seq: 2,
         text: 'r',
+        createdAt: '2026-04-01T12:00:00.000Z',
         toolName: 'Read',
         input: { file_path: 'a' },
         resultPrunedAt: '2026-06-01T12:00:00.000Z',
