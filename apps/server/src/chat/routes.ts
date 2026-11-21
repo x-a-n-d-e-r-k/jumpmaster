@@ -26,6 +26,7 @@ import {
   hasOwnerMessage,
   listMessages,
   listThreads,
+  resultStepsUpTo,
   setThreadTitle,
   threadBusy,
 } from './store.js';
@@ -322,6 +323,10 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     };
     req.raw.on('close', end);
 
+    // The results stored since the browser saw their steps (#583), each under its step's seq.
+    for (const message of resultStepsUpTo(db, thread.id, last)) {
+      relay({ seq: message.seq, event: { type: 'message', message } });
+    }
     const { turns } = deps;
     if (turns?.subscribe) {
       unsubscribe = turns.subscribe(thread.id, last, relay);
