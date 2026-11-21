@@ -510,7 +510,13 @@ export const claimKeys = (zoneId: string, claimId: number) => ({
   comment: `comment:${zoneId}:crew-done:${claimId}`,
   marker: commentMarker(zoneId, `crew-done:${claimId}`),
   close: `close:${zoneId}:crew-done:${claimId}`,
+  retract: `comment:${zoneId}:crew-done-retract:${claimId}`,
+  retractMarker: commentMarker(zoneId, `crew-done-retract:${claimId}`),
 });
+
+/** The follow-up on an issue whose closing comment was sent by a claim that no longer stands. */
+export const claimRetractComment = (why: string): string =>
+  `The crew is no longer closing this issue: ${why}. It stays open.`;
 
 /** A claim's cited pulls then issues, each once, as `#N` (numbers only). */
 const citedList = (e: DoneEvidence): string =>
@@ -611,13 +617,65 @@ async function runOnce(db: Db, forges: ForgePair, op: Op, now: Date): Promise<bo
 }
 
 /**
+ * Settles a claim whose closing comment was sent but which no longer stands (#591): its close
+ * outbox row (not done) removed so no pass sends it, then, only while the issue is still open, one
+ * follow-up comment by keys derived from the claim, then the claim `superseded` with `why`. The
+ * item is left as the ruling set it. A read or follow-up not done leaves the claim `verifying` for
+ * the next pass, which checks again. Returns how many ops it ran.
+ */
+async function retractClaim(
+  db: Db,
+  forges: ForgePair,
+  zone: DropZoneConfig,
+  claim: DoneClaim,
+  why: string,
+  now: Date,
+): Promise<number> {
+  const keys = claimKeys(zone.id, claim.id);
+  const close = getOutbox(db, keys.close);
+  if (close && close.state !== 'done') deleteOutbox(db, keys.close);
+  let ran = 0;
+  const n = getWorkItem(db, claim.itemId)?.issueNumber;
+  const sent = getOutbox(db, keys.retract);
+  if (n !== undefined && sent?.state !== 'done') {
+    // A follow-up maybe sent is read back by its marker; otherwise only an open issue gets one.
+    let post = sent !== undefined && sent.state !== 'failed';
+    if (!post) {
+      try {
+        post = (await forges.author.getIssue(n))?.state === 'open';
+      } catch {
+        return ran;
+      }
+    }
+    if (post) {
+      ran++;
+      const op: Op = {
+        kind: 'comment_issue',
+        opKey: keys.retract,
+        zoneId: zone.id,
+        itemId: null,
+        payload: {
+          number: n,
+          body: claimRetractComment(why),
+          marker: keys.retractMarker,
+        } satisfies CommentIssuePayload,
+      };
+      if (!(await runOnce(db, forges, op, now))) return ran;
+    }
+  }
+  settleDoneClaim(db, claim.id, 'superseded', why, now);
+  return ran;
+}
+
+/**
  * Settles each `verifying` claim that a parked item is already done (#536), only in an active
  * zone with the kill switch off. A claim the server's facts no longer back (the item no longer
  * parked, its briefing not open or changed, its issue closed) is superseded and writes nothing. A
  * cited item that fails `verifyCited`, or a lookup that throws, refuses it: the reason goes on the
  * briefing as `needs_command`. Verified, with `crew.closeDone`: a comment, then the issue closed as
  * completed, then the item `done` and its briefing withdrawn, each once by keys derived from the
- * claim (D3); a write not done leaves it `verifying` for the next pass. Without `crew.closeDone`
+ * claim (D3); a write not done leaves it `verifying` for the next pass, which checks again that it
+ * stands before the close (#591): one no longer standing is retracted by `retractClaim`. Without `crew.closeDone`
  * it is `done` and the briefing names what verified it. Returns how many ops it ran.
  */
 export async function flushDoneClaims(
@@ -634,7 +692,15 @@ export async function flushDoneClaims(
     const comment = getOutbox(db, keys.comment);
     // A comment sent (or maybe sent) commits the claim: it was verified before it was written.
     const committed = comment !== undefined && comment.state !== 'failed';
-    if (!committed) {
+    if (committed) {
+      // Sent the comment, the claim still closes only while it stands (#591): a ruling or a
+      // changed briefing since then supersedes it, before any close is sent.
+      const stale = claimStands(db, claim);
+      if (stale) {
+        ran += await retractClaim(db, forges, zone, claim, stale, now);
+        continue;
+      }
+    } else {
       const check = await checkClaim(db, forges, claim);
       // Re-read: a ruling or another pass may have moved it while the forge was read.
       if (getDoneClaim(db, claim.id)?.state !== 'verifying') continue;
