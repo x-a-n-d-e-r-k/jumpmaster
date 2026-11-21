@@ -1475,6 +1475,7 @@ describe('route classes (crew chat, #349)', () => {
 describe("this session's pending guarded changes under Waiting on you (#507)", () => {
   const OPERATOR = { authorization: `Bearer ${'o'.repeat(32)}`, host: 'localhost:80' };
   const needsYou = (body: string) => /data-tile="needs-you"[^>]*><b>(\d+)<\/b>/.exec(body)?.[1];
+  const tileHref = (body: string) => /data-tile="needs-you" href="([^"]*)"/.exec(body)?.[1];
 
   async function staged() {
     const h = await harness({ live: true, zone: { protectedPaths: [...DEFAULT_PROTECTED_PATHS] } });
@@ -1504,11 +1505,18 @@ describe("this session's pending guarded changes under Waiting on you (#507)", (
     expect(mine).toContain('1 guarded change to confirm');
     expect(mine).not.toContain('PATCH-SECRET-A');
     expect(needsYou(mine)).toBe('1');
+    // The tile leads to the card that lists A's pending row (#585).
+    expect(tileHref(mine)).toBe('#waiting-on-you');
+    const card = mine.slice(mine.indexOf('id="waiting-on-you"'));
+    expect(card.slice(0, card.indexOf('</section>'))).toContain(
+      `<a href="/config/confirm/${p.id}">Review and confirm</a>`,
+    );
     const theirs = (await h.view('/', { cookie: b.cookie })).body;
     expect(theirs).not.toContain('Turns on the MCP server for A');
     expect(theirs).not.toContain(p.id);
     expect(theirs).not.toContain('guarded change to confirm');
     expect(needsYou(theirs)).toBe('0');
+    expect(tileHref(theirs)).toBe('/briefings');
   });
 
   test('a control-token request to / lists none', async () => {

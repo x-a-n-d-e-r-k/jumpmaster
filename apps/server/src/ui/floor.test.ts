@@ -687,6 +687,48 @@ describe('pending guarded changes on the floor (#507)', () => {
     expect(three).toContain('from chat: <a href="/chat/42">Tune &lt;the&gt; zone</a>');
   });
 
+  const tileHref = (html: string) =>
+    /<a class="tile" data-tile="needs-you" href="([^"]*)">/.exec(strip(html))?.[1];
+
+  test('with only a pending change, the Needs you tile links to where the change is listed (#585)', () => {
+    const html = renderHome(
+      home({ zones: [zone('A')], briefings: [], pending: [{ change: pending() }] }),
+    );
+    const tile = tileHref(html);
+    expect(tile).not.toBe('/briefings');
+    expect(tile).toBe('#waiting-on-you');
+    const card = html.slice(html.indexOf('id="waiting-on-you"'));
+    expect(html).toContain('id="waiting-on-you"');
+    expect(card).toContain('<a href="/config/confirm/pend-1">Review and confirm</a>');
+    expect(html).not.toContain('PATCH-ONLY-VALUE-x9');
+  });
+
+  test('with briefings only, the Needs you tile links to /briefings (#585)', () => {
+    const html = renderHome(home({ zones: [zone('A')], briefings: [br('A')] }));
+    expect(strip(html)).toContain('<b>1</b><span>Needs you</span>');
+    expect(tileHref(html)).toBe('/briefings');
+  });
+
+  test('with briefings and a pending change, the tile leads to the card listing both (#585)', () => {
+    const html = renderHome(
+      home({ zones: [zone('A')], briefings: [br('A')], pending: [{ change: pending() }] }),
+    );
+    expect(strip(html)).toContain('<b>2</b><span>Needs you</span>');
+    expect(tileHref(html)).toBe('#waiting-on-you');
+    const card = html.slice(html.indexOf('id="waiting-on-you"'));
+    expect(card.slice(0, card.indexOf('</section>'))).toContain(
+      '<a href="/config/confirm/pend-1">Review and confirm</a>',
+    );
+    expect(card.slice(0, card.indexOf('</section>'))).toContain(
+      '1 decision waiting. <a href="/briefings">',
+    );
+  });
+
+  test('with nothing waiting, the tile still links to /briefings (#585)', () => {
+    const html = renderHome(home({ zones: [zone('A')], briefings: [] }));
+    expect(tileHref(html)).toBe('/briefings');
+  });
+
   test('the row never renders a value that is only in the patch', () => {
     const html = renderHome(
       home({ zones: [zone('A')], briefings: [], pending: [{ change: pending() }] }),

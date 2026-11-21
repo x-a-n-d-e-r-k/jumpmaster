@@ -41,6 +41,7 @@ import {
   pendingRows,
   sticksSummary,
   totalsStrip,
+  WAITING_ON_YOU_ID,
   zoneCards,
 } from './floor.js';
 import { linkTarget } from './links.js';
@@ -170,8 +171,8 @@ export const badge = (state: string): string =>
  * A floor card: an eyebrow with the plain-English name (§4: the UI says each airborne term in
  * plain words too), the section's heading, and its body.
  */
-const card = (plain: string, heading: string, body: string, cls = ''): string =>
-  `<section class="card${cls ? ` ${cls}` : ''}"><span class="term">${plain}</span>${heading}${body}</section>`;
+const card = (plain: string, heading: string, body: string, cls = '', id = ''): string =>
+  `<section${id ? ` id="${id}"` : ''} class="card${cls ? ` ${cls}` : ''}"><span class="term">${plain}</span>${heading}${body}</section>`;
 
 /** The kill control. It posts with the session's CSRF header, so a page visit cannot trigger it. */
 function killSection(killed: boolean): string {
@@ -378,6 +379,8 @@ export function waitingOnYou(
       'Briefings',
       '<h2>Waiting on you</h2>',
       `<p class="empty">Nothing is waiting on you. <a href="/briefings">Briefings and rulings</a></p>${heldLines}`,
+      '',
+      WAITING_ON_YOU_ID,
     );
   }
   const rows = projectsOf(zones, open, [])
@@ -397,6 +400,7 @@ export function waitingOnYou(
         : '') +
       heldLines,
     'attention',
+    WAITING_ON_YOU_ID,
   );
 }
 

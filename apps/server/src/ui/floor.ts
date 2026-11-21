@@ -59,7 +59,8 @@ export interface PendingLine {
 }
 
 export interface FloorCounts {
-  totals: WorkingCounts & { parked: number; needsYou: number };
+  /** `pending`: this session's pending guarded changes, a part of `needsYou` (#507). */
+  totals: WorkingCounts & { parked: number; needsYou: number; pending: number };
   zones: ZoneFloor[];
 }
 
@@ -146,6 +147,7 @@ export function floorCounts(state: HomeState, now: Date): FloorCounts {
       needsYou:
         count(briefings, (b) => !heldZones.has(b.zoneId) && !isNotice(b)) +
         (state.pending ?? []).length,
+      pending: (state.pending ?? []).length,
     },
     zones,
   };
@@ -179,13 +181,24 @@ function workingTiles(c: WorkingCounts, zone: string | undefined): string {
   );
 }
 
+/** The home card that lists pending guarded changes and briefings, linking on to /briefings. */
+export const WAITING_ON_YOU_ID = 'waiting-on-you';
+
+/**
+ * Where the Needs you tile links: /briefings lists briefings only, so with a pending guarded change
+ * counted the tile goes to the Waiting on you card, which lists both (#585).
+ */
+function needsYouHref(pending: number): string {
+  return pending > 0 ? `#${WAITING_ON_YOU_ID}` : '/briefings';
+}
+
 /** The totals strip: one line of tiles across the install. */
 export function totalsStrip(f: FloorCounts): string {
   const t = f.totals;
   return (
     `<nav class="totals" aria-label="Totals">${workingTiles(t, undefined)}` +
     tile('parked', t.parked, 'Parked', listHref('/work', undefined, 'parked')) +
-    tile('needs-you', t.needsYou, 'Needs you', '/briefings') +
+    tile('needs-you', t.needsYou, 'Needs you', needsYouHref(t.pending)) +
     '</nav>'
   );
 }
