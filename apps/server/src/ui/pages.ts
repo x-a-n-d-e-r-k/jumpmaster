@@ -298,6 +298,20 @@ const githubBlobHref = (repo: string, path: string): string => {
 export const zoneBriefingsHref = (zoneId: string): string =>
   `/briefings?zone=${encodeURIComponent(zoneId)}`;
 
+/**
+ * Where a project's briefings are listed: its zone briefings view when the zone is configured,
+ * else (a credits stop outliving its zone, or of zone `''`, #593) the unfiltered /briefings, as
+ * `/briefings?zone=` answers 404 for a zone not configured.
+ */
+const projectBriefingsHref = (zones: readonly ZoneRef[], zoneId: string): string =>
+  zones.some((z) => z.id === zoneId) ? zoneBriefingsHref(zoneId) : '/briefings';
+
+/** A zone's name as zoneNamer gives it, but never empty: zone `''` is the credits stop's. */
+const projectNamer = (zones: readonly ZoneRef[]): ((id: string) => string) => {
+  const name = zoneNamer(zones);
+  return (id) => (id === '' ? 'All dispatch stopped' : name(id));
+};
+
 /** The page sizes the briefings pages offer (#132); anything else is the first. */
 export const PAGE_SIZES = [10, 20, 50, 100] as const;
 export type PageParams = { per: number; page: number; rpage: number };
@@ -383,12 +397,13 @@ export function waitingOnYou(
       WAITING_ON_YOU_ID,
     );
   }
+  const project = projectNamer(zones);
   const rows = projectsOf(zones, open, [])
     .filter((p) => p.open.length > 0)
     .sort(byWaiting)
     .map(
       (p) =>
-        `<li><a href="${escapeHtml(zoneBriefingsHref(p.id))}">${name(p.id)}: ${p.open.length} waiting</a></li>`,
+        `<li><a href="${escapeHtml(projectBriefingsHref(zones, p.id))}">${project(p.id)}: ${p.open.length} waiting</a></li>`,
     )
     .join('');
   return card(
@@ -848,7 +863,7 @@ export function renderBriefing(s: {
     )
     .join('');
   return page(
-    `<p><a href="/briefings">All briefings</a> · <a href="${escapeHtml(zoneBriefingsHref(b.zoneId))}">Briefings of ${name(b.zoneId)}</a></p><h2>Briefing ${escapeHtml(b.id)}</h2>` +
+    `<p><a href="/briefings">All briefings</a>${s.zones.some((z) => z.id === b.zoneId) ? ` · <a href="${escapeHtml(zoneBriefingsHref(b.zoneId))}">Briefings of ${name(b.zoneId)}</a>` : ''}</p><h2>Briefing ${escapeHtml(b.id)}</h2>` +
       askButton({ kind: 'briefing', zoneId: b.zoneId, ref: String(b.id) }) +
       briefingBlock(b, ctx, 'h3') +
       (b.state === 'open' ? RULE_SCRIPT : '') +

@@ -775,3 +775,37 @@ test('a paused zone that is still configured holds its credits stop briefing (#5
   expect(f.listed.map((b) => b.subject)).toEqual(['crew:m1']);
   expect(f.held).toMatchObject([{ zoneId: 'shadow', count: 3 }]);
 });
+
+test('the Floor row of a credits stop on a removed zone leads to a page that lists it (#593)', async () => {
+  const h = await twoZones();
+  for (const zoneId of ['old', '']) {
+    raiseBriefing(
+      h.db,
+      { ...brief(zoneId, 'credits:stop:d1'), kind: 'credits_required' as const },
+      h.now(),
+    );
+  }
+  const home = (await h.view('/')).body;
+  const rows = [...home.matchAll(/<li><a href="([^"]*)">([^<]*): 1 waiting<\/a><\/li>/g)];
+  const stops = rows.filter((m) => !(m[1] ?? '').includes('zone=main'));
+  expect(stops.map((m) => m[2])).toEqual(expect.arrayContaining(['old', 'All dispatch stopped']));
+  expect(home).toContain('<a href="/briefings?zone=main">octo/demo: 1 waiting</a>');
+  for (const [, href = '', label = ''] of stops) {
+    expect(label).not.toBe('');
+    expect(href).not.toContain('zone=');
+    const res = await h.view(href.replaceAll('&amp;', '&'));
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('Decide credits:stop:d1 in old?');
+    expect(res.body).toContain('Decide credits:stop:d1 in ?');
+  }
+  const own = listBriefings(h.db, { state: 'open' }).filter((b) => b.zoneId !== 'main');
+  for (const b of own.filter((x) => x.subject.startsWith('credits:stop'))) {
+    const page = await h.view(`/briefings/${b.id}`);
+    expect(page.statusCode).toBe(200);
+    for (const [, href = ''] of page.body.matchAll(/href="(\/briefings[^"]*)"/g)) {
+      const res = await h.view(href.replaceAll('&amp;', '&'));
+      expect(res.statusCode).toBe(200);
+    }
+  }
+  expect((await h.view('/briefings?zone=old')).statusCode).toBe(404);
+});
