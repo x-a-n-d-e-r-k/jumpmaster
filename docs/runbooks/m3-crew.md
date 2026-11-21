@@ -214,10 +214,13 @@ setting it to false asks nothing.
 
 ### 5. Diagnose and Fable
 
-When an item parks, the server raises a parked briefing with **Retry**, **Leave parked** and, for a
-fully read gate-script or gate-tool park on the current head, **Allow these gate changes for
-<sha7>**. The allow option is bound to that head; a later push, even a merge of the base branch,
-needs a new ruling. A diagnose drop then reads the branch once per park and adds a **Diagnosis**
+When an item parks, the server raises a parked briefing with **Retry**, **Close as done**, **Leave
+parked** and, for a fully read gate-script or gate-tool park on the current head, **Allow these
+gate changes for <sha7>**. The allow option is bound to that head; a later push, even a merge of
+the base branch, needs a new ruling. Close as done comments on the issue, closes it as completed
+and sets the item done without merging anything; a Retry note written in the browser or with
+`ctl rule` reaches the next attempt's agents as direction (see [M1 loop: Parked briefings: Retry
+and Close as done](m1-loop.md#parked-briefings-retry-and-close-as-done)). A diagnose drop then reads the branch once per park and adds a **Diagnosis**
 and a recommendation to the briefing. They stay until the park's stated reason changes (a new
 reason, or a gate park judged on a new head); then they are cleared and the new state is diagnosed
 once.

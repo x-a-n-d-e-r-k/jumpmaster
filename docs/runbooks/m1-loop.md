@@ -247,8 +247,10 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   Another maintainer must approve, or Command allows the head (next item).
 - **Allowing a gate change by Command ruling.** Where no one else can approve (starter mode, or
   any setup where the operator's account is the PR author, which GitHub won't let approve its own
-  PR), the operator rules on the item's parked briefing instead. A gate park that is fully read
-  is briefed with three options: `Retry`, `Leave parked` and `Allow these gate changes for
+  PR), the operator rules on the item's parked briefing instead. Every parked briefing offers
+  `Retry` (option id `retry`), `Close as done` (`close`) and `Leave parked` (`leave`); see
+  [Parked briefings: Retry and Close as done](#parked-briefings-retry-and-close-as-done). A gate
+  park that is fully read on the current head also offers `Allow these gate changes for
   <sha7>` (option id `allow-<head sha, 12 chars>-<digest, 8 chars>`). The briefing says "Read the PR diff at <sha7> on the forge before
   ruling": do that. Its text is the park reason followed by every reported change in full, at
   most 8,000 characters: each changed gate script as `name: "<old>" → "<new>"` (merge base →
@@ -313,6 +315,28 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   (a server outage longer than the lease) is marked lost; its later events and result are refused,
   so its credit use is never seen. Check the account after such an outage. A Fable drop on
   credits also disables Fable (`credits:fable`, ruled separately).
+
+### Parked briefings: Retry and Close as done
+
+Every parked item raises a parked briefing with three options, plus the allow option above for a
+fully read gate park on the current head. Rule on `/briefings`, or `ctl rule <briefing> <option id>
+[note]`; the ruling is applied by the next pass.
+
+- **Retry** (`retry`): the item goes back to work and an agent runs it again from where it parked.
+  **The note is carried as direction.** A note written with a Retry ruling made in the browser or
+  with `ctl rule` rides the item's next implement, review, heal and resolve prompts as a fenced
+  `Command's direction` section, until the item parks again (a new parked briefing for it). It is
+  passed as data: it can narrow how the issue is done, but it never relaxes the agents' rules, the
+  gates or the protected paths. A note on a ruling made by the chat assistant is not carried.
+- **Close as done** (`close`): for work that is already done. It comments on the issue (`Closed by
+  Command as already done.`, then the note, if any, and `PR #<n> is still open.` when the item's PR
+  is open), closes the issue as completed, and sets the item `done`. Nothing is merged: an open PR
+  is left open, so close or merge it yourself. Each write is made once, in that order. While the
+  kill switch is on or the zone is in observe mode the ruling waits, and it is applied once that
+  lifts (the wait does not count as a failure). A forge failure is tried again on later passes; after
+  10 failed attempts the ruling gives up, the item stays parked, and its parked briefing is raised
+  again with `Close as done failed: <error>` in the why.
+- **Leave parked** (`leave`): the item stays parked; nothing runs and nothing changes on GitHub.
 
 ## 4. Start the server and the stick
 
