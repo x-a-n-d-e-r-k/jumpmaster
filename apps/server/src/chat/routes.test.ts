@@ -22,6 +22,7 @@ import {
   createThread,
   getThread,
   listMessages,
+  pruneChatToolResults,
   setMessage,
   setToolResult,
 } from './store.js';
@@ -767,5 +768,67 @@ describe('tool steps (#502)', () => {
       text: 'read X',
       createdAt: m.createdAt,
     });
+  });
+
+  test('#515: a pruned step on the stream carries resultPrunedAt and no result', async () => {
+    const w = world();
+    const DAY = 86_400_000;
+    const old = new Date(t0.getTime() - 31 * DAY);
+    const th = createThread(w.db, { title: 't' }, old);
+    appendMessage(w.db, th.id, { role: 'owner', text: 'go', state: 'done', sessionHash: 'h' }, old);
+    const step = appendMessage(
+      w.db,
+      th.id,
+      {
+        role: 'tool',
+        text: 'read a.ts',
+        state: 'done',
+        tool: { name: 'Read', useId: 'tu_1', inputJson: '{"file_path":"a.ts"}' },
+      },
+      old,
+    );
+    setToolResult(w.db, step.id, { text: 'out', truncated: false, lines: 1, isError: false }, old);
+    const fresh = appendMessage(
+      w.db,
+      th.id,
+      {
+        role: 'tool',
+        text: 'read b.ts',
+        state: 'done',
+        tool: { name: 'Read', useId: 'tu_2', inputJson: '{"file_path":"b.ts"}' },
+      },
+      t0,
+    );
+    setToolResult(w.db, fresh.id, { text: 'new', truncated: false, lines: 1, isError: false }, t0);
+    const bare = appendMessage(w.db, th.id, { role: 'tool', text: 'think', state: 'done' }, t0);
+    appendMessage(w.db, th.id, { role: 'assistant', text: 'ok', state: 'done' }, t0);
+    expect(pruneChatToolResults(w.db, t0)).toBe(1);
+    const res = await w.app.inject({
+      method: 'GET',
+      url: `/api/chat/threads/${th.id}/events?after=0`,
+      headers: w.session,
+    });
+    const tools = sseEvents(res.body).filter((e) => e.event === 'tool');
+    expect(tools.map((e) => e.data)).toEqual([
+      {
+        seq: step.seq,
+        text: 'read a.ts',
+        createdAt: step.createdAt,
+        toolName: 'Read',
+        input: { file_path: 'a.ts' },
+        resultPrunedAt: t0.toISOString(),
+      },
+      {
+        seq: fresh.seq,
+        text: 'read b.ts',
+        createdAt: fresh.createdAt,
+        toolName: 'Read',
+        input: { file_path: 'b.ts' },
+        result: { text: 'new', truncated: false, lines: 1, isError: false },
+      },
+      { seq: bare.seq, text: 'think', createdAt: bare.createdAt },
+    ]);
+    expect(res.body).not.toContain('"text":"out"');
+    for (const e of tools.slice(1)) expect(e.data).not.toHaveProperty('resultPrunedAt');
   });
 });
