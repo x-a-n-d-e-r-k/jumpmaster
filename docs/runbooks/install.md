@@ -323,16 +323,18 @@ gates need (a package registry, say), press **Adopt ticked**, confirm, then set 
 under `enforce`. See [Egress](#egress). Doctor checks: `zone.egress`, `zone.doctor-drop`,
 `zone.services`.
 
-### Step 7: File the first issue from the intake page
+### Step 7: File the first issue from the New issue page
 
-Open the zone's intake page, `/zones/<zone>/intake` (the **Intake** link in home's Crew table).
+Open the zone's page from **Zones** and follow its **New issue** link, `/zones/<zone>/issues/new`.
+Give the issue a title, the context, acceptance criteria and the tests that prove it, and **File
+the issue**. It is filed on GitHub as a ready issue (`drop-ready`) at once, and the next pass picks
+it up. Submitting twice never files twice. After a filing the page shows the issue's link and a
+**File another** button that clears the form for the next one.
 
-1. **The goal.** Fill in what the project is for and its objectives, and **Render the stub**.
-   Jumpmaster doesn't commit it: `GOAL.md` is a protected path no agent may write. Commit it
-   yourself by pull request when you're ready; the first issue doesn't wait for it.
-2. **The first issue.** Give it a title, the context, acceptance criteria and the tests that prove
-   it, and **File the issue**. It is filed on GitHub as a ready issue (`drop-ready`) at once, and
-   the next pass picks it up. Submitting twice never files twice.
+The goal is separate: the GOAL.md stub page, `/zones/<zone>/intake`, is where you fill in what the
+project is for and its objectives, and **Render the stub**. Jumpmaster doesn't commit it: `GOAL.md`
+is a protected path no agent may write. Commit it yourself by pull request when you're ready; the
+first issue doesn't wait for it.
 
 A small, testable change makes the best first issue. Any issue you label `drop-ready` yourself
 works the same way.

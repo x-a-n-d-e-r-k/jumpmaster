@@ -405,7 +405,7 @@ function crewSection(lines: CrewLine[] | undefined, name: (id: string) => string
   const rows = lines
     .map(
       (c) =>
-        `<tr><td>${name(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="/zones/${encodeURIComponent(c.zoneId)}/goals">Goals</a> <a href="/zones/${encodeURIComponent(c.zoneId)}/intake">Intake</a></td></tr>`,
+        `<tr><td>${name(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="/zones/${encodeURIComponent(c.zoneId)}/goals">Goals</a> <a href="/zones/${encodeURIComponent(c.zoneId)}/issues/new">New issue</a> <a href="/zones/${encodeURIComponent(c.zoneId)}/intake">GOAL.md stub</a></td></tr>`,
     )
     .join('');
   return card(

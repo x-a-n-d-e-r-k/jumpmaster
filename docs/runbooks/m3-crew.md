@@ -437,5 +437,5 @@ Then, in a checkout of the zone's repository, ask Claude Code to run the one tha
 it needs the crew on: each filed issue gets a Promote briefing on `/briefings`, and your Promote
 ruling starts it. Enabling the crew is a separate, later choice that spends usage (its own cycles
 start then).
-For a quick first issue without the crew, the in-app intake page (`/zones/<id>/intake`) files one
+For a quick first issue without the crew, the in-app New issue page (`/zones/<id>/issues/new`) files one
 ready issue directly.

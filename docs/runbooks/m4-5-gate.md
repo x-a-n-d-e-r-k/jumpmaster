@@ -61,7 +61,7 @@ Each step names what is measured or asserted. The steps follow the operability s
 
    *Measure:* the time to a doctor with no fail. Record every fail seen, and whether its link was
    followed.
-3. **First issue.** File it from Intake and wait for its pull request to merge. *Measure:* the time
+3. **First issue.** File it from the New issue page (`/zones/<id>/issues/new`) and wait for its pull request to merge. *Measure:* the time
    to merge, which is excluded from hands-on time. **Status question 1** is asked while this step
    waits on CI.
 4. **Change a running zone.** Pause the zone. **Status question 2** is asked here. Then change a
@@ -70,7 +70,7 @@ Each step names what is measured or asserted. The steps follow the operability s
    Revoke the old one on GitHub once the page no longer says a running drop carries it.
 
    Then, as a scripted prompt that is not counted as a question, the author asks the partner to file
-   a second issue from Intake. The order matters: revoke first, then file, so the drop is leased
+   a second issue from the New issue page. The order matters: revoke first, then file, so the drop is leased
    after the old token stops working. That one implement drop proves steps 4 and 5 (see
    [Reading the stick's drop-start line](#reading-the-sticks-drop-start-line)). *Assert:*
    - its `timeoutMinutes` is the value set in step 4, with no restart;

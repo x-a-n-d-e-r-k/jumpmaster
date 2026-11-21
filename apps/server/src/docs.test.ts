@@ -1,5 +1,6 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
+import { DEFAULT_READY_LABEL } from './config.js';
 
 /**
  * SECURITY.md's statements about GitHub App mode (issue #471), and the sections that must not
@@ -256,5 +257,32 @@ rotation](#credentials-and-rotation)), and nothing here applies to them.`),
     expect(text).not.toMatch(/-----BEGIN/);
     expect(text).not.toMatch(/\bgh[pousr]_[A-Za-z0-9]{20,}/);
     expect(text).not.toMatch(/github_pat_[A-Za-z0-9_]{20,}/);
+  });
+});
+
+describe('runbooks after the New issue split (#581)', () => {
+  const dir = new URL('../../../docs/runbooks/', import.meta.url);
+  const read = (f: string) => readFileSync(new URL(f, dir), 'utf8');
+
+  test('operate.md quotes the idle status line statusOf prints for the default ready label', () => {
+    expect(read('operate.md')).toContain(
+      `Idle: no ready issues. Label one ${DEFAULT_READY_LABEL} or file a new issue`,
+    );
+  });
+
+  test('no runbook sends the operator to Intake to file an issue; install.md names /issues/new', () => {
+    const files = readdirSync(dir).filter((f) => f.endsWith('.md'));
+    expect(files.length).toBeGreaterThan(0);
+    const stale = [
+      'from Intake',
+      'from the intake page',
+      "from the zone's Intake page",
+      'intake page (`/zones/<id>/intake`) files',
+    ];
+    for (const f of files) {
+      const text = read(f);
+      for (const phrase of stale) expect(text, `${f}: ${phrase}`).not.toContain(phrase);
+    }
+    expect(read('install.md')).toContain('/issues/new');
   });
 });

@@ -397,7 +397,7 @@ The top of home answers "what is Jumpmaster doing, and why is it waiting?" in on
 example `Working: implement #12 in <zone>, 4m 12s, gate 2 of 3`, `Waiting on CI for PR #13 (…)`,
 `Paused by you: <zone> (paused)`, `Blocked: <zone> needs githubReviewerToken: …`,
 `No runner: the stick hasn't checked in`, or
-`Idle: no ready issues. Label one drop-ready or file one from Intake`. Below it: the detail, the
+`Idle: no ready issues. Label one drop-ready or file a new issue`. Below it: the detail, the
 other things that block work, each with its fix, and the control that moves it on. `ctl status`
 prints the same (`--json` for the object).
 
@@ -668,7 +668,7 @@ collaborator invitations accepted and their tokens, and your own Claude token fr
    its account recommendation; add the first repository; import the ruleset file and commit the
    CODEOWNERS text from the GitHub page; create the labels from the doctor; run the doctor until it
    shows no fail.
-3. **First issue.** File the first issue from the zone's Intake page, and wait for its pull request
+3. **First issue.** File the first issue from the zone's New issue page (`/zones/<zone>/issues/new`), and wait for its pull request
    to merge.
 4. **Change a running zone.** Pause the zone on Zones; on its page, change a gate's timeout in
    **Stack** and save; resume it. The next drop uses the new timeout, with no restart.
