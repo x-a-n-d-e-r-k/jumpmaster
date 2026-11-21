@@ -1704,6 +1704,40 @@ describe('briefings grouped by project and paged (#132)', () => {
   });
 });
 
+describe('a credits stop on an unconfigured zone (#593)', () => {
+  const zones = [z];
+  const stop = (zoneId: string) =>
+    briefing({ id: 9, zoneId, kind: 'credits_required', subject: 'credits:stop:d1' });
+
+  test('its Waiting on you row links to /briefings, never to a zone that 404s, with a label', () => {
+    for (const zoneId of ['old', '']) {
+      const html = waitingOnYou([stop(zoneId)], [], zones);
+      expect(html).not.toContain(`href="/briefings?zone=${encodeURIComponent(zoneId)}"`);
+      expect(html).not.toMatch(/<a [^>]*>: 1 waiting<\/a>/);
+      const rows = html.match(/<li>.*?<\/li>/g) ?? [];
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatch(/^<li><a href="\/briefings">[^<:]+: 1 waiting<\/a><\/li>$/);
+    }
+    expect(waitingOnYou([stop('')], [], zones)).toContain('All dispatch stopped: 1 waiting');
+    expect(waitingOnYou([stop('old')], [], zones)).toContain('old: 1 waiting');
+  });
+
+  test('a configured zone’s row still links to its zone briefings', () => {
+    const html = waitingOnYou([stop('main'), briefing({ id: 3 })], [], zones);
+    expect(html).toContain('<a href="/briefings?zone=main">octo/demo: 2 waiting</a>');
+  });
+
+  test('its own page offers no "Briefings of" link to an unconfigured zone', () => {
+    for (const zoneId of ['old', '']) {
+      const html = renderBriefing({ briefing: stop(zoneId), rulings: [], zones });
+      expect(html).not.toContain('/briefings?zone=');
+      expect(html).toContain('<a href="/briefings">All briefings</a>');
+    }
+    const ok = renderBriefing({ briefing: stop('main'), rulings: [], zones });
+    expect(ok).toContain('<a href="/briefings?zone=main">Briefings of octo/demo</a>');
+  });
+});
+
 describe('external links open in a new tab (#133)', () => {
   const NEW_TAB = 'target="_blank" rel="noopener noreferrer"';
   test('a work-item row’s PR link (on /work and the zone pages) opens in a new tab', () => {
