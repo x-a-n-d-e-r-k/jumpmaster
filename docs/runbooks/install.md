@@ -1630,9 +1630,12 @@ reload`), or the vault entry (`jumpmaster ctl secrets remove <name>`).
 GitHub App entry files count too: when `secrets/github-app/<owner>/<role>.json` and the vault entry
 `github-app/<owner>/<role>` both exist and hold different entries, the check names the entry, the
 file and both fingerprints, and says which one is in use (the file, or the vault entry when "Prefer
-the vault" is on). Keep the one you mean: delete the file (then `jumpmaster ctl secrets reload`), or
-replace the vault entry on Settings → Credentials (`/settings/credentials`). `ctl secrets remove`
-does not take an app entry's name.
+the vault" is on). Keep the one you mean, whichever is in use: delete the file (then `jumpmaster
+ctl secrets reload`), or remove the vault copy with `jumpmaster ctl secrets remove
+github-app/<owner>/<role>` to keep the file. Either one clears the warning. Replace key does not:
+it stores a new entry, which still differs from the file, and Settings → Credentials offers it only
+while the vault entry is in use. The remove is refused while no file sets the entry, so it never
+leaves a role without one.
 
 ### `vault.key`
 

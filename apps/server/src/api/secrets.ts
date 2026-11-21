@@ -508,6 +508,52 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
     },
   );
 
+  /**
+   * Removes the vault copy of an app entry that a file also sets (issue #599): the way to keep the
+   * file and clear `credential.shadowed`. Refused while no file sets the entry (the role would lose
+   * its entry) and while the vault holds no copy. Answers and audits names and fingerprints only.
+   */
+  scope.delete<{ Params: { owner: string; role: string } }>(
+    '/api/control/secrets/github-app/:owner/:role',
+    async (req, reply) => {
+      if (req.principal?.via === 'session' && !req.principal.sudo)
+        return reply.code(403).send({
+          error: 'removing a credential asks for your passphrase again',
+          sudo: 'required',
+        });
+      const parsed = parseAppEntryName(`github-app/${req.params.owner}/${req.params.role}`);
+      if (!parsed) return reply.code(400).send({ error: BAD_APP_NAME });
+      const { owner, role } = parsed;
+      const name = `github-app/${owner}/${role}`;
+      if (!store.resolvedApps().has(owner))
+        return reply.code(404).send({ error: 'unknown app entry' });
+      return serialized(name, async () => {
+        const vault = store.vault();
+        if (vault === 'disabled') return reply.code(409).send({ error: VAULT_DISABLED });
+        const entry = vault.meta(name);
+        if (!entry) return reply.code(409).send({ error: 'the vault holds no such app entry' });
+        const r = store.resolvedApps().get(owner)?.[role];
+        const file =
+          r?.source === 'file'
+            ? r.path
+            : r?.source === 'vault'
+              ? r.overriding?.find((o) => o.source === 'file')?.path
+              : undefined;
+        if (!file)
+          return reply.code(409).send({
+            error: `no file sets ${name}: the vault entry is its only copy, so it stays (replace its key on Settings → Credentials instead)`,
+          });
+        const done = store.deleteAppEntry(owner, role);
+        if (!done.ok) {
+          audit(req, 'secret.remove', { name, fingerprint: entry.fingerprint, result: 'refused' });
+          return reply.code(400).send({ issues: done.issues });
+        }
+        audit(req, 'secret.remove', { name, fingerprint: entry.fingerprint, result: 'removed' });
+        return { removed: done.deleted, name, file, problems: store.problems() };
+      });
+    },
+  );
+
   scope.delete<{ Params: { name: string } }>('/api/control/secrets/:name', async (req, reply) => {
     const name = nameOf(req, reply);
     if (!name) return reply;

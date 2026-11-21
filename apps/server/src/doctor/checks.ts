@@ -3148,10 +3148,10 @@ function credentialChecks(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck[] {
   });
 }
 
-const SHADOWED_TOKEN_FIX =
+export const SHADOWED_TOKEN_FIX =
   'Remove the one you do not mean: delete the file (then jumpmaster ctl secrets reload), or remove the vault entry with jumpmaster ctl secrets remove <name>.';
-const SHADOWED_APP_FIX =
-  'For a GitHub App entry (github-app/<owner>/<role>), keep the one you mean: delete the file secrets/github-app/<owner>/<role>.json (then jumpmaster ctl secrets reload), or replace the vault entry on Settings → Credentials (/settings/credentials).';
+export const SHADOWED_APP_FIX =
+  'For a GitHub App entry (github-app/<owner>/<role>), keep the one you mean: delete the file secrets/github-app/<owner>/<role>.json (then jumpmaster ctl secrets reload), or remove the vault copy with jumpmaster ctl secrets remove github-app/<owner>/<role>.';
 
 const isAppShadow = (s: Shadowed | ShadowedAppEntry): s is ShadowedAppEntry => 'inUse' in s;
 

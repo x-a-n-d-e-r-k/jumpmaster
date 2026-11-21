@@ -764,6 +764,20 @@ describe('ctl secrets (Task 4)', () => {
     expect((await run(['secrets', 'nope'])).code).toBe(2);
   });
 
+  test('secrets remove github-app/<owner>/<role> reaches the app entry remove route (issue #599)', async () => {
+    expect((await run(['secrets', 'remove', 'github-app/acme/reviewer'])).calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets/github-app/acme/reviewer',
+      init: { method: 'DELETE' },
+    });
+    expect(ctlRequest(['secrets', 'remove', 'github-app/acme/reviewer'])).toEqual({
+      path: '/api/control/secrets/github-app/acme/reviewer',
+      method: 'DELETE',
+    });
+    expect(ctlRequest(['secrets', 'remove', 'githubReadToken'])?.path).toBe(
+      '/api/control/secrets/githubReadToken',
+    );
+  });
+
   test('secrets test github-app/<owner>/<role> reaches the app entry route; a PAT name and list keep theirs', async () => {
     const app = await run(['secrets', 'test', 'github-app/acme/author']);
     expect(app.calls[0]).toMatchObject({
