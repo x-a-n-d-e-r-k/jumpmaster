@@ -315,3 +315,88 @@ describe('needsRotation', () => {
     expect(needsRotation('2026-11-26', new Date(midnight - 8 * DAY))).toBe(false);
   });
 });
+
+describe('redirects', () => {
+  const ELSEWHERE = 'https://elsewhere.example';
+  type Case = {
+    name: string;
+    token: string;
+    method: 'get' | 'post';
+    path: string;
+    run: (f?: typeof fetch) => Promise<unknown>;
+    ok: unknown;
+  };
+  const cases: Case[] = [
+    {
+      name: 'resolveProjectId',
+      token: BOOTSTRAP,
+      method: 'get',
+      path: '/api/v4/projects/group%2Fproject',
+      run: (f) => resolveProjectId(GITLAB, BOOTSTRAP, 'group/project', { fetch: f }),
+      ok: { id: 4242 },
+    },
+    {
+      name: 'mintProjectToken',
+      token: BOOTSTRAP,
+      method: 'post',
+      path: '/api/v4/projects/4242/access_tokens',
+      run: (f) => mintProjectToken(GITLAB, BOOTSTRAP, 4242, 'author', { now, fetch: f }),
+      ok: mintResponse(),
+    },
+    {
+      name: 'rotateSelf',
+      token: MINTED,
+      method: 'post',
+      path: '/api/v4/projects/4242/access_tokens/self/rotate',
+      run: (f) => rotateSelf(GITLAB, MINTED, 4242, undefined, { now, fetch: f }),
+      ok: { id: 9002, token: ROTATED, expires_at: '2026-12-19' },
+    },
+  ];
+
+  describe.each(cases)('$name', (c) => {
+    test.each([302, 307])(
+      'a %i is not followed: the token never reaches the redirect target',
+      async (status) => {
+        const location = `${ELSEWHERE}${c.path}?leak=1`;
+        const elsewhere = nock(ELSEWHERE)
+          .intercept(/.*/, c.method === 'get' ? 'GET' : 'POST')
+          .reply(200, c.ok as nock.Body);
+        nock(GITLAB)
+          .intercept(c.path, c.method === 'get' ? 'GET' : 'POST')
+          .reply(status, '', { location });
+        const err = await caught(c.run());
+        expect(err).toBeInstanceOf(GitLabTokenError);
+        expectClean(err);
+        expect(elsewhere.isDone()).toBe(false);
+        expect((err as GitLabTokenError).status).toBe(status);
+        const e = err as Error;
+        const text = [e.message, String(e), e.stack ?? '', JSON.stringify(e)].join('\n');
+        expect(text).not.toContain(location);
+        expect(text).not.toContain('elsewhere.example');
+        expect(e.message).toMatch(new RegExp(`HTTP ${status}.*redirect`));
+        expect(serverScrubSet.values()).toContain(c.token);
+      },
+    );
+
+    test('an injected fetch is asked not to follow redirects', async () => {
+      const inits: RequestInit[] = [];
+      const fakeFetch: typeof fetch = async (_input, init) => {
+        inits.push(init ?? {});
+        return new Response(JSON.stringify(c.ok), { status: 200 });
+      };
+      await c.run(fakeFetch);
+      expect(inits).toHaveLength(1);
+      expect(inits[0]?.redirect === 'manual' || inits[0]?.redirect === 'error').toBe(true);
+    });
+
+    test('an injected fetch that answers 3xx is a GitLabTokenError without the Location', async () => {
+      const location = `${ELSEWHERE}/somewhere`;
+      const fakeFetch: typeof fetch = async () =>
+        new Response(null, { status: 301, headers: { location } });
+      const err = await caught(c.run(fakeFetch));
+      expect(err).toBeInstanceOf(GitLabTokenError);
+      expectClean(err);
+      expect((err as Error).message).not.toContain(location);
+    });
+  });
+});
