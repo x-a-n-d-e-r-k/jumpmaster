@@ -92,8 +92,10 @@ function bareUrlMask(text: string): Uint8Array {
  * Scanned left to right; at each position the first construct that closes wins: a code span,
  * a link `[text](url)`, `**bold**`, `*italic*`, `_italic_`. Every closing delimiter is the
  * first one after the opener, found through `forwardFinder`, so the scan is linear.
- * `*` and `_` emphasis opens only after a non-word character other than `/`, closes only before
- * one, and never inside a bare URL, so globs, `2*3*4`, snake_case and URLs stay text.
+ * `**`, `*` and `_` emphasis opens only after a non-word character other than `/` (letters,
+ * digits, `_` and `/` count as word), closes only before one, and never opens inside a bare URL,
+ * so globs (`apps/**` paths, `**.ts`), `2*3*4`, `2**3**4`, snake_case and URLs stay text. A `**`
+ * that cannot be bold is text as a pair: its second `*` never opens single emphasis.
  */
 function inline(text: string, refs: LinkRefs, inLink = false): string {
   const plain = (s: string) => (inLink ? escapeHtml(s) : linkify(s, refs));
@@ -135,12 +137,16 @@ function inline(text: string, refs: LinkRefs, inLink = false): string {
         continue;
       }
     } else if (c === '*') {
-      if (text[i + 1] === '*' && nonSpace(text[i + 2])) {
-        const j = next('**', i + 3);
-        if (j !== -1) {
-          i = emit(i, j + 2, `<strong>${inline(text.slice(i + 2, j), refs, inLink)}</strong>`);
-          continue;
+      if (text[i + 1] === '*') {
+        if (nonSpace(text[i + 2]) && opensAt(i)) {
+          const j = next('**', i + 3);
+          if (j !== -1 && closesAt(j + 1)) {
+            i = emit(i, j + 2, `<strong>${inline(text.slice(i + 2, j), refs, inLink)}</strong>`);
+            continue;
+          }
         }
+        i += 2;
+        continue;
       }
       const em = emphasis(i, '*');
       if (em !== undefined) {

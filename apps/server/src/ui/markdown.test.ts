@@ -120,6 +120,9 @@ describe('renderChatMarkdown', () => {
       '[a '.repeat(n / 3),
       '[a](b '.repeat(n / 6),
       '**a '.repeat(n / 4),
+      'a**b '.repeat(n / 5),
+      '/**'.repeat(n / 3),
+      '**a** **/'.repeat(n / 9),
       '*a '.repeat(n / 3),
       ' _a'.repeat(n / 3),
       '`a '.repeat(n / 3),
@@ -134,6 +137,31 @@ describe('renderChatMarkdown', () => {
       assertInert(html);
       expect(html).not.toMatch(/<script/i);
     }
+  });
+
+  test('double asterisks in globs, arithmetic and bare URLs stay text', () => {
+    expect(md('globs apps/**/src and packages/**/test here')).toBe(
+      '<p>globs apps/**/src and packages/**/test here</p>',
+    );
+    expect(md('matches **/*.test.ts and **/*.spec.ts')).toBe(
+      '<p>matches **/*.test.ts and **/*.spec.ts</p>',
+    );
+    expect(md('2**3**4')).toBe('<p>2**3**4</p>');
+    expect(md('see https://example.com/a**b**c')).toBe('<p>see https://example.com/a**b**c</p>');
+  });
+
+  test('bold still renders in ordinary positions', () => {
+    expect(md('**bold** and (**bold**), **bold**.')).toBe(
+      '<p><strong>bold</strong> and (<strong>bold</strong>), <strong>bold</strong>.</p>',
+    );
+    expect(md('**Note:** see `x`')).toBe('<p><strong>Note:</strong> see <code>x</code></p>');
+    expect(md('- **item** here')).toBe('<ul><li><strong>item</strong> here</li></ul>');
+    expect(md('a | b\n-|-\n**c** | d')).toBe(
+      '<table><thead><tr><th>a</th><th>b</th></tr></thead>' +
+        '<tbody><tr><td><strong>c</strong></td><td>d</td></tr></tbody></table>',
+    );
+    expect(md('[**b** c](/x)')).toBe('<p><a href="/x"><strong>b</strong> c</a></p>');
+    expect(md('**a *b* _c_**')).toBe('<p><strong>a <em>b</em> <em>c</em></strong></p>');
   });
 
   test('asterisks and underscores in globs, arithmetic and bare URLs stay text', () => {
