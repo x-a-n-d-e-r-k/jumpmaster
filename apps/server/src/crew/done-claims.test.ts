@@ -252,6 +252,96 @@ describe('a diagnosis that finds the parked item already done (#536)', () => {
       expect(item(h)?.state).toBe('done');
     });
 
+    /** A claim verified and its comment sent, its close failed: the claim left verifying. */
+    async function closeFailed(): Promise<Harness> {
+      const h = await parked();
+      forgeFacts(h);
+      await diagnose(h, claimOutput({ issues: [502] }));
+      h.forge.author.failNext('updateIssue', 'throw');
+      await flush(h);
+      expect(claims(h)).toMatchObject([{ state: 'verifying' }]);
+      expect(commentsOn1(h)).toHaveLength(1);
+      return h;
+    }
+    const followUps = (h: Harness) =>
+      commentsOn1(h).filter((c) =>
+        c.body.includes(claimKeys('main', claims(h)[0]?.id ?? -1).retractMarker),
+      );
+    const closes = (h: Harness) => writes(h).filter((m) => m === 'updateIssue');
+
+    test('the close fails, then Command rules Retry: the issue stays open and the retry proceeds', async () => {
+      const h = await closeFailed();
+      expect(ruleBriefing(h.db, briefing(h)?.id ?? -1, 'retry', '', h.now()).ok).toBe(true);
+      await h.reconcile();
+      expect(h.forge.state.issues.get(1)?.state).toBe('open');
+      expect(claims(h)).toMatchObject([
+        { state: 'superseded', reason: 'the item is no longer parked' },
+      ]);
+      expect(item(h)?.state).not.toBe('parked');
+      expect(item(h)?.state).not.toBe('done');
+      expect(h.queuedRoles()).toContain('implement');
+      expect(followUps(h)).toHaveLength(1);
+      expect(followUps(h)[0]?.body).toMatch(/^The crew is no longer closing this issue/);
+      expect(
+        claimOps(h).find((o) => o.opKey === claimKeys('main', claims(h)[0]?.id ?? -1).close),
+      ).toBeUndefined();
+      // The first close threw before it was sent: none reached the forge, and none is sent later.
+      await h.reconcile();
+      await flush(h);
+      expect(followUps(h)).toHaveLength(1);
+      expect(h.forge.state.issues.get(1)?.state).toBe('open');
+      expect(claims(h)).toMatchObject([{ state: 'superseded' }]);
+    });
+
+    test("the close fails, then the briefing's basis changes: no close, the claim superseded", async () => {
+      const h = await closeFailed();
+      const before = closes(h).length;
+      h.db
+        .prepare(`UPDATE briefings SET why = 'parked on something else' WHERE id = ?`)
+        .run(briefing(h)?.id);
+      await flush(h);
+      expect(claims(h)).toMatchObject([
+        { state: 'superseded', reason: 'the parked briefing changed' },
+      ]);
+      expect(closes(h)).toHaveLength(before);
+      expect(h.forge.state.issues.get(1)?.state).toBe('open');
+      expect(item(h)?.state).toBe('parked');
+      expect(followUps(h)).toHaveLength(1);
+      await flush(h);
+      expect(closes(h)).toHaveLength(before);
+      expect(followUps(h)).toHaveLength(1);
+    });
+
+    test('the close fails, then Command rules Close as done: no close of the crew, no follow-up', async () => {
+      const h = await closeFailed();
+      expect(ruleBriefing(h.db, briefing(h)?.id ?? -1, 'close', '', h.now()).ok).toBe(true);
+      await h.reconcile();
+      expect(claims(h)).toMatchObject([{ state: 'superseded' }]);
+      expect(h.forge.state.issues.get(1)?.state).toBe('closed');
+      expect(item(h)?.state).toBe('done');
+      const crewClose = claimKeys('main', claims(h)[0]?.id ?? -1).close;
+      expect(claimOps(h).find((o) => o.opKey === crewClose)).toBeUndefined();
+      // One close reached the forge: Command's.
+      expect(closes(h).length).toBeGreaterThan(0);
+      expect(h.forge.author.calls.filter((c) => c.method === 'updateIssue').length).toBe(
+        closes(h).length,
+      );
+      expect(followUps(h)).toHaveLength(0);
+      await h.reconcile();
+      expect(followUps(h)).toHaveLength(0);
+    });
+
+    test('the close fails, then the issue is closed by hand: no follow-up', async () => {
+      const h = await closeFailed();
+      h.db
+        .prepare(`UPDATE briefings SET why = 'parked on something else' WHERE id = ?`)
+        .run(briefing(h)?.id);
+      h.forge.state.closeIssue(1, 'completed');
+      await flush(h);
+      expect(claims(h)).toMatchObject([{ state: 'superseded' }]);
+      expect(followUps(h)).toHaveLength(0);
+    });
+
     test('a second diagnosis while one claim is verifying records no second claim, and none is scheduled', async () => {
       const h = await parked();
       forgeFacts(h);
