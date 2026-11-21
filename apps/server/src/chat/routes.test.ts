@@ -507,6 +507,80 @@ describe('tool steps (#502)', () => {
     }
   });
 
+  test('#575: a truncated input carries no prefix of a secret in the hub, the SSE tool event or GET', async () => {
+    const w = world();
+    const SECRET = 'join-NOTSHAPED-routes-0123456789';
+    const config = {
+      listen: { host: '0.0.0.0', port: 7420 },
+      dataDir: '/data',
+      pollSeconds: 60,
+      dropZones: [],
+      usage: { throttleUtilization: 0.9, probeJitterSeconds: [30, 90] },
+      claude: { plan: 'max', fableWeeklyDropCap: 0 },
+      chat: {},
+      secrets: {
+        claudeToken: ['sk', 'ant', 'oat01', 'ROUTESCLAUDETOKEN0123456789'].join('-'),
+        joinToken: SECRET,
+        operatorToken: TOKEN,
+      },
+    } as unknown as Config;
+    // As the chat service cuts a long input: its JSON's first 4096 characters.
+    const preview = JSON.stringify({ command: 'x'.repeat(4070) + SECRET }).slice(0, 4096);
+    expect(preview.endsWith(SECRET.slice(0, 14))).toBe(true);
+    const turns = new ChatTurns({
+      db: w.db,
+      config,
+      now: () => t0,
+      service: {
+        async *runTurn() {
+          yield {
+            type: 'tool',
+            name: 'Bash',
+            summary: 'bash',
+            id: 't1',
+            input: { _truncated: true, preview },
+          };
+          yield { type: 'result', isError: false };
+        },
+        health: async () => null,
+      },
+      mcpUrl: chatMcpUrl(7420),
+      resolvedApps: () => new Map(),
+      log: () => {},
+    });
+    const th = createThread(w.db, { title: 't' }, t0);
+    appendMessage(
+      w.db,
+      th.id,
+      { role: 'owner', text: 'go', state: 'queued', sessionHash: 'h' },
+      t0,
+    );
+    const hub: HubEvent[] = [];
+    turns.subscribe(th.id, 0, (e) => hub.push(e));
+    turns.enqueue(th.id);
+    await turns.idle();
+
+    const want = { input: { _truncated: true, preview: preview.slice(0, -14) } };
+    const stored = listMessages(w.db, th.id).find((m) => m.role === 'tool');
+    expect(stored).toMatchObject(want);
+    const got = await w.app.inject({
+      method: 'GET',
+      url: `/api/chat/threads/${th.id}`,
+      headers: w.session,
+    });
+    const messages = (got.json() as { messages: Record<string, unknown>[] }).messages;
+    expect(messages.find((m) => m.role === 'tool')).toMatchObject(want);
+    const sse = await w.app.inject({
+      method: 'GET',
+      url: `/api/chat/threads/${th.id}/events`,
+      headers: w.session,
+    });
+    expect(sseEvents(sse.body).find((e) => e.event === 'tool')?.data).toMatchObject(want);
+    for (const body of [JSON.stringify(hub), got.body, sse.body]) {
+      for (let k = 8; k <= SECRET.length; k++) expect(body).not.toContain(SECRET.slice(0, k));
+    }
+  });
+
   test('an older tool message streams as before, with no tool fields', async () => {
     const w = world();
     const th = createThread(w.db, { title: 't' }, t0);
