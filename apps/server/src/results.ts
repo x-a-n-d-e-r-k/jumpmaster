@@ -69,10 +69,14 @@ const TERMINAL: ReadonlySet<DropState> = new Set(['succeeded', 'failed', 'lost',
 
 const cell = (s: string): string => s.replace(/\|/g, '\\|').replace(/\s+/g, ' ');
 
-function gateTable(gates: GateResult[]): string {
+/** A table cell: `\` then `|` escaped, so no text adds or removes a column. Not for code spans. */
+const tableCell = (s: string): string =>
+  s.replace(/\\/g, '\\\\').replace(/\|/g, '\\|').replace(/\s+/g, ' ');
+
+export function gateTable(gates: GateResult[]): string {
   const rows = gates.map((g) => {
     const exit = g.timedOut ? 'timeout' : g.exitCode === null ? 'n/a' : String(g.exitCode);
-    return `| ${cell(g.name)} | ${exit} | ${(g.durationMs / 1000).toFixed(1)} |`;
+    return `| ${tableCell(g.name)} | ${exit} | ${(g.durationMs / 1000).toFixed(1)} |`;
   });
   return ['| Gate | Exit | Duration (s) |', '| --- | --- | --- |', ...rows].join('\n');
 }

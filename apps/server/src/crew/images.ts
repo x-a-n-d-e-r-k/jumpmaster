@@ -70,9 +70,10 @@ const HTML_IMAGE = /<img\b[^>]*?\ssrc\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/
 
 const decodeEntities = (s: string): string =>
   s
-    .replace(/&amp;/g, '&')
     .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
+    .replace(/&#39;/g, "'")
+    // Last, so `&amp;quot;` reads as `&quot;`: each entity is decoded exactly once.
+    .replace(/&amp;/g, '&');
 
 /** The image URLs in an issue body, Markdown `![](…)` and HTML `<img src>`, in body order. */
 export function imageUrls(body: string): string[] {

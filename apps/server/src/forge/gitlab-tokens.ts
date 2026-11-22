@@ -6,6 +6,7 @@
 // Standalone and unwired: no vault entry is read, nothing is stored. Every token passed in or
 // received is added to the server scrub set before a function returns or throws, and no error
 // carries token text: only GitLab's HTTP status and numeric ids are named.
+import { stripTrailingSlashes } from '@jumpmaster/protocol';
 import { serverScrubSet } from './scrub-set.js';
 
 export type GitLabRole = 'author' | 'reviewer';
@@ -97,7 +98,7 @@ export class GitLabTokenRefusedError extends GitLabTokenError {
   }
 }
 
-const apiBase = (baseUrl: string) => `${baseUrl.replace(/\/+$/, '')}/api/v4`;
+const apiBase = (baseUrl: string) => `${stripTrailingSlashes(baseUrl)}/api/v4`;
 
 const scrubAdd = (token: unknown) => {
   if (typeof token === 'string' && token !== '') serverScrubSet.add(token);
