@@ -22,10 +22,17 @@ import type { Pages } from './doctor/actions.js';
 import { type DoctorCheck, doctorDropWait, liveSticks } from './doctor/checks.js';
 import { latestDoctorRun } from './doctor/run.js';
 import { isReservationReason } from './flow/decide.js';
+import { listGoalChanges } from './goal-change.js';
 import { missingFor, zoneRequirements } from './leases.js';
 import { isBlocked, isOverlapReason, openPrCap } from './scheduler.js';
 import { redactionList } from './scrub.js';
-import { PROJECTS_HREF, projectHref, SYSTEM_CREDENTIALS_HREF, SYSTEM_HREF } from './ui/links.js';
+import {
+  goalConfirmHref,
+  PROJECTS_HREF,
+  projectHref,
+  SYSTEM_CREDENTIALS_HREF,
+  SYSTEM_HREF,
+} from './ui/links.js';
 import { wizardActive } from './ui/setup.js';
 import { dispatchGate, type Gate } from './usage.js';
 import { type CredentialProblem, credentialProblems } from './vault/problems.js';
@@ -120,6 +127,12 @@ export type StatusInput = {
   openBriefings: number;
   /** The viewing session's unexpired pending guarded changes (#507); none for a token. */
   pendingChanges?: number;
+  /**
+   * Goal changes open as their PR, waiting for Command to approve and merge them in the browser
+   * (#645): configured zones that are neither paused nor observing, from the `goal_changes`
+   * table only. `since` is the row's last update. Default: none.
+   */
+  goalChangesToConfirm?: { zoneId: string; id: number; prNumber: number | null; since: string }[];
   zones: StatusZone[];
   outboxRetrying: OutboxRow[];
   restartPending: boolean;
@@ -223,13 +236,27 @@ export function statusOf(input: StatusInput, now: Date): Status {
   const queuedIssues = heldQueued.filter((q) => q.d.workItemId !== null).length;
   // Under the throttle only finishing roles and the doctor lease (leases.ts): the rest waits.
   const throttled = heldQueued.filter((q) => !FINISHING.has(q.d.role) && q.d.role !== 'doctor');
+  const goalChanges = input.goalChangesToConfirm ?? [];
+  const goalText = `${plural(goalChanges.length, 'goal change')} to confirm`;
+  // The oldest change (the lowest id) is the one a link opens.
+  const oldestGoalChange = goalChanges.reduce<number | undefined>(
+    (m, c) => (m === undefined || c.id < m ? c.id : m),
+    undefined,
+  );
 
   /** The status, with every other blocker listed short, each with its fix. */
   const said = (
     s: Status,
-    uses: { problem?: CredentialProblem; doctor?: boolean; cap?: boolean } = {},
+    uses: {
+      problem?: CredentialProblem;
+      doctor?: boolean;
+      cap?: boolean;
+      goalChanges?: boolean;
+    } = {},
   ) => {
     const also: NonNullable<Status['also']> = [];
+    if (!uses.goalChanges && oldestGoalChange !== undefined)
+      also.push({ text: goalText, href: goalConfirmHref(oldestGoalChange) });
     if (!uses.cap)
       for (const c of capped)
         also.push({ text: `${name(c.z.id)}: ${c.cap}`, href: zoneHref(c.z.id) });
@@ -439,23 +466,31 @@ export function statusOf(input: StatusInput, now: Date): Status {
     );
 
   const pendingChanges = input.pendingChanges ?? 0;
-  if (input.openBriefings > 0 || pendingChanges > 0) {
+  if (input.openBriefings > 0 || pendingChanges > 0 || oldestGoalChange !== undefined) {
     const what = [
       input.openBriefings > 0 ? plural(input.openBriefings, 'briefing') : '',
       pendingChanges > 0 ? `${plural(pendingChanges, 'guarded change')} to confirm` : '',
+      oldestGoalChange !== undefined ? goalText : '',
     ].filter((w) => w !== '');
-    return said({
-      headline: `Waiting on you: ${what.join(', ')}`,
-      detail:
-        input.openBriefings > 0
-          ? 'Work they hold waits for your ruling.'
-          : 'A guarded change lapses unless you confirm it in time.',
-      waitingOn: 'you',
-      action:
-        input.openBriefings > 0
-          ? { label: 'Answer them', href: '/briefings' }
-          : { label: 'Review them on home', href: '/' },
-    });
+    return said(
+      {
+        headline: `Waiting on you: ${what.join(', ')}`,
+        detail:
+          input.openBriefings > 0
+            ? 'Work they hold waits for your ruling.'
+            : pendingChanges > 0
+              ? 'A guarded change lapses unless you confirm it in time.'
+              : 'Work under the objectives it adds waits until you approve and merge it.',
+        waitingOn: 'you',
+        action:
+          input.openBriefings > 0
+            ? { label: 'Answer them', href: '/briefings' }
+            : pendingChanges > 0 || oldestGoalChange === undefined
+              ? { label: 'Review them on home', href: '/' }
+              : { label: 'Approve and merge', href: goalConfirmHref(oldestGoalChange) },
+      },
+      { goalChanges: true },
+    );
   }
 
   if (zones.length > 0 && activeZones.length === 0) {
@@ -677,6 +712,7 @@ export function statusInputOf(o: {
     ...(last ? { lastPassAt: last } : {}),
     // A paused or observing zone's briefings are held off the floor, so they don't count here.
     openBriefings: floorBriefings(db, config.dropZones).listed.length,
+    goalChangesToConfirm: goalChangesToConfirm(db, config),
     zones: config.dropZones.map((zone): StatusZone => {
       const items = listWorkItems(db, zone.id);
       const drops = listActiveDrops(db, zone.id);
@@ -721,6 +757,28 @@ export function statusInputOf(o: {
     restartPending: (store?.status().restartPending.length ?? 0) > 0,
     pages: o.pages,
   };
+}
+
+/**
+ * The goal changes open as their PR (#645), oldest first, from the `goal_changes` table only:
+ * configured zones only, and none of a paused or observing zone's, as its briefings are held,
+ * since nothing merges there until the zone is active again.
+ */
+function goalChangesToConfirm(
+  db: Db,
+  config: Config,
+): NonNullable<StatusInput['goalChangesToConfirm']> {
+  const active = config.dropZones.filter((z) => !HELD_MODES.has(getZoneMode(db, z.id, z.mode)));
+  return active
+    .flatMap((z) =>
+      listGoalChanges(db, z.id, 'open').map((c) => ({
+        zoneId: z.id,
+        id: c.id,
+        prNumber: c.prNumber,
+        since: c.updatedAt,
+      })),
+    )
+    .sort((a, b) => a.id - b.id);
 }
 
 /** Every string of a status with the install's secrets redacted. */

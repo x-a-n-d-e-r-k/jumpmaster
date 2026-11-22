@@ -1,12 +1,13 @@
 import { describe, expect, test } from 'vitest';
 import { raiseBriefing } from './briefings.js';
 import { openDb } from './db/open.js';
-import type { Drop, OutboxRow, WorkItem } from './db/repo.js';
+import { type Drop, type OutboxRow, setZoneMode, type WorkItem } from './db/repo.js';
 import type { DoctorCheck } from './doctor/checks.js';
 import {
   cannotRunText,
   lastPassAt,
   recordPass,
+  type Status,
   type StatusInput,
   type StatusZone,
   statusOf,
@@ -934,5 +935,169 @@ describe('pending guarded changes wait on you as a briefing does (#507)', () => 
     const s = statusOf(base({ openBriefings: 2, pendingChanges: 1 }), NOW);
     expect(s.headline).toBe('Waiting on you: 2 briefings, 1 guarded change to confirm');
     expect(s.action?.href).toBe('/briefings');
+  });
+});
+
+describe('an open goal change waits on Command (#645)', () => {
+  const OPERATOR = { authorization: `Bearer ${'o'.repeat(32)}`, host: 'localhost:80' };
+
+  /** A harness with a live stick and a paused side zone, nothing else waiting. */
+  async function world() {
+    const h = await harness({ extraZones: [{ id: 'side' }] });
+    await h.app.inject({
+      method: 'POST',
+      url: '/api/sticks/lease',
+      headers: h.stickHeaders(),
+      payload: { freeSlots: 1, capabilities: ['push-v1'] },
+    });
+    setZoneMode(h.db, 'side', 'paused', h.now());
+    const change = (zoneId: string, state: string, pr: number | null) =>
+      (
+        h.db
+          .prepare(
+            `INSERT INTO goal_changes (zone_id, source, source_ref, text, text_sha256, pr_number,
+               state, created_at, updated_at) VALUES (?, 'chat', 'chat:1:1', 't', 'x', ?, ?, ?, ?)
+             RETURNING id`,
+          )
+          .get(zoneId, pr, state, h.now().toISOString(), h.now().toISOString()) as { id: number }
+      ).id;
+    const status = async () =>
+      (
+        await h.app.inject({ method: 'GET', url: '/api/control/status', headers: OPERATOR })
+      ).json() as Status;
+    return { h, change, status };
+  }
+
+  test('with no goal changes nothing waits on you', async () => {
+    const w = await world();
+    expect((await w.status()).headline).not.toContain('Waiting on you');
+  });
+
+  test('one open goal change, nothing else: waiting on you, approve and merge on its confirm page', async () => {
+    const w = await world();
+    const id = w.change('main', 'open', 613);
+    const s = await w.status();
+    expect(s.headline).toBe('Waiting on you: 1 goal change to confirm');
+    expect(s.waitingOn).toBe('you');
+    expect(s.detail).toBe(
+      'Work under the objectives it adds waits until you approve and merge it.',
+    );
+    expect(s.action).toEqual({ label: 'Approve and merge', href: `/goal-changes/${id}/confirm` });
+  });
+
+  test('the oldest open change is the one linked; the count is plural', async () => {
+    const w = await world();
+    const first = w.change('main', 'open', 613);
+    w.change('main', 'open', 614);
+    const s = await w.status();
+    expect(s.headline).toBe('Waiting on you: 2 goal changes to confirm');
+    expect(s.action?.href).toBe(`/goal-changes/${first}/confirm`);
+  });
+
+  test('with an open briefing: both are named, briefings first, and the action answers them', async () => {
+    const w = await world();
+    w.change('main', 'open', 613);
+    raiseBriefing(
+      w.h.db,
+      {
+        zoneId: 'main',
+        why: 'w',
+        source: 'server',
+        kind: 'parked',
+        subject: 'item:2',
+        decision: 'Parked. Retry?',
+        options: [{ id: 'retry', label: 'Retry', effect: 'none' }],
+      },
+      w.h.now(),
+    );
+    const s = await w.status();
+    expect(s.headline).toBe('Waiting on you: 1 briefing, 1 goal change to confirm');
+    expect(s.action).toEqual({ label: 'Answer them', href: '/briefings' });
+    expect(s.detail).toBe('Work they hold waits for your ruling.');
+  });
+
+  test.each([
+    ['merged', 'main'],
+    ['refused', 'main'],
+    ['closed', 'main'],
+    ['proposed', 'main'],
+    ['confirmed', 'main'],
+    ['open', 'ghost'],
+    ['open', 'side'],
+  ])('a change %s in zone %s does not count', async (state, zoneId) => {
+    const w = await world();
+    w.change(zoneId, state, 700);
+    const id = w.change('main', 'open', 613);
+    const s = await w.status();
+    expect(s.headline).toBe('Waiting on you: 1 goal change to confirm');
+    expect(s.action?.href).toBe(`/goal-changes/${id}/confirm`);
+  });
+});
+
+describe('goal changes on every other line (#645)', () => {
+  const running = () =>
+    base({
+      zones: [
+        zone({
+          items: [item({ id: 1, issueNumber: 622, state: 'running' })],
+          drops: [drop({ workItemId: 1, role: 'implement', state: 'running' })],
+        }),
+      ],
+    });
+
+  test('an implement drop running: the working line stays, and also links the goal change', () => {
+    const plain = statusOf(running(), NOW);
+    const s = statusOf(
+      {
+        ...running(),
+        goalChangesToConfirm: [{ zoneId: 'main', id: 1, prNumber: 613, since: NOW.toISOString() }],
+      },
+      NOW,
+    );
+    expect(s.headline).toMatch(/^Working: implement #622 in main, /);
+    expect(s.headline).toBe(plain.headline);
+    expect(s.detail).toBe(plain.detail);
+    expect(s.also).toContainEqual({
+      text: '1 goal change to confirm',
+      href: '/goal-changes/1/confirm',
+    });
+    expect(plain.also ?? []).not.toContainEqual(
+      expect.objectContaining({ text: '1 goal change to confirm' }),
+    );
+  });
+
+  test('several: plural, linked to the lowest id', () => {
+    const s = statusOf(
+      {
+        ...running(),
+        goalChangesToConfirm: [
+          { zoneId: 'main', id: 4, prNumber: 9, since: NOW.toISOString() },
+          { zoneId: 'main', id: 2, prNumber: 8, since: NOW.toISOString() },
+        ],
+      },
+      NOW,
+    );
+    expect(s.also).toContainEqual({
+      text: '2 goal changes to confirm',
+      href: '/goal-changes/2/confirm',
+    });
+  });
+
+  test('guarded changes and goal changes, no briefing: the guarded-change detail and action stay', () => {
+    const s = statusOf(
+      base({
+        pendingChanges: 1,
+        goalChangesToConfirm: [{ zoneId: 'main', id: 3, prNumber: 9, since: NOW.toISOString() }],
+      }),
+      NOW,
+    );
+    expect(s.headline).toBe(
+      'Waiting on you: 1 guarded change to confirm, 1 goal change to confirm',
+    );
+    expect(s.detail).toBe('A guarded change lapses unless you confirm it in time.');
+    expect(s.action).toEqual({ label: 'Review them on home', href: '/' });
+    expect(s.also ?? []).not.toContainEqual(
+      expect.objectContaining({ text: '1 goal change to confirm' }),
+    );
   });
 });

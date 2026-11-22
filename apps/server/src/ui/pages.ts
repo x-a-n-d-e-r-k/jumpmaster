@@ -936,7 +936,10 @@ function goalChangesBlock(changes: readonly GoalChange[]): string {
   const next = (c: GoalChange): string => {
     switch (c.state) {
       case 'proposed':
-        return 'Its pull request opens at the next pass.';
+        // A crew proposal opens only once Command rules on its goal-change briefing (#645).
+        return c.source === 'crew'
+          ? 'Waits for your ruling on its briefing.'
+          : 'Its pull request opens at the next pass.';
       case 'open':
         return `<a href="/goal-changes/${escapeHtml(c.id)}/confirm">Approve and merge</a>`;
       case 'confirmed':

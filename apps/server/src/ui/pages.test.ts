@@ -20,6 +20,7 @@ import { STARTER_WARNING } from '../config.js';
 import { type CrewIssue, getCrewIssue, insertCrewIssue, setCrewIssue } from '../crew/store.js';
 import type { Drop, StoredEvent, UsageWindowRow, WorkItem } from '../db/repo.js';
 import { insertDrop, updateDrop } from '../db/repo.js';
+import type { GoalChange } from '../goal-change.js';
 import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import { statusOf } from '../status.js';
@@ -950,6 +951,43 @@ describe('goal ladder', () => {
     expect(html).toMatch(/Ship the CLI[^<]*<\/td><td>open/);
     expect(html).toMatch(/Add docs<\/td><td>promoted<\/td><td>#7<\/td><td>pr_open/);
     expect(html).toMatch(/Second<\/td><td>staged<\/td><td>#8<\/td><td>-/);
+  });
+
+  test('#645 a crew-proposed change waits for its ruling; a chat-proposed one opens at the next pass', () => {
+    const change = (id: number, source: GoalChange['source']): GoalChange => ({
+      id,
+      zoneId: z.id,
+      source,
+      sourceRef: 'r',
+      text: 't',
+      textSha256: 'x',
+      baseSha: null,
+      branch: null,
+      prNumber: null,
+      headSha: null,
+      state: 'proposed',
+      confirmedSha: null,
+      confirmedAt: null,
+      error: null,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const html = renderGoals({
+      zone: z,
+      zones: [z],
+      goals: undefined,
+      crewIssues: [],
+      items: [],
+      skippedCrewUnpromoted: [],
+      doneByRuling: new Map(),
+      goalChanges: [change(1, 'chat'), change(2, 'crew')],
+    });
+    expect(html).toContain(
+      '<li>Goal change 1, from the chat: Its pull request opens at the next pass.</li>',
+    );
+    expect(html).toContain(
+      '<li>Goal change 2, from the crew: Waits for your ruling on its briefing.</li>',
+    );
   });
 
   test('marker-bearing issues skipped at intake are listed on the zone page', () => {

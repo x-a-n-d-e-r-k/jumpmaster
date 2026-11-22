@@ -70,3 +70,15 @@ describe('already done (#466)', () => {
     expect(text).toContain('Last attempt refused');
   });
 });
+
+describe('a goal change in flight (#645)', () => {
+  test('rule 8 forbids a briefing asking Command to merge an in-flight goal change', () => {
+    const rule8 = prompt('crew-lead.md')
+      .split('\n')
+      .find((l) => l.startsWith('8. '));
+    expect(rule8).toMatch(
+      /A goal change listed in flight is already in front of Command: never raise a briefing asking Command to merge, confirm or approve it; work that depends on it waits, and your summary says so\.$/,
+    );
+    expect(rule8).toMatch(/^8\. Propose a goal change only through `goalChange`/);
+  });
+});

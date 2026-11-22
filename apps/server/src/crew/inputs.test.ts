@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from 'vitest';
 import { applyPendingRulings, raiseBriefing, ruleBriefing } from '../briefings.js';
 import { insertDrop, insertVerdict, setWorkItemState, updateDrop } from '../db/repo.js';
 import { zonePass } from '../flow/snapshot.js';
+import { proposeGoalChange } from '../goal-change.js';
 import { refreshGoals } from '../goals.js';
 import { opMarker, sanitizeCrewText } from '../outbox.js';
 import { crewTemplate, fence } from '../payloads.js';
@@ -240,6 +241,68 @@ describe('crew-lead input', () => {
     const opens = input.match(/<<<jm-data:[^:]+:begin /g)?.length ?? 0;
     const closes = input.match(/<<<jm-data:[^:]+:end /g)?.length ?? 0;
     expect(opens).toBe(closes);
+  });
+});
+
+describe('goal changes in flight in the crew-lead input (#645)', () => {
+  const MARKER = 'GOAL-TEXT-MARKER-645';
+  const NEW_GOAL = GOAL.replace('### Ship the CLI', `### Ship the CLI\n\n### ${MARKER}`);
+  const change = (source: 'chat' | 'crew', state: string, pr: number | null) => {
+    const r = proposeGoalChange(w.db, w.zone, { text: NEW_GOAL, source, sourceRef: 'r' }, t0);
+    if (!r.ok) throw new Error(r.error);
+    w.db
+      .prepare('UPDATE goal_changes SET state = ?, pr_number = ? WHERE id = ?')
+      .run(state, pr, r.id);
+    return r.id;
+  };
+  const section = (input: string) => {
+    const start = input.indexOf('## Goal changes in flight (trusted instructions)');
+    expect(start).toBeGreaterThan(-1);
+    return input.slice(start, input.indexOf('## Ruled briefings'));
+  };
+
+  test('says No goal changes in flight. when there are none', async () => {
+    const input = await leadInput();
+    expect(input).toContain(
+      `## Goal changes in flight (trusted instructions)\n\n<<<jm-data:${DROP}:begin goal-changes>>>\nNo goal changes in flight.`,
+    );
+  });
+
+  test('the section sits between Open briefings and Ruled briefings', async () => {
+    const input = await leadInput();
+    const open = input.indexOf('## Open briefings');
+    const goals = input.indexOf('## Goal changes in flight');
+    const ruled = input.indexOf('## Ruled briefings');
+    expect(open).toBeGreaterThan(-1);
+    expect(goals).toBeGreaterThan(open);
+    expect(ruled).toBeGreaterThan(goals);
+  });
+
+  test('each state in flight gets its line in the server words; ended changes and the text never appear', async () => {
+    const chat = change('chat', 'proposed', null);
+    const crew = change('crew', 'proposed', null);
+    const open = change('chat', 'open', 613);
+    const confirmed = change('crew', 'confirmed', 614);
+    const merged = change('chat', 'merged', 615);
+    const closed = change('chat', 'closed', 616);
+    const refused = change('chat', 'refused', 617);
+    const input = await leadInput();
+    const text = section(input);
+    expect(text).toContain(
+      `Goal change ${chat}: proposed; its pull request opens at the next pass.`,
+    );
+    expect(text).toContain(
+      `Goal change ${crew}: proposed; waits for Command's ruling on its goal-change briefing.`,
+    );
+    expect(text).toContain(
+      `Goal change ${open} (pull request #613): open; waits for Command to approve and merge it in Jumpmaster. Work under the objectives it adds waits until it merges.`,
+    );
+    expect(text).toContain(
+      `Goal change ${confirmed} (pull request #614): confirmed; Jumpmaster merges it once its checks pass.`,
+    );
+    for (const id of [merged, closed, refused]) expect(text).not.toContain(`Goal change ${id}`);
+    expect(text).not.toContain('No goal changes in flight.');
+    expect(input).not.toContain(MARKER);
   });
 });
 
