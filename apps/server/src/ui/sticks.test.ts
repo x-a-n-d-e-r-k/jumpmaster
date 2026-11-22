@@ -2,7 +2,16 @@ import vm from 'node:vm';
 import { describe, expect, test } from 'vitest';
 import type { MirrorStatus } from '../images/mirror.js';
 import { t0 } from '../test/helpers.js';
-import { renderInviteResult, renderStickImages, renderSticks } from './sticks.js';
+import {
+  COPY_DIGEST_SCRIPT,
+  renderInviteResult,
+  renderStickImages,
+  renderSticks,
+  STICKS_SCRIPT,
+} from './sticks.js';
+
+/** A page script's body, for a vm run. */
+const body = (script: string) => script.replace(/^<script>|<\/script>$/g, '');
 
 const digest = `sha256:${'a'.repeat(64)}`;
 const image = (
@@ -103,9 +112,9 @@ describe('the Images tab, /system/sticks/images (issue #140, #624)', () => {
     expect(html).toContain(`<code title="${full}">sha256:0123456789ab</code>`);
     expect(html).toContain(`<button type="button" data-copy-digest="${full}">Copy</button>`);
     // The full digest appears nowhere visible: only in those two attributes.
-    const visible = html.replace(/<[^>]*>/g, '');
-    expect(visible).not.toContain(full);
-    expect(visible).toContain('sha256:0123456789ab');
+    expect(html.split(full)).toHaveLength(3);
+    expect(html.split(`title="${full}"`)).toHaveLength(2);
+    expect(html.split(`data-copy-digest="${full}"`)).toHaveLength(2);
   });
 
   test('a digest that is not a sha256 one shows as it is, in full', () => {
@@ -135,10 +144,8 @@ describe('the Images tab, /system/sticks/images (issue #140, #624)', () => {
       lock: true,
       images: [image('t', 'complete', { digest: full })],
     });
-    const src = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
-      .map((m) => m[1] ?? '')
-      .find((s) => s.includes('data-copy-digest'));
-    expect(src).toBeDefined();
+    expect(html).toContain(COPY_DIGEST_SCRIPT);
+    const src = body(COPY_DIGEST_SCRIPT);
     const listeners: ((e: unknown) => Promise<void>)[] = [];
     const written: string[] = [];
     const button = {
@@ -146,7 +153,7 @@ describe('the Images tab, /system/sticks/images (issue #140, #624)', () => {
       textContent: 'Copy',
       closest: () => button,
     };
-    vm.runInNewContext(src ?? '', {
+    vm.runInNewContext(src, {
       document: {
         addEventListener: (_: string, fn: (e: unknown) => Promise<void>) => listeners.push(fn),
       },
@@ -273,10 +280,8 @@ describe('the Remove confirmation (issue #255, #624)', () => {
   });
 
   test('in a vm: Remove shows the confirmation naming the stick, and posts only once it is confirmed', async () => {
-    const src = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
-      .map((m) => m[1] ?? '')
-      .find((s) => s.includes('jmSticks'));
-    expect(src).toBeDefined();
+    expect(html).toContain(STICKS_SCRIPT);
+    const src = body(STICKS_SCRIPT);
     const clicks: ((e: unknown) => Promise<void>)[] = [];
     const posts: string[] = [];
     let reloads = 0;
@@ -304,7 +309,7 @@ describe('the Remove confirmation (issue #255, #624)', () => {
               ? yes
               : null,
     };
-    vm.runInNewContext(src ?? '', {
+    vm.runInNewContext(src, {
       document: {
         addEventListener: (ev: string, fn: (e: unknown) => Promise<void>) => {
           if (ev === 'click') clicks.push(fn);
@@ -339,10 +344,7 @@ describe('the Remove confirmation (issue #255, #624)', () => {
   });
 
   describe('in a vm: the poll leaves the table alone while a confirmation is open', () => {
-    const src =
-      [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
-        .map((m) => m[1] ?? '')
-        .find((s) => s.includes('jmPoll')) ?? '';
+    const src = body(STICKS_SCRIPT);
     // One poll tick: `openBefore` is the confirmation's state when the timer fires, `openDuring`
     // its state once the fetch has answered.
     const tick = async (openBefore: boolean, openDuring: boolean) => {
