@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import vm from 'node:vm';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
+import type { GuidanceForge } from '../api/github.js';
 import { createApp } from '../app.js';
 import { Backoff } from '../auth/backoff.js';
 import { SetupMode, setOperatorPassphrase } from '../auth/operator.js';
@@ -42,6 +43,25 @@ const zoneDoc = (id: string, extra: Record<string, unknown> = {}) => ({
   preset: 'node',
   egress: { mode: 'monitor', allow: ['known.example.com'] },
   ...extra,
+});
+
+/** A public repository with one CI job, as the GitHub section's guidance reads it. */
+const fakeGuidanceForge = (_repo: string, _token: string): GuidanceForge => ({
+  repoAccess: async () => ({
+    private: false,
+    defaultBranch: 'main',
+    permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+    scopes: null,
+    tokenExpiresAt: null,
+    ownerType: 'Organization',
+  }),
+  ownerType: async () => 'Organization',
+  viewerLogin: async () => 'jm-author',
+  listDir: async (_ref: string, path: string) => (path === '.github/workflows' ? ['ci.yml'] : []),
+  getFileAt: async (_ref: string, path: string) =>
+    path === '.github/workflows/ci.yml'
+      ? 'on: pull_request\njobs:\n  test:\n    runs-on: x\n'
+      : null,
 });
 
 /**
@@ -94,6 +114,8 @@ async function world(o: { file?: boolean } = {}) {
     backoff: new Backoff(),
     leaseWaitMs: 0,
     leasePollMs: 0,
+    // GitHub as the Setup tab's GitHub section reads it (#618): never the network in a test.
+    guidanceForge: fakeGuidanceForge,
   });
   app = a;
   await setOperatorPassphrase(db, PASS, t0);
@@ -127,7 +149,7 @@ describe('the zones page', () => {
     expect(r.statusCode).toBe(200);
     for (const id of ['main', 'img']) {
       expect(r.body).toContain(`href="/projects/${id}"`);
-      expect(r.body).toContain(`href="/projects/${id}/github"`);
+      expect(r.body).toContain(`href="/projects/${id}/setup#github"`);
     }
     expect(r.body).toContain('active: takes ready issues and runs drops');
     expect(r.body).toContain('observe: plans and records, but writes nothing to GitHub');
@@ -1278,11 +1300,12 @@ async function setupPageRun(w: Awaited<ReturnType<typeof world>>, id = 'main') {
 }
 
 describe('Setup is one form with one save bar (#617)', () => {
-  test('the page has a section list for wide screens, a select for narrow ones, and the six sections', async () => {
+  test('the page has a section list for wide screens, a select for narrow ones, and the seven sections', async () => {
     const w = await world();
     const html = (await w.get('/projects/main/setup')).body;
     const labels = [
       ['project', 'Repository &amp; labels'],
+      ['github', 'GitHub'],
       ['stack', 'Stack &amp; checks'],
       ['egress', 'Egress'],
       ['merging', 'Merging'],
@@ -1456,14 +1479,71 @@ describe('Setup is one form with one save bar (#617)', () => {
     const at = html.indexOf('<form id="setup-form">');
     const form = html.slice(at, html.indexOf('</form>', at));
     expect(form.startsWith('<form id="setup-form"><fieldset disabled>')).toBe(true);
-    const fieldset = form.slice(0, form.indexOf('</fieldset>'));
+    // Every settings control is in a disabled fieldset; the GitHub section between them is the
+    // guide (copy buttons, the code owners login), which is not a setting.
+    const fieldsets = [...form.matchAll(/<fieldset( disabled)?>([\s\S]*?)<\/fieldset>/g)];
+    expect(fieldsets.length).toBe(2);
+    for (const f of fieldsets) expect(f[1]).toBe(' disabled');
     const controls = (s: string) => s.match(/<(input|textarea|select|button)\b/g)?.length ?? 0;
-    expect(controls(fieldset)).toBeGreaterThan(10);
-    expect(controls(form)).toBe(controls(fieldset));
+    const inFieldsets = fieldsets.reduce((n, f) => n + controls(f[2] ?? ''), 0);
+    expect(inFieldsets).toBeGreaterThan(10);
+    // Between the fieldsets: the GitHub section, whose only named control is the code owners login.
+    const between = form.slice(form.indexOf('</fieldset>'), form.lastIndexOf('<fieldset'));
+    expect(between).toContain('<section id="github" class="setup-section"><h3>GitHub</h3>');
+    expect(controls(form)).toBe(inFieldsets + controls(between));
+    expect([...between.matchAll(/\sname="([^"]+)"/g)].map((m) => m[1])).toEqual(['reviewer']);
     expect(html).not.toContain('id="save-bar"');
     expect(html).not.toContain('unsaved change');
     expect(html).not.toContain('id="setup-script"');
     expect(html).not.toContain('id="stop-confirm"');
     expect(section(html, 'danger')).toContain('removing it from the config file');
+  });
+});
+
+describe('Setup has a GitHub section with each step’s doctor status (#618)', () => {
+  const doctorRun = (w: Awaited<ReturnType<typeof world>>, checks: Partial<DoctorCheck>[]) =>
+    w.db
+      .prepare(
+        "INSERT INTO doctor_runs (started_at, finished_at, results_json) VALUES ('a', 'b', ?)",
+      )
+      .run(JSON.stringify(checks.map((c) => ({ zoneId: 'main', summary: '', ...c }))));
+  const chip = (html: string, step: string): string => {
+    const at = html.indexOf(`<p class="step-status" data-step="${step}">`);
+    expect(at, step).toBeGreaterThan(-1);
+    return html.slice(at, html.indexOf('</p>', at));
+  };
+
+  test('a failing branch-rules check shows the ruleset step missing, with the finding; a passing private-clone shows access done', async () => {
+    const w = await world();
+    doctorRun(w, [
+      { id: 'forge.branch-rules', status: 'fail', summary: 'no ruleset requires a pull request' },
+      { id: 'forge.private-clone', status: 'pass', summary: 'octo/main is public' },
+    ]);
+    const github = (await w.get('/projects/main/setup')).body;
+    expect(chip(github, 'ruleset')).toContain('data-status="missing">missing</span>');
+    expect(chip(github, 'ruleset')).toContain('no ruleset requires a pull request');
+    expect(chip(github, 'access')).toContain('data-status="done">done</span>');
+    expect(chip(github, 'codeowners')).toContain('data-status="not-checked">not checked</span>');
+  });
+
+  test('with no doctor run every step shows not checked, and none shows done', async () => {
+    const w = await world();
+    const html = (await w.get('/projects/main/setup')).body;
+    for (const step of ['access', 'ruleset', 'codeowners', 'labels'])
+      expect(chip(html, step)).toContain('data-status="not-checked">not checked</span>');
+    expect(html).not.toContain('data-status="done"');
+    expect(html).not.toContain('>done</span>');
+  });
+
+  test('the downloads and their file names are unchanged', async () => {
+    const w = await world();
+    const html = (await w.get('/projects/main/setup')).body;
+    expect(html).toMatch(
+      /<a href="data:application\/json;charset=utf-8,[^"]+" download="jumpmaster-main-ruleset\.json">Download jumpmaster-main-ruleset\.json<\/a> <button type="button" data-copy="ruleset-text">Copy<\/button>/,
+    );
+    expect(html).toContain('<pre id="ruleset-text">');
+    expect(html).toContain('<button type="button" data-copy="codeowners-text">Copy</button>');
+    expect(html).toContain('Create <code>.github/CODEOWNERS</code> on GitHub</a>');
+    expect(html).toContain('navigator.clipboard.writeText');
   });
 });

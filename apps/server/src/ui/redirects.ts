@@ -20,17 +20,20 @@ export type Redirect = {
 /** The request's own query string, `?…` included, or `''`. */
 const keep = (query: string): string => (query ? `?${query}` : '');
 
+/** A project's page or sub-page, the query kept, then `#hash` if given (it comes last). */
 const project =
-  (sub?: string) =>
+  (sub?: string, hash?: string) =>
   (p: Record<string, string>, q: string): string =>
-    `${projectHref(p.id ?? '', sub)}${keep(q)}`;
+    `${projectHref(p.id ?? '', sub)}${keep(q)}${hash ? `#${hash}` : ''}`;
 
 export const REDIRECTS: readonly Redirect[] = [
   { from: '/zones', to: (_p, q) => `${PROJECTS_HREF}${keep(q)}` },
   { from: '/zones/new', to: (_p, q) => `${PROJECTS_HREF}/new${keep(q)}` },
   { from: '/zones/:id', to: project() },
   { from: '/zones/:id/flags', to: project('flags') },
-  { from: '/zones/:id/github', to: project('github') },
+  // The GitHub guide is a section of Setup (#618).
+  { from: '/zones/:id/github', to: project('setup', 'github') },
+  { from: `${PROJECTS_HREF}/:id/github`, to: project('setup', 'github') },
   { from: '/zones/:id/goals', to: project('goals') },
   { from: '/zones/:id/intake', to: project('intake') },
   { from: '/zones/:id/issues/new', to: project('issues/new') },

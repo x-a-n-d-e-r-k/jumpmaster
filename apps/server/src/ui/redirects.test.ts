@@ -20,7 +20,6 @@ const MOVED: [string, string][] = [
   ['/zones', '/projects'],
   ['/zones/new', '/projects/new'],
   ['/zones/jm', '/projects/jm'],
-  ['/zones/jm/github', '/projects/jm/github'],
   ['/zones/jm/goals', '/projects/jm/goals'],
   ['/zones/jm/intake', '/projects/jm/intake'],
   ['/zones/jm/issues/new', '/projects/jm/issues/new'],
@@ -56,6 +55,27 @@ describe('the redirect table (issue #615)', () => {
     expect(res.statusCode).toBe(308);
     expect(res.headers.location).toBe(`${to}?q=2`);
   });
+
+  test.each(['/zones/jm/github', '/projects/jm/github'])(
+    'the GitHub guide %s is a 301 to the GitHub section of Setup, the query kept before the hash (#618)',
+    async (from) => {
+      const app = bare();
+      const get = await app.inject({ method: 'GET', url: from });
+      expect([get.statusCode, get.headers.location]).toEqual([301, '/projects/jm/setup#github']);
+      const head = await app.inject({ method: 'HEAD', url: from });
+      expect([head.statusCode, head.headers.location]).toEqual([301, '/projects/jm/setup#github']);
+      const q = await app.inject({ method: 'GET', url: `${from}?reviewer=alice` });
+      expect([q.statusCode, q.headers.location]).toEqual([
+        301,
+        '/projects/jm/setup?reviewer=alice#github',
+      ]);
+      const post = await app.inject({ method: 'POST', url: `${from}?x=1` });
+      expect([post.statusCode, post.headers.location]).toEqual([
+        308,
+        '/projects/jm/setup?x=1#github',
+      ]);
+    },
+  );
 
   test('every entry goes straight to a /projects path: one hop, never another moved path', async () => {
     const app = bare();

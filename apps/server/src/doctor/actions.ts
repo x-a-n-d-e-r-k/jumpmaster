@@ -6,7 +6,7 @@ import {
   repoOf,
   type ZoneGuidance,
 } from '../github/guidance.js';
-import { PROJECTS_HREF, projectHref } from '../ui/links.js';
+import { githubSetupHref, PROJECTS_HREF, projectHref } from '../ui/links.js';
 import { DOC, type DoctorAction, type DoctorCheck } from './checks.js';
 
 /**
@@ -96,9 +96,9 @@ function reads(role: 'author' | 'reviewer') {
       : docs(check);
 }
 
-/** Without the guidance (GitHub unreadable just now), the zone's GitHub page has every file. */
+/** Without the guidance (GitHub unreadable just now), the GitHub section of Setup has every file. */
 const githubPage = (ctx: ActionCtx, what: string): Action | undefined =>
-  ctx.zone ? app(`Get the ${what} for ${ctx.zone.id}`, `${zonePath(ctx.zone)}/github`) : undefined;
+  ctx.zone ? app(`Get the ${what} for ${ctx.zone.id}`, githubSetupHref(ctx.zone.id)) : undefined;
 
 type Rule = (check: DoctorCheck, ctx: ActionCtx) => Action | undefined;
 

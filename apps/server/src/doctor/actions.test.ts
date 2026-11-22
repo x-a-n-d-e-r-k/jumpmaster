@@ -142,7 +142,7 @@ describe('where each fail leads', () => {
     expect(actionFor(fail('forge.branch-rules'), { zone, pages: PAGES_M45A })).toEqual({
       kind: 'app',
       label: 'Get the ruleset file for web',
-      href: '/projects/web/github',
+      href: '/projects/web/setup#github',
     });
   });
 
