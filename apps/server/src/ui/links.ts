@@ -58,3 +58,6 @@ export const SYSTEM_HISTORY_HREF = `${SYSTEM_HREF}/history`;
 
 /** Every install-wide setting (#623: moved from `/settings/flags`). */
 export const SYSTEM_ADVANCED_HREF = `${SYSTEM_HREF}/advanced`;
+
+/** A goal change's confirmation page, where the owner approves and merges it (#363). */
+export const goalConfirmHref = (id: number): string => `/goal-changes/${id}/confirm`;

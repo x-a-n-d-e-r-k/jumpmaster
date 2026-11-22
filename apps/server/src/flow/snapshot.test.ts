@@ -1,8 +1,16 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import {
+  applyPendingRulings,
+  listBriefings,
+  ruleBriefing,
+  syncParkBriefings,
+} from '../briefings.js';
+import {
   addBranchUpdateFailure,
+  type Drop,
   getWorkItem,
   getWorkItemPrFiles,
+  insertDrop,
   insertVerdict,
   recordGateAllowance,
   setBranchUpdateOutcome,
@@ -922,5 +930,103 @@ describe('code-scanning alerts for a failed CodeQL check (#652)', () => {
     expect(s.forgeDenied).toBeNull();
     expect(s.missingSince).toBeNull();
     expect(['wait', 'park']).not.toContain(decide(s).kind);
+  });
+});
+
+describe('lastCiHealKey: the code-scanning key of the last counted ci heal (#653)', () => {
+  const alert = (title: string, path: string) => ({
+    path,
+    startLine: 1,
+    level: 'failure',
+    title,
+    message: 'm',
+  });
+  const rate = alert('Missing rate limiting', 'b.ts');
+  const other = alert('Clear-text logging', 'a.ts');
+  let n = 0;
+  /** A heal drop of item 1 created at `minute` past `now`, in `state`, with this input. */
+  const heal = (minute: number, input: unknown, state: Drop['state'] = 'succeeded') =>
+    insertDrop(
+      w.db,
+      {
+        id: `heal-${++n}`,
+        dropZoneId: 'main',
+        workItemId: itemId,
+        role: 'heal',
+        state,
+        inputJson: JSON.stringify(input),
+      },
+      new Date(now.getTime() + minute * 60_000),
+    );
+  const ci = (annotations: unknown[]) => ({
+    feedback: { source: 'ci', text: 'CI failed' },
+    codeScanning: [{ check: 'CodeQL', annotations }],
+  });
+
+  test('null with no heal', async () => {
+    expect((await snapshotOf()).lastCiHealKey).toBeNull();
+  });
+
+  test('the key of the latest succeeded ci heal with codeScanning: sorted and de-duplicated', async () => {
+    heal(1, ci([other]));
+    heal(2, ci([rate, other, rate]));
+    expect((await snapshotOf()).lastCiHealKey).toEqual([
+      'Clear-text logging|a.ts',
+      'Missing rate limiting|b.ts',
+    ]);
+  });
+
+  test('ignores heals whose source is not ci, heals without codeScanning, and unfinished heals', async () => {
+    heal(1, ci([rate]));
+    heal(2, { feedback: { source: 'review', text: 'x' }, codeScanning: [] });
+    heal(3, { feedback: { source: 'human', text: 'x' } });
+    heal(4, { feedback: { source: 'ci', text: 'CI failed' } });
+    heal(5, ci([other]), 'failed');
+    heal(6, ci([other]), 'queued');
+    expect((await snapshotOf()).lastCiHealKey).toEqual(['Missing rate limiting|b.ts']);
+  });
+
+  test('a review heal after the ci heal leaves its key standing', async () => {
+    heal(1, ci([rate]));
+    heal(2, { feedback: { source: 'review', text: 'x' } });
+    expect((await snapshotOf()).lastCiHealKey).toEqual(['Missing rate limiting|b.ts']);
+  });
+
+  test('ignores heals created before the latest applied retry_item ruling', async () => {
+    heal(1, ci([rate]));
+    const at = (m: number) => new Date(now.getTime() + m * 60_000);
+    setWorkItemState(w.db, itemId, 'parked', 'code scanning still flags', at(2));
+    syncParkBriefings(w.db, w.zone, at(2));
+    const b = listBriefings(w.db, { zoneId: 'main', state: 'open' }).find(
+      (x) => x.kind === 'parked',
+    );
+    const retry = b?.options.find((o) => o.effect === 'retry_item');
+    if (!b || !retry) throw new Error('no Retry option');
+    expect(ruleBriefing(w.db, b.id, retry.id, 'the alert is accepted', at(3)).ok).toBe(true);
+    // Ruled but not yet applied: the earlier heal still counts.
+    expect((await snapshotOf()).lastCiHealKey).toEqual(['Missing rate limiting|b.ts']);
+    const deps = { forges: () => w.forges, zone: () => w.zone };
+    expect(await applyPendingRulings(w.db, deps, 'main', at(4))).toBe(1);
+    expect(getWorkItem(w.db, itemId)?.state).toBe('pr_open');
+    expect((await snapshotOf()).lastCiHealKey).toBeNull();
+    heal(5, ci([other]));
+    expect((await snapshotOf()).lastCiHealKey).toEqual(['Clear-text logging|a.ts']);
+  });
+
+  test('unparseable input is skipped', async () => {
+    heal(1, ci([rate]));
+    insertDrop(
+      w.db,
+      {
+        id: 'heal-bad',
+        dropZoneId: 'main',
+        workItemId: itemId,
+        role: 'heal',
+        state: 'succeeded',
+        inputJson: '{not json',
+      },
+      new Date(now.getTime() + 2 * 60_000),
+    );
+    expect((await snapshotOf()).lastCiHealKey).toEqual(['Missing rate limiting|b.ts']);
   });
 });
