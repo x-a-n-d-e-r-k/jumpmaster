@@ -526,7 +526,9 @@ test('the merge query reads merges done in the window, with the zone of their it
   op('done-25h', 'merge', 'done', 25);
   op('failed-1h', 'merge', 'failed', 1);
   op('pr-1h', 'create_pr', 'done', 1);
-  expect(listMergesSince(h.db, at(24))).toEqual([{ zoneId: 'shadow', at: at(23).toISOString() }]);
+  expect(listMergesSince(h.db, at(24))).toEqual([
+    { zoneId: 'shadow', at: at(23).toISOString(), workItemId: w.id },
+  ]);
 });
 
 describe('the dashboard', () => {
@@ -577,11 +579,11 @@ describe('the dashboard', () => {
   test('zone links carry the zone id URL-encoded', () => {
     const B = zone('a b');
     const html = renderHome(home({ zones: [zone('A'), B], items: [wi('a b', 'parked')] }));
-    expect(listHref('/work', 'a b', 'parked')).toBe('/projects/a%20b/work?state=parked');
+    expect(listHref('/activity/work', 'a b', 'parked')).toBe('/projects/a%20b/work?state=parked');
     expect(html).toContain('<a href="/projects/a%20b/work?state=parked">1 parked</a>');
     expect(html).toContain('href="/projects/a%20b"');
-    expect(html).toContain('href="/drops?zone=a%20b&amp;state=active&amp;kind=all"');
-    expect(html).toMatch(/data-tile="running" href="\/drops\?[^"]*kind=all"/);
+    expect(html).toContain('href="/activity/drops?zone=a%20b&amp;state=active&amp;kind=all"');
+    expect(html).toMatch(/data-tile="running" href="\/activity\/drops\?[^"]*kind=all"/);
     const needs = renderHome(home({ zones: [B], briefings: [br('a b')] }));
     expect(needs).toContain('<a href="/briefings?zone=a%20b">1 briefing needs you</a>');
   });
@@ -593,11 +595,11 @@ describe('the dashboard', () => {
       html.indexOf('</nav>', html.indexOf('<nav class="totals"')),
     );
     for (const href of [
-      '/drops?state=active&amp;kind=all',
-      '/work?state=ready',
-      '/work?state=pr_open',
-      '/work?state=done',
-      '/work?state=parked',
+      '/activity/drops?state=active&amp;kind=all',
+      '/activity/work?state=ready',
+      '/activity/work?state=pr_open',
+      '/activity/work?state=done',
+      '/activity/work?state=parked',
       '/briefings',
     ])
       expect(strip).toContain(`href="${href}"`);

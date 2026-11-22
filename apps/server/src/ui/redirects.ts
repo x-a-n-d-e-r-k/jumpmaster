@@ -1,5 +1,11 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { ACTIVITY_LOG_HREF, PROJECTS_HREF, projectHref } from './links.js';
+import {
+  ACTIVITY_DROPS_HREF,
+  ACTIVITY_LOG_HREF,
+  ACTIVITY_WORK_HREF,
+  PROJECTS_HREF,
+  projectHref,
+} from './links.js';
 
 /**
  * The pages that moved, and where each one went (issue #615 and the rest of epic #614). Every
@@ -45,8 +51,12 @@ export const REDIRECTS: readonly Redirect[] = [
   { from: '/zones/:id/intake', to: project('goals', 'goal-stub') },
   { from: `${PROJECTS_HREF}/:id/intake`, to: project('goals', 'goal-stub') },
   { from: '/zones/:id/issues/new', to: project('issues/new') },
-  // A project's work and its items (#619). `/work` without `zone` stays: only `?zone=` moves.
+  // A project's work and its items (#619). A query entry is checked before any route, so
+  // `/work?zone=` goes to the project's tab and only the zone-less list goes to Activity (#622).
   { from: '/work', query: 'zone', to: project('work') },
+  { from: '/work', to: (_p, q) => `${ACTIVITY_WORK_HREF}${keep(q)}` },
+  // The drop list is Activity's (#622); a drop's own page (`/drops/:id`) does not move.
+  { from: '/drops', to: (_p, q) => `${ACTIVITY_DROPS_HREF}${keep(q)}` },
   {
     from: '/work/:zone/:issue',
     to: (p, q) =>

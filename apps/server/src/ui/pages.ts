@@ -37,6 +37,7 @@ import type { Status } from '../status.js';
 import type { Gate } from '../usage.js';
 import {
   floorCounts,
+  listHref,
   type PendingLine,
   pendingRows,
   sticksSummary,
@@ -45,7 +46,10 @@ import {
   zoneCards,
 } from './floor.js';
 import {
+  ACTIVITY_DROPS_HREF,
+  ACTIVITY_HREF,
   ACTIVITY_LOG_HREF,
+  ACTIVITY_WORK_HREF,
   githubSetupHref,
   linkTarget,
   PROJECTS_HREF,
@@ -292,7 +296,14 @@ function usageSection(u: HomeState['usage']): string {
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /** A project's page and its sub-pages (defined in `links.ts`, which has no imports). */
-export { ACTIVITY_LOG_HREF, PROJECTS_HREF, projectHref };
+export {
+  ACTIVITY_DROPS_HREF,
+  ACTIVITY_HREF,
+  ACTIVITY_LOG_HREF,
+  ACTIVITY_WORK_HREF,
+  PROJECTS_HREF,
+  projectHref,
+};
 
 /** A zone's page: an alias of `projectHref` (zones are projects in the UI). */
 export const zoneHref = projectHref;
@@ -1110,7 +1121,25 @@ export const STORE_NAV_SLOT = '<!--jm-store-nav-->';
 export const STORE_NAV = `<a href="${PROJECTS_HREF}">Projects</a><a href="/settings">Settings</a>`;
 
 /** The pages every install has, in the order the operator reaches for them. */
-const NAV = `<a href="/">Floor</a><a href="/work">Work</a><a href="/drops">Drops</a><a href="/briefings">Briefings</a><a href="/chat">Chat</a><a href="/sticks">Sticks</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a><a href="/activity/log">Log</a>`;
+const NAV = `<a href="/">Floor</a><a href="${ACTIVITY_HREF}">Activity</a><a href="/briefings">Briefings</a><a href="/chat">Chat</a><a href="/sticks">Sticks</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a>`;
+
+/** The Activity area's pages (#622), in its sub-nav's order. */
+export type ActivityPage = 'board' | 'work' | 'drops' | 'log';
+const ACTIVITY_PAGES: readonly [ActivityPage, string, string][] = [
+  ['board', ACTIVITY_HREF, 'Board'],
+  ['work', ACTIVITY_WORK_HREF, 'Work'],
+  ['drops', ACTIVITY_DROPS_HREF, 'Drops'],
+  ['log', ACTIVITY_LOG_HREF, 'Log'],
+];
+
+/** The Activity sub-nav (#622): Board · Work · Drops · Log, the current page marked. */
+export function activityNav(current: ActivityPage): string {
+  const links = ACTIVITY_PAGES.map(
+    ([key, href, label]) =>
+      `<a href="${href}"${key === current ? ' aria-current="page"' : ''}>${label}</a>`,
+  ).join(' · ');
+  return `<nav class="subnav" aria-label="Activity"><p>${links}</p></nav>`;
+}
 
 /** Marks the link for the current page; the longest matching prefix wins. */
 const NAV_SCRIPT = `<script>(()=>{const p=location.pathname;let best=null,len=-1;for(const a of document.querySelectorAll('.topnav a')){const h=a.getAttribute('href');const hit=h==='/'?p==='/':p===h||p.startsWith(h+'/');if(hit&&h.length>len){best=a;len=h.length;}}if(best)best.setAttribute('aria-current','page');})();</script>`;
@@ -1207,7 +1236,7 @@ function gateCount(drop: Drop): { total: number; passed: number; failed: number 
   }
 }
 
-/** The work-item ledger's header row, on /work. */
+/** The work-item ledger's header row, on Activity's Work. */
 export const WORK_HEAD =
   '<tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>';
 
@@ -1227,9 +1256,9 @@ export const workItemHref = (i: Pick<WorkItem, 'dropZoneId' | 'issueNumber'>): s
 export const projectWorkHref = (zone: string, state?: string): string =>
   `${projectHref(zone, 'work')}${state === undefined || state === 'active' ? '' : `?${new URLSearchParams({ state })}`}`;
 
-/** An issue's drop list on /drops. */
+/** An issue's drop list on Activity's Drops. */
 const issueDropsHref = (i: Pick<WorkItem, 'dropZoneId' | 'issueNumber'>): string =>
-  `/drops?${new URLSearchParams({ zone: i.dropZoneId, issue: String(i.issueNumber) })}`;
+  `${ACTIVITY_DROPS_HREF}?${new URLSearchParams({ zone: i.dropZoneId, issue: String(i.issueNumber) })}`;
 
 /** A GitHub link `#N` to an issue or pull request, or plain `#N` without the repository. */
 function githubRef(repo: string | undefined, kind: 'issues' | 'pull', n: number): string {
@@ -1245,7 +1274,7 @@ const attemptPairs = (attempts: ItemDetail['attempts']): string =>
     .map(([k, n]) => `${escapeHtml(k)} ${escapeHtml(n)}`)
     .join(', ') || '-';
 
-/** The work-item ledger's rows (/work's), zones named by repository. */
+/** The work-item ledger's rows (Activity's Work), zones named by repository. */
 export function workItemRows(
   items: readonly WorkItem[],
   zones: readonly Pick<DropZoneConfig, 'id' | 'repo'>[],
@@ -1347,6 +1376,8 @@ const capital = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
  */
 function listPage(p: {
   path: string;
+  /** The Activity sub-nav's current page (#622), on an install-wide list. */
+  activity?: ActivityPage;
   /**
    * A project page's header and tab bar (#619): it replaces the back link, and the page is that
    * project's alone, so there is no project filter and links carry no `zone`.
@@ -1373,8 +1404,8 @@ function listPage(p: {
   note?: string;
 }): string {
   const href = (zone: string | undefined, state: string, kind = p.kind): string => {
-    // A project's own list is its project page; /work's links to one go there directly (#619).
-    if (p.path === '/work' && zone !== undefined && p.header === undefined)
+    // A project's own list is its project page; Activity's Work links to one go there directly (#619).
+    if (p.path === ACTIVITY_WORK_HREF && zone !== undefined && p.header === undefined)
       return escapeHtml(projectWorkHref(zone, state));
     const q = new URLSearchParams();
     if (zone !== undefined && p.header === undefined) q.set('zone', zone);
@@ -1405,7 +1436,7 @@ function listPage(p: {
     : `<p class="empty">${p.empty}</p>`;
   const top =
     p.header === undefined
-      ? `<p><a href="/">Back</a></p><h2>${p.title}</h2><nav class="filters" aria-label="Project"><p>${zoneLinks}</p></nav>`
+      ? `<p><a href="/">Back</a></p>${p.activity ? activityNav(p.activity) : ''}<h2>${p.title}</h2><nav class="filters" aria-label="Project"><p>${zoneLinks}</p></nav>`
       : `${p.header}<h2>${p.title}</h2>`;
   return page(
     `${top}<nav class="filters" aria-label="State"><p>${stateLinks}</p></nav>${kindNav}${body}`,
@@ -1414,7 +1445,7 @@ function listPage(p: {
 }
 
 /**
- * /work: work items of one zone or all, in one state or every state but done. With `header`, it is
+ * /activity/work (#622): work items of one zone or all, in one state or every state but done. With `header`, it is
  * `/projects/:id/work` (#619): that project's list under its header and tab bar.
  */
 export function renderWorkList(s: {
@@ -1432,8 +1463,8 @@ export function renderWorkList(s: {
   const where = z ? ` in ${zoneName(z, s.zones)}` : '';
   const heading = (w: string): string => (z ? `${capital(words)} work${w}` : `All ${words} work`);
   return listPage({
-    path: z && s.header !== undefined ? projectHref(z.id, 'work') : '/work',
-    ...(z && s.header !== undefined ? { header: s.header } : {}),
+    path: z && s.header !== undefined ? projectHref(z.id, 'work') : ACTIVITY_WORK_HREF,
+    ...(z && s.header !== undefined ? { header: s.header } : { activity: 'work' as const }),
     title: heading(where),
     titleText: heading(z ? ` in ${zoneNameText(z, s.zones)}` : ''),
     zones: s.zones,
@@ -1471,7 +1502,7 @@ export function renderWorkItem(s: {
   const project = zoneName(zone, zones);
   const workZoneHref = projectWorkHref(i.dropZoneId);
   const crumbs =
-    `<nav class="crumbs" aria-label="Breadcrumb"><p><a href="/work">Work</a> › ` +
+    `<nav class="crumbs" aria-label="Breadcrumb"><p><a href="${ACTIVITY_WORK_HREF}">Work</a> › ` +
     `<a href="${escapeHtml(workZoneHref)}">${project}</a> › #${escapeHtml(i.issueNumber)}</p></nav>`;
   const why = i.reason ?? waitingOn(i);
   const pr = i.prNumber === null ? '-' : githubRef(repo, 'pull', i.prNumber);
@@ -1536,7 +1567,8 @@ export function renderDropList(s: {
   const heading = (w: string): string =>
     z ? `${capital(`${words}drops`)}${w}` : `All ${words}drops`;
   return listPage({
-    path: '/drops',
+    path: ACTIVITY_DROPS_HREF,
+    activity: 'drops',
     title: heading(where),
     titleText: heading(z ? `${forIssue} in ${zoneNameText(z, s.zones)}` : ''),
     zones: s.zones,
@@ -1885,8 +1917,8 @@ export type DropContext = { item?: WorkItem; zones?: readonly ZoneRef[]; now?: D
 function dropCrumbs(drop: Drop, item: WorkItem | undefined, project: string): string {
   const short = escapeHtml(drop.id.slice(0, 8));
   const trail = item
-    ? `<a href="/work">Work</a> › <a href="${escapeHtml(projectWorkHref(item.dropZoneId))}">${project}</a> › <a href="${escapeHtml(workItemHref(item))}">#${escapeHtml(item.issueNumber)}</a> › ${short}`
-    : `<a href="/drops">Drops</a> › ${short}`;
+    ? `<a href="${ACTIVITY_WORK_HREF}">Work</a> › <a href="${escapeHtml(projectWorkHref(item.dropZoneId))}">${project}</a> › <a href="${escapeHtml(workItemHref(item))}">#${escapeHtml(item.issueNumber)}</a> › ${short}`
+    : `<a href="${ACTIVITY_DROPS_HREF}">Drops</a> › ${short}`;
   return `<nav class="crumbs" aria-label="Breadcrumb"><p>${trail}</p></nav>`;
 }
 
@@ -2190,12 +2222,156 @@ export function renderLog(s: {
   }[s.kind];
   const top = tab
     ? `${s.header}<h2>Log</h2>`
-    : `<p><a href="/">Back</a></p><h2>Log${s.zone === undefined ? '' : ` of ${name(s.zone)}`}</h2><nav class="filters" aria-label="Project"><p>${projectLinks}</p></nav>`;
+    : `<p><a href="/">Back</a></p>${activityNav('log')}<h2>Log${s.zone === undefined ? '' : ` of ${name(s.zone)}`}</h2><nav class="filters" aria-label="Project"><p>${projectLinks}</p></nav>`;
   const titleText = s.zone === undefined ? 'Log' : `Log of ${zoneTextNamer(s.zones)(s.zone)}`;
   return page(
     `${top}<nav class="filters" aria-label="Kind"><p>${kindLinks}</p></nav>` +
       (rows ? `<table>${head}${rows}</table>` : `<p class="empty">${empty}</p>`),
     { title: titleText },
+  );
+}
+
+/** The lifecycle board's columns (#622), left to right. */
+export const BOARD_COLUMNS = ['ready', 'running', 'in-review', 'parked', 'merged'] as const;
+export type BoardColumn = (typeof BOARD_COLUMNS)[number];
+const BOARD_LABEL: Record<BoardColumn, string> = {
+  ready: 'Ready',
+  running: 'Running',
+  'in-review': 'In review',
+  parked: 'Parked',
+  merged: 'Merged (24 h)',
+};
+/** The most cards a board column shows; the rest are "and N more", linking to the list. */
+export const BOARD_COLUMN_LIMIT = 20;
+const BOARD_DAY_MS = 24 * 3_600_000;
+
+/**
+ * Which column a work item is in, or none. An active drop on it means Running, whatever its state;
+ * otherwise its state places it, as Floor counts it: ready, PR open (In review), parked, and done
+ * with a merge in the 24 hours before `now` (Merged). An older merge is in no column.
+ */
+export function boardColumn(
+  i: WorkItem,
+  active: ReadonlySet<number>,
+  mergedAt: ReadonlyMap<number, string>,
+  now: Date,
+): BoardColumn | undefined {
+  if (active.has(i.id) || i.state === 'in_flight') return 'running';
+  if (i.state === 'ready') return 'ready';
+  if (i.state === 'pr_open') return 'in-review';
+  if (i.state === 'parked') return 'parked';
+  const at = mergedAt.get(i.id);
+  if (i.state === 'done' && at !== undefined) {
+    const age = now.getTime() - Date.parse(at);
+    if (age >= 0 && age < BOARD_DAY_MS) return 'merged';
+  }
+  return undefined;
+}
+
+/**
+ * `/activity` (#622): the Activity sub-nav, project filter links, and the lifecycle board: five
+ * columns of work-item cards across projects, each with its count, at most BOARD_COLUMN_LIMIT
+ * cards, and "and N more" linking to the filtered list.
+ */
+export function renderBoard(s: {
+  zones: readonly ZoneRef[];
+  /** The project shown, when filtered to one. */
+  zone?: string;
+  /** Work items, already filtered to `zone`. */
+  items: readonly WorkItem[];
+  /** Active drops (any of ACTIVE_DROP_STATES), already filtered to `zone`. */
+  drops: readonly Drop[];
+  /** Merges done in the last 24 hours, or undefined when they could not be read. */
+  merges?: readonly { workItemId: number | null; at: string }[];
+  details?: Map<number, ItemDetail>;
+  now: Date;
+}): string {
+  const name = zoneNamer(s.zones);
+  const repoOf = new Map(s.zones.map((z) => [z.id, z.repo]));
+  const dropOf = new Map<number, Drop>();
+  for (const d of s.drops)
+    if (d.workItemId !== null && (ACTIVE_DROP_STATES as readonly string[]).includes(d.state))
+      dropOf.set(d.workItemId, d);
+  const mergedAt = new Map<number, string>();
+  for (const m of s.merges ?? [])
+    if (m.workItemId !== null && (mergedAt.get(m.workItemId) ?? '') < m.at)
+      mergedAt.set(m.workItemId, m.at);
+  const cols = new Map<BoardColumn, WorkItem[]>(BOARD_COLUMNS.map((c) => [c, []]));
+  for (const i of s.items) {
+    const c = boardColumn(i, new Set(dropOf.keys()), mergedAt, s.now);
+    if (c) cols.get(c)?.push(i);
+  }
+  // Merged newest first; the rest keep the list's order.
+  cols
+    .get('merged')
+    ?.sort((a, b) => (mergedAt.get(b.id) ?? '').localeCompare(mergedAt.get(a.id) ?? ''));
+  const detail = (c: BoardColumn, i: WorkItem): string => {
+    const parts: string[] = [];
+    const d = dropOf.get(i.id);
+    if (c === 'running' && d)
+      parts.push(`${escapeHtml(d.role)} ${escapeHtml(stateWords(d.state))}`);
+    if (i.blockedBy.length > 0) parts.push(`blocked by ${escapeHtml(i.blockedBy.join(', '))}`);
+    if (c === 'parked' && i.reason) parts.push(escapeHtml(i.reason));
+    if (i.prNumber !== null)
+      parts.push(`PR ${githubRef(repoOf.get(i.dropZoneId), 'pull', i.prNumber)}`);
+    const attempts = s.details?.get(i.id)?.attempts;
+    const chain = attempts ? attemptPairs(attempts) : '-';
+    if (chain !== '-') parts.push(`attempts: ${chain}`);
+    const at = mergedAt.get(i.id);
+    if (c === 'merged' && at) parts.push(`merged ${volatile(relativeTime(at, s.now))}`);
+    return parts.length > 0 ? `<span class="detail">${parts.join(' · ')}</span>` : '';
+  };
+  const card = (c: BoardColumn, i: WorkItem): string =>
+    `<article class="board-card" data-item="${escapeHtml(`${i.dropZoneId}#${i.issueNumber}`)}"><span class="project">${name(i.dropZoneId)}</span> <a href="${escapeHtml(workItemHref(i))}">#${escapeHtml(i.issueNumber)} ${escapeHtml(i.title)}</a>${detail(c, i)}</article>`;
+  const moreHref = (c: BoardColumn): string =>
+    c === 'running'
+      ? listHref(ACTIVITY_DROPS_HREF, s.zone, 'active')
+      : listHref(
+          ACTIVITY_WORK_HREF,
+          s.zone,
+          { ready: 'ready', 'in-review': 'pr_open', parked: 'parked', merged: 'done' }[c],
+        );
+  const column = (c: BoardColumn): string => {
+    const all = cols.get(c) ?? [];
+    const unknown = c === 'merged' && s.merges === undefined;
+    const count = unknown
+      ? '<span class="count" title="unavailable">–</span>'
+      : `<span class="count">${all.length}</span>`;
+    const rest = all.length - BOARD_COLUMN_LIMIT;
+    const body = unknown
+      ? '<p class="empty">Unavailable.</p>'
+      : all.length === 0
+        ? '<p class="empty">None.</p>'
+        : all
+            .slice(0, BOARD_COLUMN_LIMIT)
+            .map((i) => card(c, i))
+            .join('') +
+          (rest > 0
+            ? `<p class="more"><a href="${escapeHtml(moreHref(c))}">and ${rest} more</a></p>`
+            : '');
+    return `<section class="board-col" data-column="${c}"><h3>${BOARD_LABEL[c]} ${count}</h3>${body}</section>`;
+  };
+  const link = (to: string, label: string, current: boolean): string =>
+    `<a href="${escapeHtml(to)}"${current ? ' aria-current="page"' : ''}>${label}</a>`;
+  const projectLinks = [
+    link(ACTIVITY_HREF, 'All projects', s.zone === undefined),
+    ...s.zones.map((z) =>
+      link(
+        `${ACTIVITY_HREF}?${new URLSearchParams({ project: z.id })}`,
+        zoneName(z, s.zones),
+        s.zone === z.id,
+      ),
+    ),
+  ].join(' · ');
+  const where = s.zone === undefined ? '' : ` of ${name(s.zone)}`;
+  return page(
+    `<p><a href="/">Back</a></p>${activityNav('board')}<h2>Board${where}</h2>` +
+      `<nav class="filters" aria-label="Project"><p>${projectLinks}</p></nav>` +
+      `<div class="board">${BOARD_COLUMNS.map(column).join('')}</div>`,
+    {
+      title: s.zone === undefined ? 'Board' : `Board of ${zoneTextNamer(s.zones)(s.zone)}`,
+      live: true,
+    },
   );
 }
 
