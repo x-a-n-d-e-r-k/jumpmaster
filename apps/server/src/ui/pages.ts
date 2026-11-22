@@ -828,6 +828,64 @@ export function askButton(focus: Focus): string {
   return `<form class="ask" data-focus-kind="${escapeHtml(focus.kind)}" data-focus-zone="${escapeHtml(focus.zoneId)}" data-focus-ref="${escapeHtml(focus.ref)}"><button>Ask about this</button></form>${ASK_SCRIPT}`;
 }
 
+/** The tabs of a project's pages (#616), in the order the tab bar shows them. */
+export type ProjectTab = 'overview' | 'work' | 'goals' | 'setup' | 'log';
+
+/**
+ * Where each project tab goes. Work and Log link to the install-wide lists filtered to the project
+ * until their own project pages land.
+ */
+const PROJECT_TABS: readonly { tab: ProjectTab; label: string; href: (id: string) => string }[] = [
+  { tab: 'overview', label: 'Overview', href: (id) => projectHref(id) },
+  { tab: 'work', label: 'Work', href: (id) => `/work?${new URLSearchParams({ zone: id })}` },
+  { tab: 'goals', label: 'Goals', href: (id) => projectHref(id, 'goals') },
+  { tab: 'setup', label: 'Setup', href: (id) => projectHref(id, 'setup') },
+  {
+    tab: 'log',
+    label: 'Log',
+    href: (id) => `/observations?${new URLSearchParams({ zone: id })}`,
+  },
+];
+
+/** A project's tab bar (#616): every project page carries it, the current tab marked. */
+export function projectTabs(zone: Pick<ZoneRef, 'id'>, current: ProjectTab | undefined): string {
+  const links = PROJECT_TABS.map(
+    (t) =>
+      `<a href="${escapeHtml(t.href(zone.id))}"${t.tab === current ? ' aria-current="page"' : ''}>${t.label}</a>`,
+  ).join('');
+  return `<nav class="settings-tabs project-tabs" aria-label="Project tabs">${links}</nav>`;
+}
+
+/** The header's Pause or Resume button: it sets the zone's mode as the projects list's buttons do. */
+const PROJECT_MODE_SCRIPT = `<script>for(const b of document.querySelectorAll('button.project-mode')){if(b.dataset.bound)continue;b.dataset.bound='1';b.addEventListener('click',async()=>{const r=await jmFetch('/api/control/zones/'+encodeURIComponent(b.dataset.zone),{mode:b.dataset.mode});if(r.ok){location.reload();return;}const j=await r.json().catch(()=>({}));document.getElementById('project-mode-out').textContent=b.dataset.name+': '+(j.error||('refused ('+r.status+')'));});}</script>`;
+
+/**
+ * A project's header (#616), on every project page: the repository name and mode badge, the
+ * Briefings count, then Ask about this (zone focus unless the page names its own), Pause or
+ * Resume, and New issue; then the tab bar.
+ */
+export function projectHeader(p: {
+  zone: ZoneRef;
+  zones: readonly ZoneRef[];
+  /** The zone's current mode (`getZoneMode`). */
+  mode: string;
+  openBriefings: number;
+  current: ProjectTab | undefined;
+  ask?: Focus;
+}): string {
+  const { zone, zones, mode } = p;
+  const id = zone.id;
+  const [label, next] = mode === 'active' ? ['Pause', 'paused'] : ['Resume', 'active'];
+  const control = `<button type="button" class="project-mode" data-zone="${escapeHtml(id)}" data-name="${escapeHtml(zoneNameText(zone, zones))}" data-mode="${next}">${label}</button>`;
+  return (
+    `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${escapeHtml(projectHref(id, 'github'))}">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${escapeHtml(p.openBriefings)} open)</a></p>` +
+    `<header class="project-header"><h2>${zoneName(zone, zones)} ${badge(mode)}</h2>` +
+    `<p class="project-mode-label">${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>` +
+    `<div class="project-actions">${askButton(p.ask ?? { kind: 'zone', zoneId: id, ref: id })} ${control} <a href="${escapeHtml(projectHref(id, 'issues/new'))}">New issue</a> <span id="project-mode-out" role="status"></span></div>` +
+    `${PROJECT_MODE_SCRIPT}</header>${projectTabs(zone, p.current)}`
+  );
+}
+
 /**
  * One briefing on its own page (`/briefings/<n>`), open or not, with its rulings: where a
  * reference to it from another page, or `ctl briefings`, leads.
@@ -929,6 +987,10 @@ export function renderGoals(s: {
   doneByRuling: ReadonlyMap<string, number>;
   /** The zone's goal changes (#363), oldest first. */
   goalChanges?: readonly GoalChange[];
+  /** The zone's current mode, for the project header (#616); its configured mode when absent. */
+  mode?: string;
+  /** The zone's open briefings, counted in the project header. */
+  openBriefings?: number;
 }): string {
   const path = s.zone.crew?.goalPath ?? 'GOAL.md';
   const missing = s.goals?.parse.ok === false && s.goals.parse.error === `${path} not found`;
@@ -996,8 +1058,15 @@ export function renderGoals(s: {
       ? '<p>None.</p>'
       : `<ul>${s.skippedCrewUnpromoted.map((n) => `<li>${skippedLine(n)}</li>`).join('')}</ul>`;
   return page(
-    `<p><a href="/">Back</a> · <a href="${escapeHtml(zoneHref(s.zone.id))}">Zone</a></p><h2>Objectives (goal ladder): ${zoneName(s.zone, s.zones)}</h2>` +
-      askButton({ kind: 'goals', zoneId: s.zone.id, ref: s.zone.id }) +
+    projectHeader({
+      zone: s.zone,
+      zones: s.zones,
+      mode: s.mode ?? s.zone.mode ?? 'active',
+      openBriefings: s.openBriefings ?? 0,
+      current: 'goals',
+      ask: { kind: 'goals', zoneId: s.zone.id, ref: s.zone.id },
+    }) +
+      `<h2>Objectives (goal ladder)</h2>` +
       `${ladder}${edit}${goalChangesBlock(s.goalChanges ?? [])}` +
       `<h2>Crew issues</h2><table><tr><th>Objective</th><th>Key</th><th>Title</th><th>State</th><th>Issue</th><th>Work item</th><th>Findings</th></tr>${issues}</table>` +
       `<h2>Crew issues not started (no recorded promotion)</h2>${skipped}`,
@@ -2049,7 +2118,12 @@ const intakeArea = (id: string, rows: number, required = false) =>
 const intakeBase = (zone: ZoneRef) => `/api/control/zones/${encodeURIComponent(zone.id)}/intake`;
 
 /** The GOAL.md stub builder: the stub, then how to commit it; issues are filed on New issue. */
-export function renderIntake(zone: ZoneRef, zones: readonly ZoneRef[] = [zone]): string {
+export function renderIntake(
+  zone: ZoneRef,
+  zones: readonly ZoneRef[] = [zone],
+  /** The project header and tab bar (#616). */
+  header = '',
+): string {
   const field = intakeField;
   const area = intakeArea;
   const goal = `<h3>Step 1: the goal</h3><form id="stub-form">${field(
@@ -2066,16 +2140,21 @@ export function renderIntake(zone: ZoneRef, zones: readonly ZoneRef[] = [zone]):
   const commit = `<h3>Step 2: commit it by pull request</h3><p>GOAL.md is a protected path, so no agent may write it and Jumpmaster doesn't commit it either. Copy the stub, then on a branch of ${escapeHtml(zone.repo)}: save it as GOAL.md, commit, push, open a pull request, and merge it yourself. The crew reads it once it is on the default branch.</p><p><textarea id="stub-out" rows="16" cols="80" readonly></textarea><br><button type="button" id="stub-copy">Copy</button></p>`;
   const next = `<p>To file an issue, use <a href="${escapeHtml(zoneHref(zone.id))}/issues/new"><strong>New issue</strong></a>.</p>`;
   return page(
-    `<h2>GOAL.md stub: ${zoneName(zone, zones)}</h2><div id="intake" data-base="${escapeHtml(intakeBase(zone))}">${goal}${commit}</div>${next}${STUB_SCRIPT}`,
+    `${header}<h2>GOAL.md stub: ${zoneName(zone, zones)}</h2><div id="intake" data-base="${escapeHtml(intakeBase(zone))}">${goal}${commit}</div>${next}${STUB_SCRIPT}`,
   );
 }
 
 /** The New issue page: one ready issue, filed under objective 1 as soon as it is submitted. */
-export function renderNewIssue(zone: ZoneRef, zones: readonly ZoneRef[] = [zone]): string {
+export function renderNewIssue(
+  zone: ZoneRef,
+  zones: readonly ZoneRef[] = [zone],
+  /** The project header and tab bar (#616), in place of the link back to the project. */
+  header?: string,
+): string {
   const field = intakeField;
   const area = intakeArea;
   const form = `<p>Filed ready, under objective 1, as soon as you submit: it doesn't need GOAL.md merged first.</p><form id="issue-form">${field('issue-title', 'Title (at most 120 characters)', '<input id="issue-title" size="80" maxlength="120" required>')}${field('issue-context', 'Context', area('issue-context', 6, true))}${field('issue-acceptance', 'Acceptance criteria, one per line', area('issue-acceptance', 5, true))}${field('issue-tests', 'Required tests, one per line', area('issue-tests', 3, true))}${field('issue-out', 'Out of scope, one per line (optional)', area('issue-out', 3))}<button>File the issue</button> <span id="issue-status" role="status"></span> <button type="button" id="issue-again" hidden>File another</button></form>`;
   return page(
-    `<p><a href="${escapeHtml(zoneHref(zone.id))}">${zoneName(zone, zones)}</a></p><h2>New issue: ${zoneName(zone, zones)}</h2><div id="new-issue" data-base="${escapeHtml(intakeBase(zone))}" data-issues="${escapeHtml(issueUrl(zone.repo, 0).replace(/0$/, ''))}">${form}</div>${ISSUE_SCRIPT}`,
+    `${header ?? `<p><a href="${escapeHtml(zoneHref(zone.id))}">${zoneName(zone, zones)}</a></p>`}<h2>New issue: ${zoneName(zone, zones)}</h2><div id="new-issue" data-base="${escapeHtml(intakeBase(zone))}" data-issues="${escapeHtml(issueUrl(zone.repo, 0).replace(/0$/, ''))}">${form}</div>${ISSUE_SCRIPT}`,
   );
 }
