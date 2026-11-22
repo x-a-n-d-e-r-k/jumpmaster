@@ -198,7 +198,7 @@ describe('UI routes', () => {
     expect(home.body).toContain('<h2>Crew</h2>');
   });
 
-  test('/zones/:id/goals shows the ladder, crew issues and the skipped list from the last sync', async () => {
+  test('/projects/:id/goals shows the ladder, crew issues and the skipped list from the last sync', async () => {
     const h = await crewHarness();
     await h.sync();
     insertCrewIssue(h.db, {
@@ -213,7 +213,7 @@ describe('UI routes', () => {
       number: 30,
       createdAt: h.now().toISOString(),
     });
-    const res = await get(h, '/zones/main/goals');
+    const res = await get(h, '/projects/main/goals');
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('Objectives (goal ladder)');
     expect(res.body).toContain('Document every endpoint');
@@ -259,13 +259,13 @@ Ship it.
     return m?.[1];
   }
 
-  test('/zones/:id/goals marks done by ruling and names the crew’s current objective (#338)', async () => {
+  test('/projects/:id/goals marks done by ruling and names the crew’s current objective (#338)', async () => {
     const h = await crewHarness();
     h.forge.state.files.set('main:GOAL.md', THREE_GOALS);
     await h.sync();
     const rid = await rulingId(h);
     recordObjectiveDone(h.db, 'main', 'manifest-flow', rid, h.now());
-    const body = (await get(h, '/zones/main/goals')).body;
+    const body = (await get(h, '/projects/main/goals')).body;
     expect(statusOf(body, 'Broker and JWT')).toBe('done');
     expect(statusOf(body, 'Manifest flow')).toBe(`done (ruling #${rid})`);
     expect(statusOf(body, 'Release notes')).toBe('Current objective');
@@ -275,14 +275,14 @@ Ship it.
     expect(body).not.toContain('Every objective is done');
   });
 
-  test('/zones/:id/goals says every objective is done when the file and rulings cover all (#338)', async () => {
+  test('/projects/:id/goals says every objective is done when the file and rulings cover all (#338)', async () => {
     const h = await crewHarness();
     h.forge.state.files.set('main:GOAL.md', THREE_GOALS);
     await h.sync();
     const rid = await rulingId(h);
     recordObjectiveDone(h.db, 'main', 'manifest-flow', rid, h.now());
     recordObjectiveDone(h.db, 'main', 'release-notes', rid, h.now());
-    const body = (await get(h, '/zones/main/goals')).body;
+    const body = (await get(h, '/projects/main/goals')).body;
     expect(zoneObjective(h.db, 'main')).toBeNull();
     expect(body).toContain(
       'Every objective is done. Add the next objective to GOAL.md to give the crew more work.',
@@ -291,30 +291,30 @@ Ship it.
     expect(statusOf(body, 'Release notes')).toBe(`done (ruling #${rid})`);
   });
 
-  test('/zones/:id/goals links back to the zone page and to the goal file on GitHub (#365)', async () => {
+  test('/projects/:id/goals links back to the zone page and to the goal file on GitHub (#365)', async () => {
     const h = await crewHarness();
     await h.sync();
-    const body = (await get(h, '/zones/main/goals')).body;
-    expect(body).toContain('href="/zones/main"');
+    const body = (await get(h, '/projects/main/goals')).body;
+    expect(body).toContain('href="/projects/main"');
     expect(body).toContain('The goals live in GOAL.md in octo/demo.');
     expect(body).toContain('<a href="https://github.com/octo/demo/blob/HEAD/GOAL.md">');
-    expect(body).not.toContain('/zones/main/intake');
+    expect(body).not.toContain('/projects/main/intake');
   });
 
-  test('/zones/:id/goals offers the intake page, not GitHub, when the goal file is missing (#365)', async () => {
+  test('/projects/:id/goals offers the intake page, not GitHub, when the goal file is missing (#365)', async () => {
     const h = await crewHarness();
     h.forge.state.files.delete('main:GOAL.md');
     await h.sync();
-    const body = (await get(h, '/zones/main/goals')).body;
+    const body = (await get(h, '/projects/main/goals')).body;
     expect(body).toContain(
-      `GOAL.md isn't in the repository yet. <a href="/zones/main/intake">Write one with the intake page</a>.`,
+      `GOAL.md isn't in the repository yet. <a href="/projects/main/intake">Write one with the intake page</a>.`,
     );
     expect(body).not.toContain('github.com');
   });
 
-  test('an unknown zone on /zones/:id/goals is 404', async () => {
+  test('an unknown zone on /projects/:id/goals is 404', async () => {
     const h = await crewHarness();
-    expect((await get(h, '/zones/nope/goals')).statusCode).toBe(404);
+    expect((await get(h, '/projects/nope/goals')).statusCode).toBe(404);
   });
 
   test('the drop page shows the models', async () => {
@@ -365,42 +365,44 @@ Ship it.
 
   test('the intake page renders for a known zone and is 404 for an unknown one', async () => {
     const h = await crewHarness();
-    const res = await get(h, '/zones/main/intake');
+    const res = await get(h, '/projects/main/intake');
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('GOAL.md stub: ');
     expect(res.body).toContain('stub-form');
-    expect((await get(h, '/zones/nope/intake')).statusCode).toBe(404);
+    expect((await get(h, '/projects/nope/intake')).statusCode).toBe(404);
   });
 
-  test('/zones/:id/intake has no issue form and points to New issue (#500)', async () => {
+  test('/projects/:id/intake has no issue form and points to New issue (#500)', async () => {
     const h = await crewHarness();
-    const body = (await get(h, '/zones/main/intake')).body;
+    const body = (await get(h, '/projects/main/intake')).body;
     expect(body).not.toContain('issue-form');
     expect(body).toContain(
-      'To file an issue, use <a href="/zones/main/issues/new"><strong>New issue</strong></a>',
+      'To file an issue, use <a href="/projects/main/issues/new"><strong>New issue</strong></a>',
     );
   });
 
-  test('/zones/:id/issues/new is the issue form alone, and 404 for an unknown zone (#500)', async () => {
+  test('/projects/:id/issues/new is the issue form alone, and 404 for an unknown zone (#500)', async () => {
     const h = await crewHarness();
-    const res = await get(h, '/zones/main/issues/new');
+    const res = await get(h, '/projects/main/issues/new');
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('New issue: ');
     expect(res.body).toContain('<form id="issue-form">');
     expect(res.body).toContain('maxlength="120"');
     expect(res.body).toContain('data-base="/api/control/zones/main/intake"');
     expect(res.body).not.toContain('stub-form');
-    expect((await get(h, '/zones/nope/issues/new')).statusCode).toBe(404);
+    expect((await get(h, '/projects/nope/issues/new')).statusCode).toBe(404);
   });
 
-  test.each(['/briefings', '/zones/main/goals', '/zones/main/intake', '/zones/main/issues/new'])(
-    'a foreign Host cannot read %s',
-    async (url) => {
-      const h = await crewHarness();
-      const res = await h.view(url, { host: 'evil.test' });
-      expect(res.statusCode).toBe(403);
-    },
-  );
+  test.each([
+    '/briefings',
+    '/projects/main/goals',
+    '/projects/main/intake',
+    '/projects/main/issues/new',
+  ])('a foreign Host cannot read %s', async (url) => {
+    const h = await crewHarness();
+    const res = await h.view(url, { host: 'evil.test' });
+    expect(res.statusCode).toBe(403);
+  });
 });
 
 describe('doctor fix links (Task 8)', () => {
@@ -1112,7 +1114,7 @@ describe('/work and /drops list pages (#119)', () => {
     expect(home.indexOf('data-zone="main"')).toBeLessThan(home.indexOf('data-zone="ref"'));
     expect(home).toContain('data-state="blocked" data-zone="main"');
     expect(home).toContain('data-state="working" data-zone="ref"');
-    expect(home).toContain('<a href="/zones/ref">octo/ref</a>');
+    expect(home).toContain('<a href="/projects/ref">octo/ref</a>');
     for (const gone of ['<h2>Work items</h2>', '<h2>Drops</h2>', '<h2>Drop zones</h2>'])
       expect(home).not.toContain(gone);
     expect(home).toMatch(/<details id="sticks"[^>]*><summary>Sticks: \d+ live/);
@@ -1302,7 +1304,7 @@ describe('/briefings grouped by project and paged (#132)', () => {
 });
 
 describe('external links open in a new tab, in-app links do not (#133)', () => {
-  test('a sweep over /, /work, /drops, /briefings and /zones/<id>/github', async () => {
+  test('a sweep over /, /work, /drops, /briefings and /projects/<id>/github', async () => {
     const h = await harness({
       issues: [],
       live: true,
@@ -1353,7 +1355,7 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
       createdAt: '2026-01-01T00:00:00.000Z',
     });
     const anchors: string[] = [];
-    for (const url of ['/', '/work', '/drops', '/briefings', '/zones/main/github']) {
+    for (const url of ['/', '/work', '/drops', '/briefings', '/projects/main/github']) {
       const res = await h.view(url);
       expect(res.statusCode, url).toBe(200);
       anchors.push(...(res.body.match(/<a\b[^>]*>/g) ?? []).map((a) => `${url}: ${a}`));
@@ -1559,5 +1561,102 @@ describe("this session's pending guarded changes under Waiting on you (#507)", (
     // Oldest first.
     expect(body.indexOf('Chat change')).toBeLessThan(body.indexOf('Settings change'));
     expect(needsYou(body)).toBe('2');
+  });
+});
+
+/** A GitHub that answers the zone's GitHub page reads. */
+const sweepForge = () => ({
+  repoAccess: async () => ({
+    private: false,
+    defaultBranch: 'main',
+    permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+    scopes: null,
+    tokenExpiresAt: null,
+    ownerType: 'Organization' as const,
+  }),
+  ownerType: async () => 'Organization' as const,
+  viewerLogin: async () => 'jm-author',
+  listDir: async () => [],
+  getFileAt: async () => null,
+});
+
+/** Every `href`, form `action` and quoted JS path in the HTML that starts with `/zones`. */
+export function zonesPagePaths(html: string): string[] {
+  const out: string[] = [];
+  for (const m of html.matchAll(/\b(?:href|action)\s*=\s*["']?(\/zones[^"'\s>]*)/gi))
+    out.push(m[1] ?? '');
+  for (const m of html.matchAll(/["'`](\/zones(?:[/?#][^"'`]*)?)["'`]/g)) out.push(m[1] ?? '');
+  return [...new Set(out)];
+}
+
+/** A store-mode install (the config in the database) with one seeded zone. */
+const storeHarness = (id = 'main') =>
+  harness({
+    live: true,
+    zone: { id, protectedPaths: [...DEFAULT_PROTECTED_PATHS] },
+    guidanceForge: sweepForge,
+  });
+
+describe('project pages live at /projects (#631)', () => {
+  test('/projects and /projects/new return 200', async () => {
+    const h = await storeHarness();
+    for (const url of ['/projects', '/projects/new']) {
+      const res = await h.view(url);
+      expect(res.statusCode, url).toBe(200);
+      expect(res.headers['content-type'], url).toMatch(/^text\/html/);
+    }
+  });
+
+  test.each(['', '/flags', '/github', '/goals', '/intake', '/issues/new'])(
+    '/projects/:id%s is 200 for a known zone and 404 for an unknown one',
+    async (sub) => {
+      const h = await storeHarness();
+      expect((await h.view(`/projects/main${sub}`)).statusCode).toBe(200);
+      expect((await h.view(`/projects/nope${sub}`)).statusCode).toBe(404);
+    },
+  );
+
+  test('the top bar and the list say Projects', async () => {
+    const h = await storeHarness();
+    const body = (await h.view('/projects')).body;
+    expect(body).toContain('<a href="/projects">Projects</a>');
+    expect(body).toContain('<h2>Projects</h2>');
+    expect(body).toContain('<p>A project is one repository Jumpmaster works on.</p>');
+    expect(body).not.toContain('>Zones<');
+  });
+
+  test('the sweep helper finds a /zones link (it is not vacuous)', () => {
+    expect(zonesPagePaths('<p><a href="/zones/jm">x</a></p>')).toEqual(['/zones/jm']);
+    expect(zonesPagePaths(`<form action="/zones/jm/github">`)).toEqual(['/zones/jm/github']);
+    expect(zonesPagePaths(`location.href = '/zones'; x`)).toEqual(['/zones']);
+    expect(
+      zonesPagePaths(
+        `<a href="/projects/jm">p</a><button data-x="/api/control/zones/jm">b</button>'/api/control/zones/'`,
+      ),
+    ).toEqual([]);
+  });
+
+  test('no swept page links a /zones page path, and each links /projects', async () => {
+    const h = await storeHarness('jm');
+    for (const url of [
+      '/',
+      '/projects',
+      '/projects/new',
+      '/projects/jm',
+      '/projects/jm/flags',
+      '/projects/jm/github',
+      '/projects/jm/goals',
+      '/work',
+      '/drops',
+      '/doctor',
+      '/settings/history',
+      '/settings/credentials',
+    ]) {
+      const res = await h.view(url);
+      expect(res.statusCode, url).toBe(200);
+      expect(res.headers['content-type'], url).toMatch(/^text\/html/);
+      expect(zonesPagePaths(res.body), url).toEqual([]);
+      expect(res.body, url).toMatch(/\b(?:href|action)="\/projects(?:[/"?#])/);
+    }
   });
 });

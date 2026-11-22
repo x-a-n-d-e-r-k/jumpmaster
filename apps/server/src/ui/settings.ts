@@ -36,6 +36,7 @@ import {
 } from '../vault/credentials.js';
 import { VAULT_KEY_IN_DATA_DIR } from '../vault/vault.js';
 import { FLAGS_SCRIPT, renderFlagsForm, savedNote } from './flags.js';
+import { projectHref } from './links.js';
 import { escapeHtml, page, tokenAgeBanner } from './pages.js';
 import {
   CONFIG_ANSWER_FN,
@@ -810,7 +811,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 /** File mode: the install's settings are the config file's, read-only here (Install and Advanced). */
 const fileModeBanner = (store: ConfigStore): string =>
-  `<p class="warn">These settings are set in the config file <code>${escapeHtml(store.status().filePath ?? '?')}</code> (file mode), so they are read-only here: edit the file and run <code>jumpmaster ctl config reload</code>, or adopt it into the database (<code>jumpmaster ctl config adopt</code>, or the button on <a href="/zones">Zones</a>) to change them here.</p>`;
+  `<p class="warn">These settings are set in the config file <code>${escapeHtml(store.status().filePath ?? '?')}</code> (file mode), so they are read-only here: edit the file and run <code>jumpmaster ctl config reload</code>, or adopt it into the database (<code>jumpmaster ctl config adopt</code>, or the button on <a href="/projects">Projects</a>) to change them here.</p>`;
 
 export function renderInstall(o: {
   store: ConfigStore;
@@ -867,7 +868,7 @@ export function renderInstallFlags(o: { store: ConfigStore; saved?: number }): s
   const links = zones
     .map(
       (z) =>
-        `<li><a href="/zones/${encodeURIComponent(z.id)}/flags">${zoneName(z, zones)}</a></li>`,
+        `<li><a href="${escapeHtml(projectHref(z.id, 'flags'))}">${zoneName(z, zones)}</a></li>`,
     )
     .join('');
   const form = renderFlagsForm({
@@ -1092,7 +1093,7 @@ export function renderMcpTokens(o: {
   const mint = !routes
     ? ''
     : config.dropZones.length === 0
-      ? '<p>A token belongs to a zone: <a href="/zones/new">add a project</a> first.</p>'
+      ? '<p>A token belongs to a zone: <a href="/projects/new">add a project</a> first.</p>'
       : `<h3>Make a token</h3>
 <form id="mint"><label>Zone <select name="zoneId">${zones}</select></label> <label>Scope <select name="scope"><option value="read" selected>read</option><option value="write">write</option></select></label> <label>Days <input type="number" name="days" min="1" max="${MAX_TOKEN_DAYS}" value="30" required></label> <label>Label <input name="label" maxlength="80" autocomplete="off"></label> <button>Make a token</button></form>
 ${SUDO_PROMPT('making a token')}

@@ -394,17 +394,17 @@ describe('the setup wizard', () => {
     expect(add.json().guarded.map((g: { path: string }) => g.path)).toEqual(['dropZones[py].repo']);
   });
 
-  test('the wizard disappears once a zone exists or is dismissed, the Credentials tab holds its credential controls, and home links Add a project (now /zones/new, Task 11)', async () => {
+  test('the wizard disappears once a zone exists or is dismissed, the Credentials tab holds its credential controls, and home links Add a project (now /projects/new)', async () => {
     const w = await world();
     const home = await w.get('/');
     expect(home.body).toContain('Finish setting up');
     expect(home.body).toContain('href="/setup/next"');
-    expect(home.body).toContain('href="/zones/new"');
+    expect(home.body).toContain('href="/projects/new"');
     const dismissed = await w.form('/setup/dismiss', {});
     expect(dismissed.statusCode).toBe(303);
     const after = await w.get('/');
     expect(after.body).not.toContain('Finish setting up');
-    expect(after.body).toContain('href="/zones/new"');
+    expect(after.body).toContain('href="/projects/new"');
     // The steps stay reachable for their controls, and /setup/next goes home.
     expect((await w.get('/setup/forge')).statusCode).toBe(200);
     expect((await w.get('/setup/next')).headers.location).toBe('/');
@@ -413,7 +413,7 @@ describe('the setup wizard', () => {
     v.store.apply({ dropZones: [zoneDoc('main')] }, { via: 'ctl', principal: token });
     const withZone = await v.get('/');
     expect(withZone.body).not.toContain('Finish setting up');
-    expect(withZone.body).toContain('href="/zones/new"');
+    expect(withZone.body).toContain('href="/projects/new"');
   });
 
   test("the doctor step names a check's zone by repository (#99)", async () => {

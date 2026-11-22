@@ -95,7 +95,7 @@ const STOP_SCRIPT = `for (const b of document.querySelectorAll('button.stop')) b
   const r = await jmFetch('/api/control/zones/' + encodeURIComponent(b.dataset.zone), {}, 'DELETE');
   const j = await r.json().catch(() => ({}));
   // 200: removed now; 202: stopping, removed by the server once drained.
-  if (r.status === 200) { location.href = '/zones'; return; }
+  if (r.status === 200) { location.href = '/projects'; return; }
   if (r.status === 202) { location.reload(); return; }
   document.getElementById('stop-out').textContent = b.dataset.name + ': ' + (j.error || (j.issues || []).map((i) => i.message).join('; ') || ('refused (' + r.status + ')'));
 });`;
@@ -134,8 +134,8 @@ function listPage(store: ConfigStore, db: Db): string {
     })
     .join('');
   return page(
-    `<p><a href="/">Home</a></p><h2>Zones</h2><p>A zone is one project: one repository Jumpmaster works on.</p>
-${fileMode ? ADOPT_BANNER : '<p><a href="/zones/new">Add a project</a></p>'}
+    `<p><a href="/">Home</a></p><h2>Projects</h2><p>A project is one repository Jumpmaster works on.</p>
+${fileMode ? ADOPT_BANNER : '<p><a href="/projects/new">Add a project</a></p>'}
 <table><tr><th>Project</th><th>Mode</th><th>Stack</th><th>Egress</th><th>Accounts</th><th>Last drop</th><th>Doctor fails</th><th>Needs</th><th></th></tr>${rows || '<tr><td colspan="9">No zones yet.</td></tr>'}</table>
 <p id="mode-out" role="status"></p><p id="stop-out" role="status"></p>
 <script>
@@ -357,7 +357,7 @@ ${field('overrideApprovers', 'Override approvers (logins)', textarea(f, 'overrid
   const base = zoneHref(id);
   const briefings = listBriefings(db, { zoneId: id, state: 'open' }).length;
   return page(
-    `<p><a href="/">Home</a> · <a href="/zones">Zones</a> · <a href="${base}/github">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${briefings} open)</a> · <a href="${base}/goals">Goals</a> · <a href="${base}/issues/new">New issue</a></p>
+    `<p><a href="/">Home</a> · <a href="/projects">Projects</a> · <a href="${base}/github">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${briefings} open)</a> · <a href="${base}/goals">Goals</a> · <a href="${base}/issues/new">New issue</a></p>
 <h2>${zoneName(resolved, all)}</h2><p>${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>
 ${askButton({ kind: 'zone', zoneId: id, ref: id })}
 ${stopping ? `<p><strong>${escapeHtml(stopping)}</strong> <small>Resume or Pause from the Zones list withdraws it.</small></p>` : ''}
@@ -449,33 +449,33 @@ export function registerZonesPages(
   deps: { db: Db; store: ConfigStore; now(): Date },
 ): void {
   const { db, store, now } = deps;
-  app.get('/zones', async (req, reply) => html(req, reply, listPage(store, db)));
-  app.get('/zones/new', async (req, reply) => {
+  app.get('/projects', async (req, reply) => html(req, reply, listPage(store, db)));
+  app.get('/projects/new', async (req, reply) => {
     if (store.mode() === 'file')
       return html(
         req,
         reply,
-        page(`<p><a href="/zones">Zones</a></p><h2>Add a project</h2>${ADOPT_BANNER}`),
+        page(`<p><a href="/projects">Projects</a></p><h2>Add a project</h2>${ADOPT_BANNER}`),
       );
     return html(
       req,
       reply,
       page(
-        `<p><a href="/">Home</a> · <a href="/zones">Zones</a></p>${projectBody(
+        `<p><a href="/">Home</a> · <a href="/projects">Projects</a></p>${projectBody(
           getWizard(db).starter ? 'starter' : 'two-bot',
-          { returnTo: '/zones', cancelTo: '/zones/new', done: '/zones' },
+          { returnTo: '/projects', cancelTo: '/projects/new', done: '/projects' },
         )}`,
       ),
     );
   });
-  app.get<{ Params: { id: string } }>('/zones/:id', async (req, reply) => {
+  app.get<{ Params: { id: string } }>('/projects/:id', async (req, reply) => {
     const body = zonePage(store, db, req.params.id, now());
     if (!body) return reply.code(404).type('text/plain').send('no such zone');
     return html(req, reply, body);
   });
   // A zone's advanced settings: every setting of the catalog, one per row (issue #322).
   app.get<{ Params: { id: string }; Querystring: { saved?: string } }>(
-    '/zones/:id/flags',
+    '/projects/:id/flags',
     async (req, reply) => {
       const saved = /^\d{1,9}$/.test(req.query.saved ?? '') ? Number(req.query.saved) : undefined;
       const body = renderFlags(store, req.params.id, {

@@ -171,9 +171,9 @@ const links = (html: string): string[] =>
   [...html.matchAll(/\b(?:href|src)="([^"]*)"/g)].map((m) => (m[1] ?? '').replaceAll('&amp;', '&'));
 
 describe('the GitHub page of a zone', () => {
-  test('GET /zones/:id/github holds the recommendation, the token links, the checklist, the ruleset file and CODEOWNERS, escaped and without a credential', async () => {
+  test('GET /projects/:id/github holds the recommendation, the token links, the checklist, the ruleset file and CODEOWNERS, escaped and without a credential', async () => {
     const w = await world();
-    const r = await w.get('/zones/demo/github?reviewer=alice');
+    const r = await w.get('/projects/demo/github?reviewer=alice');
     expect(r.statusCode, r.body).toBe(200);
     const html = r.body;
     // Named by its repository, not its zone id (#99).
@@ -231,7 +231,7 @@ describe('the GitHub page of a zone', () => {
   });
 
   test('the token step is short numbered steps, in the order they are done, with the lifetime note', async () => {
-    const html = (await (await world()).get('/zones/demo/github')).body;
+    const html = (await (await world()).get('/projects/demo/github')).body;
     const steps = /<ol id="token-steps">([\s\S]*?)<\/ol>/.exec(html)?.[1] ?? '';
     const order = [
       'Sign in as',
@@ -252,7 +252,7 @@ describe('the GitHub page of a zone', () => {
 
   test('with no CI the warning comes before the download and says what the file still requires; starter says Jumpmaster parks protected paths', async () => {
     const html = (
-      await (await world({ noCi: true, identity: 'starter' })).get('/zones/demo/github')
+      await (await world({ noCi: true, identity: 'starter' })).get('/projects/demo/github')
     ).body;
     const note = html.indexOf('a pull request must exist');
     expect(note).toBeGreaterThan(-1);
@@ -262,7 +262,7 @@ describe('the GitHub page of a zone', () => {
   });
 
   test('a two-bot zone folds its token links under Use tokens instead; a starter zone shows them as before; a personal starter zone is not the recommendation', async () => {
-    const two = (await (await world()).get('/zones/demo/github')).body;
+    const two = (await (await world()).get('/projects/demo/github')).body;
     const details = two.indexOf('<details id="use-tokens"><summary>Use tokens instead</summary>');
     expect(details).toBeGreaterThan(-1);
     expect(details).toBeLessThan(two.indexOf('id="tokens"'));
@@ -273,7 +273,7 @@ describe('the GitHub page of a zone', () => {
     vi.restoreAllMocks();
 
     const starter = (
-      await (await world({ ownerType: 'User', identity: 'starter' })).get('/zones/demo/github')
+      await (await world({ ownerType: 'User', identity: 'starter' })).get('/projects/demo/github')
     ).body;
     expect(starter).toContain('id="tokens"');
     expect(starter).not.toContain('id="use-tokens"');
@@ -284,13 +284,13 @@ describe('the GitHub page of a zone', () => {
 
   test('an app-author zone with no author PAT renders its guidance on the author app, not the no-author message', async () => {
     const appToken = ['ghs', 'PAGEAPPTOKEN'.repeat(3)].join('_');
-    const without = await (await world({ noAuthor: true })).get('/zones/demo/github');
+    const without = await (await world({ noAuthor: true })).get('/projects/demo/github');
     expect(without.statusCode).toBe(409);
     expect(without.body).toContain('Set or replace the tokens');
     await app?.close();
     vi.restoreAllMocks();
     const r = await (await world({ noAuthor: true, authorApp: { token: appToken } })).get(
-      '/zones/demo/github',
+      '/projects/demo/github',
     );
     expect(r.statusCode, r.body).toBe(200);
     expect(r.body).toContain('id="ruleset"');
@@ -301,8 +301,8 @@ describe('the GitHub page of a zone', () => {
 
   test('an unknown zone is 404; a refused read says why, escaped, and links the GitHub step', async () => {
     const w = await world({ fail: 401 });
-    expect((await w.get('/zones/nope/github')).statusCode).toBe(404);
-    const r = await w.get('/zones/demo/github');
+    expect((await w.get('/projects/nope/github')).statusCode).toBe(404);
+    const r = await w.get('/projects/demo/github');
     expect(r.statusCode).toBe(502);
     expect(r.body).toContain('GitHub rejected the author token (401)');
     expect(r.body).toContain('<h2>GitHub for octo-org/demo</h2>');
@@ -312,9 +312,9 @@ describe('the GitHub page of a zone', () => {
 
   test('home links each zone’s page, which links its GitHub page, as the doctor page does', async () => {
     const w = await world();
-    expect((await w.get('/')).body).toContain('href="/zones/demo"');
-    expect((await w.get('/zones/demo')).body).toContain('href="/zones/demo/github"');
-    expect((await w.get('/doctor')).body).toContain('href="/zones/demo/github"');
+    expect((await w.get('/')).body).toContain('href="/projects/demo"');
+    expect((await w.get('/projects/demo')).body).toContain('href="/projects/demo/github"');
+    expect((await w.get('/doctor')).body).toContain('href="/projects/demo/github"');
   });
 });
 

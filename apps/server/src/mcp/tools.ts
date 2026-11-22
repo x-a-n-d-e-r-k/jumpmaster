@@ -19,6 +19,7 @@ import {
 } from '../db/repo.js';
 import { getGoals } from '../goals.js';
 import { redactionList } from '../scrub.js';
+import { projectHref } from '../ui/links.js';
 import { dispatchGate } from '../usage.js';
 import { type Acted, CHAT_ACTION_TOOLS, carded } from './chat-actions.js';
 import { CHAT_TOOLS } from './chat-tools.js';
@@ -316,7 +317,7 @@ function filedCard(ctx: ToolContext, input: CrewActionInput): Acted {
       `(crew issue ${r.filed.join(', ')}). Nothing starts until Command promotes ` +
       `${r.filed.length === 1 ? 'it' : 'them'}.${refusedTail(r)}`,
     target: `zone:${ctx.zone.id}`,
-    link: `/zones/${encodeURIComponent(ctx.zone.id)}`,
+    link: projectHref(ctx.zone.id),
   };
 }
 

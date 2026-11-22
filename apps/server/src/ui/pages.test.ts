@@ -149,8 +149,8 @@ describe('renderHome', () => {
       crew: [{ zoneId: id, enabled: true, lastCycle: null, nextDue: null, fable: 'available' }],
     });
     const enc = encodeURIComponent(id);
-    expect(html).toContain(`<a href="/zones/${enc}/issues/new">New issue</a>`);
-    expect(html).toContain(`<a href="/zones/${enc}/intake">GOAL.md stub</a>`);
+    expect(html).toContain(`<a href="/projects/${enc}/issues/new">New issue</a>`);
+    expect(html).toContain(`<a href="/projects/${enc}/intake">GOAL.md stub</a>`);
     expect(html).not.toContain(`/intake">Intake</a>`);
     expect(html).not.toContain(id);
   });
@@ -223,7 +223,7 @@ describe('renderWorkItem (#498)', () => {
       now,
     });
     expect(html).toMatch(/<a href="https:\/\/github\.com\/octo\/demo\/issues\/7"[^>]*>#7<\/a>/);
-    expect(html).toContain('<a href="/zones/main">octo/demo</a>');
+    expect(html).toContain('<a href="/projects/main">octo/demo</a>');
     expect(html).toContain('<span class="badge crew">pr_open</span>');
     expect(html).toContain('needs &lt;review&gt;');
     expect(html).toMatch(/<a href="https:\/\/github\.com\/octo\/demo\/pull\/9"[^>]*>#9<\/a>/);
@@ -999,7 +999,7 @@ describe('goal ladder', () => {
     const html = ladder(withPath('a b/goals.md'), parsed);
     expect(html).toContain('href="https://github.com/o/r/blob/HEAD/a%20b/goals.md"');
     expect(html).toContain('The goals live in a b/goals.md in o/r.');
-    expect(html).toContain('href="/zones/jm"');
+    expect(html).toContain('href="/projects/jm"');
   });
 
   test('a repo or goal path holding markup is escaped in the text and encoded in the link (#365)', () => {
@@ -1016,7 +1016,7 @@ describe('goal ladder', () => {
       goals({ ok: false, error: 'a b/goals.md not found' }),
     );
     expect(html).toContain(
-      `a b/goals.md isn't in the repository yet. <a href="/zones/jm/intake">Write one with the intake page</a>.`,
+      `a b/goals.md isn't in the repository yet. <a href="/projects/jm/intake">Write one with the intake page</a>.`,
     );
     expect(html).not.toContain('github.com');
   });
@@ -1099,7 +1099,7 @@ describe('renderIntake', () => {
     expect(html).not.toMatch(/Step 3/);
     expect(html).not.toContain('issue-form');
     expect(html).toContain(
-      'To file an issue, use <a href="/zones/main%22%3E%3Cscript%3Ex%3C%2Fscript%3E/issues/new"><strong>New issue</strong></a>',
+      'To file an issue, use <a href="/projects/main%22%3E%3Cscript%3Ex%3C%2Fscript%3E/issues/new"><strong>New issue</strong></a>',
     );
     expect(html).not.toContain('type="password"');
     expect(html).toContain('const r = await jmFetch(base + path, body);');
@@ -1175,7 +1175,7 @@ describe('the status banner (Task 12, round 2)', () => {
       action: { label: 'See the sticks', href: '/' },
       also: [
         { text: 'demo: no Claude token', href: '/settings/credentials' },
-        { text: 'docs is paused', href: '/zones/docs' },
+        { text: 'docs is paused', href: '/projects/docs' },
         { text: 'evil', href: 'javascript:alert(1)' },
         { text: 'no pass yet since start' },
       ],
@@ -1184,7 +1184,7 @@ describe('the status banner (Task 12, round 2)', () => {
     expect(html).toContain('<p>check <code>docker compose logs stick</code> &lt;now&gt;</p>');
     expect(html).not.toContain('`');
     expect(html).toContain(
-      '<ul class="also"><li>demo: no Claude token <a href="/settings/credentials">Fix</a></li><li>docs is paused <a href="/zones/docs">Fix</a></li><li>evil</li><li>no pass yet since start</li></ul>',
+      '<ul class="also"><li>demo: no Claude token <a href="/settings/credentials">Fix</a></li><li>docs is paused <a href="/projects/docs">Fix</a></li><li>evil</li><li>no pass yet since start</li></ul>',
     );
     expect(html).not.toContain('javascript:');
     // The action link goes through the same check.
@@ -1212,7 +1212,7 @@ describe('zones are named by their repository (#99)', () => {
   const zones = [solo, a, b];
   /** The page with every URL, and the attributes that carry ids to the API, taken out. */
   const outsideUrls = (html: string) =>
-    html.replace(/(href|action|data-[a-z-]+)="[^"]*"/g, '').replace(/\/zones\/[^\s"'<]*/g, '');
+    html.replace(/(href|action|data-[a-z-]+)="[^"]*"/g, '').replace(/\/projects\/[^\s"'<]*/g, '');
   /** No zone id anywhere but in a shared-repository suffix. */
   const expectNoBareId = (html: string) => {
     const text = outsideUrls(html).replaceAll(/<small>\(zid-[ab]\)<\/small>/g, '');
@@ -1274,7 +1274,7 @@ describe('zones are named by their repository (#99)', () => {
     expect(html).toContain('Starter mode in acme/widgets');
     expect(html).toContain('cannot run acme/widgets: lacks egress-v1');
     // The ids stay in the URLs.
-    expect(html).toContain('href="/zones/zid-solo/goals"');
+    expect(html).toContain('href="/projects/zid-solo/goals"');
     expectNoBareId(html);
   });
 
@@ -1317,7 +1317,7 @@ describe('zones are named by their repository (#99)', () => {
     expect(html).toContain('<strong>Blocked: acme/shared (zid-a) needs claudeToken');
     expect(html).toContain('acme/shared (zid-b): no Claude token');
     expect(html).toContain('acme/widgets is paused');
-    expect(html).toContain('href="/zones/zid-solo"');
+    expect(html).toContain('href="/projects/zid-solo"');
     // A shared repository's id follows it in the plain-text status, as it does in <small> elsewhere.
     expectNoBareId(html.replaceAll(/acme\/shared \(zid-[ab]\)/g, ''));
   });
@@ -2467,7 +2467,7 @@ describe('the drop page header and system-event groups (#499)', () => {
     );
     expect(html).toContain('<code>abcdef12-3456-7890-abcd-ef1234567890</code>');
     const s = summaryOf(html);
-    expect(s).toContain('<a href="/zones/jm">octo/jm</a>');
+    expect(s).toContain('<a href="/projects/jm">octo/jm</a>');
     expect(s).toContain('<a href="/work/jm/487">#487 Header</a>');
     expect(s).toContain('kidney');
     expect(s).toContain('https://github.com/octo/jm/pull/12');
