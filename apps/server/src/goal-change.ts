@@ -491,9 +491,40 @@ async function advanceGoalChange(
 }
 
 /**
+ * An open change whose PR ended outside Jumpmaster (#645): it follows the forge's own state only,
+ * `merged` when the PR merged and `closed` when it was closed without merging. A PR still open, one
+ * the forge does not return, or a read that failed leaves the row as it is.
+ */
+async function reconcileOpenGoalChange(
+  db: Db,
+  forges: ForgePair,
+  c: GoalChange,
+  now: Date,
+): Promise<boolean> {
+  if (c.prNumber === null) return false;
+  let pr: Awaited<ReturnType<ForgePair['author']['getPull']>>;
+  try {
+    pr = await forges.author.getPull(c.prNumber);
+  } catch {
+    return false;
+  }
+  if (pr === null) return false;
+  if (pr.merged) {
+    update(db, c.id, { state: 'merged', error: null }, now);
+    return true;
+  }
+  if (pr.state !== 'open') {
+    update(db, c.id, { state: 'closed', error: `the pull request was closed: ${AGAIN}` }, now);
+    return true;
+  }
+  return false;
+}
+
+/**
  * Merges every goal change of the zone the owner confirmed, each only at the commit they confirmed
  * (a reconcile pass, while the zone is active). The only path that merges a change of the goal
- * file: agent PRs touching it park on the protected path. Returns how many changes moved on.
+ * file: agent PRs touching it park on the protected path. An open change whose PR was closed or
+ * merged by hand follows it (#645). Returns how many changes moved on.
  */
 export async function advanceGoalChanges(
   db: Db,
@@ -503,6 +534,9 @@ export async function advanceGoalChanges(
 ): Promise<number> {
   if (isKilled(db) || getZoneMode(db, zone.id, zone.mode) !== 'active') return 0;
   let moved = 0;
+  for (const c of listGoalChanges(db, zone.id, 'open')) {
+    if (await reconcileOpenGoalChange(db, forges, c, now)) moved++;
+  }
   for (const c of listGoalChanges(db, zone.id, 'confirmed')) {
     if (await advanceGoalChange(db, forges, zone, c, now)) moved++;
   }

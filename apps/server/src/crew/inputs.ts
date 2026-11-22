@@ -7,6 +7,7 @@ import type { Feedback } from '../flow/decide.js';
 import type { ZonePass } from '../flow/snapshot.js';
 import { serverScrubSet } from '../forge/scrub-set.js';
 import { failureText, newestFailure } from '../gate-output.js';
+import { type GoalChange, listGoalChanges } from '../goal-change.js';
 import { getGoals, objectivesDone, zoneObjective } from '../goals.js';
 import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
 import { crewTemplate, fence, gatherAuthorReports, neutralise } from '../payloads.js';
@@ -145,6 +146,35 @@ function rulings(db: Db, zoneId: string, limit = 20): RulingLine[] {
 type OpenBriefingLine = { id: number; subject: string; decision: string; optionsJson: string };
 
 /** The zone's open briefings raised by the crew, oldest first. */
+/**
+ * The zone's goal changes in flight (#645), one line each in the server's own words: ids, states
+ * and PR numbers only, never the proposed text.
+ */
+function goalChangesText(db: Db, zoneId: string): string {
+  const pr = (c: GoalChange) => (c.prNumber === null ? '' : ` (pull request #${c.prNumber})`);
+  const lines = listGoalChanges(db, zoneId).flatMap((c): string[] => {
+    switch (c.state) {
+      case 'proposed':
+        return [
+          c.source === 'crew'
+            ? `Goal change ${c.id}: proposed; waits for Command's ruling on its goal-change briefing.`
+            : `Goal change ${c.id}: proposed; its pull request opens at the next pass.`,
+        ];
+      case 'open':
+        return [
+          `Goal change ${c.id}${pr(c)}: open; waits for Command to approve and merge it in Jumpmaster. Work under the objectives it adds waits until it merges.`,
+        ];
+      case 'confirmed':
+        return [
+          `Goal change ${c.id}${pr(c)}: confirmed; Jumpmaster merges it once its checks pass.`,
+        ];
+      default:
+        return [];
+    }
+  });
+  return lines.length === 0 ? 'No goal changes in flight.' : lines.join('\n');
+}
+
 function openCrewBriefings(db: Db, zoneId: string): OpenBriefingLine[] {
   return db
     .prepare(
@@ -252,6 +282,12 @@ export async function crewLeadInput(
                 return `Briefing ${b.id} (${b.subject}): ${b.decision}\nOptions: ${options.map((o) => o.label).join('; ')}`;
               })
               .join('\n\n'),
+    },
+    {
+      title: 'Goal changes in flight',
+      name: 'goal-changes',
+      kind: 'trusted',
+      text: goalChangesText(db, zone.id),
     },
     {
       title: 'Ruled briefings',
