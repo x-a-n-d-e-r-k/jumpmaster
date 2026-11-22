@@ -910,6 +910,27 @@ describe('ctl detect and ctl zones add', () => {
   });
 });
 
+describe('ctl zones keeps its API paths when the pages move to /projects (#631)', () => {
+  test('zones list, show, add and remove still call /api/control/zones', () => {
+    expect(ctlRequest(['zones', 'list'])).toMatchObject({
+      method: 'GET',
+      path: '/api/control/zones',
+    });
+    expect(ctlRequest(['zones', 'show', 'main'])).toMatchObject({
+      method: 'GET',
+      path: '/api/control/zones/main',
+    });
+    expect(ctlRequest(['zones', 'add', 'octo/demo'])).toMatchObject({
+      method: 'POST',
+      path: '/api/control/zones',
+    });
+    expect(ctlRequest(['zones', 'remove', 'main'])).toMatchObject({
+      method: 'DELETE',
+      path: '/api/control/zones/main',
+    });
+  });
+});
+
 describe('ctl zones add output', () => {
   test('ctl zones add prints the zone, preset and gates it wrote', async () => {
     const r = await run(

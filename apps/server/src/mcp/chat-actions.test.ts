@@ -201,6 +201,10 @@ describe('chat action tools', () => {
     expect(listCards(w.db, w.one.id)).toEqual([
       expect.objectContaining({ kind: 'crew_cycle', state: 'done', zoneId: 'main' }),
     ]);
+    // The card links the project page, never the old /zones path (#631).
+    expect(listCards(w.db, w.one.id)[0]?.link).toBe('/projects/main');
+    await w.call('set_zone_mode', { zoneId: 'main', mode: 'paused' });
+    expect(listCards(w.db, w.one.id).at(-1)?.link).toBe('/projects/main');
   });
 
   test('mark_objective_done raises the server objective_done briefing and rules Mark it done', async () => {
@@ -399,6 +403,7 @@ describe('chat action tools', () => {
     const [card] = listCards(w.db, w.one.id);
     expect(card).toMatchObject({ kind: 'file_issues', state: 'done', zoneId: 'main' });
     expect(card?.summary).toMatch(/1 staged issue/);
+    expect(card?.link).toBe('/projects/main');
     // raise_briefing records a briefing card too.
     const b = await w.call('raise_briefing', {
       zoneId: 'main',
