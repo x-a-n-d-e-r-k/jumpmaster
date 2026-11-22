@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
 import { delimiter, join } from 'node:path';
+import { SYSTEM_OTHER_MACHINES_HREF } from './ui/links.js';
 
 /**
  * The address other machines reach this server at (`server.publicUrl`, issue #139): its rules, the
@@ -12,7 +13,7 @@ import { delimiter, join } from 'node:path';
 export const HEALTHZ_TIMEOUT_MS = 5000;
 
 /** Where the setting is edited: pages and scripts that need it link here. */
-export const PUBLIC_URL_PAGE = '/settings/other-machines';
+export const PUBLIC_URL_PAGE = SYSTEM_OTHER_MACHINES_HREF;
 
 /**
  * What the Other machines page says while other machines reach the server and no TLS terminator on

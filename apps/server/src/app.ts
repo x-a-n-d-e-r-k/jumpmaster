@@ -90,6 +90,7 @@ import { registerConfirmPages } from './ui/confirm.js';
 import type { FloorInputs, PendingLine } from './ui/floor.js';
 import { githubSectionRenderer } from './ui/github.js';
 import { registerGoalConfirmPages } from './ui/goal-confirm.js';
+import { SYSTEM_HREF, SYSTEM_STICKS_ADD_HREF, SYSTEM_STICKS_HREF } from './ui/links.js';
 import {
   ACTIVITY_DROPS_HREF,
   ACTIVITY_HREF,
@@ -121,6 +122,8 @@ import {
   STORE_NAV,
   STORE_NAV_SLOT,
   type StickLine,
+  SYSTEM_STORE_NAV,
+  SYSTEM_STORE_NAV_SLOT,
   WORK_STATES,
 } from './ui/pages.js';
 import { registerRedirects } from './ui/redirects.js';
@@ -483,10 +486,12 @@ export function createApp(
   });
   // The confirmation page for a session's guarded config change (§7.5): with the store only.
   if (deps.config instanceof ConfigStore) {
-    // Every page's navigation gains the store-only pages (Zones, Settings).
+    // Every page's navigation gains the store-only pages (Projects, and System's settings pages).
     app.addHook('onSend', async (_req, reply, payload) =>
       typeof payload === 'string' && String(reply.getHeader('content-type')).startsWith('text/html')
-        ? payload.replace(STORE_NAV_SLOT, STORE_NAV)
+        ? payload
+            .replace(STORE_NAV_SLOT, STORE_NAV)
+            .replace(SYSTEM_STORE_NAV_SLOT, SYSTEM_STORE_NAV)
         : payload,
     );
     registerConfirmPages(app, {
@@ -554,7 +559,7 @@ export function createApp(
   registerRedirects(app);
 
   // Every stick and its trooper count (issue #136): the count is set through the control route.
-  app.get('/sticks', async (req, reply) => {
+  app.get(SYSTEM_STICKS_HREF, async (req, reply) => {
     const { db } = deps;
     const config = cfg(req);
     const target = upgradeTargetOf(deps.images, version);
@@ -586,7 +591,7 @@ export function createApp(
 
   // Add a stick (issue #138): a session with sudo makes a one-time code, shown once on the page
   // this answers with (never cached). A refusal is JSON for the form to show.
-  app.post('/sticks/add', async (req, reply) => {
+  app.post(SYSTEM_STICKS_ADD_HREF, async (req, reply) => {
     const p = req.principal;
     if (!p || !requireCsrf(req, p))
       return reply.code(403).send({ error: 'missing or wrong x-jm-csrf header' });
@@ -599,7 +604,7 @@ export function createApp(
     const serverUrl = publicOrigin(config);
     if (!serverUrl)
       return reply.code(409).send({
-        error: `${PUBLIC_URL_NEEDED} first: Settings, Other machines (${PUBLIC_URL_PAGE})`,
+        error: `${PUBLIC_URL_NEEDED} first: System, Server, Other machines (${PUBLIC_URL_PAGE})`,
         settings: PUBLIC_URL_PAGE,
       });
     const body = (req.body ?? {}) as { name?: unknown; slots?: unknown; kind?: unknown };
@@ -958,10 +963,20 @@ export function createApp(
     );
   });
 
-  app.get('/doctor', async (req, reply) =>
+  // Health (#623): the doctor's latest run, and a store install's zone problems above it.
+  app.get(SYSTEM_HREF, async (req, reply) =>
     reply
       .type('text/html; charset=utf-8')
-      .send(withCsrf(req, renderDoctor(latestDoctorRun(deps.db), cfg(req).dropZones))),
+      .send(
+        withCsrf(
+          req,
+          renderDoctor(
+            latestDoctorRun(deps.db),
+            cfg(req).dropZones,
+            deps.config instanceof ConfigStore ? deps.config.problems() : undefined,
+          ),
+        ),
+      ),
   );
 
   // The Log (#621): observe mode's decisions in words and the rulings, newest first. A project's

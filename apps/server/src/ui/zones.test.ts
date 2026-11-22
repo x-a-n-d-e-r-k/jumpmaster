@@ -156,7 +156,7 @@ describe('the zones page', () => {
     expect(r.body).toContain('monitor');
     expect(r.body).toContain('starter');
     // main is two-bot with no reviewer token: its problem, linked to the Credentials tab.
-    expect(r.body).toMatch(/reviewer token[^<]*<\/span> <a href="\/settings\/credentials">/);
+    expect(r.body).toMatch(/reviewer token[^<]*<\/span> <a href="\/system\/credentials">/);
     // Only the transitions that apply: main is active (Pause, Observe), img observes (Resume, Pause).
     const row = (id: string) => {
       const at = r.body.indexOf(`href="/projects/${id}"`);
@@ -1031,7 +1031,7 @@ describe('a project: tabs, header and Overview (#616)', () => {
     const needs = block(body, 'needs-you') ?? '';
     expect(needs).toMatch(/<a href="\/briefings\/\d+">Decide crew:a<\/a>/);
     expect(needs).toMatch(/<a href="\/briefings\/\d+">Decide crew:b<\/a>/);
-    expect(needs).toContain('<a href="/doctor">zone.labels</a>: labels missing');
+    expect(needs).toContain('<a href="/system">zone.labels</a>: labels missing');
     expect(needs).not.toContain('not this project');
     expect(needs).not.toContain('Nothing needs you');
 
@@ -1048,7 +1048,7 @@ describe('a project: tabs, header and Overview (#616)', () => {
     expect(objective).toContain('<a href="/projects/main/goals">Objective 6</a>: 6 of 7 done');
 
     const health = block(body, 'health') ?? '';
-    expect(health).toContain('Doctor: <a href="/doctor">fail</a>');
+    expect(health).toContain('Doctor: <a href="/system">fail</a>');
     expect(health).toContain('Egress: monitor');
     expect(health).toContain('Accounts: two-bot');
 
@@ -1064,7 +1064,7 @@ describe('a project: tabs, header and Overview (#616)', () => {
     expect(block(body, 'recent-work')).toContain('No work yet.');
     expect(block(body, 'needs-you')).toContain('Nothing needs you.');
     expect(block(body, 'state')).toContain('Idle: nothing queued or running.');
-    expect(block(body, 'health')).toContain('Doctor: <a href="/doctor">not run yet</a>');
+    expect(block(body, 'health')).toContain('Doctor: <a href="/system">not run yet</a>');
   });
 
   test('a work title is escaped on the Overview', async () => {

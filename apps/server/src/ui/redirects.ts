@@ -5,6 +5,14 @@ import {
   ACTIVITY_WORK_HREF,
   PROJECTS_HREF,
   projectHref,
+  SYSTEM_ADVANCED_HREF,
+  SYSTEM_CREDENTIALS_HREF,
+  SYSTEM_HISTORY_HREF,
+  SYSTEM_HREF,
+  SYSTEM_MCP_TOKENS_HREF,
+  SYSTEM_SERVER_HREF,
+  SYSTEM_STICKS_ADD_HREF,
+  SYSTEM_STICKS_HREF,
 } from './links.js';
 
 /**
@@ -31,6 +39,12 @@ export type Redirect = {
 
 /** The request's own query string, `?…` included, or `''`. */
 const keep = (query: string): string => (query ? `?${query}` : '');
+
+/** A fixed page, the query kept, then `#hash` if given (it comes last). */
+const to =
+  (path: string, hash?: string) =>
+  (_p: Record<string, string>, q: string): string =>
+    `${path}${keep(q)}${hash ? `#${hash}` : ''}`;
 
 /** A project's page or sub-page, the query kept, then `#hash` if given (it comes last). */
 const project =
@@ -65,6 +79,18 @@ export const REDIRECTS: readonly Redirect[] = [
   // The observations list is the Log (#621): a project's tab, or the install-wide log.
   { from: '/observations', query: 'zone', to: project('log') },
   { from: '/observations', to: (_p, q) => `${ACTIVITY_LOG_HREF}${keep(q)}` },
+  // The install-wide pages are the System area (#623).
+  { from: '/doctor', to: to(SYSTEM_HREF) },
+  { from: '/sticks', to: to(SYSTEM_STICKS_HREF) },
+  { from: '/sticks/add', to: to(SYSTEM_STICKS_ADD_HREF) },
+  { from: '/settings', to: to(SYSTEM_CREDENTIALS_HREF) },
+  { from: '/settings/credentials', to: to(SYSTEM_CREDENTIALS_HREF) },
+  { from: '/settings/install', to: to(SYSTEM_SERVER_HREF) },
+  // Other machines is the second section of Server.
+  { from: '/settings/other-machines', to: to(SYSTEM_SERVER_HREF, 'other-machines') },
+  { from: '/settings/mcp-tokens', to: to(SYSTEM_MCP_TOKENS_HREF) },
+  { from: '/settings/history', to: to(SYSTEM_HISTORY_HREF) },
+  { from: '/settings/flags', to: to(SYSTEM_ADVANCED_HREF) },
 ];
 
 /** The raw query string of a request, without the `?`. */

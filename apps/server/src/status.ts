@@ -25,7 +25,7 @@ import { isReservationReason } from './flow/decide.js';
 import { missingFor, zoneRequirements } from './leases.js';
 import { isBlocked, isOverlapReason, openPrCap } from './scheduler.js';
 import { redactionList } from './scrub.js';
-import { PROJECTS_HREF, projectHref } from './ui/links.js';
+import { PROJECTS_HREF, projectHref, SYSTEM_CREDENTIALS_HREF, SYSTEM_HREF } from './ui/links.js';
 import { wizardActive } from './ui/setup.js';
 import { dispatchGate, type Gate } from './usage.js';
 import { type CredentialProblem, credentialProblems } from './vault/problems.js';
@@ -186,7 +186,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
   );
   const credentialsHref = (p: CredentialProblem) =>
     pages.credentials
-      ? '/settings/credentials'
+      ? SYSTEM_CREDENTIALS_HREF
       : p.credential === 'claudeToken'
         ? '/setup/claude'
         : '/setup/forge';
@@ -238,7 +238,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
     if (!uses.doctor && fails.length > 0)
       also.push({
         text: `${plural(fails.length, 'doctor fail')} (${fails.map((f) => f.id).join(', ')}), from a run ${failsAreNew ? 'after' : 'before'} the last pass`,
-        href: '/doctor',
+        href: SYSTEM_HREF,
       });
     // A paused zone among active ones (every zone paused is a headline of its own).
     if (activeZones.length > 0)
@@ -418,7 +418,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
         detail: 'The zone stays parked until it is fixed.',
         waitingOn: 'credentials',
         action: {
-          label: pages.credentials ? 'Open Settings, Credentials' : 'Set it (setup step)',
+          label: pages.credentials ? 'Open System, Credentials' : 'Set it (setup step)',
           href: credentialsHref(problem),
         },
       },
@@ -433,7 +433,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
         detail: 'Each fail links to the control that fixes it.',
         waitingOn: 'doctor',
         ...(input.doctor.finishedAt ? { since: input.doctor.finishedAt } : {}),
-        action: { label: 'Open the doctor', href: '/doctor' },
+        action: { label: 'Open Health', href: SYSTEM_HREF },
       },
       { doctor: true },
     );

@@ -295,10 +295,10 @@ one is missing, and its **Create the missing labels** button creates them as the
 
 ### Step 6: Run the doctor to zero fails
 
-On `/doctor` press **Run the doctor** (or
+On `/system` press **Run the doctor** (or
 `docker compose exec jumpmaster jumpmaster ctl doctor`). Each check shows `PASS`, `WARN`,
 `FAIL` or `SKIP`; every one that isn't a pass shows its fix and an action: a link to the page that
-fixes it (Settings, the zone page, the GitHub page), a GitHub page (with the generated file to
+fixes it (System, the zone page, the GitHub page), a GitHub page (with the generated file to
 bring there, as a download), or a button for the two writes (**Create the missing labels**,
 **Run a doctor drop for &lt;zone&gt;**). [Troubleshooting by check id](#troubleshooting-by-check-id)
 lists each check with its action. Fix each `FAIL` and run it again until it shows `0 fail`.
@@ -312,7 +312,7 @@ At this point these warnings are expected, and the doctor drop clears the first 
 
 **The doctor drop** runs your zone's real image, gates, services and egress setting on the default
 branch, in a real drop: it proves the Claude token, the clone, the services and the gates, and
-spends one turn of Claude usage. Press **Doctor drop: &lt;zone&gt;** on `/doctor` (or
+spends one turn of Claude usage. Press **Doctor drop: &lt;zone&gt;** on `/system` (or
 `ctl doctor <zone> --drop`) and run the doctor again when it has finished; see
 [Doctor drop](#doctor-drop).
 
@@ -615,7 +615,7 @@ An install is in one of two modes, and `jumpmaster ctl config show` says which:
   problem by path).
 - **Db mode**: no file (the browser path), or the file was adopted. The config lives in the
   database as revisions; the UI and `ctl config set` / `ctl settings set` / `ctl zones set` change
-  it, every change applies at the next pass, and Settings, History lists and reverts revisions.
+  it, every change applies at the next pass, and System, History lists and reverts revisions.
 
 `jumpmaster ctl config adopt` copies the file into the database and switches to db mode; from then
 on the file is ignored (the startup log and the doctor say so). `jumpmaster ctl config mode file`
@@ -813,7 +813,7 @@ instead of [GitHub Apps](#github-apps).
 
 The setup wizard's GitHub step and each zone's GitHub page link GitHub's token page pre-filled with
 these permissions; this is what they ask for. In the browser the tokens are `githubAuthorToken`,
-`githubReviewerToken` and `githubReadToken` under Settings, Credentials; as files, the names below.
+`githubReviewerToken` and `githubReadToken` under System, Credentials; as files, the names below.
 
 All GitHub tokens are **fine-grained personal access tokens** (Settings → Developer settings →
 Personal access tokens → Fine-grained tokens), each with **Repository access: Only select
@@ -846,7 +846,7 @@ repository, set `authorMayBeAdmin` (see [Starter mode](#starter-mode); the same 
 two-bot with a machine reviewer).
 
 When the wizard, `init` or the doctor says a token was rejected (401), it is expired, revoked or
-mistyped: replace it under Settings, Credentials (or `ctl secrets set <name>`, the value on
+mistyped: replace it under System, Credentials (or `ctl secrets set <name>`, the value on
 stdin), or write the new file with `put` and run `docker compose exec jumpmaster jumpmaster ctl
 secrets reload`. The [operate runbook](operate.md#credentials-and-rotation) covers rotation.
 
@@ -854,11 +854,11 @@ secrets reload`. The [operate runbook](operate.md#credentials-and-rotation) cove
 
 On any machine with a browser and the Claude CLI, run `claude setup-token`, sign in with the
 account whose plan pays for the work, and copy the token it prints (it starts `sk-ant-oat01-`).
-Paste it in the wizard's Claude step (or Settings, Credentials: `claudeToken`), or write it with
+Paste it in the wizard's Claude step (or System, Credentials: `claudeToken`), or write it with
 `put claude_token`. It lasts a year. A token entered in the browser is dated the day it is entered
 (or the **Made on** date you give); in file mode `init` records the date of the file as
 `claude.tokenCreatedAt` in the config (correct it if you made the token on another day). The
-doctor's `claude.token-age` warns from day 330, and so does a banner on home and on Settings,
+doctor's `claude.token-age` warns from day 330, and so does a banner on home and on System,
 Credentials. To renew, run `claude setup-token` again and replace the token the same way.
 
 The agent inside each drop runs Claude Code with this token, so the agent can read it. Egress
@@ -882,7 +882,7 @@ and resolve drops clone with it too when it is set, so the author token never en
 agent runs in; set one on a public repository as well for that (see
 [SECURITY.md](../../SECURITY.md#where-the-write-token-goes)). Detection (the
 wizard's project step, or `init`) sees the repository is private and sets `reviewReadToken: true`;
-enter the token as `githubReadToken` under Settings, Credentials, or write the file. A zone with
+enter the token as `githubReadToken` under System, Credentials, or write the file. A zone with
 `reviewReadToken` and no read token is parked until one arrives. Doctor check:
 `forge.private-clone`.
 
@@ -989,7 +989,7 @@ protected path, so an agent change to a workflow parks instead of merging. Under
 The zone uses `drop-ready` (`readyLabel`) and `agent-retry` (`retryLabel`); with the crew on,
 also `agent-staged`, and with the triage gate on, `jm-triage` and `jm-triaged` (see
 [How Jumpmaster triages issues](#how-jumpmaster-triages-issues)). When one is missing, `forge.labels` fails and its action, **Create the
-missing labels** on `/doctor` (or `jumpmaster ctl labels <zone>`), creates the configured ones as
+missing labels** on `/system` (or `jumpmaster ctl labels <zone>`), creates the configured ones as
 the author bot; it creates nothing else and works in observe mode too, but not while the kill
 switch is engaged. You can also make them yourself under the repository's Issues → Labels, or with
 `gh label create drop-ready --repo your-org/your-repo`. Doctor check: `forge.labels`.
@@ -1122,7 +1122,7 @@ verify cache in the `jm-stick` volume, and runs `JM_SLOTS` drops at once to star
 
 ### Troopers per stick
 
-How many troopers (drops) a stick runs at once is set on the **Sticks** page (`/sticks`, linked
+How many troopers (drops) a stick runs at once is set on the **Sticks** page (`/system/sticks`, linked
 from the navigation and the floor's Sticks summary), or with `jumpmaster ctl sticks slots
 <name-or-id> <n>`; `jumpmaster ctl sticks` lists each stick's counts. A change applies on the
 stick's next lease answer, with no restart. Lowering it stops nothing: the stick takes no new drop
@@ -1163,7 +1163,7 @@ lacks. Doctor checks: `stick.seen`, `stick.capabilities`.
 
 Each drop starts with one `drop-start` line in `docker compose logs stick`: the drop's role, its
 gates with the `timeoutMinutes` it received, and `forgeToken`, the 8-character fingerprint of the
-forge token it carries (the form Settings, Credentials shows). Implement, heal and resolve drops
+forge token it carries (the form System, Credentials shows). Implement, heal and resolve drops
 carry the read token when one is set and the author token otherwise; they clone with it and never
 push with it (the push container gets its own credential). A review or crew drop shows the read
 token's fingerprint or none. It is how to confirm, with no
@@ -1239,8 +1239,8 @@ doesn't advertise `push-v1`), only review, crew and doctor drops. With Compose, 
 ## Image trust
 
 The config written by `init` sets `requireSignedImages: true` (dispatch only to a stick that
-verifies signatures); a browser install starts with it off, and you can turn it on under Settings,
-Install. Either way, the release's stick runs the `signed` policy: before it creates anything for a drop it verifies the trooper and proxy images
+verifies signatures); a browser install starts with it off, and you can turn it on under System,
+Server. Either way, the release's stick runs the `signed` policy: before it creates anything for a drop it verifies the trooper and proxy images
 with cosign against this repository's release workflow, then pulls them by digest. A verified
 digest is cached for 7 days, so a short Sigstore outage doesn't stop known images. A tag never
 runs. Doctor check: `stick.image-policy`.
@@ -1262,7 +1262,7 @@ Doctor check: `config.listen`.
 ## Reaching the server from other machines
 
 A stick on another machine (a VPS on your tailnet, say) needs an address it reaches this server
-at: `server.publicUrl`. Set it under Settings, **Other machines** (`/settings/other-machines`), or
+at: `server.publicUrl`. Set it under System, Server, **Other machines** (`/system/server#other-machines`), or
 with `jumpmaster ctl public-url set https://<address>`; in file mode set `JM_PUBLIC_URL` in the
 server's environment instead. It must be a plain `https://` origin: a host name (letters, digits,
 dots and hyphens) or a bracketed IPv6 address, an optional numeric port, and no path, query or
@@ -1309,11 +1309,11 @@ Before you start:
 
 - Set the address other machines reach this server at
   ([Reaching the server from other machines](#reaching-the-server-from-other-machines)). Until it is
-  set, **Add a stick** is refused with a link to Settings.
+  set, **Add a stick** is refused with a link to System, Server, Other machines.
 - The server runs a release image, so it has an image lock, and the mirror shows the stick image
-  as complete under **Images** on `/sticks`.
+  as complete under **Images** on `/system/sticks`.
 
-**On the sticks page** (`/sticks`), under **Add a stick**:
+**On the sticks page** (`/system/sticks`), under **Add a stick**:
 
 1. Give the stick a **name** of 1 to 64 letters, digits, dots, dashes or underscores. No other
    stick or pending invite may have the same name.
@@ -1499,11 +1499,11 @@ question on `/briefings`, or edit the issue to have it triaged again.
 ## Troubleshooting by check id
 
 Each check prints its own fix; this says what it means. **Action** is the control the doctor's
-page (`/doctor`) offers beside a fail or a warn, and `ctl doctor` prints as `action:`.
+page (`/system`) offers beside a fail or a warn, and `ctl doctor` prints as `action:`.
 
 ### `config.listen`
 
-**Action:** Open Settings, Install (`/settings/install`), where the boot settings show with where each is set.
+**Action:** Open System, Server (`/system/server`), where the boot settings show with where each is set.
 
 Where the UI listens and which host names it accepts. Inside the container `0.0.0.0` passes:
 compose publishes `127.0.0.1` only. It fails when `allowedHosts` names a host other than loopback
@@ -1511,7 +1511,7 @@ and no TLS terminator is declared (`JM_TLS_TERMINATED=1`). See [Listen](#listen)
 
 ### `server.public-url`
 
-**Action:** Open Settings, Other machines
+**Action:** Open System, Server, Other machines
 
 The address other machines reach this server at. `info` while it is unset: nothing needs it until
 a stick runs on another machine. `pass` when `<address>/healthz` answers; `warn` with the same words
@@ -1552,15 +1552,15 @@ keeps this warning for good. `skip` with "rootless unsupported": use a rootful e
 
 ### `config.file`
 
-**Action:** Open Settings, History (`/settings/history`).
+**Action:** Open System, History (`/system/history`).
 
 Where the config comes from. With a config file the install is in file mode: the file is the
 config, and after editing it `jumpmaster ctl config reload` applies it without a restart. A `fail`
 means the last reload found the file invalid: the server keeps running the revision it had, and
 the fix lists each problem by path. `jumpmaster ctl config adopt` moves the config into the
-database (db mode), where the UI (Settings, Install for the install-wide settings) and
+database (db mode), where the UI (System, Server for the install-wide settings) and
 `ctl settings set` / `ctl config set` change it; from then on the file is ignored except for
-`listen` and `dataDir`, read at start. Settings, History lists every revision with what it
+`listen` and `dataDir`, read at start. System, History lists every revision with what it
 changed and reverts one (`jumpmaster ctl config rollback <id>`). A `warn` in db mode means the file no
 longer mirrors the database: refresh it with
 `docker compose exec -T jumpmaster jumpmaster ctl config export > config/jumpmaster.config.json.tmp && mv config/jumpmaster.config.json.tmp config/jumpmaster.config.json`
@@ -1570,16 +1570,16 @@ to write before running an older release, which reads only the file.
 
 ### `config.restart`
 
-**Action:** Open Settings, Install (`/settings/install`), which carries the restart-pending badge.
+**Action:** Open System, Server (`/system/server`), which carries the restart-pending badge.
 
 A setting changed since the server started that only a restart applies (`mcp.enabled` and
 `mcp.maxBodyBytes`, or a `listen` or `dataDir` changed in the file). Every other change applies at
-the next pass. Settings, Install shows it as "restart pending". Run
+the next pass. System, Server shows it as "restart pending". Run
 `docker compose restart jumpmaster`.
 
 ### `credential.install`
 
-**Action:** Open Settings, Credentials (`/settings/credentials`).
+**Action:** Open System, Credentials (`/system/credentials`).
 
 The two credentials every zone needs, the Claude token and the GitHub author token, judged for
 the install before any zone exists (a fresh install that skipped the wizard's first steps). A
@@ -1589,11 +1589,11 @@ zone exists, each zone's `credential.missing` reports them instead, so this pass
 
 ### `credential.missing`
 
-**Action:** Open Settings, Credentials (`/settings/credentials`).
+**Action:** Open System, Credentials (`/system/credentials`).
 
 A zone needs a credential nobody has set: the Claude token, the author token, a two-bot zone's
 reviewer token, the read token when `reviewReadToken` is on, or a gate secret it declares. The zone
-is parked until it arrives (its queue reason says `credentials: …`). Enter it under Settings,
+is parked until it arrives (its queue reason says `credentials: …`). Enter it under System,
 Credentials, or `jumpmaster ctl secrets set <name>` (the value on stdin), or write its file under
 `secrets/` and run `jumpmaster ctl secrets reload`.
 
@@ -1606,7 +1606,7 @@ restore the vault key it was stored with. The fix the doctor shows is the same.
 
 ### `credential.kind`
 
-**Action:** Open Settings, Credentials (`/settings/credentials`).
+**Action:** Open System, Credentials (`/system/credentials`).
 
 A credential of the wrong kind for its zone: a starter zone, or one with `authorMayBeAdmin`, needs a
 fine-grained author token (`github_pat_`); a gate secret needs at least 8 characters. The zone is
@@ -1614,14 +1614,14 @@ parked until it is replaced.
 
 ### `credential.same`
 
-**Action:** Open Settings, Credentials (`/settings/credentials`).
+**Action:** Open System, Credentials (`/system/credentials`).
 
 The reviewer token belongs to the author's account (the same token, or the same login when both
 were tested on entry). A review must come from a second account: replace the reviewer token.
 
 ### `credential.shadowed`
 
-**Action:** Open Settings, Credentials (`/settings/credentials`).
+**Action:** Open System, Credentials (`/system/credentials`).
 
 A credential is set both by a file under `secrets/` (or a variable) and in the vault, with different
 values. The file wins. Remove whichever you do not mean: the file (then `jumpmaster ctl secrets
@@ -1633,13 +1633,13 @@ file and both fingerprints, and says which one is in use (the file, or the vault
 the vault" is on). Keep the one you mean, whichever is in use: delete the file (then `jumpmaster
 ctl secrets reload`), or remove the vault copy with `jumpmaster ctl secrets remove
 github-app/<owner>/<role>` to keep the file. Either one clears the warning. Replace key does not:
-it stores a new entry, which still differs from the file, and Settings → Credentials offers it only
+it stores a new entry, which still differs from the file, and System → Credentials offers it only
 while the vault entry is in use. The remove is refused while no file sets the entry, so it never
 leaves a role without one.
 
 ### `vault.key`
 
-**Action:** Open Settings, Credentials (`/settings/credentials`).
+**Action:** Open System, Credentials (`/system/credentials`).
 
 The vault's entries do not decrypt with the key `JM_VAULT_KEY_FILE` names (`secrets/vault_key`).
 The key and the data travel together: restore the key file from the backup taken with `data/`, or
@@ -1657,20 +1657,20 @@ inside a `0700` directory.
 
 ### `claude.token-age`
 
-**Action:** Open Settings, Credentials (`/settings/credentials`).
+**Action:** Open System, Credentials (`/system/credentials`).
 
 The Claude token's age from `claude.tokenCreatedAt`; warns from day 330, fails past a year. Renew
 it ([Claude token](#claude-token)).
 
 ### `claude.plan`
 
-**Action:** Open Settings, Install (`/settings/install`).
+**Action:** Open System, Server (`/system/server`).
 
 The declared plan, and whether a `fableModel` fits it ([Claude plan](#claude-plan)).
 
 ### `chat.service`
 
-**Action:** Open Settings, Credentials (`/settings/credentials`) for a zone's line; the
+**Action:** Open System, Credentials (`/system/credentials`) for a zone's line; the
 install-wide line points here.
 
 The crew chat's service answers and reaches both the Claude API and GitHub. With no chat service
@@ -1723,14 +1723,14 @@ Its log names the cause on the line starting `push-v1 withheld:`. A refused troo
 
 ### `usage.gate`
 
-**Action:** Open Settings, Install (`/settings/install`).
+**Action:** Open System, Server (`/system/server`).
 
 Whether dispatch is open under your Claude usage; nothing to do unless a credits briefing waits
 ([Usage](#usage)).
 
 ### `forge.author`
 
-**Action:** Open Settings, Credentials (`/settings/credentials`).
+**Action:** Open System, Credentials (`/system/credentials`).
 
 The author token's account, its role on the repository (must be Write, not Admin unless
 `authorMayBeAdmin`), and its expiry ([Tokens](#tokens)).
@@ -1740,9 +1740,9 @@ server signs a request as the app and compares GitHub's answer with the imported
 naming the app by its slug, when:
 
 - GitHub rejects the key, or the key can't sign: the fix is a new private key from the app's page
-  on GitHub, pasted into the row's **Replace key** under Settings, Credentials
+  on GitHub, pasted into the row's **Replace key** under System, Credentials
   ([Rotating an app's private key](operate.md#rotating-an-apps-private-key));
-- the key belongs to another app than the entry's: re-import the app under Settings, Credentials;
+- the key belongs to another app than the entry's: re-import the app under System, Credentials;
 - GitHub names the app differently (the slug mismatch: the app was renamed, so it no longer acts
   as `<old-slug>[bot]`): re-import the app, and add the old login to the zone's
   `authorLoginAliases` so its open pull requests stay adopted;
@@ -1764,7 +1764,7 @@ tokens are minted per use.
 
 ### `forge.reviewer`
 
-**Action:** Open Settings, Credentials (`/settings/credentials`).
+**Action:** Open System, Credentials (`/system/credentials`).
 
 The same for the reviewer; it must be another account than the author, with Write and not Admin.
 `skip` in starter mode ([Tokens](#tokens)).
@@ -1807,7 +1807,7 @@ token page.
 
 ### `forge.admin`
 
-**Action:** Open Settings, Credentials (`/settings/credentials`).
+**Action:** Open System, Credentials (`/system/credentials`).
 
 Neither bot may be a repository admin, unless `authorMayBeAdmin` is set for an owner's personal
 repository and the author token has no Administration permission ([Starter mode](#starter-mode)).
@@ -1884,7 +1884,7 @@ make sure no label action is in flight.
 
 ### `forge.private-clone`
 
-**Action:** Open Settings, Credentials (`/settings/credentials`).
+**Action:** Open System, Credentials (`/system/credentials`).
 
 A private repository needs the read token and `reviewReadToken: true` ([Read token](#read-token)).
 
@@ -1937,7 +1937,7 @@ The egress mode and the hosts seen; in monitor, the hosts to add before enforcin
 **Action:** Edit the identity of <zone> (the zone page's **Merging** section).
 
 `two-bot` passes. Starter mode always warns with its cost ([Starter mode](#starter-mode)). To add
-a reviewer: give a second account Write, enter its token as `githubReviewerToken` under Settings,
+a reviewer: give a second account Write, enter its token as `githubReviewerToken` under System,
 Credentials (or write `secrets/github_reviewer_token` and run `ctl secrets reload`), set
 **Accounts** to `two-bot` in the zone page's **Merging** section (in file mode, `"identity":
 "two-bot"` in the file and `ctl config reload`), and import the zone's two-bot ruleset from its

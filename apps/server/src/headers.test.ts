@@ -103,7 +103,7 @@ describe('framing headers (issue #260)', () => {
       '/projects',
       '/projects/:id',
       '/drops/:id',
-      '/sticks',
+      '/system/sticks',
     ])
       expect(htmlUrls, page).toContain(page);
   });
@@ -135,14 +135,14 @@ describe('framing headers (issue #260)', () => {
 
   test('the error path: the pages a refused request is sent to, and an HTML error page', async () => {
     const { h } = await world();
-    const setup = await h.app.inject({ method: 'GET', url: '/doctor' });
+    const setup = await h.app.inject({ method: 'GET', url: '/system' });
     expect(setup.statusCode).toBe(302);
     expect(setup.headers.location).toBe('/setup');
     const setupPage = await h.app.inject({ method: 'GET', url: '/setup' });
     expect(isHtml(setupPage)).toBe(true);
     expectNoFraming(setupPage, '/setup');
     await h.view('/');
-    const out = await h.app.inject({ method: 'GET', url: '/doctor' });
+    const out = await h.app.inject({ method: 'GET', url: '/system' });
     expect(out.statusCode).toBe(302);
     const login = await h.app.inject({ method: 'GET', url: String(out.headers.location) });
     expect(login.statusCode).toBe(200);

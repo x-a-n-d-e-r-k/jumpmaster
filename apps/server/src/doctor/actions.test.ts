@@ -53,7 +53,7 @@ describe('the action table', () => {
     expect(actionFor(fail('server.image-mirror'), { pages: PAGES_M45A })).toEqual({
       kind: 'app',
       label: 'See the images on Sticks',
-      href: '/sticks',
+      href: '/system/sticks',
     });
   });
 
@@ -94,7 +94,7 @@ describe('where each fail leads', () => {
     for (const id of ['credential.missing', 'forge.author', 'claude.token-age', 'vault.key'])
       expect(actionFor(fail(id), { zone, pages: all })).toMatchObject({
         kind: 'app',
-        href: '/settings/credentials',
+        href: '/system/credentials',
       });
     expect(
       actionFor(fail('credential.missing', { credentials: ['claudeToken'] }), {
@@ -200,12 +200,12 @@ test('install and history doctor checks now link to their tabs', async () => {
   for (const id of ['config.listen', 'claude.plan', 'usage.gate', 'config.restart'])
     expect([id, actionFor(fail(id), { pages })]).toEqual([
       id,
-      { kind: 'app', label: 'Open Settings, Install', href: '/settings/install' },
+      { kind: 'app', label: 'Open System, Server', href: '/system/server' },
     ]);
   expect(actionFor(fail('config.file'), { pages })).toEqual({
     kind: 'app',
-    label: 'Open Settings, History',
-    href: '/settings/history',
+    label: 'Open System, History',
+    href: '/system/history',
   });
   await app.close();
 });
@@ -213,7 +213,7 @@ test('install and history doctor checks now link to their tabs', async () => {
 test('pagesOf reads which pages are registered, so a later task cannot forget to flip a flag', async () => {
   const app = Fastify();
   app.get('/projects', async () => '');
-  app.get('/settings/credentials', async () => '');
+  app.get('/system/credentials', async () => '');
   await app.ready();
   expect(pagesOf(app)).toEqual({ zones: true, settings: false, credentials: true });
   await app.close();

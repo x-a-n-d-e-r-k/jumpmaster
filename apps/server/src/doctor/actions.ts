@@ -6,7 +6,16 @@ import {
   repoOf,
   type ZoneGuidance,
 } from '../github/guidance.js';
-import { githubSetupHref, PROJECTS_HREF, projectHref } from '../ui/links.js';
+import {
+  githubSetupHref,
+  PROJECTS_HREF,
+  projectHref,
+  SYSTEM_CREDENTIALS_HREF,
+  SYSTEM_HISTORY_HREF,
+  SYSTEM_OTHER_MACHINES_HREF,
+  SYSTEM_SERVER_HREF,
+  SYSTEM_STICKS_HREF,
+} from '../ui/links.js';
 import { DOC, type DoctorAction, type DoctorCheck } from './checks.js';
 
 /**
@@ -22,9 +31,9 @@ export type Action = DoctorAction;
 export type Pages = {
   /** `/projects` and `/projects/:id` (Task 11; moved from `/zones` by issue #615). */
   zones: boolean;
-  /** `/settings/install` and `/settings/history` (Task 13, with `/settings/mcp-tokens`). */
+  /** `/system/server` and `/system/history` (Task 13; moved from `/settings/…` by issue #623). */
   settings: boolean;
-  /** `/settings/credentials` (Task 9). */
+  /** `/system/credentials` (Task 9; moved from `/settings/credentials` by issue #623). */
   credentials: boolean;
 };
 
@@ -39,8 +48,8 @@ export function pagesOf(app: Pick<FastifyInstance, 'hasRoute'>): Pages {
   const has = (url: string) => app.hasRoute({ method: 'GET', url });
   return {
     zones: has(PROJECTS_HREF),
-    settings: has('/settings/install') && has('/settings/history'),
-    credentials: has('/settings/credentials'),
+    settings: has(SYSTEM_SERVER_HREF) && has(SYSTEM_HISTORY_HREF),
+    credentials: has(SYSTEM_CREDENTIALS_HREF),
   };
 }
 
@@ -59,7 +68,7 @@ const app = (label: string, href: string): Action => ({ kind: 'app', label, href
 
 /** Before the Credentials tab, the wizard step that sets the credential. */
 function credentials(check: DoctorCheck, ctx: ActionCtx): Action {
-  if (ctx.pages.credentials) return app('Open Settings, Credentials', '/settings/credentials');
+  if (ctx.pages.credentials) return app('Open System, Credentials', SYSTEM_CREDENTIALS_HREF);
   // The check names its credentials (the first is the one the wizard reaches first).
   const claude = check.id === 'claude.token-age' || check.credentials?.[0] === 'claudeToken';
   if (check.id === 'vault.key' || check.id === 'credential.shadowed') return docs(check);
@@ -103,17 +112,17 @@ const githubPage = (ctx: ActionCtx, what: string): Action | undefined =>
 type Rule = (check: DoctorCheck, ctx: ActionCtx) => Action | undefined;
 
 const TABLE: Record<string, Rule> = {
-  'config.listen': settings('/settings/install', 'Open Settings, Install'),
-  'server.public-url': settings('/settings/other-machines', 'Open Settings, Other machines'),
-  'server.image-mirror': () => app('See the images on Sticks', '/sticks'),
-  'claude.plan': settings('/settings/install', 'Open Settings, Install'),
-  'usage.gate': settings('/settings/install', 'Open Settings, Install'),
-  'config.file': settings('/settings/history', 'Open Settings, History'),
+  'config.listen': settings(SYSTEM_SERVER_HREF, 'Open System, Server'),
+  'server.public-url': settings(SYSTEM_OTHER_MACHINES_HREF, 'Open System, Server, Other machines'),
+  'server.image-mirror': () => app('See the images on Sticks', SYSTEM_STICKS_HREF),
+  'claude.plan': settings(SYSTEM_SERVER_HREF, 'Open System, Server'),
+  'usage.gate': settings(SYSTEM_SERVER_HREF, 'Open System, Server'),
+  'config.file': settings(SYSTEM_HISTORY_HREF, 'Open System, History'),
   'config.uid': docs,
   'transcripts.retention': docs,
   'config.secret-files': docs,
-  // The Install tab carries the restart-pending badge and the restart command.
-  'config.restart': settings('/settings/install', 'Open Settings, Install'),
+  // Server's install settings carry the restart-pending badge and the restart command.
+  'config.restart': settings(SYSTEM_SERVER_HREF, 'Open System, Server'),
   'claude.token-age': credentials,
   'forge.author': credentials,
   'forge.reviewer': credentials,

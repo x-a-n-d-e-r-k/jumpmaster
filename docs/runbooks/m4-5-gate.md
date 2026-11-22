@@ -66,7 +66,7 @@ Each step names what is measured or asserted. The steps follow the operability s
    waits on CI.
 4. **Change a running zone.** Pause the zone. **Status question 2** is asked here. Then change a
    gate's timeout in Stack (to a value other than 20, the default), and resume.
-5. **Rotate a token.** In Settings, Credentials, replace the author token with the second one.
+5. **Rotate a token.** In System, Credentials, replace the author token with the second one.
    Revoke the old one on GitHub once the page no longer says a running drop carries it.
 
    Then, as a scripted prompt that is not counted as a question, the author asks the partner to file
@@ -103,7 +103,7 @@ docker compose logs stick | grep '"event":"drop-start"' | grep '"role":"implemen
 
 - `timeoutMinutes` is the gate's timeout as this drop received it (step 4).
 - `forgeToken` is the first 8 hex characters of the SHA-256 of the token the drop carries. That is
-  the same form Settings, Credentials shows.
+  the same form System, Credentials shows.
 - Only implement, heal and resolve drops carry the author token. Filter for `implement`: the review
   drop that follows an implement drop is usually the last line, and it shows the read token's
   fingerprint (when `reviewReadToken` is set) or no `forgeToken`. Crew drops behave the same way.

@@ -109,7 +109,7 @@ describe('kinds, options and bounds from the schema', () => {
       'Fixed once the zone exists: remove the zone and add it again to change it.',
     );
     expect(FLAGS.find((f) => f.path === 'server.publicUrl')?.elsewhere).toBe(
-      'Changed in the Other machines tab.',
+      'Changed under Other machines, on System, Server.',
     );
     expect(FLAGS.find((f) => f.path === 'usage.probeJitterSeconds')?.elsewhere).toBe(
       'Changed with jumpmaster ctl settings set or in the config file.',
