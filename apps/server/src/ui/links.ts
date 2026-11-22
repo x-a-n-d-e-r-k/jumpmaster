@@ -20,5 +20,14 @@ export const projectHref = (id: string, sub?: string): string =>
 /** A project's GitHub setup: the GitHub section of its Setup tab (#618). */
 export const githubSetupHref = (id: string): string => `${projectHref(id, 'setup')}#github`;
 
+/** The Activity area (#622): its lifecycle board, every project's or one's with `?project=`. */
+export const ACTIVITY_HREF = '/activity';
+
+/** The cross-project work list (#622: moved from `/work`). */
+export const ACTIVITY_WORK_HREF = `${ACTIVITY_HREF}/work`;
+
+/** The cross-project drop list (#622: moved from `/drops`; a drop's own page stays `/drops/:id`). */
+export const ACTIVITY_DROPS_HREF = `${ACTIVITY_HREF}/drops`;
+
 /** The install-wide Log (#621): every project's, or one project's with `?project=`. */
-export const ACTIVITY_LOG_HREF = '/activity/log';
+export const ACTIVITY_LOG_HREF = `${ACTIVITY_HREF}/log`;

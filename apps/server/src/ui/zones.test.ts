@@ -466,7 +466,7 @@ describe('the zones page', () => {
       expect(row).toContain(`>${id.slice(0, 8)}</a>`);
     }
     for (const id of ids.slice(0, 5)) expect(row).not.toContain(`/drops/${id}`);
-    expect(row).toContain('<a href="/drops?zone=main&amp;kind=all">and 5 more</a>');
+    expect(row).toContain('<a href="/activity/drops?zone=main&amp;kind=all">and 5 more</a>');
   });
 
   test('"and M more" opens a drops list that includes the doctor drops it counts', async () => {
@@ -476,7 +476,7 @@ describe('the zones page', () => {
       section((await w.get('/projects/main/setup')).body, 'egress'),
       'new.example.com',
     );
-    const href = /<a href="(\/drops\?[^"]+)">and 5 more<\/a>/.exec(row)?.[1];
+    const href = /<a href="(\/activity\/drops\?[^"]+)">and 5 more<\/a>/.exec(row)?.[1];
     expect(href).toBeDefined();
     const list = (await w.get(href!.replaceAll('&amp;', '&'))).body;
     for (const id of ids.slice(0, 5)) expect(list).toContain(`/drops/${id}`);
@@ -493,7 +493,7 @@ describe('the zones page', () => {
     expect(dropLinks(row)).toHaveLength(3);
     for (const id of ids) expect(row).toContain(`href="/drops/${id}"`);
     expect(row).not.toContain('more');
-    expect(row).not.toContain('/drops?zone=');
+    expect(row).not.toContain('/activity/drops?zone=');
   });
 
   test('counts render with en-US thousands separators', async () => {

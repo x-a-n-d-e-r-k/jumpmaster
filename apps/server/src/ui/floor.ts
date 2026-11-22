@@ -2,7 +2,7 @@ import { isNotice } from '../briefings.js';
 import type { Pending } from '../config/confirm.js';
 import { ACTIVE_DROP_STATES } from '../db/repo.js';
 import { STICK_LIVE_MS } from '../doctor/checks.js';
-import { projectHref } from './links.js';
+import { ACTIVITY_DROPS_HREF, ACTIVITY_WORK_HREF, projectHref } from './links.js';
 import type { HomeState, StickLine } from './pages.js';
 import { type ZoneRef, zoneName } from './zone-name.js';
 
@@ -90,7 +90,7 @@ const STATE_RANK: Record<CardState, number> = {
 };
 
 /** Live drops: active and started (a pending push still holds its slot). */
-const isRunning = (state: string): boolean =>
+export const isRunning = (state: string): boolean =>
   state !== 'queued' && (ACTIVE_DROP_STATES as readonly string[]).includes(state);
 
 const liveSticks = (sticks: readonly StickLine[], now: Date): StickLine[] =>
@@ -172,17 +172,17 @@ export function floorCounts(
 }
 
 /**
- * A list page's URL, filtered to a zone and a state; the values URL-encoded. /drops links ask for
+ * A list page's URL, filtered to a zone and a state; the values URL-encoded. Drop-list links ask for
  * every kind, so the list matches the count that links to it, crew drops included (#497).
  */
 export function listHref(path: string, zone: string | undefined, state?: string): string {
   // A project's work is its Work tab (#619), not the install-wide list filtered to it.
-  if (path === '/work' && zone !== undefined)
+  if (path === ACTIVITY_WORK_HREF && zone !== undefined)
     return `${projectHref(zone, 'work')}${state === undefined ? '' : `?state=${encodeURIComponent(state)}`}`;
   const q: string[] = [];
   if (zone !== undefined) q.push(`zone=${encodeURIComponent(zone)}`);
   if (state !== undefined) q.push(`state=${encodeURIComponent(state)}`);
-  if (path === '/drops') q.push('kind=all');
+  if (path === ACTIVITY_DROPS_HREF) q.push('kind=all');
   return q.length === 0 ? path : `${path}?${q.join('&')}`;
 }
 
@@ -195,10 +195,10 @@ function tile(key: string, n: number | null, label: string, href: string): strin
 /** The Working tiles of a zone (or of the install, with `zone` undefined). */
 function workingTiles(c: WorkingCounts, zone: string | undefined): string {
   return (
-    tile('running', c.running, 'Running', listHref('/drops', zone, 'active')) +
-    tile('queued', c.queued, 'Queued', listHref('/work', zone, 'ready')) +
-    tile('pr-open', c.prOpen, 'PRs open', listHref('/work', zone, 'pr_open')) +
-    tile('merged', c.merged24h, 'Merged (24h)', listHref('/work', zone, 'done'))
+    tile('running', c.running, 'Running', listHref(ACTIVITY_DROPS_HREF, zone, 'active')) +
+    tile('queued', c.queued, 'Queued', listHref(ACTIVITY_WORK_HREF, zone, 'ready')) +
+    tile('pr-open', c.prOpen, 'PRs open', listHref(ACTIVITY_WORK_HREF, zone, 'pr_open')) +
+    tile('merged', c.merged24h, 'Merged (24h)', listHref(ACTIVITY_WORK_HREF, zone, 'done'))
   );
 }
 
@@ -218,7 +218,7 @@ export function totalsStrip(f: FloorCounts): string {
   const t = f.totals;
   return (
     `<nav class="totals" aria-label="Totals">${workingTiles(t, undefined)}` +
-    tile('parked', t.parked, 'Parked', listHref('/work', undefined, 'parked')) +
+    tile('parked', t.parked, 'Parked', listHref(ACTIVITY_WORK_HREF, undefined, 'parked')) +
     tile('needs-you', t.needsYou, 'Needs you', needsYouHref(t.pending)) +
     '</nav>'
   );
@@ -288,10 +288,10 @@ function zoneCard(z: ZoneFloor, zone: ZoneRef, zones: readonly ZoneRef[]): strin
     : `<div class="tiles">${workingTiles(c, id)}</div>`;
   const blocked = [
     c.parked > 0
-      ? `<li><a href="${esc(listHref('/work', id, 'parked'))}">${c.parked} parked</a></li>`
+      ? `<li><a href="${esc(listHref(ACTIVITY_WORK_HREF, id, 'parked'))}">${c.parked} parked</a></li>`
       : '',
     c.outbox > 0
-      ? `<li><a href="${esc(listHref('/work', id))}">${plural(c.outbox, 'forge write')} unknown or failed</a></li>`
+      ? `<li><a href="${esc(listHref(ACTIVITY_WORK_HREF, id))}">${plural(c.outbox, 'forge write')} unknown or failed</a></li>`
       : '',
     c.noStick ? '<li><a href="#sticks">No stick can run it</a></li>' : '',
   ].join('');

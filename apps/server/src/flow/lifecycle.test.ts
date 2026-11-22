@@ -263,7 +263,7 @@ describe('the merge reservation of the oldest approved PR', () => {
       reason: 'waiting to merge after #1',
     });
     // The floor's status line and the /work ledger both say whose merge B waits for.
-    for (const url of ['/', '/work']) {
+    for (const url of ['/', '/activity/work']) {
       expect((await h.view(url)).body).toContain('waiting to merge after #1');
     }
     expect(attemptsOf(2)).toEqual(spent);

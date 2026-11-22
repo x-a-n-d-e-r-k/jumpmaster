@@ -15,7 +15,7 @@ import { FORM_SCRIPT, zoneToForm } from '../zones/form.js';
 import { renderFlags } from './flags.js';
 import { type FloorInputs, floorCounts, listHref, stateSentence } from './floor.js';
 import { COPY_SCRIPT, githubReviewerForm } from './github.js';
-import { githubSetupHref } from './links.js';
+import { ACTIVITY_DROPS_HREF, githubSetupHref } from './links.js';
 import {
   badge,
   escapeHtml,
@@ -81,7 +81,7 @@ function dropsCell(zoneId: string, drops: string[]): string {
     .join(' ');
   const more =
     rest > 0
-      ? ` <a href="${escapeHtml(listHref('/drops', zoneId))}">and ${formatCount(rest)} more</a>`
+      ? ` <a href="${escapeHtml(listHref(ACTIVITY_DROPS_HREF, zoneId))}">and ${formatCount(rest)} more</a>`
       : '';
   return `${formatCount(drops.length)} <details><summary>show ${formatCount(drops.length)}</summary>${links}${more}</details>`;
 }

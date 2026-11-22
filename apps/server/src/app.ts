@@ -91,7 +91,10 @@ import type { FloorInputs, PendingLine } from './ui/floor.js';
 import { githubSectionRenderer } from './ui/github.js';
 import { registerGoalConfirmPages } from './ui/goal-confirm.js';
 import {
+  ACTIVITY_DROPS_HREF,
+  ACTIVITY_HREF,
   ACTIVITY_LOG_HREF,
+  ACTIVITY_WORK_HREF,
   type CrewLine,
   DROP_KINDS,
   DROP_LIST_LIMIT,
@@ -103,6 +106,7 @@ import {
   type LogKind,
   PROJECTS_HREF,
   pageParams,
+  renderBoard,
   renderBriefing,
   renderBriefings,
   renderDoctor,
@@ -218,7 +222,7 @@ const FLOOR_DROP_LIMIT = 1000;
  * Merges done in the 24 hours before `at`, each with its item's zone, for the floor's Merged
  * (24h) counts. A failed read leaves `merges24h` out: the floor says "unavailable", not 0.
  */
-function floorMerges(db: Db, at: Date): { merges24h?: Array<{ zoneId: string; at: string }> } {
+function floorMerges(db: Db, at: Date): { merges24h?: ReturnType<typeof listMergesSince> } {
   try {
     return { merges24h: listMergesSince(db, new Date(at.getTime() - 24 * 3_600_000)) };
   } catch {
@@ -742,25 +746,61 @@ export function createApp(
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
 
-  app.get<{ Querystring: { zone?: string; state?: string } }>('/work', async (req, reply) => {
+  // The Activity board (#622): every project's work items in lifecycle columns, or one project's.
+  app.get<{ Querystring: { project?: string } }>(ACTIVITY_HREF, async (req, reply) => {
     const { db } = deps;
-    const config = cfg(req);
-    const f = listFilter(req.query, config.dropZones, ['active', ...WORK_STATES] as const);
-    if ('refuse' in f) return reply.code(404).type('text/plain').send(f.refuse);
-    const state = f.state ?? 'active';
-    const items = config.dropZones
-      .filter((z) => f.zone === undefined || z.id === f.zone)
-      .flatMap((z) => listWorkItems(db, z.id))
-      .filter((i) => (state === 'active' ? i.state !== 'done' : i.state === state));
-    const html = renderWorkList({
-      zones: config.dropZones,
-      ...(f.zone !== undefined ? { zone: f.zone } : {}),
-      state,
+    const zones = cfg(req).dropZones;
+    const project = req.query.project;
+    if (project !== undefined && !zones.some((z) => z.id === project))
+      return reply.code(404).type('text/plain').send('no such project');
+    const shown = zones.filter((z) => project === undefined || z.id === project);
+    const items = shown.flatMap((z) => listWorkItems(db, z.id));
+    const ids = new Set(items.map((i) => i.id));
+    const drops = shown.flatMap((z) =>
+      listDrops(db, { zoneId: z.id, states: ACTIVE_DROP_STATES, limit: -1 }),
+    );
+    const now = deps.now();
+    const { merges24h } = floorMerges(db, now);
+    const merges = merges24h?.filter((m) => m.workItemId !== null && ids.has(m.workItemId));
+    const merged = new Set(merges?.map((m) => m.workItemId));
+    const html = renderBoard({
+      zones,
+      ...(project !== undefined ? { zone: project } : {}),
       items,
-      details: itemDetails(db, items),
+      drops,
+      ...(merges ? { merges } : {}),
+      // Details (attempts, verdict) for the items the board can show: not the older done ones.
+      details: itemDetails(
+        db,
+        items.filter((i) => i.state !== 'done' || merged.has(i.id)),
+      ),
+      now,
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
+
+  app.get<{ Querystring: { zone?: string; state?: string } }>(
+    ACTIVITY_WORK_HREF,
+    async (req, reply) => {
+      const { db } = deps;
+      const config = cfg(req);
+      const f = listFilter(req.query, config.dropZones, ['active', ...WORK_STATES] as const);
+      if ('refuse' in f) return reply.code(404).type('text/plain').send(f.refuse);
+      const state = f.state ?? 'active';
+      const items = config.dropZones
+        .filter((z) => f.zone === undefined || z.id === f.zone)
+        .flatMap((z) => listWorkItems(db, z.id))
+        .filter((i) => (state === 'active' ? i.state !== 'done' : i.state === state));
+      const html = renderWorkList({
+        zones: config.dropZones,
+        ...(f.zone !== undefined ? { zone: f.zone } : {}),
+        state,
+        items,
+        details: itemDetails(db, items),
+      });
+      return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+    },
+  );
 
   // A project's work (#619): its list under the project header, Work current, and each item.
   app.get<{ Params: { id: string }; Querystring: { state?: string } }>(
@@ -813,7 +853,7 @@ export function createApp(
   );
 
   app.get<{ Querystring: { zone?: string; state?: string; issue?: string; kind?: string } }>(
-    '/drops',
+    ACTIVITY_DROPS_HREF,
     async (req, reply) => {
       const { db } = deps;
       const config = cfg(req);
