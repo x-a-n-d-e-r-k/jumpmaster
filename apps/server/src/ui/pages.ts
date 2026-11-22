@@ -832,12 +832,12 @@ export function askButton(focus: Focus): string {
 export type ProjectTab = 'overview' | 'work' | 'goals' | 'setup' | 'log';
 
 /**
- * Where each project tab goes. Work and Log link to the install-wide lists filtered to the project
- * until their own project pages land.
+ * Where each project tab goes. Log links to the install-wide list filtered to the project until its
+ * own project page lands.
  */
 const PROJECT_TABS: readonly { tab: ProjectTab; label: string; href: (id: string) => string }[] = [
   { tab: 'overview', label: 'Overview', href: (id) => projectHref(id) },
-  { tab: 'work', label: 'Work', href: (id) => `/work?${new URLSearchParams({ zone: id })}` },
+  { tab: 'work', label: 'Work', href: (id) => projectHref(id, 'work') },
   { tab: 'goals', label: 'Goals', href: (id) => projectHref(id, 'goals') },
   { tab: 'setup', label: 'Setup', href: (id) => projectHref(id, 'setup') },
   {
@@ -1234,9 +1234,13 @@ export const DROP_HEAD =
 const waitingOn = (i: WorkItem): string =>
   i.state === 'ready' && i.blockedBy.length > 0 ? `waiting on ${i.blockedBy.join(', ')}` : '';
 
-/** A work item's own page (#498). */
+/** A work item's own page (#498), under its project's Work tab (#619). */
 export const workItemHref = (i: Pick<WorkItem, 'dropZoneId' | 'issueNumber'>): string =>
-  `/work/${encodeURIComponent(i.dropZoneId)}/${i.issueNumber}`;
+  `${projectHref(i.dropZoneId, 'work')}/${i.issueNumber}`;
+
+/** A project's work list (#619), in `state` unless it is the default (active). */
+export const projectWorkHref = (zone: string, state?: string): string =>
+  `${projectHref(zone, 'work')}${state === undefined || state === 'active' ? '' : `?${new URLSearchParams({ state })}`}`;
 
 /** An issue's drop list on /drops. */
 const issueDropsHref = (i: Pick<WorkItem, 'dropZoneId' | 'issueNumber'>): string =>
@@ -1358,6 +1362,11 @@ const capital = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
  */
 function listPage(p: {
   path: string;
+  /**
+   * A project page's header and tab bar (#619): it replaces the back link, and the page is that
+   * project's alone, so there is no project filter and links carry no `zone`.
+   */
+  header?: string;
   /** The heading, as HTML. */
   title: string;
   /** The heading as plain text, for the document title. */
@@ -1379,8 +1388,11 @@ function listPage(p: {
   note?: string;
 }): string {
   const href = (zone: string | undefined, state: string, kind = p.kind): string => {
+    // A project's own list is its project page; /work's links to one go there directly (#619).
+    if (p.path === '/work' && zone !== undefined && p.header === undefined)
+      return escapeHtml(projectWorkHref(zone, state));
     const q = new URLSearchParams();
-    if (zone !== undefined) q.set('zone', zone);
+    if (zone !== undefined && p.header === undefined) q.set('zone', zone);
     if (zone !== undefined && zone === p.zone && p.issue !== undefined)
       q.set('issue', String(p.issue));
     if (state !== p.defaultState) q.set('state', state);
@@ -1406,18 +1418,25 @@ function listPage(p: {
   const body = p.rows
     ? `<table>${p.head}${p.rows}</table>${p.note ? `<p class="muted">${p.note}</p>` : ''}`
     : `<p class="empty">${p.empty}</p>`;
+  const top =
+    p.header === undefined
+      ? `<p><a href="/">Back</a></p><h2>${p.title}</h2><nav class="filters" aria-label="Project"><p>${zoneLinks}</p></nav>`
+      : `${p.header}<h2>${p.title}</h2>`;
   return page(
-    `<p><a href="/">Back</a></p><h2>${p.title}</h2>` +
-      `<nav class="filters" aria-label="Project"><p>${zoneLinks}</p></nav>` +
-      `<nav class="filters" aria-label="State"><p>${stateLinks}</p></nav>${kindNav}${body}`,
+    `${top}<nav class="filters" aria-label="State"><p>${stateLinks}</p></nav>${kindNav}${body}`,
     { title: p.titleText },
   );
 }
 
-/** /work: work items of one zone or all, in one state or every state but done. */
+/**
+ * /work: work items of one zone or all, in one state or every state but done. With `header`, it is
+ * `/projects/:id/work` (#619): that project's list under its header and tab bar.
+ */
 export function renderWorkList(s: {
   zones: readonly ZoneRef[];
   zone?: string;
+  /** The project header and tab bar (`projectHeaderFor`), on a project's own list. */
+  header?: string;
   state: WorkFilter;
   /** Already filtered. */
   items: readonly WorkItem[];
@@ -1428,7 +1447,8 @@ export function renderWorkList(s: {
   const where = z ? ` in ${zoneName(z, s.zones)}` : '';
   const heading = (w: string): string => (z ? `${capital(words)} work${w}` : `All ${words} work`);
   return listPage({
-    path: '/work',
+    path: z && s.header !== undefined ? projectHref(z.id, 'work') : '/work',
+    ...(z && s.header !== undefined ? { header: s.header } : {}),
     title: heading(where),
     titleText: heading(z ? ` in ${zoneNameText(z, s.zones)}` : ''),
     zones: s.zones,
@@ -1446,7 +1466,7 @@ export function renderWorkList(s: {
 }
 
 /**
- * /work/:zone/:issue (#498): one issue's whole story. The header (issue, project, state, PR, head
+ * /projects/:zone/work/:issue (#498, #619): one issue's whole story, under the project header. The header (issue, project, state, PR, head
  * and verdict), the attempt counts, then every drop for it oldest first with its gates.
  */
 export function renderWorkItem(s: {
@@ -1456,13 +1476,15 @@ export function renderWorkItem(s: {
   /** The item's drops, in any order: shown oldest first. */
   drops: readonly Drop[];
   now?: Date;
+  /** The project header and tab bar (`projectHeaderFor`). */
+  header?: string;
 }): string {
   const { item: i, zones, detail: d } = s;
   const now = s.now ?? new Date();
   const zone = zones.find((z) => z.id === i.dropZoneId) ?? { id: i.dropZoneId, repo: i.dropZoneId };
   const repo = zones.some((z) => z.id === i.dropZoneId) ? zone.repo : undefined;
   const project = zoneName(zone, zones);
-  const workZoneHref = `/work?${new URLSearchParams({ zone: i.dropZoneId })}`;
+  const workZoneHref = projectWorkHref(i.dropZoneId);
   const crumbs =
     `<nav class="crumbs" aria-label="Breadcrumb"><p><a href="/work">Work</a> › ` +
     `<a href="${escapeHtml(workZoneHref)}">${project}</a> › #${escapeHtml(i.issueNumber)}</p></nav>`;
@@ -1495,7 +1517,8 @@ export function renderWorkItem(s: {
     ? `<table><tr><th>Role</th><th>State</th><th>Started</th><th>Elapsed</th><th>Gates</th><th>PR</th><th>Drop</th></tr>${rows}</table>`
     : '<p class="empty">No attempts yet.</p>';
   return page(
-    crumbs +
+    (s.header ?? '') +
+      crumbs +
       header +
       `<h3>Attempts</h3>${attempts}` +
       `<p><a href="${escapeHtml(issueDropsHref(i))}">All drops for this issue</a></p>`,
@@ -1877,7 +1900,7 @@ export type DropContext = { item?: WorkItem; zones?: readonly ZoneRef[]; now?: D
 function dropCrumbs(drop: Drop, item: WorkItem | undefined, project: string): string {
   const short = escapeHtml(drop.id.slice(0, 8));
   const trail = item
-    ? `<a href="/work">Work</a> › <a href="${escapeHtml(`/work?${new URLSearchParams({ zone: item.dropZoneId })}`)}">${project}</a> › <a href="${escapeHtml(workItemHref(item))}">#${escapeHtml(item.issueNumber)}</a> › ${short}`
+    ? `<a href="/work">Work</a> › <a href="${escapeHtml(projectWorkHref(item.dropZoneId))}">${project}</a> › <a href="${escapeHtml(workItemHref(item))}">#${escapeHtml(item.issueNumber)}</a> › ${short}`
     : `<a href="/drops">Drops</a> › ${short}`;
   return `<nav class="crumbs" aria-label="Breadcrumb"><p>${trail}</p></nav>`;
 }

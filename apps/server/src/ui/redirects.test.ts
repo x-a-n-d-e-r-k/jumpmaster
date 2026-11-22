@@ -24,6 +24,7 @@ const MOVED: [string, string][] = [
   ['/zones/jm/intake', '/projects/jm/intake'],
   ['/zones/jm/issues/new', '/projects/jm/issues/new'],
   ['/zones/jm/flags', '/projects/jm/flags'],
+  ['/work/jm/487', '/projects/jm/work/487'],
 ];
 
 describe('the redirect table (issue #615)', () => {
@@ -77,10 +78,58 @@ describe('the redirect table (issue #615)', () => {
     },
   );
 
+  describe("a project's work (#619)", () => {
+    test('/work/jm/487 is a 301 to /projects/jm/work/487', async () => {
+      const res = await bare().inject({ method: 'GET', url: '/work/jm/487' });
+      expect([res.statusCode, res.headers.location]).toEqual([301, '/projects/jm/work/487']);
+    });
+
+    test('/work?zone=jm&state=done is a 301 to /projects/jm/work?state=done', async () => {
+      const app = bare();
+      for (const [url, to] of [
+        ['/work?zone=jm&state=done', '/projects/jm/work?state=done'],
+        ['/work?state=done&zone=jm', '/projects/jm/work?state=done'],
+        ['/work?zone=jm', '/projects/jm/work'],
+        ['/work?zone=jm&x=a%20b', '/projects/jm/work?x=a%20b'],
+        ['/work?zone=a%2Fb', '/projects/a%2Fb/work'],
+      ]) {
+        const res = await app.inject({ method: 'GET', url });
+        expect([url, res.statusCode, res.headers.location]).toEqual([url, 301, to]);
+        const head = await app.inject({ method: 'HEAD', url });
+        expect([url, head.statusCode, head.headers.location]).toEqual([url, 301, to]);
+        const post = await app.inject({ method: 'POST', url });
+        expect([url, post.statusCode, post.headers.location]).toEqual([url, 308, to]);
+      }
+    });
+
+    test('/work without a zone is not redirected; it still renders in the app', async () => {
+      const app = bare();
+      for (const url of ['/work', '/work?state=parked', '/work?zone=']) {
+        const res = await app.inject({ method: 'GET', url });
+        expect([url, res.statusCode, res.headers.location]).toEqual([url, 404, undefined]);
+      }
+      // Non-vacuous: the same bare app does redirect the zoned list.
+      expect((await app.inject({ method: 'GET', url: '/work?zone=jm' })).statusCode).toBe(301);
+      const h = await harness({});
+      for (const url of ['/work', '/work?state=parked']) {
+        const res = await h.view(url);
+        expect([url, res.statusCode]).toEqual([url, 200]);
+        expect(res.body, url).toContain('work</h2>');
+      }
+      const zoned = await h.view('/work?zone=main&state=parked');
+      expect([zoned.statusCode, zoned.headers.location]).toEqual([
+        301,
+        '/projects/main/work?state=parked',
+      ]);
+      expect((await h.view('/projects/main/work?state=parked')).statusCode).toBe(200);
+    });
+  });
+
   test('every entry goes straight to a /projects path: one hop, never another moved path', async () => {
     const app = bare();
     for (const r of REDIRECTS) {
-      const url = r.from.replace(/:id/g, 'jm');
+      const path = r.from.replace(/:id|:zone/g, 'jm').replace(':issue', '487');
+      const url = r.query ? `${path}?${r.query}=jm` : path;
       const res = await app.inject({ method: 'GET', url });
       const location = String(res.headers.location);
       expect(location.startsWith('/projects'), url).toBe(true);

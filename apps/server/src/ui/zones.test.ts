@@ -943,7 +943,7 @@ describe('a project: tabs, header and Overview (#616)', () => {
     const overview = tabsOf((await w.get('/projects/main')).body);
     expect(overview).toEqual([
       ['Overview', '/projects/main', true],
-      ['Work', '/work?zone=main', false],
+      ['Work', '/projects/main/work', false],
       ['Goals', '/projects/main/goals', false],
       ['Setup', '/projects/main/setup', false],
       ['Log', '/observations?zone=main', false],
@@ -1036,7 +1036,9 @@ describe('a project: tabs, header and Overview (#616)', () => {
     expect(needs).not.toContain('Nothing needs you');
 
     const recent = block(body, 'recent-work') ?? '';
-    const numbers = [...recent.matchAll(/href="\/work\/main\/(\d+)"/g)].map((m) => Number(m[1]));
+    const numbers = [...recent.matchAll(/href="\/projects\/main\/work\/(\d+)"/g)].map((m) =>
+      Number(m[1]),
+    );
     expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     expect(recent).toContain('implement → review');
     expect(recent).toContain('1 min ago');

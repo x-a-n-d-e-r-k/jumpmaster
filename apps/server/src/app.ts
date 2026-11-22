@@ -754,25 +754,55 @@ export function createApp(
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
 
-  app.get<{ Params: { zone: string; issue: string } }>('/work/:zone/:issue', async (req, reply) => {
-    const { db } = deps;
-    const config = cfg(req);
-    const zone = config.dropZones.find((z) => z.id === req.params.zone);
-    const n = issueFilter(req.params.issue, zone?.id);
-    const item = zone && typeof n === 'number' ? findWorkItem(db, zone.id, n) : undefined;
-    if (!item) return reply.code(404).type('text/plain').send('not found');
-    // SQLite's LIMIT -1 is no limit: the page shows every attempt.
-    const drops = listDrops(db, { zoneId: item.dropZoneId, workItemId: item.id, limit: -1 });
-    const detail = itemDetails(db, [item]).get(item.id);
-    const html = renderWorkItem({
-      item,
-      zones: config.dropZones,
-      ...(detail ? { detail } : {}),
-      drops,
-      now: deps.now(),
-    });
-    return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
-  });
+  // A project's work (#619): its list under the project header, Work current, and each item.
+  app.get<{ Params: { id: string }; Querystring: { state?: string } }>(
+    `${PROJECTS_HREF}/:id/work`,
+    async (req, reply) => {
+      const { db } = deps;
+      const zones = cfg(req).dropZones;
+      const zone = zones.find((z) => z.id === req.params.id);
+      if (!zone) return reply.code(404).type('text/plain').send('not found');
+      const f = listFilter({ state: req.query.state }, zones, ['active', ...WORK_STATES] as const);
+      if ('refuse' in f) return reply.code(404).type('text/plain').send(f.refuse);
+      const state = f.state ?? 'active';
+      const items = listWorkItems(db, zone.id).filter((i) =>
+        state === 'active' ? i.state !== 'done' : i.state === state,
+      );
+      const html = renderWorkList({
+        zones,
+        zone: zone.id,
+        header: projectHeaderFor(db, zone, zones, 'work'),
+        state,
+        items,
+        details: itemDetails(db, items),
+      });
+      return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+    },
+  );
+
+  app.get<{ Params: { id: string; issue: string } }>(
+    `${PROJECTS_HREF}/:id/work/:issue`,
+    async (req, reply) => {
+      const { db } = deps;
+      const zones = cfg(req).dropZones;
+      const zone = zones.find((z) => z.id === req.params.id);
+      const n = issueFilter(req.params.issue, zone?.id);
+      const item = zone && typeof n === 'number' ? findWorkItem(db, zone.id, n) : undefined;
+      if (!zone || !item) return reply.code(404).type('text/plain').send('not found');
+      // SQLite's LIMIT -1 is no limit: the page shows every attempt.
+      const drops = listDrops(db, { zoneId: item.dropZoneId, workItemId: item.id, limit: -1 });
+      const detail = itemDetails(db, [item]).get(item.id);
+      const html = renderWorkItem({
+        item,
+        zones,
+        ...(detail ? { detail } : {}),
+        drops,
+        now: deps.now(),
+        header: projectHeaderFor(db, zone, zones, 'work'),
+      });
+      return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+    },
+  );
 
   app.get<{ Querystring: { zone?: string; state?: string; issue?: string; kind?: string } }>(
     '/drops',
