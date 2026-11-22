@@ -458,7 +458,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
     // unauthenticated client cannot make the server parse an 8 MiB body (issue #644). The
     // handlers still authenticate and check ownership, epoch and state; this only adds a check.
     scope.addHook('onRequest', async (req, reply) => {
-      if (req.method === 'POST' && req.routeOptions.url === '/api/sticks/enroll') return;
+      if (req.routeOptions.url === '/api/sticks/enroll') return;
       if (!authStick(req)) return reply.code(401).send({ error: 'unauthorized' });
     });
 

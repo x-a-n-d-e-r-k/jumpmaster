@@ -28,6 +28,7 @@ import {
   getStickByTokenHash,
   getUsageState,
   insertDrop,
+  insertStickInvite,
   listEvents,
   reclaimableDropFor,
   removeStick,
@@ -47,6 +48,7 @@ import {
 import { ScrubSet } from '../forge/scrub-set.js';
 import { StickFetches } from '../images/fetches.js';
 import { ImageMirror } from '../images/mirror.js';
+import { codeHash } from '../install/invite.js';
 import { buildPayload, promptVersions } from '../payloads.js';
 import { type FakeImage, type FakeRegistry, startFakeRegistry } from '../test/fake-registry.js';
 import { fakeForge } from '../test/fakes.js';
@@ -2245,9 +2247,28 @@ describe('stick auth before the body is read (issue #644)', () => {
   });
 
   test('enroll needs no bearer; a malformed enroll body is still 400', async () => {
-    setup();
+    const { db } = setup();
     const ok = await enroll();
     expect(ok.stickToken).toMatch(/^[0-9a-f]{64}$/);
+    const code = `jm_enroll_${'C'.repeat(43)}`;
+    insertStickInvite(db, {
+      id: 'inv-1',
+      name: 'by-code',
+      slots: 2,
+      kind: 'line',
+      createdAt: t0.toISOString(),
+      expiresAt: plus(t0, 60 * 60_000).toISOString(),
+      codeHash: codeHash(code),
+    });
+    const byCode = await app.inject({
+      method: 'POST',
+      url: '/api/sticks/enroll',
+      headers: proto,
+      payload: { enrollCode: code, name: 'ignored', slots: 1 },
+    });
+    expect(byCode.statusCode).toBe(200);
+    expect(byCode.json()).toMatchObject({ name: 'by-code' });
+    expect(byCode.json().stickToken).toMatch(/^[0-9a-f]{64}$/);
     const bad = await app.inject({
       method: 'POST',
       url: '/api/sticks/enroll',
@@ -2263,6 +2284,17 @@ describe('stick auth before the body is read (issue #644)', () => {
       const res = await app.inject({ method: 'POST', url, headers: json, payload: '{"epoch":' });
       expect(res.statusCode, url).toBe(426);
     }
+    const image = await app.inject({
+      method: 'GET',
+      url: '/api/sticks/images/x/oci.tar?platform=linux/amd64',
+    });
+    expect(image.statusCode).toBe(426);
+    const enrollNoProto = await app.inject({
+      method: 'POST',
+      url: '/api/sticks/enroll',
+      payload: { joinToken: 'join-me', name: 's', slots: 1 },
+    });
+    expect(enrollNoProto.statusCode).toBe(426);
   });
 
   test('an enrolled stick gets the same answers; another stick on its drop is refused by the handler', async () => {
