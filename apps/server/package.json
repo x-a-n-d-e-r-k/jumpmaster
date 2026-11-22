@@ -12,6 +12,7 @@
     "postbuild": "node -e \"require('node:fs').cpSync('src/db/schema.sql','dist/db/schema.sql')\""
   },
   "dependencies": {
+    "@fastify/rate-limit": "11.3.0",
     "@jumpmaster/protocol": "*",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@octokit/rest": "^22.0.1",
