@@ -1,6 +1,7 @@
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, test } from 'vitest';
+import { listBriefings, syncParkBriefings } from './briefings.js';
 import { loadBoot } from './config/boot.js';
 import { ConfigStore } from './config/store.js';
 import type { DropZoneConfig } from './config.js';
@@ -17,6 +18,7 @@ import {
 import type { Db } from './db/open.js';
 import { openDb } from './db/open.js';
 import {
+  getWorkItem,
   insertOutbox,
   listOutbox,
   listWorkItems,
@@ -25,12 +27,13 @@ import {
   updateOutbox,
   type WorkItem,
 } from './db/repo.js';
+import { zonePass } from './flow/snapshot.js';
 import type { ForgeIssue } from './forge/github.js';
 import { getGoals } from './goals.js';
 import { resolveUnknown } from './outbox.js';
-import { rankItems, syncDropZone } from './sync.js';
+import { rankItems, syncDropZone, syncParked } from './sync.js';
 import { fakeForge, fakeForgePair } from './test/fakes.js';
-import { makeZone, zoneWorld } from './test/fixtures.js';
+import { makeZone, type ZoneWorld, zoneWorld } from './test/fixtures.js';
 import { plus, t0, tmpDbFile } from './test/helpers.js';
 
 const pair = <F>(f: F) => ({ author: f, reviewer: f });
@@ -1314,5 +1317,186 @@ describe('the ready label after the drop-ready upgrade (#198)', () => {
     // Unpinned, the new default would have missed it.
     const unpinned = { ...after, readyLabel: 'drop-ready' };
     expect(await forge.author.listReadyIssues(unpinned.readyLabel)).toEqual([]);
+  });
+});
+
+describe('a parked item whose issue was closed (#649)', () => {
+  const HOUR = 3_600_000;
+  const crewOn = { ...makeZone({}).crew, enabled: true };
+
+  /** A world with issue `n` parked on `reason`: with an open agent PR when `pr`, else none. */
+  function parkedOn(reason: string, o: { pr?: boolean } = {}): { w: ZoneWorld; id: number } {
+    const w = zoneWorld({ crew: crewOn });
+    const id = o.pr ? w.prItem(1, 'sha1') : w.item(1);
+    setWorkItemState(w.db, id, 'parked', reason, t0);
+    return { w, id };
+  }
+
+  async function pass(w: ZoneWorld, at = plus(t0, 60_000)) {
+    w.f.author.calls.length = 0;
+    const p = await zonePass(w.forges, w.zone, 'main');
+    w.f.author.calls.length = 0;
+    w.f.reviewer.calls.length = 0;
+    return syncParked(w.db, w.forges, w.zone, p, at);
+  }
+
+  const methods = (w: ZoneWorld) => w.f.author.calls.map((c) => c.method);
+  /** The only forge calls a pass over one parked item may make here: reads. */
+  const READS = new Set(['getIssueLabels', 'getPull', 'getIssue', 'listReviews', 'checksFor']);
+  function expectNoWrites(w: ZoneWorld) {
+    expect(methods(w).filter((m) => !READS.has(m))).toEqual([]);
+    expect(w.f.reviewer.calls).toEqual([]);
+    expect(w.f.state.comments).toEqual([]);
+    expect(listOutbox(w.db, ['pending', 'sent', 'failed', 'unknown'])).toEqual([]);
+  }
+
+  describe('ends', () => {
+    test('#518: closed as completed with no PR → done, "issue closed as completed"', async () => {
+      const { w, id } = parkedOn('gate test failed');
+      w.f.state.closeIssue(1, 'completed');
+      const labels = [...(w.f.state.issues.get(1)?.labels ?? [])];
+      expect(await pass(w)).toEqual({ retried: 0, reopened: 1 });
+      expect(getWorkItem(w.db, id)).toMatchObject({
+        state: 'done',
+        reason: 'issue closed as completed',
+      });
+      expect(methods(w)).toEqual(['getIssueLabels', 'getIssue']);
+      expect(w.f.state.issues.get(1)).toMatchObject({ state: 'closed', labels });
+      expectNoWrites(w);
+    });
+
+    test('closed as not planned with a closed PR → done, "issue closed as not planned"', async () => {
+      const { w, id } = parkedOn('pr closed', { pr: true });
+      w.f.state.close(1);
+      w.f.state.closeIssue(1, 'not_planned');
+      await pass(w);
+      expect(getWorkItem(w.db, id)).toMatchObject({
+        state: 'done',
+        reason: 'issue closed as not planned',
+      });
+      expectNoWrites(w);
+    });
+
+    test('closed with no state reason → done, "issue closed"', async () => {
+      const { w, id } = parkedOn('issue closed');
+      w.f.state.closeIssue(1);
+      await pass(w);
+      expect(getWorkItem(w.db, id)).toMatchObject({ state: 'done', reason: 'issue closed' });
+      expect(methods(w)).not.toContain('getIssueState');
+      expectNoWrites(w);
+    });
+
+    test('a PR the forge no longer has counts as no open PR', async () => {
+      const { w, id } = parkedOn('pr closed', { pr: true });
+      w.f.state.pulls.delete(1);
+      w.f.state.closeIssue(1, 'completed');
+      await pass(w);
+      expect(getWorkItem(w.db, id)).toMatchObject({ state: 'done' });
+      expectNoWrites(w);
+    });
+  });
+
+  describe('kept', () => {
+    test('closed with the PR still open → still parked', async () => {
+      const { w, id } = parkedOn('gate test failed', { pr: true });
+      w.f.state.closeIssue(1, 'completed');
+      expect(await pass(w)).toEqual({ retried: 0, reopened: 0 });
+      expect(getWorkItem(w.db, id)).toMatchObject({ state: 'parked', reason: 'gate test failed' });
+      expectNoWrites(w);
+    });
+
+    test('closed, and the PR read fails → still parked', async () => {
+      const { w, id } = parkedOn('pr closed', { pr: true });
+      w.f.state.close(1);
+      w.f.state.closeIssue(1, 'completed');
+      w.f.author.failNext('getPull', 'throw');
+      await pass(w);
+      expect(getWorkItem(w.db, id)).toMatchObject({ state: 'parked', reason: 'pr closed' });
+      expectNoWrites(w);
+    });
+
+    test('issue open, gate test failed → still parked', async () => {
+      const { w, id } = parkedOn('gate test failed');
+      await pass(w);
+      expect(getWorkItem(w.db, id)).toMatchObject({ state: 'parked', reason: 'gate test failed' });
+      expectNoWrites(w);
+    });
+
+    test('issue open, merge rejected → re-decided after an hour, as today', async () => {
+      const { w, id } = parkedOn('merge rejected: blocked', { pr: true });
+      insertOutbox(w.db, {
+        id: 'm1',
+        opKey: 'merge:1:sha1',
+        kind: 'merge',
+        workItemId: id,
+        zoneId: 'main',
+        payloadJson: '{}',
+        state: 'failed',
+        createdAt: t0.toISOString(),
+      });
+      await pass(w, plus(t0, 60_000));
+      expect(getWorkItem(w.db, id)).toMatchObject({ state: 'parked' });
+      await pass(w, plus(t0, 2 * HOUR));
+      expect(getWorkItem(w.db, id)).toMatchObject({ state: 'pr_open' });
+    });
+
+    test('issue closed park whose issue is open again → pr_open, with one issue read and no getIssueState', async () => {
+      const { w, id } = parkedOn('issue closed', { pr: true });
+      expect(await pass(w)).toEqual({ retried: 0, reopened: 1 });
+      expect(getWorkItem(w.db, id)).toMatchObject({ state: 'pr_open' });
+      expect(methods(w).filter((m) => m === 'getIssue')).toHaveLength(1);
+      expect(methods(w)).not.toContain('getIssueState');
+      expectNoWrites(w);
+    });
+
+    test('pr closed park whose PR is still closed and issue open → still parked', async () => {
+      const { w, id } = parkedOn('pr closed', { pr: true });
+      w.f.state.close(1);
+      await pass(w);
+      expect(getWorkItem(w.db, id)).toMatchObject({ state: 'parked', reason: 'pr closed' });
+      expect(methods(w)).not.toContain('getIssueState');
+    });
+  });
+
+  describe('briefing', () => {
+    test("its open parked briefing is withdrawn; another item's stays open", async () => {
+      const w = zoneWorld({ crew: crewOn });
+      const a = w.item(1);
+      const b = w.item(2);
+      setWorkItemState(w.db, a, 'parked', 'gate test failed', t0);
+      setWorkItemState(w.db, b, 'parked', 'gate test failed', t0);
+      syncParkBriefings(w.db, w.zone, t0);
+      expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })).toHaveLength(2);
+      w.f.state.closeIssue(1, 'completed');
+      await pass(w);
+      expect(getWorkItem(w.db, a)).toMatchObject({ state: 'done' });
+      expect(getWorkItem(w.db, b)).toMatchObject({ state: 'parked' });
+      const all = listBriefings(w.db, { zoneId: 'main' });
+      expect(all.find((x) => x.subject === `item:${a}`)?.state).toBe('withdrawn');
+      expect(all.find((x) => x.subject === `item:${b}`)?.state).toBe('open');
+      expectNoWrites(w);
+    });
+  });
+
+  describe('a failed issue read (D2)', () => {
+    for (const mode of ['throws', 'returns null'] as const) {
+      test(`the issue read ${mode} → the item stays parked and nothing else changes`, async () => {
+        const w = zoneWorld({ crew: crewOn });
+        const id = w.item(1);
+        setWorkItemState(w.db, id, 'parked', 'issue closed', t0);
+        syncParkBriefings(w.db, w.zone, t0);
+        w.f.state.closeIssue(1, 'completed');
+        if (mode === 'throws') w.f.author.failNext('getIssue', 'throw');
+        else w.f.author.getIssue = async () => null;
+        const before = {
+          item: getWorkItem(w.db, id),
+          briefings: listBriefings(w.db, { zoneId: 'main' }),
+        };
+        expect(await pass(w)).toEqual({ retried: 0, reopened: 0 });
+        expect(getWorkItem(w.db, id)).toEqual(before.item);
+        expect(listBriefings(w.db, { zoneId: 'main' })).toEqual(before.briefings);
+        expectNoWrites(w);
+      });
+    }
   });
 });

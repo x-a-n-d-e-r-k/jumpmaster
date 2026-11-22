@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { isBacklogIssue } from './backlog.js';
+import { withdrawBriefing } from './briefings.js';
 import { type DropZoneConfig, triageGateOn } from './config.js';
 import { issueGateReasons } from './crew/actions.js';
 import {
@@ -37,7 +38,13 @@ import {
   type ZonePass,
   zonePass,
 } from './flow/snapshot.js';
-import type { ChecksFacts, ForgeIssue, PullFacts } from './forge/github.js';
+import type {
+  ChecksFacts,
+  ForgeIssue,
+  IssueFacts,
+  IssueStateReason,
+  PullFacts,
+} from './forge/github.js';
 import { refreshGoals } from './goals.js';
 import { confirmIntakeIssues } from './intake.js';
 import { log } from './log.js';
@@ -399,15 +406,6 @@ async function recordTriage(
   }
 }
 
-async function readPull(forges: ForgePair, number: number | null): Promise<PullFacts | null> {
-  if (number === null) return null;
-  try {
-    return await forges.author.getPull(number);
-  } catch {
-    return null;
-  }
-}
-
 /** Puts an item back on the track its PR is on: open → pr_open, merged → done, gone → ready. */
 function restoreFromPull(db: Db, item: WorkItem, pr: PullFacts | null, now: Date): void {
   if (pr?.merged) {
@@ -502,6 +500,13 @@ export async function retryParkedItem(
   return true;
 }
 
+/** The done reason for an item whose issue was closed on the forge, from GitHub's state reason. */
+function closedIssueReason(stateReason: IssueStateReason | undefined): string {
+  if (stateReason === 'completed') return 'issue closed as completed';
+  if (stateReason === 'not_planned') return 'issue closed as not planned';
+  return 'issue closed';
+}
+
 export async function syncParked(
   db: Db,
   forges: ForgePair,
@@ -527,22 +532,42 @@ export async function syncParked(
     if (!hasRetry && item.retryLabelSeen) setRetryLabelSeen(db, item.id, false);
 
     // A PR merged by a human ends the item whatever it was parked for (budgets included).
-    const pr = await readPull(forges, prNumber);
+    // `prKnown` is false only when the PR read failed: a PR the forge no longer has reads `null`.
+    let pr: PullFacts | null = null;
+    let prKnown = true;
+    if (prNumber !== null) {
+      try {
+        pr = await forges.author.getPull(prNumber);
+      } catch {
+        prKnown = false;
+      }
+    }
     if (pr?.merged) {
       setWorkItemState(db, item.id, 'done', 'merged', now);
       reopened++;
       continue;
     }
 
+    // One issue read per parked item per pass; a failed read skips the item, as the label read.
+    let issue: IssueFacts | null;
+    try {
+      issue = await forges.author.getIssue(item.issueNumber);
+    } catch {
+      continue;
+    }
+    if (!issue) continue;
+    // An issue closed on the forge (by hand, say) ends the item when no open PR could still be
+    // merged: nothing is written to the forge, and its parked briefing has nothing left to rule.
+    if (issue.state === 'closed' && prKnown && pr?.state !== 'open') {
+      setWorkItemState(db, item.id, 'done', closedIssueReason(issue.stateReason), now);
+      withdrawBriefing(db, zone.id, `item:${item.id}`, now);
+      reopened++;
+      continue;
+    }
+
     const reason = item.reason ?? '';
     if (reason === 'pr closed' || reason === 'issue closed') {
-      let issueOpen = false;
-      try {
-        issueOpen = (await forges.author.getIssueState(item.issueNumber)) === 'open';
-      } catch {
-        issueOpen = false;
-      }
-      if (pr?.state === 'open' && issueOpen) {
+      if (pr?.state === 'open' && issue.state === 'open') {
         setWorkItemState(db, item.id, 'pr_open', undefined, now);
         reopened++;
       }

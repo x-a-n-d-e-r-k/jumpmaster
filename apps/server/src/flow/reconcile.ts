@@ -64,6 +64,7 @@ import {
   reservationReason,
   type Snapshot,
 } from './decide.js';
+import { malformedRetryCharge } from './malformed.js';
 import { buildSnapshot, loginIn, recordGateParkOf, type ZonePass } from './snapshot.js';
 
 export type ReconcileReport = { actions: number; merges: number };
@@ -242,7 +243,16 @@ function enqueue(
   const item = s.item;
   try {
     db.transaction(() => {
-      const charge = chargeBudget(db, item.id, CHARGE_KEY[a.role], a.fingerprint, zone.budgets);
+      const headSha = s.pr?.headSha ?? null;
+      // The retry of a malformed run (#659) reuses that drop's charge: it costs no budget.
+      // Review keeps its own repeat budget (a failed review never parks), so only heal and resolve.
+      const retry =
+        a.role === 'review'
+          ? undefined
+          : malformedRetryCharge(db, item.id, a.role, a.fingerprint, headSha);
+      const charge = retry
+        ? ({ ok: true, charged: retry.chargedKey ? [retry.chargedKey] : [] } as const)
+        : chargeBudget(db, item.id, CHARGE_KEY[a.role], a.fingerprint, zone.budgets);
       if (!charge.ok) {
         parkReason(db, item.id, charge.reason, now);
         return;
@@ -257,8 +267,12 @@ function enqueue(
           state: 'queued',
           fingerprint: a.fingerprint,
           prNumber: s.pr?.number ?? null,
-          headSha: s.pr?.headSha ?? null,
-          inputJson: JSON.stringify({ feedback: a.feedback ?? null }),
+          headSha,
+          inputJson: JSON.stringify({
+            feedback: a.feedback ?? null,
+            // A `ci` heal's code-scanning alerts (#652), raw: the payload builder fences them.
+            ...(a.codeScanning ? { codeScanning: a.codeScanning } : {}),
+          }),
           promptVersion: versions[a.role],
           image: zone.image,
           chargedKey: charge.charged.join(',') || null,

@@ -960,7 +960,7 @@ async function publicUrlCheck(d: DoctorDeps): Promise<DoctorCheck> {
       ...base,
       status: 'info',
       summary: `no address for other machines is set: ${PUBLIC_URL_NEEDED} before adding a stick on another machine`,
-      fix: 'Settings, Other machines (or jumpmaster ctl public-url set https://…); in file mode set JM_PUBLIC_URL.',
+      fix: 'System, Server, Other machines (or jumpmaster ctl public-url set https://…); in file mode set JM_PUBLIC_URL.',
     };
   const r = await (d.reach ?? ((u: string) => checkReach(u)))(url);
   if (r.ok) return { ...base, status: 'pass', summary: `${url} is reachable (/healthz answered)` };
@@ -968,7 +968,7 @@ async function publicUrlCheck(d: DoctorDeps): Promise<DoctorCheck> {
     ...base,
     status: 'warn',
     summary: `${url} is not reachable from this server: ${r.message}`,
-    fix: 'Make the address answer over HTTPS (Settings, Other machines shows how), then Check again.',
+    fix: 'Make the address answer over HTTPS (System, Server, Other machines shows how), then Check again.',
   };
 }
 
@@ -1224,7 +1224,7 @@ async function appIdentityCheck(
         ...base,
         status: 'fail',
         summary: `GitHub says the key of ${named} belongs to a different app than its entry's app id`,
-        fix: `Re-import ${named} (Settings, Credentials) so its entry matches the app its key belongs to.`,
+        fix: `Re-import ${named} (System, Credentials) so its entry matches the app its key belongs to.`,
       };
     if (problem === APP_SLUG_MISMATCH)
       return {
@@ -1233,8 +1233,8 @@ async function appIdentityCheck(
         summary: `GitHub names ${named} differently now: the app was renamed, so it no longer acts as ${bot}`,
         fix:
           who === 'author'
-            ? `Re-import the app (Settings, Credentials) so its entry carries the new name, and add the old login ${bot} to zone ${zone.id}'s authorLoginAliases so its open pull requests stay adopted.`
-            : `Re-import the app (Settings, Credentials) so its entry carries the new name.`,
+            ? `Re-import the app (System, Credentials) so its entry carries the new name, and add the old login ${bot} to zone ${zone.id}'s authorLoginAliases so its open pull requests stay adopted.`
+            : `Re-import the app (System, Credentials) so its entry carries the new name.`,
       };
     return {
       ...base,
@@ -3112,15 +3112,15 @@ export async function zoneChecks(
 const CREDENTIAL_KINDS = {
   missing: {
     id: 'credential.missing',
-    fix: 'Enter it under Settings, Credentials (or write its file under secrets/ and run jumpmaster ctl secrets reload); the zone stays parked until then.',
+    fix: 'Enter it under System, Credentials (or write its file under secrets/ and run jumpmaster ctl secrets reload); the zone stays parked until then.',
   },
   kind: {
     id: 'credential.kind',
-    fix: 'Replace the token with a fine-grained one (github_pat_) limited to the repository, under Settings, Credentials.',
+    fix: 'Replace the token with a fine-grained one (github_pat_) limited to the repository, under System, Credentials.',
   },
   same: {
     id: 'credential.same',
-    fix: 'The reviewer token must belong to a second account: replace it under Settings, Credentials.',
+    fix: 'The reviewer token must belong to a second account: replace it under System, Credentials.',
   },
 } as const;
 
@@ -3192,14 +3192,14 @@ function vaultKeyCheck(d: DoctorDeps): DoctorCheck {
       ...base,
       status: 'fail',
       summary: `${KEY_CHANGED} (${k.names.join(', ')})`,
-      fix: 'Put back the key file JM_VAULT_KEY_FILE names (secrets/vault_key) from the backup taken with the data, or re-enter each credential under Settings, Credentials.',
+      fix: 'Put back the key file JM_VAULT_KEY_FILE names (secrets/vault_key) from the backup taken with the data, or re-enter each credential under System, Credentials.',
     };
   if (k.status === 'disabled')
     return {
       ...base,
       status: 'skip',
       summary:
-        'no vault key (the vault is off: turn it on under Settings, Credentials, or set JM_VAULT_KEY_FILE): credentials come from files and the environment only',
+        'no vault key (the vault is off: turn it on under System, Credentials, or set JM_VAULT_KEY_FILE): credentials come from files and the environment only',
     };
   const keyFile = d.credentials?.vaultKeyFile ?? d.env.vaultKeyFile;
   // CLAIM = PROOF: no examined key path, no pass.
@@ -3259,7 +3259,7 @@ function imageMirrorCheck(status: MirrorStatus): DoctorCheck {
       summary: `${failed.length} of ${current.length} release images could not be mirrored: ${failed
         .map((i) => `${i.name}: ${i.error ?? 'unknown'}`)
         .join('; ')}`,
-      fix: 'The mirror retries with backoff. A refusal from the registry needs the registryReadToken credential (Settings, Credentials, or JM_REGISTRY_READ_TOKEN) with read access to the packages.',
+      fix: 'The mirror retries with backoff. A refusal from the registry needs the registryReadToken credential (System, Credentials, or JM_REGISTRY_READ_TOKEN) with read access to the packages.',
     };
   const busy = current.filter((i) => i.state !== 'complete');
   if (busy.length > 0)

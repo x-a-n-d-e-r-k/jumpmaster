@@ -140,6 +140,8 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     branchSha: 's',
     compare: cmp(),
     checks: pending,
+    codeScanning: [],
+    lastCiHealKey: null,
     forgeUnavailable: null,
     forgeDenied: null,
     requiredChecks: [],
@@ -659,6 +661,161 @@ describe('rules in order', () => {
       fingerprint: fingerprint(['s', 'ci']),
       feedback: { source: 'ci', text: 'CI failed on s; reproduce with the gates and fix.' },
     }));
+
+  test('24: a CodeQL failure heals with ci feedback and the code-scanning alerts (#652)', () => {
+    const codeScanning = [
+      {
+        check: 'CodeQL',
+        annotations: [{ path: 'a.ts', startLine: 1, level: 'failure', title: 'T', message: 'M' }],
+      },
+    ];
+    const failed = [
+      { name: 'CodeQL', conclusion: 'failure', checkRunId: 7, app: 'github-advanced-security' },
+    ];
+    expect(
+      decide(mergeable({ checks: { state: 'failure', names: ['CodeQL'], failed }, codeScanning })),
+    ).toEqual({
+      kind: 'enqueue',
+      role: 'heal',
+      fingerprint: fingerprint(['s', 'ci']),
+      feedback: {
+        source: 'ci',
+        text: 'CI failed on s; reproduce with the gates and fix.\n- CodeQL: failure',
+      },
+      codeScanning,
+    });
+  });
+
+  describe('24: code scanning flags the same alerts after a ci heal (#653)', () => {
+    const alert = (title: string, path: string, startLine = 1) => ({
+      path,
+      startLine,
+      level: 'failure',
+      title,
+      message: 'm',
+    });
+    const rate = alert('Missing rate limiting', 'apps/server/src/api/sticks.ts', 460);
+    const cq = {
+      name: 'CodeQL',
+      conclusion: 'failure',
+      checkRunId: 7,
+      app: 'github-advanced-security',
+    };
+    const failingWith = (failed: ChecksFacts['failed'], over: Partial<Snapshot>) =>
+      mergeable({
+        checks: { state: 'failure', names: failed.map((f) => f.name), failed },
+        ...over,
+      });
+    const KEY = ['Missing rate limiting|apps/server/src/api/sticks.ts'];
+    const REASON =
+      'code scanning still flags Missing rate limiting at apps/server/src/api/sticks.ts:460 after a heal: fix it with a Retry note, or dismiss the alert in GitHub and re-run the CodeQL check';
+
+    test('the same key after a ci heal parks, naming the first alert', () => {
+      expect(
+        decide(
+          failingWith([cq], {
+            codeScanning: [{ check: 'CodeQL', annotations: [rate, rate] }],
+            lastCiHealKey: KEY,
+          }),
+        ),
+      ).toEqual({ kind: 'park', reason: REASON });
+    });
+
+    test('the first alert is the first by title and path, whatever the order read', () => {
+      const b = alert('B rule', 'z.ts', 9);
+      const a = alert('A rule', 'y.ts', 3);
+      expect(
+        decide(
+          failingWith([cq], {
+            codeScanning: [{ check: 'CodeQL', annotations: [b, a] }],
+            lastCiHealKey: ['A rule|y.ts', 'B rule|z.ts'],
+          }),
+        ),
+      ).toEqual({
+        kind: 'park',
+        reason:
+          'code scanning still flags A rule at y.ts:3 after a heal: fix it with a Retry note, or dismiss the alert in GitHub and re-run the CodeQL check',
+      });
+    });
+
+    test("a review heal in between does not matter: the key is the last ci heal's", () => {
+      // The snapshot counts only ci heals; whatever review heal ran since, the same key parks.
+      const s = failingWith([cq], {
+        codeScanning: [{ check: 'CodeQL', annotations: [rate] }],
+        lastCiHealKey: KEY,
+        verdictsOnHead: [approve('s')],
+      });
+      expect(decide(s)).toEqual({ kind: 'park', reason: REASON });
+    });
+
+    test('a different key heals', () => {
+      const other = alert('Clear-text logging', 'apps/server/src/log.ts', 4);
+      const a = decide(
+        failingWith([cq], {
+          codeScanning: [{ check: 'CodeQL', annotations: [other] }],
+          lastCiHealKey: KEY,
+        }),
+      );
+      expect(a).toMatchObject({ kind: 'enqueue', role: 'heal', feedback: { source: 'ci' } });
+    });
+
+    test('a key that only adds an alert heals', () => {
+      const other = alert('Clear-text logging', 'apps/server/src/log.ts', 4);
+      const a = decide(
+        failingWith([cq], {
+          codeScanning: [{ check: 'CodeQL', annotations: [rate, other] }],
+          lastCiHealKey: KEY,
+        }),
+      );
+      expect(a).toMatchObject({ kind: 'enqueue', role: 'heal' });
+    });
+
+    test('ci failing too heals', () => {
+      const a = decide(
+        failingWith(
+          [cq, { name: 'ci', conclusion: 'failure', checkRunId: 8, app: 'github-actions' }],
+          {
+            codeScanning: [{ check: 'CodeQL', annotations: [rate] }],
+            lastCiHealKey: KEY,
+          },
+        ),
+      );
+      expect(a).toMatchObject({ kind: 'enqueue', role: 'heal' });
+    });
+
+    test('an empty annotation list heals', () => {
+      const a = decide(
+        failingWith([cq], {
+          codeScanning: [{ check: 'CodeQL', annotations: [] }],
+          lastCiHealKey: [],
+        }),
+      );
+      expect(a).toMatchObject({ kind: 'enqueue', role: 'heal' });
+    });
+
+    test('a second CodeQL check with no annotations heals', () => {
+      const a = decide(
+        failingWith([cq, { ...cq, name: 'CodeQL (js)', checkRunId: 9 }], {
+          codeScanning: [
+            { check: 'CodeQL', annotations: [rate] },
+            { check: 'CodeQL (js)', annotations: [] },
+          ],
+          lastCiHealKey: KEY,
+        }),
+      );
+      expect(a).toMatchObject({ kind: 'enqueue', role: 'heal' });
+    });
+
+    test('lastCiHealKey null heals', () => {
+      const a = decide(
+        failingWith([cq], {
+          codeScanning: [{ check: 'CodeQL', annotations: [rate] }],
+          lastCiHealKey: null,
+        }),
+      );
+      expect(a).toMatchObject({ kind: 'enqueue', role: 'heal' });
+    });
+  });
 
   describe('24: failed checks', () => {
     const head = 'c441a9cdeadbeef';

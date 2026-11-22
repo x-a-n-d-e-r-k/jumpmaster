@@ -295,7 +295,7 @@ What the server mirrors:
   images arrive only with a new lock, when the server is upgraded to a new release.
 
 The registry: anonymous access first, which serves public packages. If the registry refuses it
-(private packages), set the optional `registryReadToken` credential (Settings, Credentials, the
+(private packages), set the optional `registryReadToken` credential (System, Credentials, the
 file `registry_read_token` in the secrets directory, or `JM_REGISTRY_READ_TOKEN`): a GitHub token
 with `read:packages`. The server exchanges it at the registry's own token service (never at another
 host) for a pull token. Both are scrubbed from every log line, and neither is written to the image
@@ -330,9 +330,10 @@ release keep working through an upgrade; any other digest is `404 { error: 'not 
 lock' }`. An image not yet complete is `404 { error: 'not mirrored', state }` with `state` one of
 `pending`, `fetching` or `failed: <reason>`; a platform the image does not have is `404`.
 
-The sticks page has an **Images** card listing each image with its platforms, size and state, and
-the doctor's `server.image-mirror` says the same: `info` with no lock (a checkout has nothing to
-mirror), `pass` when every image is complete, `warn` naming each failure.
+The **Images** tab of Sticks (`/system/sticks/images`) lists each image, current release first,
+with its platforms, size, state and short digest, and the doctor's `server.image-mirror` says the
+same: `info` with no lock (a checkout has nothing to mirror), `pass` when every image is complete,
+`warn` naming each failure.
 
 ### The stick's half (issue #141)
 
@@ -351,7 +352,7 @@ images, its own trooper image, the egress check's proxy), for one it doesn't hav
    as it reads. It refuses, before writing anything outside that directory: a link entry (symlink
    or hard link), an absolute or `..` path, any name an image layout doesn't have, a duplicate,
    and more than 8 GB. Every blob must hash to its name. Progress (bytes done of total) goes to
-   the server at most every 2 seconds on a lease call with no free slot; `/sticks` shows
+   the server at most every 2 seconds on a lease call with no free slot; `/system/sticks` shows
    `fetching <image> X/Y MB` beside the stick.
 2. It binds the layout to the digest it asked for: that digest's blob is the multi-arch index, and
    the index's entry for its platform is the manifest it loads.

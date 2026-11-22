@@ -13,6 +13,7 @@ import {
 } from '../goal-change.js';
 import type { ForgePair } from '../outbox.js';
 import { BUSY, checkPassphrase, html, notice, retryAfterSeconds } from './confirm.js';
+import { goalConfirmHref } from './links.js';
 import { escapeHtml, page, zoneHref } from './pages.js';
 
 /**
@@ -30,7 +31,7 @@ export interface GoalConfirmDeps {
   forgesFor(zoneId: string): ForgePair;
 }
 
-export const goalConfirmHref = (id: number): string => `/goal-changes/${id}/confirm`;
+export { goalConfirmHref };
 
 const ConfirmBody = z.object({ headSha: z.string().min(1).max(200) });
 

@@ -431,4 +431,34 @@ describe('approving and merging a goal change (#363)', () => {
     expect(w.f.state.merges).toEqual([]);
     expect(getGoalChange(w.db, w.id)?.state).toBe('confirmed');
   });
+  test('#645 an open change whose PR was closed by hand without merging is closed at the next pass', async () => {
+    const w = await opened();
+    const pull = w.f.state.pulls.get(w.pr);
+    if (!pull) throw new Error('no pull');
+    pull.state = 'closed';
+    await w.pass();
+    expect(getGoalChange(w.db, w.id)?.state).toBe('closed');
+    expect(w.f.state.merges).toEqual([]);
+  });
+
+  test('#645 an open change whose PR merged outside Jumpmaster is merged at the next pass', async () => {
+    const w = await opened();
+    const pull = w.f.state.pulls.get(w.pr);
+    if (!pull) throw new Error('no pull');
+    pull.state = 'closed';
+    pull.merged = true;
+    await w.pass();
+    expect(getGoalChange(w.db, w.id)).toMatchObject({ state: 'merged' });
+    expect(w.ops('merge')).toEqual([]);
+  });
+
+  test("#645 a forge error reading an open change's PR leaves it open", async () => {
+    const w = await opened();
+    const pull = w.f.state.pulls.get(w.pr);
+    if (!pull) throw new Error('no pull');
+    pull.state = 'closed';
+    for (let i = 0; i < 10; i++) w.f.author.failNext('getPull', '5xx');
+    await w.pass();
+    expect(getGoalChange(w.db, w.id)?.state).toBe('open');
+  });
 });

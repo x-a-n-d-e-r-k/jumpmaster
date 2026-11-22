@@ -244,7 +244,7 @@ describe('carried into Task 14', () => {
       expect(err).toEqual([SWITCHES['mcp.enabled']]);
     }
     expect(SWITCHES['mcp.enabled']).toBe(
-      "Command's MCP server is off: turn on mcp.enabled under Settings, Install (it takes effect at the next restart)",
+      "Command's MCP server is off: turn on mcp.enabled under System, Server (it takes effect at the next restart)",
     );
   });
 

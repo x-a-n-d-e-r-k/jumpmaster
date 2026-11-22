@@ -257,7 +257,7 @@ const WORDS: Words[] = [
     'Address other machines use',
     'The https address a new stick reaches this server at, to download the installer and enroll. Unset, no machine can be added.',
     'elsewhere',
-    'Changed in the Other machines tab.',
+    'Changed under Other machines, on System, Server.',
   ),
 
   // A zone: the project.

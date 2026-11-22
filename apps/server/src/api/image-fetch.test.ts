@@ -69,7 +69,7 @@ test('progress a stick reports on its lease shows on /sticks, and goes once it r
     (
       await app?.inject({
         method: 'GET',
-        url: '/sticks',
+        url: '/system/sticks',
         headers: { host: HOST, cookie: s.cookie },
       })
     )?.body ?? '';

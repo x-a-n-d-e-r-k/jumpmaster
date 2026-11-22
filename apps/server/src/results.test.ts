@@ -27,7 +27,13 @@ import {
 } from './db/repo.js';
 import { serverScrubSet } from './forge/scrub-set.js';
 import { promptVersions } from './payloads.js';
-import { applyResult, applyUsage, type ResultDeps, renderReviewBody } from './results.js';
+import {
+  applyResult,
+  applyUsage,
+  gateTable,
+  type ResultDeps,
+  renderReviewBody,
+} from './results.js';
 import { fakeForgePair } from './test/fakes.js';
 import { plus, t0, tmpDbFile, workItem } from './test/helpers.js';
 
@@ -394,7 +400,56 @@ describe('applyResult: review', () => {
   });
 });
 
+/** Splits a Markdown table row on `|` preceded by an even number of backslashes. */
+function rowCells(row: string): string[] {
+  const cells: string[] = [];
+  let cur = '';
+  let slashes = 0;
+  for (const ch of row) {
+    if (ch === '|' && slashes % 2 === 0) {
+      cells.push(cur);
+      cur = '';
+    } else {
+      cur += ch;
+    }
+    slashes = ch === '\\' ? slashes + 1 : 0;
+  }
+  cells.push(cur);
+  return cells.slice(1, -1).map((c) => c.trim());
+}
+
+describe('gateTable', () => {
+  const gate = (name: string): GateResult => ({
+    name,
+    exitCode: 1,
+    timedOut: false,
+    durationMs: 1000,
+    outputTail: '',
+  });
+
+  test('a gate name with a backslash and a pipe stays in one cell', () => {
+    const row = gateTable([gate('lint\\|fmt')]).split('\n')[2];
+    expect(row).toBe('| lint\\\\\\|fmt | 1 | 1.0 |');
+    expect(rowCells(row)).toEqual(['lint\\\\\\|fmt', '1', '1.0']);
+  });
+
+  test('a plain name gives the same row as before', () => {
+    expect(gateTable([gate('lint')])).toBe(
+      ['| Gate | Exit | Duration (s) |', '| --- | --- | --- |', '| lint | 1 | 1.0 |'].join('\n'),
+    );
+  });
+});
+
 describe('renderReviewBody', () => {
+  test('gate names in code spans are unchanged by the table escape', () => {
+    const body = renderReviewBody(
+      { decision: 'request_changes', summary: 'S', findings: [] },
+      [{ name: 'lint\\|fmt', exitCode: 1, timedOut: false, durationMs: 1000, outputTail: '' }],
+      [],
+    );
+    expect(body).toBe('S\n\nGates failed: `lint\\\\|fmt` (exit 1)');
+  });
+
   test('carries no tool attribution footer', () => {
     const body = renderReviewBody(
       { decision: 'approve', summary: 'ok', findings: [] },

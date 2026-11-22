@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { listBriefings, ruleBriefing } from '../briefings.js';
+import { listBriefings, ruleBriefing, syncParkBriefings } from '../briefings.js';
 import {
   activeDropFor,
   getAttempts,
@@ -25,6 +25,7 @@ import {
   headN,
   ruling,
   toHealsExhausted,
+  toPrOpen,
 } from '../test/flowHarness.js';
 import { reconcileZone } from './reconcile.js';
 import { zonePass } from './snapshot.js';
@@ -798,5 +799,144 @@ describe('a retried implement drop carries the previous failure (#395)', () => {
     );
     expect(payload.prompt).toContain(' FAIL  scripts/no-token-literals.test.ts > no literal');
     expect(payload.prompt).not.toContain('\u001b');
+  });
+});
+
+describe('a CodeQL failure heals with its code-scanning alerts (#652)', () => {
+  test('the heal drop stores codeScanning beside feedback in input_json', async () => {
+    const id = w.prItem(1, 'sha1');
+    approve(id, 'sha1');
+    w.f.state.checks.set('sha1', {
+      state: 'failure',
+      names: ['CodeQL', 'ci'],
+      failed: [
+        { name: 'CodeQL', conclusion: 'failure', checkRunId: 77, app: 'github-advanced-security' },
+      ],
+    });
+    const alert = {
+      path: 'apps/server/src/api/sticks.ts',
+      startLine: 460,
+      level: 'failure',
+      title: 'Missing rate limiting',
+      message: 'This route handler performs authorization, but is not rate-limited.',
+    };
+    w.f.state.annotations.set(77, [alert]);
+    await pass();
+    const drop = activeDropFor(w.db, id);
+    expect(drop).toMatchObject({ role: 'heal' });
+    expect(JSON.parse(drop?.inputJson ?? '{}')).toEqual({
+      feedback: {
+        source: 'ci',
+        text: 'CI failed on sha1; reproduce with the gates and fix.\n- CodeQL: failure',
+      },
+      codeScanning: [{ check: 'CodeQL', annotations: [alert] }],
+    });
+  });
+
+  test('a heal without code-scanning alerts stores feedback alone, as before', async () => {
+    const id = w.prItem(1, 'sha1');
+    approve(id, 'sha1');
+    w.f.state.checks.set('sha1', {
+      state: 'failure',
+      names: ['ci'],
+      failed: [{ name: 'ci', conclusion: 'failure', checkRunId: 78, app: 'github-actions' }],
+    });
+    await pass();
+    const drop = activeDropFor(w.db, id);
+    expect(Object.keys(JSON.parse(drop?.inputJson ?? '{}'))).toEqual(['feedback']);
+  });
+});
+
+describe('code scanning flags the same alerts after a heal: park, not another heal (#653)', () => {
+  const gateOk = { name: 'test', exitCode: 0, durationMs: 10, timedOut: false, outputTail: '' };
+  const alert = {
+    path: 'apps/server/src/api/sticks.ts',
+    startLine: 460,
+    level: 'failure',
+    title: 'Missing rate limiting',
+    message: 'This route handler performs authorization, but is not rate-limited.',
+  };
+  const REASON =
+    'code scanning still flags Missing rate limiting at apps/server/src/api/sticks.ts:460 after a heal: fix it with a Retry note, or dismiss the alert in GitHub and re-run the CodeQL check';
+  let run = 100;
+  /** CodeQL fails on `head` with the rate-limiting alert, as GitHub reports it. */
+  function codeqlFails(h: Harness, head: string): void {
+    const checkRunId = ++run;
+    h.forge.state.checks.set(head, {
+      state: 'failure',
+      names: ['ci', 'CodeQL'],
+      failed: [
+        { name: 'CodeQL', conclusion: 'failure', checkRunId, app: 'github-advanced-security' },
+      ],
+    });
+    h.forge.state.annotations.set(checkRunId, [alert]);
+  }
+  async function review(h: Harness, decision: 'approve' | 'request_changes'): Promise<void> {
+    await h.reconcile();
+    await h.finishDrop('review', {
+      status: 'completed',
+      gates: [gateOk],
+      verdict: {
+        decision,
+        summary: decision,
+        findings: decision === 'approve' ? [] : [{ severity: 'major', detail: 'tidy' }],
+      },
+    });
+  }
+  async function healTo(h: Harness, head: string): Promise<void> {
+    for (let n = 0; n < 5 && !h.queuedRoles().includes('heal'); n++) await h.reconcile();
+    await h.finishDrop('heal', { status: 'completed', headSha: head, gates: [gateOk] });
+  }
+  const healInputs = (h: Harness) =>
+    (
+      h.db
+        .prepare(`SELECT input_json AS j FROM drops WHERE role = 'heal' ORDER BY created_at, rowid`)
+        .all() as { j: string }[]
+    ).map((r) => JSON.parse(r.j) as { feedback: { source: string } });
+
+  test('a ci heal, a review heal, the same alert again: park; Retry gets exactly one more heal', async () => {
+    const h = await harness({ zone: { ciRequired: true } });
+    for (const id of ['author', 'reviewer'] as const) {
+      const r = h.forge.state.rules[id];
+      if (r.kind === 'ok') r.rules.requiredChecks = ['ci'];
+    }
+    await toPrOpen(h, headN(1));
+    await review(h, 'approve');
+    codeqlFails(h, headN(1));
+    await healTo(h, headN(2)); // heal 1: ci, with the alert
+    await review(h, 'request_changes');
+    await healTo(h, headN(3)); // heal 2: review feedback, in between
+    await review(h, 'approve');
+    codeqlFails(h, headN(3));
+    await h.reconcile();
+    expect(getWorkItem(h.db, 1)).toMatchObject({ state: 'parked', reason: REASON });
+    expect(healInputs(h).map((i) => i.feedback.source)).toEqual(['ci', 'review']);
+
+    // Command rules Retry with a note: one more heal runs on the same alert.
+    syncParkBriefings(h.db, h.zone, h.now());
+    h.at(1);
+    const b = listBriefings(h.db, { zoneId: 'main', state: 'open' }).find(
+      (x) => x.kind === 'parked',
+    );
+    const retry = b?.options.find((o) => o.effect === 'retry_item');
+    if (!b || !retry) throw new Error('no Retry option');
+    const note = 'keep the hook; the alert is accepted';
+    expect(ruleBriefing(h.db, b.id, retry.id, note, h.now(), { via: 'session' }).ok).toBe(true);
+    for (let n = 0; n < 3 && !h.queuedRoles().includes('heal'); n++) await h.reconcile();
+    expect(getWorkItem(h.db, 1)?.state).toBe('pr_open');
+    expect(h.queuedRoles()).toEqual(['heal']);
+    const { dropId, epoch, payload } = await h.lease();
+    expect(payload.role).toBe('heal');
+    expect(payload.prompt).toContain(note);
+    h.forge.state.setHead(1, headN(4));
+    await h.postResult(dropId, epoch, { status: 'completed', headSha: headN(4), gates: [gateOk] });
+
+    // The same alert on the healed head: parked again, no third ci heal.
+    await review(h, 'approve');
+    codeqlFails(h, headN(4));
+    await h.reconcile();
+    expect(getWorkItem(h.db, 1)).toMatchObject({ state: 'parked', reason: REASON });
+    expect(healInputs(h).map((i) => i.feedback.source)).toEqual(['ci', 'review', 'ci']);
+    expect(h.forge.state.merges).toEqual([]);
   });
 });

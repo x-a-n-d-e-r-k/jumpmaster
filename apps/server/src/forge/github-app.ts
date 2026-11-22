@@ -7,7 +7,13 @@
 // none is ever written to the vault, the database or a file. The module does not log, and no error
 // it throws carries a token, the JWT or the key.
 import { createSign } from 'node:crypto';
-import { isOwnerName, isRepoName, redactTokenShapes, replaceJwtShapes } from '@jumpmaster/protocol';
+import {
+  isOwnerName,
+  isRepoName,
+  redactTokenShapes,
+  replaceJwtShapes,
+  stripTrailingSlashes,
+} from '@jumpmaster/protocol';
 
 const b64url = (v: string | Buffer) => Buffer.from(v).toString('base64url');
 
@@ -103,7 +109,7 @@ const PEM_SHAPE = /-----BEGIN [^-]+-----[\s\S]*?(-----END [^-]+-----|$)/g;
 
 export function createGitHubAppBroker(opts: GitHubAppBrokerOptions): GitHubAppBroker {
   const { appId, privateKey } = opts;
-  const apiBase = (opts.apiBase ?? 'https://api.github.com').replace(/\/+$/, '');
+  const apiBase = stripTrailingSlashes(opts.apiBase ?? 'https://api.github.com');
   const now = opts.now ?? Date.now;
   const onSecret = opts.onSecret ?? (() => {});
   onSecret(privateKey);

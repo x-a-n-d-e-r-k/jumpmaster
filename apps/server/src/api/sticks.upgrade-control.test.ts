@@ -153,14 +153,14 @@ describe('POST /api/control/sticks/:id/upgrade', () => {
       { version: '0.6.0', result: 'failed', reason: 'the new stick did not start' },
       h.now(),
     );
-    const page = (await h.view('/sticks')).body;
+    const page = (await h.view('/system/sticks')).body;
     expect(page).toContain('upgrade to v0.6.0 failed: the new stick did not start');
     expect(page).toContain('data-upgrade="/api/control/sticks/kidney/upgrade"');
     expect(page).toMatch(/<button[^>]*data-upgrade="[^"]*kidney\/upgrade"[^>]*>Retry<\/button>/);
     const r = await upgrade(h, 'kidney');
     expect(r.statusCode, r.body).toBe(200);
     expect(getStickUpgrade(h.db, 'kidney')).toMatchObject({ state: 'pending', reason: null });
-    expect((await h.view('/sticks')).body).toContain('upgrading to v0.6.0');
+    expect((await h.view('/system/sticks')).body).toContain('upgrading to v0.6.0');
   });
 });
 
@@ -279,7 +279,7 @@ describe('the read API and the sticks page', () => {
 
   test('the page shows each status in words, with buttons only where stated', async () => {
     const h = await mixed();
-    const page = (await h.view('/sticks')).body;
+    const page = (await h.view('/system/sticks')).body;
     const row = (id: string) => {
       const m = new RegExp(`<tr[^>]*data-stick="${id}"[^>]*>.*?</tr>`).exec(page);
       expect(m, id).not.toBeNull();
@@ -302,7 +302,7 @@ describe('the read API and the sticks page', () => {
   test('a capable stick under the allowlist policy is told what it needs, with no button', async () => {
     const h = await world();
     stick(h, 'kidney', { ...ELIGIBLE, imagePolicy: 'allowlist' });
-    const page = (await h.view('/sticks')).body;
+    const page = (await h.view('/system/sticks')).body;
     expect(page).toContain(SIGNED_POLICY_REASON);
     expect(page).not.toContain('data-upgrade=');
   });
@@ -310,7 +310,7 @@ describe('the read API and the sticks page', () => {
   test('with no target the page shows no status line and no button', async () => {
     const h = await world({ version: 'dev' });
     stick(h, 'kidney');
-    const page = (await h.view('/sticks')).body;
+    const page = (await h.view('/system/sticks')).body;
     expect(page).toContain('data-stick="kidney"');
     expect(page).not.toContain('data-upgrade=');
     expect(page).not.toMatch(/up to date|update available|upgrading to|older than in-place/);

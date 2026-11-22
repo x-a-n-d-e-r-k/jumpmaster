@@ -36,7 +36,22 @@ import {
 } from '../vault/credentials.js';
 import { VAULT_KEY_IN_DATA_DIR } from '../vault/vault.js';
 import { FLAGS_SCRIPT, renderFlagsForm, savedNote } from './flags.js';
-import { escapeHtml, PROJECTS_HREF, page, projectHref, tokenAgeBanner } from './pages.js';
+import {
+  SYSTEM_ADVANCED_HREF,
+  SYSTEM_CREDENTIALS_HREF,
+  SYSTEM_HISTORY_HREF,
+  SYSTEM_MCP_TOKENS_HREF,
+  SYSTEM_OTHER_MACHINES_HREF,
+  SYSTEM_SERVER_HREF,
+} from './links.js';
+import {
+  escapeHtml,
+  PROJECTS_HREF,
+  page,
+  projectHref,
+  systemNav,
+  tokenAgeBanner,
+} from './pages.js';
 import {
   CONFIG_ANSWER_FN,
   type Control,
@@ -73,20 +88,6 @@ export function claudeTokenDays(store: ConfigStore, now: Date): number | undefin
   const t = made === undefined ? Number.NaN : Date.parse(made);
   return Number.isFinite(t) ? Math.floor((now.getTime() - t) / DAY_MS) : undefined;
 }
-
-/** The tabs: each a path, the current one in bold. `/settings` goes to the first. */
-const TABS: [string, string][] = [
-  ['credentials', 'Credentials'],
-  ['install', 'Install'],
-  ['other-machines', 'Other machines'],
-  ['mcp-tokens', 'MCP tokens'],
-  ['history', 'History'],
-  ['flags', 'Advanced'],
-];
-const tabs = (current: string): string =>
-  `<nav class="settings-tabs">${TABS.map(([path, label]) =>
-    path === current ? `<strong>${label}</strong>` : `<a href="/settings/${path}">${label}</a>`,
-  ).join(' · ')}</nav>`;
 
 const day = (iso: string | undefined): string => (iso ? escapeHtml(iso.slice(0, 10)) : '-');
 
@@ -331,7 +332,7 @@ async function jmLapsed(r, state, status) {
   return true;
 }
 function jmRefreshLink(status) {
-  status.insertAdjacentHTML('beforeend', ' <a href="/settings/credentials">Refresh the list</a>');
+  status.insertAdjacentHTML('beforeend', ' <a href="${SYSTEM_CREDENTIALS_HREF}">Refresh the list</a>');
 }
 async function jmReplaceCredential(c, state, status) {
   if (!c.value) { status.textContent = 'Enter a token first.'; return 'empty'; }
@@ -544,32 +545,20 @@ export function renderCredentials(o: {
         `<p class="warn running">${r.n} running drop${r.n === 1 ? '' : 's'} still carr${r.n === 1 ? 'ies' : 'y'} the previous ${escapeHtml(r.name)}: revoke the old one with its provider once ${r.n === 1 ? 'it finishes' : 'they finish'}.</p>`,
     )
     .join('');
-  const problems = store.problems();
-  const zoneName = zoneNamer(config.dropZones);
-  const problemList =
-    problems.length === 0
-      ? '<p>No zone is missing a credential it needs.</p>'
-      : `<ul class="problems">${problems
-          .map(
-            (p) =>
-              `<li><strong>${zoneName(p.zoneId)}</strong> (${escapeHtml(p.credential)}, ${escapeHtml(p.kind)}): ${escapeHtml(p.message)}</li>`,
-          )
-          .join('')}</ul>`;
   const vaultLine = vaultSection(store);
   return page(
-    `<h2>Settings</h2>${tabs('credentials')}${tokenAgeBanner(claudeTokenDays(store, o.now))}
+    `${systemNav('credentials')}<h2>Credentials</h2>${tokenAgeBanner(claudeTokenDays(store, o.now))}
 <div id="credentials" data-sudo="${o.sudo ? '1' : '0'}">
 ${vaultLine}${running}
 <table><tr><th>Credential</th><th>Source</th><th>Fingerprint</th><th>Login</th><th>Set</th><th>Created</th><th>Last test</th><th></th></tr>${rows}</table>
 ${appEntriesSection(store)}
 ${SUDO_PROMPT('changing a credential')}
 <p id="credentials-status" role="status"></p>
-<h3>Zone problems</h3>${problemList}
 <h3>Claude</h3>
 <p>Make the token on your own computer with <code>claude setup-token</code> (it lasts a year) and replace it above; its “Made on” date starts the expiry reminder.</p>
 ${planSection(store, config)}
 <h3>GitHub</h3>
-${guideSection(o.guide, '/settings/credentials', appOptionsFor(store, o.guide, o.sudo))}
+${guideSection(o.guide, SYSTEM_CREDENTIALS_HREF, appOptionsFor(store, o.guide, o.sudo))}
 </div>
 ${CREDENTIALS_SCRIPT}`,
   );
@@ -788,8 +777,8 @@ function jmInstallPatch(fields) {
 ${CONFIG_ANSWER_FN}
 async function jmSaveInstall(patch, revision, status, go) {
   if (Object.keys(patch).length === 0) { status.textContent = 'Nothing changed.'; return 'unchanged'; }
-  const r = await jmFetch('/api/control/config', { patch, expectRevision: revision, returnTo: '/settings/install', cancelTo: '/settings/install' }, 'PATCH');
-  return jmConfigAnswer(r, status, go, '/settings/install');
+  const r = await jmFetch('/api/control/config', { patch, expectRevision: revision, returnTo: '${SYSTEM_SERVER_HREF}', cancelTo: '${SYSTEM_SERVER_HREF}' }, 'PATCH');
+  return jmConfigAnswer(r, status, go, '${SYSTEM_SERVER_HREF}');
 }
 document.addEventListener('DOMContentLoaded', () => {
   const form = document.getElementById('install');
@@ -812,12 +801,24 @@ document.addEventListener('DOMContentLoaded', () => {
 const fileModeBanner = (store: ConfigStore): string =>
   `<p class="warn">These settings are set in the config file <code>${escapeHtml(store.status().filePath ?? '?')}</code> (file mode), so they are read-only here: edit the file and run <code>jumpmaster ctl config reload</code>, or adopt it into the database (<code>jumpmaster ctl config adopt</code>, or the button on <a href="${PROJECTS_HREF}">Projects</a>) to change them here.</p>`;
 
-export function renderInstall(o: {
+/** Server (#623): the install settings, then Other machines, under the System sub-nav. */
+export function renderServer(o: {
   store: ConfigStore;
   config: Config;
+  guidance: TailscaleGuidance;
   /** The revision a Save just applied (`?saved=N`), said at the top. */
   saved?: number;
 }): string {
+  return page(
+    `${systemNav('server')}<h2>Server</h2>
+${installSection(o)}
+${otherMachinesSection(o)}`,
+    { title: 'Server' },
+  );
+}
+
+/** The install-wide settings through the config routes (once the Install tab). */
+function installSection(o: { store: ConfigStore; config: Config; saved?: number }): string {
   const { store, config } = o;
   const status = store.status();
   const saved =
@@ -844,15 +845,13 @@ export function renderInstall(o: {
   const save = fileMode
     ? ''
     : '<p><button>Save</button> <span id="install-out" role="status"></span></p>';
-  return page(
-    `<h2>Settings</h2>${tabs('install')}
+  return `<h3 id="install-settings">Install</h3>
 ${saved}${restart}${warnings}${banner}
 <form id="install" data-revision="${store.revision()}" data-readonly="${fileMode ? '1' : '0'}"><fieldset${fileMode ? ' disabled' : ''}>
 <table><tr><th>Setting</th><th>Value</th><th></th></tr>${rows}</table>
 </fieldset>${save}</form>
 ${bootSection(store)}
-${INSTALL_SCRIPT}`,
-  );
+${INSTALL_SCRIPT}`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -870,13 +869,13 @@ export function renderInstallFlags(o: { store: ConfigStore; saved?: number }): s
   const form = renderFlagsForm({
     scope: 'install',
     rows: flagRows('install', doc, doc),
-    target: { savedTo: '/settings/flags' },
+    target: { savedTo: SYSTEM_ADVANCED_HREF },
     revision: store.revision(),
     readOnly,
     forbiddenNote: SESSION_FORBIDDEN_NOTE,
   });
   return page(
-    `<h2>Settings</h2>${tabs('flags')}
+    `${systemNav('advanced')}<h2>Advanced</h2>
 <h3>Advanced settings · this install</h3>
 <p>Every install-wide setting. Changes apply at the next pass, except those marked for the next restart; one that loosens a safeguard asks you to confirm first.</p>
 <p>Each zone has its own advanced settings:</p>
@@ -897,11 +896,17 @@ ${FLAGS_SCRIPT}`,
  * redraws, or goes to the confirmation page the change waits on (issue #254); Check asks the server to fetch `<publicUrl>/healthz` and says what it answered.
  */
 export const OTHER_MACHINES_SCRIPT = `<script>
+function jmGo(to) {
+  const u = new URL(to, location.href);
+  // Only the hash differs (Other machines is a section of this page): draw the page again.
+  if (u.pathname === location.pathname && u.search === location.search) { location.hash = u.hash; location.reload(); return; }
+  location.href = to;
+}
 async function jmSavePublicUrl(value, status, go) {
   const r = await jmFetch('/api/control/server/public-url', { publicUrl: value === '' ? null : value }, 'PUT');
   let j = {};
   try { j = await r.json(); } catch (e) {}
-  if (r.ok) { status.textContent = 'Saved as revision ' + j.revision + '.'; go('/settings/other-machines'); return 'saved'; }
+  if (r.ok) { status.textContent = 'Saved as revision ' + j.revision + '.'; go('${SYSTEM_OTHER_MACHINES_HREF}'); return 'saved'; }
   if (r.status === 409 && j.needsConfirmation) { go(j.confirm); return 'confirm'; }
   if (j.issues) { status.textContent = j.issues.map((i) => i.message).join('; '); return 'refused'; }
   status.textContent = j.error || ('Refused (' + r.status + ')');
@@ -923,14 +928,15 @@ document.addEventListener('DOMContentLoaded', () => {
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (form.dataset.readonly === '1') return;
-    await jmSavePublicUrl(document.getElementById('public-url').value.trim(), out, (to) => { location.href = to; });
+    await jmSavePublicUrl(document.getElementById('public-url').value.trim(), out, jmGo);
   });
   const check = document.getElementById('public-url-check');
   if (check) check.addEventListener('click', () => jmCheckPublicUrl(out));
 });
 </script>`;
 
-export function renderOtherMachines(o: {
+/** Other machines (issue #139): the second section of Server. */
+function otherMachinesSection(o: {
   store: ConfigStore;
   config: Config;
   guidance: TailscaleGuidance;
@@ -956,9 +962,7 @@ export function renderOtherMachines(o: {
           : '<p>The address is then <code>https://</code> and this machine&#39;s name on the tailnet (<code>tailscale status</code> shows it): save it above, then Check.</p>'
       }`
     : `<h3>Making the address work</h3><p>${escapeHtml(guidance.note)}</p>`;
-  return page(
-    `<h2>Settings</h2>${tabs('other-machines')}
-<h3 id="other-machines">Other machines</h3>
+  return `<h3 id="other-machines">Other machines</h3>
 <p>The address other machines, such as a new stick on a VPS, reach this server at.</p>
 ${state}${shared}${how}
 <form id="public-url-form" data-readonly="${fileMode ? '1' : '0'}">
@@ -968,8 +972,7 @@ ${fileMode ? '' : '<button>Save</button> '}<button type="button" id="public-url-
 </form>
 <p><small>Check: this server fetches <code>&lt;address&gt;/healthz</code> (5 seconds at most) and says Reachable, or what failed.</small></p>
 ${tailnet}
-${OTHER_MACHINES_SCRIPT}`,
-  );
+${OTHER_MACHINES_SCRIPT}`;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1078,7 +1081,7 @@ export function renderMcpTokens(o: {
     : `<p class="warn">Command's MCP server is off on this server, so no token can be made or used. ${
         enabled
           ? '<code>mcp.enabled</code> is on and takes effect at the next restart: run <code>docker compose restart jumpmaster</code>.'
-          : 'Turn on <code>mcp.enabled</code> under <a href="/settings/install">Install</a>; it takes effect at the next restart.'
+          : `Turn on <code>mcp.enabled</code> under <a href="${SYSTEM_SERVER_HREF}">System, Server</a>; it takes effect at the next restart.`
       }</p>`;
   const zones = config.dropZones
     .map(
@@ -1113,7 +1116,7 @@ ${SUDO_PROMPT('making a token')}
     .join('');
   const list = tokens.length === 0 ? NO_TOKENS : `${TOKENS_HEAD}${rows}${TOKENS_TAIL}`;
   return page(
-    `<h2>Settings</h2>${tabs('mcp-tokens')}
+    `${systemNav('mcp-tokens')}<h2>MCP tokens</h2>
 <div id="mcp-tokens" data-sudo="${o.sudo ? '1' : '0'}">
 ${intro}${off}${mint}
 <h3>Tokens</h3><div id="token-list" data-zones="${escapeHtml(JSON.stringify(names))}">${list}</div>
@@ -1157,10 +1160,10 @@ async function jmRevert(r, status, ask, go) {
   const n = r.readds.length;
   const readds = n === 0 ? '' : ' It re-adds zone' + (n > 1 ? 's ' : ' ') + r.readds.join(', ') + ' with ' + (n > 1 ? 'their' : 'its') + ' history; ' + (n > 1 ? 'they come' : 'it comes') + ' back paused.';
   if (!ask('Revert to revision ' + r.id + '? It is applied as a new revision, and the history is kept.' + readds)) return 'cancelled';
-  const res = await jmFetch('/api/control/config/rollback', { id: r.id, expectRevision: r.revision, returnTo: '/settings/history', cancelTo: '/settings/history' });
+  const res = await jmFetch('/api/control/config/rollback', { id: r.id, expectRevision: r.revision, returnTo: '${SYSTEM_HISTORY_HREF}', cancelTo: '${SYSTEM_HISTORY_HREF}' });
   let j = {};
   try { j = await res.json(); } catch (e) {}
-  if (res.ok) { go('/settings/history'); return 'reverted'; }
+  if (res.ok) { go('${SYSTEM_HISTORY_HREF}'); return 'reverted'; }
   if (res.status === 409 && j.needsConfirmation) { go(j.confirm); return 'confirm'; }
   if (res.status === 409 && j.conflict) { status.textContent = 'The config changed since this page was drawn: reload it and revert again.'; return 'conflict'; }
   if (res.status === 403 && j.sessionForbidden) { status.textContent = 'Not from the browser: ' + j.sessionForbidden.join(', ') + ' is set with jumpmaster ctl or in the config file.'; return 'forbidden'; }
@@ -1226,7 +1229,7 @@ export function renderHistory(o: { store: ConfigStore; revisions: RevisionView[]
     ? '<p class="warn">In file mode the config file is the config: each reload that changed it is a revision here, and a revert is made by editing the file (or, after adopting it, here).</p>'
     : '<p>Every change to the config is a revision, kept for good. Revert applies an old revision’s content as a new revision; one that weakens a guard asks for confirmation first, and one that brings back a removed zone says so before it runs.</p>';
   return page(
-    `<h2>Settings</h2>${tabs('history')}
+    `${systemNav('history')}<h2>History</h2>
 <div id="history" data-revision="${current}">
 ${intro}
 <table><tr><th>Revision</th><th>When (UTC)</th><th>Made by</th><th>Note</th><th>Changes</th><th>Marks</th><th></th></tr>${rows}</table>
@@ -1255,24 +1258,23 @@ export function registerSettingsPages(
 ): void {
   const { store, now } = deps;
   const forgeOf = deps.guidanceForge ?? githubGuidanceForge;
-  // Each tab is a path; Settings opens on the first.
-  app.get('/settings', async (_req, reply) => reply.redirect('/settings/credentials', 302));
-  app.get<{ Querystring: { saved?: string } }>('/settings/install', async (req, reply) => {
+  // Server (#623): the install settings, then Other machines.
+  app.get<{ Querystring: { saved?: string } }>(SYSTEM_SERVER_HREF, async (req, reply) => {
     // Only a revision number is echoed back: anything else says nothing.
     const raw = req.query.saved;
     const saved = typeof raw === 'string' && /^[1-9]\d{0,9}$/.test(raw) ? Number(raw) : undefined;
+    const config = req.jmConfig ?? store.current();
+    const guidance = await tailscaleGuidance(
+      config.listen.port,
+      deps.tailscale ?? defaultTailscaleDeps,
+    );
     return html(
       req,
       reply,
-      renderInstall({
-        store,
-        config: req.jmConfig ?? store.current(),
-        ...(saved !== undefined ? { saved } : {}),
-      }),
+      renderServer({ store, config, guidance, ...(saved !== undefined ? { saved } : {}) }),
     );
   });
-  // Advanced (issue #323): every install-wide setting, one per row.
-  app.get<{ Querystring: { saved?: string } }>('/settings/flags', async (req, reply) => {
+  app.get<{ Querystring: { saved?: string } }>(SYSTEM_ADVANCED_HREF, async (req, reply) => {
     const raw = req.query.saved;
     const saved = typeof raw === 'string' && /^[1-9]\d{0,9}$/.test(raw) ? Number(raw) : undefined;
     return html(
@@ -1281,15 +1283,7 @@ export function registerSettingsPages(
       renderInstallFlags({ store, ...(saved !== undefined ? { saved } : {}) }),
     );
   });
-  app.get('/settings/other-machines', async (req, reply) => {
-    const config = req.jmConfig ?? store.current();
-    const guidance = await tailscaleGuidance(
-      config.listen.port,
-      deps.tailscale ?? defaultTailscaleDeps,
-    );
-    return html(req, reply, renderOtherMachines({ store, config, guidance }));
-  });
-  app.get('/settings/mcp-tokens', async (req, reply) =>
+  app.get(SYSTEM_MCP_TOKENS_HREF, async (req, reply) =>
     html(
       req,
       reply,
@@ -1303,10 +1297,10 @@ export function registerSettingsPages(
       }),
     ),
   );
-  app.get('/settings/history', async (req, reply) =>
+  app.get(SYSTEM_HISTORY_HREF, async (req, reply) =>
     html(req, reply, renderHistory({ store, revisions: store.revisions(HISTORY_LIMIT) })),
   );
-  app.get('/settings/credentials', async (req, reply) => {
+  app.get(SYSTEM_CREDENTIALS_HREF, async (req, reply) => {
     const config = req.jmConfig ?? store.current();
     const guide = await forgeGuideFor(store, config, req.query, forgeOf, now);
     return html(

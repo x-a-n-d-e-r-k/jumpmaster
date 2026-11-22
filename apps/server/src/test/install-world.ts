@@ -191,13 +191,13 @@ export async function installWorld(o: { publicUrl?: boolean } = {}): Promise<Ins
     },
     inject: (opts) => a.inject(opts),
     add: (payload: Record<string, unknown>) =>
-      a.inject({ method: 'POST', url: '/sticks/add', headers: session, payload }),
+      a.inject({ method: 'POST', url: '/system/sticks/add', headers: session, payload }),
     /** An invite made with sudo: its code, read off the result page. */
     invite: async (name: string, slots: number | 'auto' = 'auto') => {
       sudo();
       const r = await a.inject({
         method: 'POST',
-        url: '/sticks/add',
+        url: '/system/sticks/add',
         headers: session,
         payload: { name, slots },
       });
@@ -212,8 +212,13 @@ export async function installWorld(o: { publicUrl?: boolean } = {}): Promise<Ins
         payload: { ...cred, name: 'stick', slots: 1, capabilities: [] },
       }),
     page: async () =>
-      (await a.inject({ method: 'GET', url: '/sticks', headers: { host: HOST, cookie: s.cookie } }))
-        .body,
+      (
+        await a.inject({
+          method: 'GET',
+          url: '/system/sticks',
+          headers: { host: HOST, cookie: s.cookie },
+        })
+      ).body,
     image: (code?: string) =>
       a.inject({
         method: 'GET',

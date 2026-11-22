@@ -8,7 +8,7 @@
 // that can throw, so no later error path can log them. The client and webhook secrets are dropped:
 // Jumpmaster neither signs users in with the app nor receives webhooks. No error this module throws
 // carries the code, the PEM or either secret, and it never retries: a code is single-use.
-import { isOwnerName } from '@jumpmaster/protocol';
+import { isOwnerName, stripTrailingSlashes } from '@jumpmaster/protocol';
 import { APP_MANIFEST_PERMISSIONS, type ManifestPermissions } from '../github/app-manifest.js';
 import { APP_ROLES, type AppRole, isPrivateKeyPem } from '../vault/github-app-entries.js';
 import { type ScrubSet, serverScrubSet } from './scrub-set.js';
@@ -95,7 +95,7 @@ export async function redeemManifestCode(
   if (!(APP_ROLES as readonly string[]).includes(role))
     throw new ManifestConversionError('the role is not author or reviewer', 0);
 
-  const apiBase = (opts.apiBase ?? 'https://api.github.com').replace(/\/+$/, '');
+  const apiBase = stripTrailingSlashes(opts.apiBase ?? 'https://api.github.com');
   const doFetch = opts.fetch ?? globalThis.fetch;
   const scrub = opts.scrub ?? serverScrubSet;
   const expected = opts.expectedPermissions ?? APP_MANIFEST_PERMISSIONS[role];

@@ -24,7 +24,7 @@ import { appliedItemArbitration, getCrewRetry } from './crew/store.js';
 import type { Db } from './db/open.js';
 import { type Drop, getPullRequest, listWorkItems, updateDrop, type WorkItem } from './db/repo.js';
 import { resolveModel } from './fable.js';
-import type { Feedback } from './flow/decide.js';
+import type { CodeScanning, Feedback } from './flow/decide.js';
 import { type CrewRetryNote, lastFailure, renderLastFailure } from './gate-output.js';
 import { unsanitizeForgeText } from './outbox.js';
 import { PRESET_EGRESS } from './presets.js';
@@ -216,6 +216,62 @@ export function renderFeedback(f: Feedback, dropId: string): string {
         ? '## Feedback (data, from the server)'
         : '## Automated review findings (data, untrusted)';
   return `${heading}\n\n${fence(dropId, 'feedback', neutralise(unsanitizeForgeText(f.text)))}`;
+}
+
+/** Follows the code-scanning section, outside every fence (#652). */
+export const CODE_SCANNING_INSTRUCTION =
+  'Code scanning is not one of the gates. Fix the code an alert names, or, if the alert is wrong for this design, change nothing for it and say why in your report.';
+
+/** The most characters of an alert's message the heal sees, counted after redaction. */
+const MAX_ALERT_MESSAGE = 300;
+
+/**
+ * A Markdown link `[text](target)` (CodeQL links the code it names by number). Neither part may
+ * hold a bracket, a parenthesis or a newline, so every scan stops at the next delimiter: linear.
+ */
+const MD_LINK = /\[([^[\]()\n]*)\]\(([^[\]()\s]*)\)/g;
+
+const oneLine = (text: string): string => text.replace(/\s*[\r\n]+\s*/g, ' ');
+
+/** The code-scanning alerts in a heal's `input_json`, malformed entries dropped. */
+function codeScanningOf(raw: unknown): CodeScanning[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.flatMap((e: unknown) => {
+    const c = e as Partial<CodeScanning> | null;
+    if (typeof c?.check !== 'string' || !Array.isArray(c.annotations)) return [];
+    const annotations = c.annotations.filter(
+      (a) =>
+        typeof a?.path === 'string' &&
+        typeof a.startLine === 'number' &&
+        typeof a.title === 'string' &&
+        typeof a.message === 'string',
+    );
+    return [{ check: c.check, annotations }];
+  });
+}
+
+/**
+ * A heal's code-scanning alerts (#652), one line each, `<check>: <title> at <path>:<line>:
+ * <message>`: links stripped to their text, each message cut after redaction, then the whole
+ * section redacted, neutralised and fenced as untrusted data. The fixed instruction follows,
+ * outside the fence. Empty when there is no annotation.
+ */
+export function renderCodeScanning(
+  entries: CodeScanning[],
+  dropId: string,
+  secrets: string[],
+): string {
+  const lines = entries.flatMap((e) =>
+    e.annotations.map((a) => {
+      const message = [...redact(oneLine(a.message).replace(MD_LINK, '$1'), secrets)]
+        .slice(0, MAX_ALERT_MESSAGE)
+        .join('');
+      return oneLine(`${e.check}: ${a.title} at ${a.path}:${a.startLine}: ${message}`);
+    }),
+  );
+  if (lines.length === 0) return '';
+  const body = neutralise(redact(lines.join('\n'), secrets));
+  return `## Code scanning alerts (data)\n\n${fence(dropId, 'code-scanning', body)}\n\n${CODE_SCANNING_INSTRUCTION}`;
 }
 
 /** How many of the latest author reports a reviewer sees. */
@@ -656,8 +712,17 @@ export function buildPayload(
         },
       };
     case 'heal': {
-      const input = JSON.parse(drop.inputJson ?? '{}') as { feedback?: Feedback };
+      const input = JSON.parse(drop.inputJson ?? '{}') as {
+        feedback?: Feedback;
+        codeScanning?: unknown;
+      };
       if (!input.feedback) throw new Error(`heal drop ${drop.id} has no feedback`);
+      const feedback = renderFeedback(input.feedback, drop.id);
+      const alerts = renderCodeScanning(
+        codeScanningOf(input.codeScanning),
+        drop.id,
+        redactionList(secrets),
+      );
       return {
         ...common,
         role,
@@ -670,7 +735,7 @@ export function buildPayload(
           redactionList(secrets),
         ),
         credentials: fetchCredentials,
-        feedback: renderFeedback(input.feedback, drop.id),
+        feedback: alerts ? `${feedback}\n\n${alerts}` : feedback,
       };
     }
     case 'resolve':

@@ -1,14 +1,23 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest';
 import {
+  applyPendingRulings,
+  listBriefings,
+  ruleBriefing,
+  syncParkBriefings,
+} from '../briefings.js';
+import {
   addBranchUpdateFailure,
+  type Drop,
   getWorkItem,
   getWorkItemPrFiles,
+  insertDrop,
   insertVerdict,
   recordGateAllowance,
   setBranchUpdateOutcome,
   setWorkItemState,
   type VerdictRow,
 } from '../db/repo.js';
+import type { ChecksFacts } from '../forge/github.js';
 import { zoneWorld } from '../test/fixtures.js';
 import { decide } from './decide.js';
 import { ADMINISTRATION_PROBLEM } from './guards.js';
@@ -861,5 +870,163 @@ describe('the open PR file list is stored on the item (issue #291)', () => {
     w.f.author.failNext('listPullFiles', '5xx');
     await snapshotOf();
     expect(getWorkItemPrFiles(w.db, itemId)).toEqual(['src/a.ts']);
+  });
+});
+
+describe('code-scanning alerts for a failed CodeQL check (#652)', () => {
+  const alert = {
+    path: 'apps/server/src/api/sticks.ts',
+    startLine: 460,
+    level: 'failure',
+    title: 'Missing rate limiting',
+    message: 'This route handler performs authorization, but is not rate-limited.',
+  };
+  const fail = (failed: ChecksFacts['failed']) =>
+    w.f.state.checks.set('sha1', { state: 'failure', names: failed.map((f) => f.name), failed });
+
+  test('a failed github-advanced-security run: its failure annotations are in codeScanning', async () => {
+    fail([
+      { name: 'CodeQL', conclusion: 'failure', checkRunId: 77, app: 'github-advanced-security' },
+    ]);
+    w.f.state.annotations.set(77, [{ ...alert, level: 'warning', title: 'w' }, alert]);
+    const s = await snapshotOf();
+    expect(s.codeScanning).toEqual([{ check: 'CodeQL', annotations: [alert] }]);
+    expect(s.forgeUnavailable).toBeNull();
+  });
+
+  test('a failed github-actions run, a status and an app-less check: no annotations call', async () => {
+    fail([
+      { name: 'ci', conclusion: 'failure', checkRunId: 78, app: 'github-actions' },
+      { name: 'ci/x', conclusion: 'error' },
+      { name: 'jobs', conclusion: 'failure', checkRunId: 79 },
+    ]);
+    const s = await snapshotOf();
+    expect(s.codeScanning).toEqual([]);
+    expect(w.f.author.calls.some((c) => c.method === 'checkAnnotations')).toBe(false);
+  });
+
+  test('checks not in failure are never read for annotations', async () => {
+    w.f.state.checks.set('sha1', {
+      state: 'pending',
+      names: ['CodeQL'],
+      failed: [
+        { name: 'CodeQL', conclusion: 'failure', checkRunId: 77, app: 'github-advanced-security' },
+      ],
+    });
+    const s = await snapshotOf();
+    expect(s.codeScanning).toEqual([]);
+    expect(w.f.author.calls.some((c) => c.method === 'checkAnnotations')).toBe(false);
+  });
+
+  test('an annotations call that errors: an empty list, and the snapshot stays available', async () => {
+    fail([
+      { name: 'CodeQL', conclusion: 'failure', checkRunId: 77, app: 'github-advanced-security' },
+    ]);
+    w.f.state.annotations.set(77, [alert]);
+    w.f.author.failNext('checkAnnotations', { status: 403 });
+    const s = await snapshotOf();
+    expect(s.codeScanning).toEqual([{ check: 'CodeQL', annotations: [] }]);
+    expect(s.forgeUnavailable).toBeNull();
+    expect(s.forgeDenied).toBeNull();
+    expect(s.missingSince).toBeNull();
+    expect(['wait', 'park']).not.toContain(decide(s).kind);
+  });
+});
+
+describe('lastCiHealKey: the code-scanning key of the last counted ci heal (#653)', () => {
+  const alert = (title: string, path: string) => ({
+    path,
+    startLine: 1,
+    level: 'failure',
+    title,
+    message: 'm',
+  });
+  const rate = alert('Missing rate limiting', 'b.ts');
+  const other = alert('Clear-text logging', 'a.ts');
+  let n = 0;
+  /** A heal drop of item 1 created at `minute` past `now`, in `state`, with this input. */
+  const heal = (minute: number, input: unknown, state: Drop['state'] = 'succeeded') =>
+    insertDrop(
+      w.db,
+      {
+        id: `heal-${++n}`,
+        dropZoneId: 'main',
+        workItemId: itemId,
+        role: 'heal',
+        state,
+        inputJson: JSON.stringify(input),
+      },
+      new Date(now.getTime() + minute * 60_000),
+    );
+  const ci = (annotations: unknown[]) => ({
+    feedback: { source: 'ci', text: 'CI failed' },
+    codeScanning: [{ check: 'CodeQL', annotations }],
+  });
+
+  test('null with no heal', async () => {
+    expect((await snapshotOf()).lastCiHealKey).toBeNull();
+  });
+
+  test('the key of the latest succeeded ci heal with codeScanning: sorted and de-duplicated', async () => {
+    heal(1, ci([other]));
+    heal(2, ci([rate, other, rate]));
+    expect((await snapshotOf()).lastCiHealKey).toEqual([
+      'Clear-text logging|a.ts',
+      'Missing rate limiting|b.ts',
+    ]);
+  });
+
+  test('ignores heals whose source is not ci, heals without codeScanning, and unfinished heals', async () => {
+    heal(1, ci([rate]));
+    heal(2, { feedback: { source: 'review', text: 'x' }, codeScanning: [] });
+    heal(3, { feedback: { source: 'human', text: 'x' } });
+    heal(4, { feedback: { source: 'ci', text: 'CI failed' } });
+    heal(5, ci([other]), 'failed');
+    heal(6, ci([other]), 'queued');
+    expect((await snapshotOf()).lastCiHealKey).toEqual(['Missing rate limiting|b.ts']);
+  });
+
+  test('a review heal after the ci heal leaves its key standing', async () => {
+    heal(1, ci([rate]));
+    heal(2, { feedback: { source: 'review', text: 'x' } });
+    expect((await snapshotOf()).lastCiHealKey).toEqual(['Missing rate limiting|b.ts']);
+  });
+
+  test('ignores heals created before the latest applied retry_item ruling', async () => {
+    heal(1, ci([rate]));
+    const at = (m: number) => new Date(now.getTime() + m * 60_000);
+    setWorkItemState(w.db, itemId, 'parked', 'code scanning still flags', at(2));
+    syncParkBriefings(w.db, w.zone, at(2));
+    const b = listBriefings(w.db, { zoneId: 'main', state: 'open' }).find(
+      (x) => x.kind === 'parked',
+    );
+    const retry = b?.options.find((o) => o.effect === 'retry_item');
+    if (!b || !retry) throw new Error('no Retry option');
+    expect(ruleBriefing(w.db, b.id, retry.id, 'the alert is accepted', at(3)).ok).toBe(true);
+    // Ruled but not yet applied: the earlier heal still counts.
+    expect((await snapshotOf()).lastCiHealKey).toEqual(['Missing rate limiting|b.ts']);
+    const deps = { forges: () => w.forges, zone: () => w.zone };
+    expect(await applyPendingRulings(w.db, deps, 'main', at(4))).toBe(1);
+    expect(getWorkItem(w.db, itemId)?.state).toBe('pr_open');
+    expect((await snapshotOf()).lastCiHealKey).toBeNull();
+    heal(5, ci([other]));
+    expect((await snapshotOf()).lastCiHealKey).toEqual(['Clear-text logging|a.ts']);
+  });
+
+  test('unparseable input is skipped', async () => {
+    heal(1, ci([rate]));
+    insertDrop(
+      w.db,
+      {
+        id: 'heal-bad',
+        dropZoneId: 'main',
+        workItemId: itemId,
+        role: 'heal',
+        state: 'succeeded',
+        inputJson: '{not json',
+      },
+      new Date(now.getTime() + 2 * 60_000),
+    );
+    expect((await snapshotOf()).lastCiHealKey).toEqual(['Missing rate limiting|b.ts']);
   });
 });
