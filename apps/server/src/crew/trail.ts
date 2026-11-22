@@ -616,6 +616,28 @@ async function runOnce(db: Db, forges: ForgePair, op: Op, now: Date): Promise<bo
   }
 }
 
+/** Removes a claim's close outbox row unless it is done, so no pass sends it. */
+function dropClaimClose(db: Db, closeKey: string): void {
+  const close = getOutbox(db, closeKey);
+  if (close && close.state !== 'done') deleteOutbox(db, closeKey);
+}
+
+/**
+ * Whether a Close as done (`close_item`) ruling on the claim's item is recorded and neither
+ * applied nor failed (#607): its forge writes may still land on a later pass.
+ */
+function closeAsDonePending(db: Db, claim: DoneClaim): boolean {
+  return (
+    db
+      .prepare(
+        `SELECT 1 FROM rulings r JOIN briefings b ON b.id = r.briefing_id
+          WHERE r.zone_id = ? AND b.subject = ? AND r.choice_effect = 'close_item'
+            AND r.applied_at IS NULL AND r.apply_error IS NULL LIMIT 1`,
+      )
+      .get(claim.zoneId, `item:${claim.itemId}`) !== undefined
+  );
+}
+
 /**
  * Settles a claim whose closing comment was sent but which no longer stands (#591): its close
  * outbox row (not done) removed so no pass sends it, then, only while the issue is still open, one
@@ -632,8 +654,7 @@ async function retractClaim(
   now: Date,
 ): Promise<number> {
   const keys = claimKeys(zone.id, claim.id);
-  const close = getOutbox(db, keys.close);
-  if (close && close.state !== 'done') deleteOutbox(db, keys.close);
+  dropClaimClose(db, keys.close);
   let ran = 0;
   const n = getWorkItem(db, claim.itemId)?.issueNumber;
   const sent = getOutbox(db, keys.retract);
@@ -675,7 +696,8 @@ async function retractClaim(
  * briefing as `needs_command`. Verified, with `crew.closeDone`: a comment, then the issue closed as
  * completed, then the item `done` and its briefing withdrawn, each once by keys derived from the
  * claim (D3); a write not done leaves it `verifying` for the next pass, which checks again that it
- * stands before the close (#591): one no longer standing is retracted by `retractClaim`. Without `crew.closeDone`
+ * stands before the close (#591): one no longer standing is retracted by `retractClaim`, unless a
+ * Close as done on its item is still pending (#607): then it waits. Without `crew.closeDone`
  * it is `done` and the briefing names what verified it. Returns how many ops it ran.
  */
 export async function flushDoneClaims(
@@ -697,6 +719,12 @@ export async function flushDoneClaims(
       // changed briefing since then supersedes it, before any close is sent.
       const stale = claimStands(db, claim);
       if (stale) {
+        // Command's Close as done not applied yet (#607): no close of the crew, and no follow-up
+        // saying the issue stays open; the claim waits for the ruling to apply or give up.
+        if (closeAsDonePending(db, claim)) {
+          dropClaimClose(db, keys.close);
+          continue;
+        }
         ran += await retractClaim(db, forges, zone, claim, stale, now);
         continue;
       }
