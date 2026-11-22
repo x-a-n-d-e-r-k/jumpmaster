@@ -87,7 +87,7 @@ import { transcriptPruned } from './transcripts.js';
 import { registerAuthPages } from './ui/auth-pages.js';
 import { renderChatList, renderThread } from './ui/chat.js';
 import { registerConfirmPages } from './ui/confirm.js';
-import type { PendingLine } from './ui/floor.js';
+import type { FloorInputs, PendingLine } from './ui/floor.js';
 import { registerGithubPages } from './ui/github.js';
 import { registerGoalConfirmPages } from './ui/goal-confirm.js';
 import {
@@ -261,6 +261,25 @@ function stickLine(s: Stick, config: Config): StickLine {
     cannotRun: config.dropZones
       .map((z) => ({ zoneId: z.id, missing: missingFor(s, zoneRequirements(z, config)) }))
       .filter((c) => c.missing.length > 0),
+  };
+}
+
+/**
+ * What the floor's zone cards count, read from the database: shared by the floor and a project's
+ * Overview (#616), whose State sentence is its floor card's.
+ */
+function floorInputs(db: Db, config: Config, at: Date): FloorInputs {
+  const floor = floorBriefings(db, config.dropZones);
+  return {
+    zones: config.dropZones,
+    modes: Object.fromEntries(config.dropZones.map((z) => [z.id, getZoneMode(db, z.id, z.mode)])),
+    items: config.dropZones.flatMap((z) => listWorkItems(db, z.id)),
+    drops: listDrops(db, { states: ACTIVE_DROP_STATES, limit: FLOOR_DROP_LIMIT }),
+    ...floorMerges(db, at),
+    outbox: listOutbox(db, ['unknown', 'failed']),
+    briefings: floor.listed,
+    heldBriefings: floor.held,
+    sticks: listSticks(db).map((s) => stickLine(s, config)),
   };
 }
 
@@ -494,7 +513,13 @@ export function createApp(
       ...(deps.appTokens ? { appTokens: deps.appTokens } : {}),
     });
     // The zones page (Task 11): every zone, a page per zone, and the add page.
-    registerZonesPages(app, { db: deps.db, store: deps.config, now: deps.now });
+    const store = deps.config;
+    registerZonesPages(app, {
+      db: deps.db,
+      store,
+      now: deps.now,
+      floor: (at) => floorInputs(deps.db, store.current(), at),
+    });
   }
   // The pages that moved (issue #615): each old path answers 301/308 straight to its new one.
   registerRedirects(app);
@@ -597,8 +622,6 @@ export function createApp(
     const { db, now } = deps;
     const config = cfg(req);
     const at = now();
-    const items = config.dropZones.flatMap((z) => listWorkItems(db, z.id));
-    const floor = floorBriefings(db, config.dropZones);
     const pending = pendingLinesFor(req);
     const html = renderHome({
       setup: {
@@ -621,19 +644,11 @@ export function createApp(
       ...(deps.config instanceof ConfigStore
         ? { claudeTokenDays: claudeTokenDays(deps.config, at) }
         : {}),
-      zones: config.dropZones,
+      ...floorInputs(db, config, at),
       killed: isKilled(db),
-      modes: Object.fromEntries(config.dropZones.map((z) => [z.id, getZoneMode(db, z.id, z.mode)])),
-      items,
-      drops: listDrops(db, { states: ACTIVE_DROP_STATES, limit: FLOOR_DROP_LIMIT }),
       now: at,
       usage: usageView(db, config, at),
-      ...floorMerges(db, at),
-      outbox: listOutbox(db, ['unknown', 'failed']),
-      briefings: floor.listed,
-      heldBriefings: floor.held,
       pending,
-      sticks: listSticks(db).map((s) => stickLine(s, config)),
       crew: config.dropZones.map((z): CrewLine => {
         const last = db
           .prepare(
@@ -815,6 +830,8 @@ export function createApp(
       skippedCrewUnpromoted: lastSyncResult(zone.id)?.skippedCrewUnpromoted ?? [],
       doneByRuling: objectivesDone(db, zone.id),
       goalChanges: listGoalChanges(db, zone.id),
+      mode: getZoneMode(db, zone.id, zone.mode),
+      openBriefings: listBriefings(db, { zoneId: zone.id, state: 'open' }).length,
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });

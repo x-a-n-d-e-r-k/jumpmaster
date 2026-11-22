@@ -1592,7 +1592,7 @@ describe('project pages live under /projects (issue #615)', () => {
     await h.reconcile();
     return h;
   }
-  const PROJECT_PAGES = ['', '/github', '/goals', '/intake', '/issues/new', '/flags'];
+  const PROJECT_PAGES = ['', '/setup', '/github', '/goals', '/intake', '/issues/new', '/flags'];
 
   test.each(PROJECT_PAGES)(
     '/projects/<id>%s is 200 for a known zone and 404 for an unknown one',
@@ -1627,6 +1627,7 @@ describe('project pages live under /projects (issue #615)', () => {
       '/projects',
       '/projects/jm',
       '/projects/jm/goals',
+      '/projects/jm/setup',
       '/work',
       '/drops',
       '/doctor',
@@ -1653,6 +1654,7 @@ describe('project pages live under /projects (issue #615)', () => {
       '/projects/jm/intake',
       '/projects/jm/issues/new',
       '/projects/jm/flags',
+      '/projects/jm/setup',
       '/projects/ref/flags',
     ])
       expect(seen, href).toContain(href);

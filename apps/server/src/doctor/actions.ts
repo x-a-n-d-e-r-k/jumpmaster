@@ -71,7 +71,7 @@ function credentials(check: DoctorCheck, ctx: ActionCtx): Action {
 function zoneSection(section: string, words: string) {
   return (check: DoctorCheck, ctx: ActionCtx): Action | undefined =>
     ctx.pages.zones && ctx.zone
-      ? app(`Edit the ${words} of ${ctx.zone.id}`, `${zonePath(ctx.zone)}#${section}`)
+      ? app(`Edit the ${words} of ${ctx.zone.id}`, `${zonePath(ctx.zone)}/setup#${section}`)
       : docs(check);
 }
 

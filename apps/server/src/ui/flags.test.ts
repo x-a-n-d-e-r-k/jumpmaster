@@ -184,8 +184,8 @@ describe('the advanced settings page, /projects/:id/flags', () => {
     expect(heads[0]).toBe('Crew');
     expect(r.body).toContain('id="flag-search"');
     // Links both ways.
-    expect(r.body).toContain('<a href="/projects/jm#advanced">Edit the zone as JSON</a>');
-    expect((await w.get('/projects/jm')).body).toContain(
+    expect(r.body).toContain('<a href="/projects/jm/setup#advanced">Edit the zone as JSON</a>');
+    expect((await w.get('/projects/jm/setup')).body).toContain(
       'All settings, one per row: <a href="/projects/jm/flags">advanced settings</a>',
     );
   });
@@ -239,9 +239,9 @@ describe('the advanced settings page, /projects/:id/flags', () => {
     // elsewhere: the sentence and a link, no control.
     const gates = rowHtml(html, 'gates');
     expect(gates).toContain('Changed in the Stack section.');
-    expect(gates).toContain('href="/projects/jm#stack"');
+    expect(gates).toContain('href="/projects/jm/setup#stack"');
     expect(gates).not.toContain('data-path=');
-    expect(rowHtml(html, 'models')).toContain('href="/projects/jm#advanced"');
+    expect(rowHtml(html, 'models')).toContain('href="/projects/jm/setup#advanced"');
     expect(rowHtml(html, 'id')).toContain(
       'Fixed once the zone exists: remove the zone and add it again to change it.',
     );

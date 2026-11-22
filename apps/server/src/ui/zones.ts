@@ -8,22 +8,25 @@ import type { Db } from '../db/open.js';
 import { getZoneMode, type ZoneWaits, zoneStopping, zoneWaits } from '../db/repo.js';
 import { egressSeen } from '../doctor/checks.js';
 import { latestDoctorRun } from '../doctor/run.js';
+import { getGoals, objectivesDone } from '../goals.js';
 import { BASE_EGRESS } from '../payloads.js';
 import { PRESET_EGRESS } from '../presets.js';
 import { FORM_SCRIPT, zoneToForm } from '../zones/form.js';
 import { renderFlags } from './flags.js';
-import { listHref } from './floor.js';
+import { type FloorInputs, floorCounts, listHref, stateSentence } from './floor.js';
 import {
-  askButton,
+  badge,
   escapeHtml,
   MODE_LABELS,
   PROJECTS_HREF,
   page,
+  projectHeader,
   projectHref,
-  zoneBriefingsHref,
+  workItemHref,
   zoneHref,
 } from './pages.js';
 import { getWizard, projectBody } from './setup.js';
+import { relativeTime } from './time.js';
 import { zoneName, zoneNameText } from './zone-name.js';
 
 /**
@@ -252,7 +255,114 @@ function backlogSection(id: string, repo: string): string {
 </script>`;
 }
 
-function zonePage(store: ConfigStore, db: Db, id: string, now: Date): string | undefined {
+/** How many work items the Overview's Recent work lists. */
+const RECENT_WORK = 10;
+
+/** Doctor statuses, worst first: the Overview's Health names the worst of a project's checks. */
+const DOCTOR_WORST_FIRST = ['fail', 'warn', 'info', 'pass', 'skip'] as const;
+
+type RecentItem = {
+  id: number;
+  dropZoneId: string;
+  issueNumber: number;
+  title: string;
+  state: string;
+  updatedAt: string;
+};
+
+/**
+ * A project's Overview (#616): its state in its floor card's words, what needs you, its recent
+ * work, its current objective and its health. Everything comes from the database and the config:
+ * no forge call. Every value is escaped.
+ */
+function overviewPage(
+  store: ConfigStore,
+  db: Db,
+  id: string,
+  now: Date,
+  floor: FloorInputs | undefined,
+): string | undefined {
+  const all = store.current().dropZones;
+  const zone = all.find((z) => z.id === id);
+  if (!zone) return undefined;
+  const mode = getZoneMode(db, id, zone.mode);
+  const briefings = listBriefings(db, { zoneId: id, state: 'open' });
+  const run = latestDoctorRun(db);
+  const checks = run ? run.checks.filter((c) => c.zoneId === id) : [];
+  const failing = checks.filter((c) => c.status === 'fail');
+
+  const card = floor ? floorCounts(floor, now).zones.find((z) => z.zoneId === id) : undefined;
+  const state = `<section id="state"><h3>State</h3><p>${card ? stateSentence(card) : escapeHtml(MODE_LABELS[mode] ?? mode)}</p></section>`;
+
+  const needs = [
+    ...briefings.map(
+      (b) =>
+        `<li><a href="/briefings/${encodeURIComponent(String(b.id))}">${escapeHtml(b.decision)}</a></li>`,
+    ),
+    ...failing.map(
+      (c) => `<li><a href="/doctor">${escapeHtml(c.id)}</a>: ${escapeHtml(c.summary)}</li>`,
+    ),
+  ];
+  const needsYou = `<section id="needs-you"><h3>Needs you</h3>${
+    needs.length ? `<ul>${needs.join('')}</ul>` : '<p class="empty">Nothing needs you.</p>'
+  }</section>`;
+
+  const recent = db
+    .prepare(
+      `SELECT id, drop_zone_id AS dropZoneId, issue_number AS issueNumber, title, state,
+         updated_at AS updatedAt FROM work_items WHERE drop_zone_id = ?
+       ORDER BY updated_at DESC, id DESC LIMIT ?`,
+    )
+    .all(id, RECENT_WORK) as RecentItem[];
+  const roles = db.prepare(
+    'SELECT role FROM drops WHERE work_item_id = ? ORDER BY created_at, rowid',
+  );
+  const rows = recent
+    .map((i) => {
+      const chain = (roles.all(i.id) as { role: string }[]).map((r) => r.role).join(' → ');
+      return `<li class="recent-item"><a href="${escapeHtml(workItemHref(i))}">#${escapeHtml(i.issueNumber)} ${escapeHtml(i.title)}</a> ${badge(i.state)} <span class="chain">${chain ? escapeHtml(chain) : 'no attempts yet'}</span> ${relativeTime(i.updatedAt, now)}</li>`;
+    })
+    .join('');
+  const work = `<section id="recent-work"><h3>Recent work</h3>${
+    rows ? `<ul>${rows}</ul>` : '<p class="empty">No work yet.</p>'
+  }</section>`;
+
+  const goals = getGoals(db, id);
+  let objective = '';
+  if (goals?.parse.ok && goals.parse.objectives.length > 0) {
+    const doneKeys = new Set(objectivesDone(db, id).keys());
+    const objectives = goals.parse.objectives;
+    const done = objectives.filter((o) => o.done || doneKeys.has(o.key)).length;
+    const current = objectives.find((o) => !o.done && !doneKeys.has(o.key));
+    objective = `<section id="objective"><h3>Objective</h3><p><a href="${escapeHtml(projectHref(id, 'goals'))}">${
+      current ? escapeHtml(current.title) : 'Every objective is done'
+    }</a>: ${done} of ${objectives.length} done</p></section>`;
+  }
+
+  const worst = run
+    ? (DOCTOR_WORST_FIRST.find((st) => checks.some((c) => c.status === st)) ?? 'no checks')
+    : 'not run yet';
+  const health = `<section id="health"><h3>Health</h3><ul><li>Doctor: <a href="/doctor">${escapeHtml(worst)}</a></li><li>Egress: ${escapeHtml(zone.egress?.mode ?? 'off')}</li><li>Accounts: ${escapeHtml(zone.identity)}</li></ul></section>`;
+
+  return page(
+    projectHeader({
+      zone,
+      zones: all,
+      mode,
+      openBriefings: briefings.length,
+      current: 'overview',
+    }) +
+      state +
+      needsYou +
+      work +
+      objective +
+      health,
+    { title: zoneNameText(zone, all) },
+  );
+}
+
+/** A project's Setup tab: the settings forms and the Backlog (the project page before #616). */
+function setupPage(store: ConfigStore, db: Db, id: string, now: Date): string | undefined {
   const doc = store.document();
   const zones = (Array.isArray(doc.dropZones) ? doc.dropZones : []) as Record<string, unknown>[];
   const index = zones.findIndex((z) => z.id === id);
@@ -363,12 +473,10 @@ ${field('overrideApprovers', 'Override approvers (logins)', textarea(f, 'overrid
     `<p>Zone id: <code>${escapeHtml(id)}</code> <small>(the zone's key in URLs, the API and <code>jumpmaster ctl</code>)</small></p><p>The zone as JSON: models, budgets, crew and every other setting. It is checked as the sections are.</p><p>All settings, one per row: <a href="${projectHref(id, 'flags')}">advanced settings</a></p><div id="goals"></div><div id="crew"></div><textarea name="json" rows="24" cols="90">${escapeHtml(JSON.stringify(raw, null, 2))}</textarea><span class="issue" data-issues="advanced"></span>`,
     readOnly,
   );
-  const base = zoneHref(id);
+  const base = projectHref(id, 'setup');
   const briefings = listBriefings(db, { zoneId: id, state: 'open' }).length;
   return page(
-    `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${base}/github">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${briefings} open)</a> · <a href="${base}/goals">Goals</a> · <a href="${base}/issues/new">New issue</a></p>
-<h2>${zoneName(resolved, all)}</h2><p>${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>
-${askButton({ kind: 'zone', zoneId: id, ref: id })}
+    `${projectHeader({ zone: resolved, zones: all, mode, openBriefings: briefings, current: 'setup' })}
 ${stopping ? `<p><strong>${escapeHtml(stopping)}</strong> <small>Resume or Pause from the Zones list withdraws it.</small></p>` : ''}
 ${readOnly || stopping ? '' : `<p>${stopButton(id, zoneNameText(resolved, all))}<small>No new work, then removed once drained; open pull requests and history stay.</small> <span id="stop-out" role="status"></span></p>`}
 ${readOnly ? ADOPT_BANNER : ''}
@@ -455,7 +563,13 @@ if (adopt) adopt.addEventListener('click', async () => {
 
 export function registerZonesPages(
   app: FastifyInstance,
-  deps: { db: Db; store: ConfigStore; now(): Date },
+  deps: {
+    db: Db;
+    store: ConfigStore;
+    now(): Date;
+    /** The floor's inputs, for the Overview's State sentence (its floor card's words). */
+    floor?: (at: Date) => FloorInputs;
+  },
 ): void {
   const { db, store, now } = deps;
   app.get(PROJECTS_HREF, async (req, reply) => html(req, reply, listPage(store, db)));
@@ -478,7 +592,13 @@ export function registerZonesPages(
     );
   });
   app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id`, async (req, reply) => {
-    const body = zonePage(store, db, req.params.id, now());
+    const at = now();
+    const body = overviewPage(store, db, req.params.id, at, deps.floor?.(at));
+    if (!body) return reply.code(404).type('text/plain').send('no such zone');
+    return html(req, reply, body);
+  });
+  app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/setup`, async (req, reply) => {
+    const body = setupPage(store, db, req.params.id, now());
     if (!body) return reply.code(404).type('text/plain').send('no such zone');
     return html(req, reply, body);
   });

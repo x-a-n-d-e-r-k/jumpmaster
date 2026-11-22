@@ -75,7 +75,7 @@ describe('where each fail leads', () => {
     expect(actionFor(egress, { zone, pages: all })).toEqual({
       kind: 'app',
       label: 'Edit the egress of web',
-      href: '/projects/web#egress',
+      href: '/projects/web/setup#egress',
     });
     expect(actionFor(egress, { zone, pages: PAGES_M45A })).toMatchObject({
       kind: 'docs',
@@ -86,7 +86,7 @@ describe('where each fail leads', () => {
     const odd = makeZone({ id: 'a b<c', repo: 'octo/x' });
     expect(actionFor(fail('zone.preset'), { zone: odd, pages: all })?.href).toBe(
       // The zone page's Stack section holds the preset (Task 11).
-      '/projects/a%20b%3Cc#stack',
+      '/projects/a%20b%3Cc/setup#stack',
     );
   });
 

@@ -66,7 +66,7 @@ function elsewhereLink(f: FlagsForm, r: FlagRow): string {
   const base = projectHref(f.target.zone?.id ?? '');
   const named = /(\w+) section/.exec(sentence)?.[1]?.toLowerCase() ?? 'advanced';
   const words = named === 'advanced' ? 'the JSON editor' : `the ${named} section`;
-  return ` <a href="${base}#${escapeHtml(named)}">${escapeHtml(words)}</a>`;
+  return ` <a href="${base}/setup#${escapeHtml(named)}">${escapeHtml(words)}</a>`;
 }
 
 /**
@@ -285,7 +285,7 @@ export function renderFlags(
     forbiddenNote: o.forbiddenNote,
   });
   return page(
-    `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${base}">${zoneName(resolved, all)}</a> · <a href="${base}#advanced">Edit the zone as JSON</a></p>
+    `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${base}">${zoneName(resolved, all)}</a> · <a href="${base}/setup#advanced">Edit the zone as JSON</a></p>
 <h2>Advanced settings · ${zoneName(resolved, all)}</h2>
 <p>Every setting for this zone. Changes apply at the next pass; one that loosens a safeguard asks you to confirm first.</p>
 ${savedNote(o.saved)}${readOnly ? o.adoptBanner : ''}

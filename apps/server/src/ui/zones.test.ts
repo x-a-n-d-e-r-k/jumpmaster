@@ -155,7 +155,7 @@ describe('the zones page', () => {
 
   test('the zone page, the goals page and a briefing page each carry Ask about this with their focus', async () => {
     const w = await world();
-    const body = (await w.get('/projects/main')).body;
+    const body = (await w.get('/projects/main/setup')).body;
     const at = body.indexOf('<form class="ask"');
     expect(at).toBeGreaterThanOrEqual(0);
     const form = body.slice(at, body.indexOf('</form>', at));
@@ -166,24 +166,22 @@ describe('the zones page', () => {
     expect(body).toContain("jmFetch('/api/chat/threads'");
   });
 
-  test('the zone page links its goals page after Briefings (#365)', async () => {
+  test('the setup page links its goals page from the project tabs (#365, #616)', async () => {
     const w = await world();
-    const body = (await w.get('/projects/main')).body;
-    expect(body).toContain('href="/projects/main/goals"');
-    expect(body).toMatch(
-      /Briefings \(\d+ open\)<\/a> · <a href="\/projects\/main\/goals">Goals<\/a>/,
-    );
+    const body = (await w.get('/projects/main/setup')).body;
+    expect(body).toContain('<a href="/projects/main/goals">Goals</a>');
+    expect(body).toMatch(/Briefings \(\d+ open\)<\/a>/);
   });
 
   test('the zone page header links its New issue page (#500)', async () => {
     const w = await world();
-    const body = (await w.get('/projects/main')).body;
+    const body = (await w.get('/projects/main/setup')).body;
     expect(body).toContain('<a href="/projects/main/issues/new">New issue</a>');
   });
 
   test('each section of the zone page is filled from the current config and posts a patch with expectRevision', async () => {
     const w = await world();
-    const r = await w.get('/projects/main');
+    const r = await w.get('/projects/main/setup');
     expect(r.statusCode).toBe(200);
     for (const id of ['project', 'stack', 'egress', 'merging', 'advanced']) section(r.body, id);
     expect(section(r.body, 'project')).toContain('name="readyLabel" value="drop-ready"');
@@ -226,13 +224,13 @@ describe('the zones page', () => {
         },
         t0,
       );
-    const page = (await w.get('/projects/main')).body;
+    const page = (await w.get('/projects/main/setup')).body;
     expect(page).toContain('<a href="/briefings?zone=main">Briefings (2 open)</a>');
   });
 
   test('a schema issue is rendered beside the field its path names', async () => {
     const w = await world();
-    const page = (await w.get('/projects/main')).body;
+    const page = (await w.get('/projects/main/setup')).body;
     // Every field the issue mapping names has a place on the page for its issue.
     for (const f of ['readyLabel', 'gates', 'ciDeadlineMinutes', 'egress.allow', 'advanced'])
       expect(page, f).toContain(`data-issues="${f}"`);
@@ -248,20 +246,21 @@ describe('the zones page', () => {
 
   test('a guarded change from a session goes to the confirmation page and succeeds with the token', async () => {
     const w = await world();
-    const page = (await w.get('/projects/main')).body;
+    const page = (await w.get('/projects/main/setup')).body;
     expect(page).toContain('j.needsConfirmation');
-    expect(page).toContain('returnTo: "/projects/main#" + section');
+    expect(page).toContain('returnTo: "/projects/main/setup#" + section');
+    expect(page).toContain('cancelTo: "/projects/main/setup"');
     const patch = { dropZones: [{ id: 'main', ciRequired: false }] };
     const s = await w.api('PATCH', '/api/control/config', {
       patch,
       expectRevision: w.store.revision(),
-      returnTo: '/projects/main#merging',
-      cancelTo: '/projects/main',
+      returnTo: '/projects/main/setup#merging',
+      cancelTo: '/projects/main/setup',
     });
     expect(s.statusCode).toBe(409);
     const confirm = await w.get(s.json().confirm);
     expect(confirm.body).toContain('Agent PRs in main will merge without CI');
-    expect(confirm.body).toContain('<a href="/projects/main">Cancel</a>');
+    expect(confirm.body).toContain('<a href="/projects/main/setup">Cancel</a>');
     const t = await w.api(
       'PATCH',
       '/api/control/config',
@@ -277,7 +276,7 @@ describe('the zones page', () => {
 
   test('the image and the repo are read-only on the page with their notes', async () => {
     const w = await world();
-    const img = (await w.get('/projects/img')).body;
+    const img = (await w.get('/projects/img/setup')).body;
     expect(section(img, 'stack')).toContain(`ghcr.io/x/trooper@sha256:${'c'.repeat(64)}`);
     expect(section(img, 'stack')).not.toContain('name="image"');
     expect(section(img, 'stack')).toContain(
@@ -296,7 +295,7 @@ describe('the zones page', () => {
 
   test('in file mode the zone page is read-only and shows the adopt banner', async () => {
     const w = await world({ file: true });
-    const r = await w.get('/projects/main');
+    const r = await w.get('/projects/main/setup');
     expect(r.statusCode).toBe(200);
     expect(r.body).toContain('Your config file holds these zones');
     expect(r.body).toContain("'/api/control/config/adopt'");
@@ -358,7 +357,7 @@ describe('the zones page', () => {
         )
         .run(drop, t0.toISOString(), JSON.stringify({ host, decision: 'allowed', count: 2 }));
     }
-    const egress = section((await w.get('/projects/main')).body, 'egress');
+    const egress = section((await w.get('/projects/main/setup')).body, 'egress');
     expect(egress).toContain('Observed in the last 14 days');
     expect(egress).toMatch(
       /new\.example\.com[\s\S]*?href="\/drops\/d1"[\s\S]*?not in this zone&#39;s lists/,
@@ -420,7 +419,7 @@ describe('the zones page', () => {
   test('the observed table has Host, Decision, Connections, Drops, Listed and Adopt columns', async () => {
     const w = await world();
     seedEgress(w.db, [{ host: 'new.example.com', count: 4 }], 2);
-    const egress = section((await w.get('/projects/main')).body, 'egress');
+    const egress = section((await w.get('/projects/main/setup')).body, 'egress');
     expect(egress).toContain(
       '<tr><th>Host</th><th>Decision</th><th>Connections</th><th>Drops</th><th>Listed</th><th>Adopt</th></tr>',
     );
@@ -432,7 +431,10 @@ describe('the zones page', () => {
   test('a host with 25 drops shows the count and links the newest 20, then "and 5 more"', async () => {
     const w = await world();
     const ids = seedEgress(w.db, [{ host: 'new.example.com' }], 25);
-    const row = rowOf(section((await w.get('/projects/main')).body, 'egress'), 'new.example.com');
+    const row = rowOf(
+      section((await w.get('/projects/main/setup')).body, 'egress'),
+      'new.example.com',
+    );
     expect(row).toMatch(/<td>25 <details><summary>show 25<\/summary>/);
     const links = dropLinks(row);
     expect(links).toHaveLength(20);
@@ -447,7 +449,10 @@ describe('the zones page', () => {
   test('"and M more" opens a drops list that includes the doctor drops it counts', async () => {
     const w = await world();
     const ids = seedEgress(w.db, [{ host: 'new.example.com' }], 25);
-    const row = rowOf(section((await w.get('/projects/main')).body, 'egress'), 'new.example.com');
+    const row = rowOf(
+      section((await w.get('/projects/main/setup')).body, 'egress'),
+      'new.example.com',
+    );
     const href = /<a href="(\/drops\?[^"]+)">and 5 more<\/a>/.exec(row)?.[1];
     expect(href).toBeDefined();
     const list = (await w.get(href!.replaceAll('&amp;', '&'))).body;
@@ -457,7 +462,10 @@ describe('the zones page', () => {
   test('a host with 3 drops links all three and no "more" line', async () => {
     const w = await world();
     const ids = seedEgress(w.db, [{ host: 'new.example.com' }], 3);
-    const row = rowOf(section((await w.get('/projects/main')).body, 'egress'), 'new.example.com');
+    const row = rowOf(
+      section((await w.get('/projects/main/setup')).body, 'egress'),
+      'new.example.com',
+    );
     expect(row).toContain('<summary>show 3</summary>');
     expect(dropLinks(row)).toHaveLength(3);
     for (const id of ids) expect(row).toContain(`href="/drops/${id}"`);
@@ -469,7 +477,7 @@ describe('the zones page', () => {
     const w = await world();
     seedEgress(w.db, [{ host: 'registry.npmjs.org', count: 19510 }], 1);
     const row = rowOf(
-      section((await w.get('/projects/main')).body, 'egress'),
+      section((await w.get('/projects/main/setup')).body, 'egress'),
       'registry.npmjs.org',
     );
     expect(row).toContain('<td>19,510</td>');
@@ -479,7 +487,7 @@ describe('the zones page', () => {
     const w = await world();
     const hosts = Array.from({ length: 50 }, (_, i) => ({ host: `h${i}.example.com` }));
     seedEgress(w.db, hosts, 300);
-    const egress = section((await w.get('/projects/main')).body, 'egress');
+    const egress = section((await w.get('/projects/main/setup')).body, 'egress');
     const links = dropLinks(egress);
     expect(links.length).toBeGreaterThan(0);
     expect(links.length).toBeLessThanOrEqual(50 * 20);
@@ -489,7 +497,7 @@ describe('the zones page', () => {
   test('adopt checkboxes render for an unlisted host and not for a listed one', async () => {
     const w = await world();
     seedEgress(w.db, [{ host: 'new.example.com' }, { host: 'registry.npmjs.org' }], 2);
-    const egress = section((await w.get('/projects/main')).body, 'egress');
+    const egress = section((await w.get('/projects/main/setup')).body, 'egress');
     expect(rowOf(egress, 'new.example.com')).toContain(
       '<input type="checkbox" name="adopt" value="new.example.com">',
     );
@@ -529,7 +537,7 @@ describe('the zones page', () => {
           `INSERT INTO drop_events (drop_id, seq, ts, kind, data_json) VALUES ('j1', ?, ?, 'egress', ?)`,
         )
         .run(seq, t0.toISOString(), JSON.stringify({ host, decision: 'allowed', count: 1 }));
-    const egress = section((await w.get('/projects/main')).body, 'egress');
+    const egress = section((await w.get('/projects/main/setup')).body, 'egress');
     expect(egress).toContain('name="adopt" value="registry.npmjs.org"');
     expect(egress).toMatch(/repo\.maven\.apache\.org[\s\S]*?listed by the jvm preset/);
     expect(egress).not.toContain('name="adopt" value="repo.maven.apache.org"');
@@ -559,7 +567,7 @@ describe('the zones page', () => {
   });
 
   test('the zone page offers Stop managing near its top, and none at the bottom any more', async () => {
-    const page = (await (await world()).get('/projects/main')).body;
+    const page = (await (await world()).get('/projects/main/setup')).body;
     const stop = page.indexOf('<button class="stop" data-zone="main"');
     expect(stop).toBeGreaterThanOrEqual(0);
     expect(stop).toBeLessThan(page.indexOf('<form id="project"'));
@@ -597,7 +605,7 @@ describe('the zones page', () => {
     // Already stopping: no second Stop, and no mode button but Resume (which withdraws it).
     expect(row).not.toContain('class="stop"');
     expect(row).toContain('data-mode="active"');
-    expect((await w.get('/projects/main')).body).toContain(waiting);
+    expect((await w.get('/projects/main/setup')).body).toContain(waiting);
     // Not removed while the drop runs; the already-drained zone goes at once.
     expect(w.store.current().dropZones.map((z) => z.id)).toEqual(['main', 'img']);
     expect((await w.api('DELETE', '/api/control/zones/img')).json()).toMatchObject({
@@ -608,7 +616,7 @@ describe('the zones page', () => {
   test('a read-only (file-mode) config shows no Stop managing control', async () => {
     const w = await world({ file: true });
     expect((await w.get('/projects')).body).not.toContain('class="stop"');
-    expect((await w.get('/projects/main')).body).not.toContain('class="stop"');
+    expect((await w.get('/projects/main/setup')).body).not.toContain('class="stop"');
   });
 
   test('pause, resume and observe from the zones page keep the existing guards', async () => {
@@ -648,7 +656,7 @@ describe('the zones page', () => {
     const pages = pagesOf(w.app);
     expect(pages.zones).toBe(true);
     const zone = w.store.current().dropZones[0] as never;
-    const page = (await w.get('/projects/main')).body;
+    const page = (await w.get('/projects/main/setup')).body;
     for (const [id, anchor] of [
       ['zone.preset', 'stack'],
       ['zone.services', 'stack'],
@@ -658,7 +666,7 @@ describe('the zones page', () => {
       ['zone.crew-cap', 'advanced'],
     ] as const) {
       const check: DoctorCheck = { id, zoneId: 'main', status: 'fail', summary: 'x' };
-      expect(actionFor(check, { zone, pages })?.href, id).toBe(`/projects/main#${anchor}`);
+      expect(actionFor(check, { zone, pages })?.href, id).toBe(`/projects/main/setup#${anchor}`);
       expect(page, anchor).toContain(`id="${anchor}"`);
     }
     expect(
@@ -687,7 +695,7 @@ describe('the zones page', () => {
       },
       true,
     );
-    const r = (await w.get('/projects/main')).body;
+    const r = (await w.get('/projects/main/setup')).body;
     expect(r).not.toContain('<script>alert(1)</script>');
     expect(r).toContain('&quot;&gt;&lt;script&gt;');
     expect(ORIGIN).toBeDefined();
@@ -708,9 +716,9 @@ describe('zones are named by their repository (#99)', () => {
   });
 
   test('a zone page heads with the repository and keeps the zone id on a detail line', async () => {
-    const page = (await (await world()).get('/projects/main')).body;
+    const page = (await (await world()).get('/projects/main/setup')).body;
     expect(page).toContain('<title>Jumpmaster: octo/main</title>');
-    expect(page).toContain('<h2>octo/main</h2>');
+    expect(page).toContain('<h2>octo/main <span class="badge ok">active</span></h2>');
     expect(page).not.toContain('<h2>Zone main</h2>');
     expect(section(page, 'advanced')).toContain('Zone id: <code>main</code>');
   });
@@ -726,7 +734,7 @@ const backlogScript = (html: string): string => {
 describe('the Backlog section (#346)', () => {
   test('the zone page has a Backlog section that loads from the backlog route', async () => {
     const w = await world();
-    const r = await w.get('/projects/main');
+    const r = await w.get('/projects/main/setup');
     expect(r.statusCode).toBe(200);
     expect(r.body).toContain('<section id="backlog">');
     expect(r.body).toContain('id="backlog-rows"');
@@ -743,7 +751,7 @@ describe('the Backlog section (#346)', () => {
 
   test('in file mode the Backlog section still shows', async () => {
     const w = await world({ file: true });
-    const r = await w.get('/projects/main');
+    const r = await w.get('/projects/main/setup');
     expect(r.statusCode).toBe(200);
     expect(r.body).toContain('<section id="backlog">');
     expect(backlogScript(r.body)).toContain("'Work on it'");
@@ -751,7 +759,7 @@ describe('the Backlog section (#346)', () => {
 
   test('the script escapes issue titles', async () => {
     const w = await world();
-    const script = backlogScript((await w.get('/projects/main')).body);
+    const script = backlogScript((await w.get('/projects/main/setup')).body);
     expect(script).toContain('textContent');
     expect(script.replaceAll(' ', '')).not.toContain('innerHTML=');
   });
@@ -776,8 +784,8 @@ const identityScript = (html: string): string => {
 describe('the starter-mode warning (#494)', () => {
   test('a two-bot zone hides it; a starter zone shows it', async () => {
     const w = await world();
-    expect(isHidden(starterWarning((await w.get('/projects/main')).body))).toBe(true);
-    const img = starterWarning((await w.get('/projects/img')).body);
+    expect(isHidden(starterWarning((await w.get('/projects/main/setup')).body))).toBe(true);
+    const img = starterWarning((await w.get('/projects/img/setup')).body);
     expect(img).toBeDefined();
     expect(isHidden(img)).toBe(false);
     expect(img).toContain('<strong>Starter mode:</strong> the author token can merge any green PR');
@@ -785,30 +793,32 @@ describe('the starter-mode warning (#494)', () => {
 
   test('the theme lets `hidden` win over `.warn{display:block}`', async () => {
     const w = await world();
-    expect((await w.get('/projects/main')).body).toContain('[hidden]{display:none!important}');
+    expect((await w.get('/projects/main/setup')).body).toContain(
+      '[hidden]{display:none!important}',
+    );
   });
 
   test('the label is never doubled, for either identity', async () => {
     const w = await world();
     for (const id of ['main', 'img']) {
-      const merging = section((await w.get(`/projects/${id}`)).body, 'merging');
+      const merging = section((await w.get(`/projects/${id}/setup`)).body, 'merging');
       expect(merging).not.toMatch(/starter mode:(\s|<\/strong>)*starter mode/i);
-      const p = starterWarning((await w.get(`/projects/${id}`)).body) ?? '';
+      const p = starterWarning((await w.get(`/projects/${id}/setup`)).body) ?? '';
       expect(p.replace(/<[^>]+>/g, '')).not.toMatch(/starter mode:\s*starter mode/i);
     }
   });
 
   test('a read-only page follows the same rule', async () => {
     const w = await world({ file: true });
-    expect(isHidden(starterWarning((await w.get('/projects/main')).body))).toBe(true);
-    const img = starterWarning((await w.get('/projects/img')).body);
+    expect(isHidden(starterWarning((await w.get('/projects/main/setup')).body))).toBe(true);
+    const img = starterWarning((await w.get('/projects/img/setup')).body);
     expect(img).toBeDefined();
     expect(isHidden(img)).toBe(false);
   });
 
   test('the page script toggles it as the Accounts select changes, with no fetch', async () => {
     const w = await world();
-    const script = identityScript((await w.get('/projects/main')).body);
+    const script = identityScript((await w.get('/projects/main/setup')).body);
     const listeners: Record<string, (() => void)[]> = {};
     const select = {
       value: 'two-bot',
@@ -842,5 +852,201 @@ describe('the starter-mode warning (#494)', () => {
     change('two-bot');
     expect(warning.hidden).toBe(true);
     expect(fetched).toBe(0);
+  });
+});
+
+/** The project tab bar's links, as `[label, href, current]`. */
+const tabsOf = (html: string): [string, string, boolean][] => {
+  const at = html.indexOf('<nav class="settings-tabs project-tabs"');
+  expect(at).toBeGreaterThanOrEqual(0);
+  const nav = html.slice(at, html.indexOf('</nav>', at));
+  return [...nav.matchAll(/<a href="([^"]*)"( aria-current="page")?>([^<]*)<\/a>/g)].map((m) => [
+    m[3] ?? '',
+    m[1] ?? '',
+    m[2] !== undefined,
+  ]);
+};
+
+/** The HTML of the Overview section with `id`, or undefined when absent. */
+const block = (html: string, id: string): string | undefined => {
+  const at = html.indexOf(`<section id="${id}">`);
+  return at === -1 ? undefined : html.slice(at, html.indexOf('</section>', at));
+};
+
+const seedItem = (db: ReturnType<typeof openDb>, n: number, minutes: number, title = `Item ${n}`) =>
+  upsertWorkItem(
+    db,
+    {
+      dropZoneId: 'main',
+      issueNumber: n,
+      title,
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    },
+    new Date(t0.getTime() - minutes * 60_000),
+  );
+
+const seedGoals = (db: ReturnType<typeof openDb>, done: boolean[]) =>
+  db
+    .prepare(
+      "INSERT INTO goals (zone_id, parser_version, parse_json, read_at) VALUES ('main', 1, ?, ?)",
+    )
+    .run(
+      JSON.stringify({
+        ok: true,
+        lighthouse: 'l',
+        sections: {},
+        objectives: done.map((d, i) => ({
+          key: `o${i}`,
+          title: `Objective ${i}`,
+          done: d,
+          body: '',
+        })),
+      }),
+      t0.toISOString(),
+    );
+
+describe('a project: tabs, header and Overview (#616)', () => {
+  test('the tab bar has five tabs: Overview current on the project page, Setup on /setup', async () => {
+    const w = await world();
+    const overview = tabsOf((await w.get('/projects/main')).body);
+    expect(overview).toEqual([
+      ['Overview', '/projects/main', true],
+      ['Work', '/work?zone=main', false],
+      ['Goals', '/projects/main/goals', false],
+      ['Setup', '/projects/main/setup', false],
+      ['Log', '/observations?zone=main', false],
+    ]);
+    const setup = tabsOf((await w.get('/projects/main/setup')).body);
+    expect(setup.filter(([, , c]) => c).map(([l]) => l)).toEqual(['Setup']);
+    expect(setup).toHaveLength(5);
+    const goals = tabsOf((await w.get('/projects/main/goals')).body);
+    expect(goals.filter(([, , c]) => c).map(([l]) => l)).toEqual(['Goals']);
+  });
+
+  test('every project page heads with the repository, mode badge, Ask, Pause or Resume and New issue', async () => {
+    const w = await world();
+    for (const url of ['/projects/main', '/projects/main/setup', '/projects/main/goals']) {
+      const body = (await w.get(url)).body;
+      expect(body, url).toContain('<h2>octo/main <span class="badge ok">active</span></h2>');
+      expect(body, url).toContain('data-focus-zone="main"');
+      expect(body, url).toContain('data-mode="paused">Pause</button>');
+      expect(body, url).toContain('<a href="/projects/main/issues/new">New issue</a>');
+    }
+    expect((await w.get('/projects/main')).body).toContain('data-focus-kind="zone"');
+    setZoneMode(w.db, 'main', 'paused', t0);
+    const paused = (await w.get('/projects/main')).body;
+    expect(paused).toContain('<span class="badge warn-b">paused</span>');
+    expect(paused).toContain('data-mode="active">Resume</button>');
+  });
+
+  test('Setup holds the forms and the Backlog; the Overview holds none of them', async () => {
+    const w = await world();
+    const setup = (await w.get('/projects/main/setup')).body;
+    for (const id of ['project', 'stack', 'egress', 'merging', 'advanced']) section(setup, id);
+    expect(setup).toContain('<section id="backlog">');
+    const overview = (await w.get('/projects/main')).body;
+    expect(overview).not.toContain('<form id="egress"');
+    expect(overview).not.toContain('<form id="merging"');
+    expect(overview).not.toContain('<section id="backlog">');
+    expect(overview).not.toContain('const REVISION');
+  });
+
+  test('the Overview shows its briefings, failing check, 10 newest items and the objective', async () => {
+    const w = await world();
+    for (const subject of ['crew:a', 'crew:b'])
+      raiseBriefing(
+        w.db,
+        {
+          zoneId: 'main',
+          kind: 'crew',
+          subject,
+          decision: `Decide ${subject}`,
+          why: 'w',
+          options: [{ id: 'ok', label: 'OK', effect: 'none' }],
+          source: 'crew',
+        },
+        t0,
+      );
+    w.db
+      .prepare(
+        "INSERT INTO doctor_runs (started_at, finished_at, results_json) VALUES ('a', 'b', ?)",
+      )
+      .run(
+        JSON.stringify([
+          { id: 'zone.ok', zoneId: 'main', status: 'pass', summary: 'fine' },
+          { id: 'zone.labels', zoneId: 'main', status: 'fail', summary: 'labels missing' },
+          { id: 'zone.other', zoneId: 'img', status: 'fail', summary: 'not this project' },
+        ]),
+      );
+    // Item n was updated n minutes ago: 1 is the newest, 12 the oldest.
+    for (let n = 1; n <= 12; n++) seedItem(w.db, n, n);
+    const one = w.db
+      .prepare("SELECT id FROM work_items WHERE drop_zone_id = 'main' AND issue_number = 1")
+      .get() as { id: number };
+    for (const [i, role] of (['implement', 'review'] as const).entries())
+      insertDrop(w.db, {
+        id: `d${i}`,
+        dropZoneId: 'main',
+        workItemId: one.id,
+        role,
+        state: 'succeeded',
+        createdAt: new Date(t0.getTime() - (10 - i) * 1000).toISOString(),
+      });
+    seedGoals(w.db, [true, true, true, true, true, true, false]);
+
+    const body = (await w.get('/projects/main')).body;
+    const needs = block(body, 'needs-you') ?? '';
+    expect(needs).toMatch(/<a href="\/briefings\/\d+">Decide crew:a<\/a>/);
+    expect(needs).toMatch(/<a href="\/briefings\/\d+">Decide crew:b<\/a>/);
+    expect(needs).toContain('<a href="/doctor">zone.labels</a>: labels missing');
+    expect(needs).not.toContain('not this project');
+    expect(needs).not.toContain('Nothing needs you');
+
+    const recent = block(body, 'recent-work') ?? '';
+    const numbers = [...recent.matchAll(/href="\/work\/main\/(\d+)"/g)].map((m) => Number(m[1]));
+    expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(recent).toContain('implement → review');
+    expect(recent).toContain('1 min ago');
+    expect(recent).toContain('<span class="badge');
+
+    const objective = block(body, 'objective') ?? '';
+    expect(objective).toContain('<a href="/projects/main/goals">Objective 6</a>: 6 of 7 done');
+
+    const health = block(body, 'health') ?? '';
+    expect(health).toContain('Doctor: <a href="/doctor">fail</a>');
+    expect(health).toContain('Egress: monitor');
+    expect(health).toContain('Accounts: two-bot');
+
+    // The State sentence is the floor card's: 2 briefings need this project.
+    expect(block(body, 'state')).toContain('Needs you: ');
+    expect(block(body, 'state')).toContain('2 briefings need you');
+  });
+
+  test('an empty project: no Objective block, "No work yet" and "Nothing needs you"', async () => {
+    const w = await world();
+    const body = (await w.get('/projects/main')).body;
+    expect(block(body, 'objective')).toBeUndefined();
+    expect(block(body, 'recent-work')).toContain('No work yet.');
+    expect(block(body, 'needs-you')).toContain('Nothing needs you.');
+    expect(block(body, 'state')).toContain('Idle: nothing queued or running.');
+    expect(block(body, 'health')).toContain('Doctor: <a href="/doctor">not run yet</a>');
+  });
+
+  test('a work title is escaped on the Overview', async () => {
+    const w = await world();
+    seedItem(w.db, 7, 1, '<img src=x onerror=alert(1)>');
+    const recent = block((await w.get('/projects/main')).body, 'recent-work') ?? '';
+    expect(recent).toContain('&lt;img src=x onerror=alert(1)&gt;');
+    expect(recent).not.toContain('<img');
+  });
+
+  test('an unknown project has no setup page', async () => {
+    const w = await world();
+    expect((await w.get('/projects/nope/setup')).statusCode).toBe(404);
+    expect((await w.get('/projects/nope')).statusCode).toBe(404);
   });
 });
