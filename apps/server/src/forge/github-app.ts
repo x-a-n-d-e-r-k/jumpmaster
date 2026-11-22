@@ -7,7 +7,7 @@
 // none is ever written to the vault, the database or a file. The module does not log, and no error
 // it throws carries a token, the JWT or the key.
 import { createSign } from 'node:crypto';
-import { isOwnerName, isRepoName, redactTokenShapes } from '@jumpmaster/protocol';
+import { isOwnerName, isRepoName, redactTokenShapes, replaceJwtShapes } from '@jumpmaster/protocol';
 
 const b64url = (v: string | Buffer) => Buffer.from(v).toString('base64url');
 
@@ -97,7 +97,8 @@ export interface GitHubAppBrokerOptions {
   onSecret?: (s: string) => void;
 }
 
-const JWT_SHAPE = /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g;
+/** A JWT's start; `replaceJwtShapes` reads its three segments in linear time (#642). */
+const JWT_START = /eyJ/g;
 const PEM_SHAPE = /-----BEGIN [^-]+-----[\s\S]*?(-----END [^-]+-----|$)/g;
 
 export function createGitHubAppBroker(opts: GitHubAppBrokerOptions): GitHubAppBroker {
@@ -118,10 +119,8 @@ export function createGitHubAppBroker(opts: GitHubAppBrokerOptions): GitHubAppBr
     let out = text;
     for (const s of [privateKey, ...secrets]) if (s) out = out.split(s).join('[redacted]');
     // GitHub token shapes come from the protocol's list, so the broker and every other sink agree.
-    return redactTokenShapes(out.replace(PEM_SHAPE, '[redacted]'), '[redacted]').replace(
-      JWT_SHAPE,
-      '[redacted]',
-    );
+    const shaped = redactTokenShapes(out.replace(PEM_SHAPE, '[redacted]'), '[redacted]');
+    return replaceJwtShapes(shaped, JWT_START, '[redacted]');
   };
 
   async function call(
