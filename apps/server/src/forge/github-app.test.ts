@@ -336,3 +336,33 @@ describe('error scrubbing parity with redactTokenShapes', () => {
     expect((err as GitHubAppError).githubMessage).toBe(expected);
   });
 });
+
+// #642: the broker's JWT redaction is linear in the text GitHub sent back.
+describe('JWT redaction in linear time', () => {
+  afterEach(() => nock.cleanAll());
+
+  test('a 1 MB run of eyJ is redacted in under 2s', async () => {
+    const message = 'x' + 'eyJ'.repeat(349_525);
+    nock(api).post('/app/installations/99/access_tokens').reply(500, { message });
+    const t0 = performance.now();
+    const err = await caught(broker().mint({ installationId: 99, repositoryId: 1, use: 'push' }));
+    const took = performance.now() - t0;
+    expect(err).toBeInstanceOf(GitHubAppError);
+    expect((err as GitHubAppError).githubMessage).toBe(message);
+    expect(took).toBeLessThan(2000);
+  });
+
+  test('a message holding a real JWT never carries it in the error', async () => {
+    const other = appJwt('7', privateKey, NOW_SEC - 999);
+    nock(api)
+      .post('/app/installations/99/access_tokens')
+      .reply(500, { message: `bad jwt n${other}. and ${other}` });
+    const err = await caught(broker().mint({ installationId: 99, repositoryId: 1, use: 'push' }));
+    expectClean(err);
+    const e = err as GitHubAppError;
+    expect(e.githubMessage).toBe('bad jwt n[redacted]. and [redacted]');
+    for (const text of [e.message, String(e), JSON.stringify(e)]) {
+      expect(text.includes(other)).toBe(false);
+    }
+  });
+});

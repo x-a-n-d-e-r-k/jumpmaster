@@ -797,12 +797,14 @@ export * from './names.js';
 export {
   containsSecret,
   dropSecrets,
+  findJwtShape,
   findPrivateKeys,
   type PrivateKeyBlock,
   payloadSecrets,
   REAL_KEY_BODY_CHARS,
   redact,
   redactTokenShapes,
+  replaceJwtShapes,
   withBasicAuth,
 } from './redact.js';
 export { CREDENTIAL_FILES, MAX_SECRET_FILE_BYTES, readSecret, readSecretFile } from './secrets.js';

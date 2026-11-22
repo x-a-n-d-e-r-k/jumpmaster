@@ -276,3 +276,88 @@ describe('GitLab token shapes', () => {
     expect(containsSecret(source, [])).toBe(false);
   });
 });
+
+// #642: the stateless installation token shape is matched in linear time.
+describe('stateless token shape in linear time', () => {
+  const N = 116_509; // 'ghs_0_eyJ'.length * N ≈ 1 MB
+  const run = (n: number) => 'ghs_0_eyJ'.repeat(n);
+  const adversarial: [string, string][] = [
+    ['fails at the first segment', 'x' + run(N) + '!'],
+    ['empty second segment', 'x' + run(N) + '.!'],
+    ['second segment not followed by a dot', 'x' + run(N) + '.' + 'a'.repeat(9 * N) + '!'],
+  ];
+  const timed = <T>(f: () => T): [T, number] => {
+    const t0 = performance.now();
+    const r = f();
+    return [r, performance.now() - t0];
+  };
+
+  test.each(adversarial)('%s: every entry point completes in under 2s', (_name, s) => {
+    const [shaped, t1] = timed(() => redactTokenShapes(s));
+    expect(shaped).toBe(s);
+    expect(t1).toBeLessThan(2000);
+    const [red, t2] = timed(() => redact(s, ['some-secret-value']));
+    expect(red).toBe(s);
+    expect(t2).toBeLessThan(2000);
+    const [found, t3] = timed(() => containsSecret(s, []));
+    expect(found).toBe(false);
+    expect(t3).toBeLessThan(2000);
+  });
+
+  // Today's list, copied as the oracle (#642), applied in order with String.prototype.replace.
+  const ORACLE = [
+    /github_pat_[A-Za-z0-9_]{20,}/g,
+    /ghs_\d+_eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
+    /(?<![A-Za-z0-9_])ghs_[A-Za-z0-9._-]{36,}/g,
+    /gh[pousr]_[A-Za-z0-9]{20,}/g,
+    /eC1hY2Nlc3MtdG9rZW46[A-Za-z0-9+/]{20,}={0,2}/g,
+    /sk-ant-[A-Za-z0-9_-]{20,}/g,
+    /jmm_[A-Za-z0-9_-]{20,}/g,
+    /gl(?:pat|oas|dt|rt|cbt|ptt|ft|imt|agent|soat)-[A-Za-z0-9_-]{20,}(?:\.[A-Za-z0-9_-]+)*/g,
+  ];
+  const oracle = (s: string) => ORACLE.reduce((out, re) => out.replace(re, '[REDACTED]'), s);
+  // Built at runtime so no token-shaped literal sits in the tracked file.
+  const jwt = 'eyJhbGciOiJSUzI1NiJ9.' + 'aB3-_x'.repeat(40) + '.' + 'Zz9_-q'.repeat(40);
+  const token = ['ghs', '5761534', jwt].join('_');
+  const equivalence: string[] = [
+    token,
+    `auth ${token} end`,
+    `n${token}`,
+    `m${token}`,
+    `_${token}`,
+    `x-access-token%3A${token}`,
+    JSON.stringify({ log: `line\n${token}\nnext` }),
+    `${token} ${token}`,
+    `the token was ${token}.`,
+    ['ghs', '1', 'eyJa.b.'].join('_'),
+    `n${['ghs', '1', 'eyJa.b.'].join('_')}`,
+    ['ghs', 'x', 'eyJa.b.c'].join('_'),
+    `n${['ghs', 'x', 'eyJa.b.c'].join('_')}`,
+    `n${['ghs', '1', 'eyJa.b.c'].join('_')}.d.e`,
+    `n${['ghs', '1', 'eyJa'].join('_')}${['ghs', '2', 'eyJb.c.d'].join('_')}`,
+    `n${['ghs', '1', 'eyJa.b'].join('_')}${['ghs', '2', 'eyJb.c.d'].join('_')}`,
+    `n${['ghs', '1', 'eyJa.'].join('_')}${['ghs', '2', 'eyJb.c.d'].join('_')}`,
+    `n${['ghs', '12', ''].join('_')}${['ghs', '2', 'eyJb.c.d'].join('_')}`,
+    `n${['ghs', '1', 'eyJ'].join('_')}.b.c`,
+    'x' + run(50) + '!',
+    'x' + run(50) + '.!',
+    'x' + run(50) + '.aaa!',
+    'x' + run(50) + '.aaa.b',
+  ];
+  test.each(equivalence)('matches what the previous pattern matched: %j', (s) => {
+    expect(redactTokenShapes(s)).toBe(oracle(s));
+  });
+
+  test('a token in the middle of a long adversarial run is still redacted', () => {
+    const s = 'x' + run(N) + 'n' + token + run(N) + '!';
+    const [out, t] = timed(() => redactTokenShapes(s));
+    expect(t).toBeLessThan(2000);
+    expect(out.includes(jwt)).toBe(false);
+    for (const part of jwt.split('.')) expect(out.includes(part)).toBe(false);
+  });
+
+  test('a token right after a word character is still redacted', () => {
+    expect(redactTokenShapes(`n${token}`)).toBe('n[REDACTED]');
+    expect(containsSecret(`n${token}`, [])).toBe(true);
+  });
+});
