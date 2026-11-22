@@ -158,12 +158,12 @@ const field = (key: string, kind: string, value: unknown, original: unknown, exp
 const stubStatus = () => ({ textContent: '', innerHTML: '' });
 
 /** The zone page's save target, as the form carries it. */
-const JM = { savedTo: '/zones/jm/flags', zone: { id: 'jm', index: 0 } };
+const JM = { savedTo: '/projects/jm/flags', zone: { id: 'jm', index: 0 } };
 
-describe('the advanced settings page, /zones/:id/flags', () => {
+describe('the advanced settings page, /projects/:id/flags', () => {
   test('lists exactly the zone flagRows, each once, grouped in FlagGroup order and in catalog order', async () => {
     const w = await world();
-    const r = await w.get('/zones/jm/flags');
+    const r = await w.get('/projects/jm/flags');
     expect(r.statusCode).toBe(200);
     const rows = rowsOf(w.store, 'jm');
     const keys = flagRowsHtml(r.body).map(([k]) => k);
@@ -184,19 +184,19 @@ describe('the advanced settings page, /zones/:id/flags', () => {
     expect(heads[0]).toBe('Crew');
     expect(r.body).toContain('id="flag-search"');
     // Links both ways.
-    expect(r.body).toContain('<a href="/zones/jm#advanced">Edit the zone as JSON</a>');
-    expect((await w.get('/zones/jm')).body).toContain(
-      'All settings, one per row: <a href="/zones/jm/flags">advanced settings</a>',
+    expect(r.body).toContain('<a href="/projects/jm/setup#advanced">Edit the zone as JSON</a>');
+    expect((await w.get('/projects/jm/setup')).body).toContain(
+      'All settings, one per row: <a href="/projects/jm/flags">advanced settings</a>',
     );
   });
 
   test('an unknown zone answers 404, and the page needs a browser session', async () => {
     const w = await world();
-    const r = await w.get('/zones/nope/flags');
+    const r = await w.get('/projects/nope/flags');
     expect(r.statusCode).toBe(404);
-    expect(r.body).toBe((await w.get('/zones/nope')).body);
-    const anon = await w.get('/zones/jm/flags', false);
-    expect(anon.statusCode).toBe((await w.get('/zones/jm', false)).statusCode);
+    expect(r.body).toBe((await w.get('/projects/nope')).body);
+    const anon = await w.get('/projects/jm/flags', false);
+    expect(anon.statusCode).toBe((await w.get('/projects/jm', false)).statusCode);
     expect(anon.statusCode).not.toBe(200);
   });
 
@@ -211,7 +211,7 @@ describe('the advanced settings page, /zones/:id/flags', () => {
         }),
       ],
     });
-    const html = (await w.get('/zones/jm/flags')).body;
+    const html = (await w.get('/projects/jm/flags')).body;
     // bool: a checkbox (unset refutePromotes shows its default, true), guarded, not set.
     const refute = rowHtml(html, 'crew.refutePromotes');
     expect(refute).toMatch(
@@ -239,9 +239,9 @@ describe('the advanced settings page, /zones/:id/flags', () => {
     // elsewhere: the sentence and a link, no control.
     const gates = rowHtml(html, 'gates');
     expect(gates).toContain('Changed in the Stack section.');
-    expect(gates).toContain('href="/zones/jm#stack"');
+    expect(gates).toContain('href="/projects/jm/setup#stack"');
     expect(gates).not.toContain('data-path=');
-    expect(rowHtml(html, 'models')).toContain('href="/zones/jm#advanced"');
+    expect(rowHtml(html, 'models')).toContain('href="/projects/jm/setup#advanced"');
     expect(rowHtml(html, 'id')).toContain(
       'Fixed once the zone exists: remove the zone and add it again to change it.',
     );
@@ -269,14 +269,14 @@ describe('the advanced settings page, /zones/:id/flags', () => {
       { via: 'ctl', principal: token },
     );
     expect(applied.ok, JSON.stringify(applied)).toBe(true);
-    const row = rowHtml((await w.get('/zones/jm/flags')).body, 'requireSignedImages');
+    const row = rowHtml((await w.get('/projects/jm/flags')).body, 'requireSignedImages');
     expect(row).toMatch(/data-path="requireSignedImages"[^>]* checked disabled/);
     expect(row).not.toContain('class="set"');
   });
 
   test('in file mode every control is disabled, there is no Save and the adopt banner shows', async () => {
     const w = await world({ file: true });
-    const html = (await w.get('/zones/jm/flags')).body;
+    const html = (await w.get('/projects/jm/flags')).body;
     expect(html).toContain('Your config file holds these zones');
     expect(html).not.toContain('Save changes');
     expect(html).not.toContain('class="reset"');
@@ -287,15 +287,15 @@ describe('the advanced settings page, /zones/:id/flags', () => {
 
   test('config text is escaped', async () => {
     const w = await world({ zones: [zoneDoc('jm', { readyLabel: '<script>x</script>' })] });
-    const html = (await w.get('/zones/jm/flags')).body;
+    const html = (await w.get('/projects/jm/flags')).body;
     expect(html).not.toContain('<script>x</script>');
     expect(rowHtml(html, 'readyLabel')).toContain('value="&lt;script&gt;x&lt;/script&gt;"');
   });
 
   test('a saved revision is said at the top, and only a number is echoed', async () => {
     const w = await world();
-    expect((await w.get('/zones/jm/flags?saved=3')).body).toContain('Saved as revision 3');
-    expect((await w.get('/zones/jm/flags?saved=<b>')).body).not.toContain('Saved as revision');
+    expect((await w.get('/projects/jm/flags?saved=3')).body).toContain('Saved as revision 3');
+    expect((await w.get('/projects/jm/flags?saved=<b>')).body).not.toContain('Saved as revision');
   });
 });
 
@@ -350,12 +350,12 @@ describe('the advanced settings page script', () => {
         body: {
           patch: { dropZones: [{ id: 'jm', crew: { refutePromotes: true } }] },
           expectRevision: 4,
-          returnTo: '/zones/jm/flags',
-          cancelTo: '/zones/jm/flags',
+          returnTo: '/projects/jm/flags',
+          cancelTo: '/projects/jm/flags',
         },
       },
     ]);
-    expect(went).toBe('/zones/jm/flags?saved=9');
+    expect(went).toBe('/projects/jm/flags?saved=9');
   });
 
   test('nothing changed sends no request', async () => {
@@ -449,8 +449,8 @@ describe('D5: the page writes through the same guards as the JSON editor', () =>
       const r = await w.patch({
         patch: { dropZones: [zone] },
         expectRevision: w.store.revision(),
-        returnTo: '/zones/jm/flags',
-        cancelTo: '/zones/jm/flags',
+        returnTo: '/projects/jm/flags',
+        cancelTo: '/projects/jm/flags',
       });
       expect(r.statusCode).toBe(409);
       const j = r.json() as { needsConfirmation: boolean; guarded: unknown };
@@ -482,7 +482,7 @@ describe('D5: the page writes through the same guards as the JSON editor', () =>
     }
     expect(w.store.revision()).toBe(before);
     expect(w.store.current().dropZones[0]?.requireSignedImages).toBe(true);
-    const html = (await w.get('/zones/jm/flags')).body;
+    const html = (await w.get('/projects/jm/flags')).body;
     for (const k of ['requireSignedImages', 'image'])
       expect(rowHtml(html, k)).toMatch(new RegExp(`data-path="${k}"[^>]* disabled`));
   });
@@ -506,7 +506,7 @@ describe('D5: the page writes through the same guards as the JSON editor', () =>
     const after = rowsOf(w.store, 'jm').find((row) => row.key === 'crew.maxDropsPerDay');
     expect(after?.explicit).toBe(false);
     expect(after?.value).toEqual(after?.defaultValue);
-    const html = rowHtml((await w.get('/zones/jm/flags')).body, 'crew.maxDropsPerDay');
+    const html = rowHtml((await w.get('/projects/jm/flags')).body, 'crew.maxDropsPerDay');
     expect(html).not.toContain('class="set"');
     expect(html).toContain(`value="${String(after?.defaultValue)}"`);
   });

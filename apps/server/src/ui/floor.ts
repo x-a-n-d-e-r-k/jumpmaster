@@ -2,6 +2,7 @@ import { isNotice } from '../briefings.js';
 import type { Pending } from '../config/confirm.js';
 import { ACTIVE_DROP_STATES } from '../db/repo.js';
 import { STICK_LIVE_MS } from '../doctor/checks.js';
+import { projectHref } from './links.js';
 import type { HomeState, StickLine } from './pages.js';
 import { type ZoneRef, zoneName } from './zone-name.js';
 
@@ -64,6 +65,20 @@ export interface FloorCounts {
   zones: ZoneFloor[];
 }
 
+/** The parts of the home state a zone card counts: what the floor and a project's Overview read. */
+export type FloorInputs = Pick<
+  HomeState,
+  | 'zones'
+  | 'modes'
+  | 'items'
+  | 'drops'
+  | 'merges24h'
+  | 'outbox'
+  | 'briefings'
+  | 'heldBriefings'
+  | 'sticks'
+>;
+
 const HELD_MODES: ReadonlySet<string> = new Set(['paused', 'observe']);
 const DAY_MS = 24 * 3_600_000;
 const STATE_RANK: Record<CardState, number> = {
@@ -97,7 +112,10 @@ function cardState(c: ZoneCounts, held: boolean): CardState {
 }
 
 /** Every number on the floor, per zone and across the install. Pure: no database access. */
-export function floorCounts(state: HomeState, now: Date): FloorCounts {
+export function floorCounts(
+  state: FloorInputs & Pick<HomeState, 'pending'>,
+  now: Date,
+): FloorCounts {
   const items = state.items;
   const itemZone = new Map(items.map((i) => [i.id, i.dropZoneId]));
   const merges =
@@ -158,6 +176,9 @@ export function floorCounts(state: HomeState, now: Date): FloorCounts {
  * every kind, so the list matches the count that links to it, crew drops included (#497).
  */
 export function listHref(path: string, zone: string | undefined, state?: string): string {
+  // A project's work is its Work tab (#619), not the install-wide list filtered to it.
+  if (path === '/work' && zone !== undefined)
+    return `${projectHref(zone, 'work')}${state === undefined ? '' : `?state=${encodeURIComponent(state)}`}`;
   const q: string[] = [];
   if (zone !== undefined) q.push(`zone=${encodeURIComponent(zone)}`);
   if (state !== undefined) q.push(`state=${encodeURIComponent(state)}`);
@@ -216,17 +237,54 @@ const HELD_LABEL: Record<string, string> = { paused: 'PAUSED', observe: 'OBSERVI
 const MODE_TONE: Record<string, string> = { active: 'ok', observe: 'info', paused: 'warn-b' };
 const HELD_WORD: Record<string, string> = { paused: 'paused', observe: 'observing' };
 
+/** The card's state word: a held card names its mode. */
+const cardLabel = (z: ZoneFloor): string =>
+  z.state === 'held' ? (HELD_LABEL[z.mode] ?? STATE_LABEL.held) : STATE_LABEL[z.state];
+
+/** Nothing queued, running, open or merged, and nothing else to say: the card's idle line. */
+const IDLE_LINE = 'Idle: nothing queued or running.';
+const isAllIdle = (z: ZoneFloor): boolean => {
+  const c = z.counts;
+  return (
+    c.running === 0 && c.queued === 0 && c.prOpen === 0 && c.merged24h === 0 && z.state === 'idle'
+  );
+};
+
+/**
+ * A project's state as one sentence, in its floor card's words (#616): the card's state word,
+ * then its counts, or the card's idle line. HTML-safe: only numbers and fixed words.
+ */
+export function stateSentence(z: ZoneFloor): string {
+  if (isAllIdle(z)) return IDLE_LINE;
+  const c = z.counts;
+  const parts = [
+    `${c.running} running`,
+    `${c.queued} queued`,
+    `${c.prOpen} ${c.prOpen === 1 ? 'PR' : 'PRs'} open`,
+    c.merged24h === null ? 'merged (24h) unavailable' : `${c.merged24h} merged (24h)`,
+    c.parked > 0 ? `${c.parked} parked` : '',
+    c.outbox > 0 ? `${plural(c.outbox, 'forge write')} unknown or failed` : '',
+    c.noStick ? 'no stick can run it' : '',
+    z.held
+      ? c.held > 0
+        ? `${c.held} held while ${HELD_WORD[z.mode] ?? esc(z.mode)}`
+        : ''
+      : c.needsYou > 0
+        ? `${plural(c.needsYou, 'briefing')} need${c.needsYou === 1 ? 's' : ''} you`
+        : '',
+  ].filter(Boolean);
+  return `${cardLabel(z)}: ${parts.join(', ')}.`;
+}
+
 function zoneCard(z: ZoneFloor, zone: ZoneRef, zones: readonly ZoneRef[]): string {
   const c = z.counts;
   const id = zone.id;
   const heading =
-    `<h2><a href="${esc(`/zones/${encodeURIComponent(id)}`)}">${zoneName(zone, zones)}</a>` +
+    `<h2><a href="${esc(projectHref(id))}">${zoneName(zone, zones)}</a>` +
     ` <span class="badge ${MODE_TONE[z.mode] ?? ''}">${esc(z.mode)}</span>` +
-    ` <span class="card-state">${z.state === 'held' ? (HELD_LABEL[z.mode] ?? STATE_LABEL.held) : STATE_LABEL[z.state]}</span></h2>`;
-  const allZero =
-    c.running === 0 && c.queued === 0 && c.prOpen === 0 && c.merged24h === 0 && z.state === 'idle';
-  const working = allZero
-    ? '<p class="empty">Idle: nothing queued or running.</p>'
+    ` <span class="card-state">${cardLabel(z)}</span></h2>`;
+  const working = isAllIdle(z)
+    ? `<p class="empty">${IDLE_LINE}</p>`
     : `<div class="tiles">${workingTiles(c, id)}</div>`;
   const blocked = [
     c.parked > 0

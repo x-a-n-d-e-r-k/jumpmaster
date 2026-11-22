@@ -35,6 +35,7 @@ import {
   type UpdateIssuePayload,
 } from '../outbox.js';
 import { redactionList } from '../scrub.js';
+import { projectHref } from '../ui/links.js';
 import { dispatchGate } from '../usage.js';
 import { type ChatToolContext, type ChatToolDef, type Outcome, ok, refused } from './kit.js';
 import { type ChatPrincipal, isChatPrincipal } from './tokens.js';
@@ -65,7 +66,7 @@ export type Acted = {
   undo?: CardUndo | SettingUndo | PendingSetting;
 };
 
-const zoneLink = (zoneId: string): string => `/zones/${encodeURIComponent(zoneId)}`;
+const zoneLink = (zoneId: string): string => projectHref(zoneId);
 const briefingLink = (id: number): string => `/briefings/${id}`;
 
 /** What each kind of action is called in a refused card. */

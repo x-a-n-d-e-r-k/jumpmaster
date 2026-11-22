@@ -2,7 +2,7 @@ import { expect, test } from 'vitest';
 import { getPullRequest, listWorkItems, recordGateAllowance } from '../db/repo.js';
 import { harness, toPrOpen } from '../test/flowHarness.js';
 
-test.each(['/', '/observations', '/drops/x', '/artifacts/1'])(
+test.each(['/', '/activity/log', '/drops/x', '/artifacts/1'])(
   'a foreign Host cannot read %s, which defeats DNS rebinding',
   async (url) => {
     const h = await harness();

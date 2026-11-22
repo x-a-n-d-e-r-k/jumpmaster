@@ -1,12 +1,13 @@
 import { RESTART_PATHS } from '../config/boot.js';
 import { type FlagGroup, type FlagRow, type FlagScope, flagRows } from '../config/catalog.js';
 import type { ConfigStore } from '../config/store.js';
-import { escapeHtml, page } from './pages.js';
+import type { DropZoneConfig } from '../config.js';
+import { escapeHtml, PROJECTS_HREF, page, projectHref } from './pages.js';
 import { CONFIG_ANSWER_FN, RESTART_NOTE, settingControl, settingId } from './setting-controls.js';
-import { zoneName, zoneNameText } from './zone-name.js';
+import { type ZoneRef, zoneName, zoneNameText } from './zone-name.js';
 
 /**
- * The advanced settings pages: a zone's (`/zones/:id/flags`, issue #322) and the install's
+ * The advanced settings pages: a zone's (`/projects/:id/flags`, issue #322) and the install's
  * (`/settings/flags`, issue #323). Each lists every setting of its scope in the catalog, one per
  * row, grouped, with its plain words, a control, whether the document sets it and a Reset. One
  * Save sends one merge patch of what changed through `PATCH /api/control/config`, as the JSON
@@ -63,10 +64,10 @@ function elsewhereLink(f: FlagsForm, r: FlagRow): string {
       ? ' <a href="/settings/other-machines">the Other machines tab</a>'
       : '';
   }
-  const base = `/zones/${encodeURIComponent(f.target.zone?.id ?? '')}`;
+  const base = projectHref(f.target.zone?.id ?? '');
   const named = /(\w+) section/.exec(sentence)?.[1]?.toLowerCase() ?? 'advanced';
   const words = named === 'advanced' ? 'the JSON editor' : `the ${named} section`;
-  return ` <a href="${base}#${escapeHtml(named)}">${escapeHtml(words)}</a>`;
+  return ` <a href="${base}/setup#${escapeHtml(named)}">${escapeHtml(words)}</a>`;
 }
 
 /**
@@ -265,7 +266,13 @@ export const savedNote = (saved: number | undefined): string =>
 export function renderFlags(
   store: ConfigStore,
   id: string,
-  o: { adoptBanner: string; forbiddenNote: string; saved?: number },
+  o: {
+    adoptBanner: string;
+    forbiddenNote: string;
+    saved?: number;
+    /** The project header and tab bar, in place of the breadcrumb (#616). */
+    header?: (zone: DropZoneConfig, zones: readonly ZoneRef[]) => string;
+  },
 ): string | undefined {
   const doc = store.document() as Record<string, unknown>;
   const zones = (Array.isArray(doc.dropZones) ? doc.dropZones : []) as Record<string, unknown>[];
@@ -275,7 +282,7 @@ export function renderFlags(
   const resolved = all.find((z) => z.id === id);
   if (!raw || !resolved) return undefined;
   const readOnly = store.mode() === 'file';
-  const base = `/zones/${encodeURIComponent(id)}`;
+  const base = projectHref(id);
   const form = renderFlagsForm({
     scope: 'zone',
     rows: flagRows('zone', raw, doc),
@@ -285,7 +292,11 @@ export function renderFlags(
     forbiddenNote: o.forbiddenNote,
   });
   return page(
-    `<p><a href="/">Home</a> · <a href="/zones">Zones</a> · <a href="${base}">${zoneName(resolved, all)}</a> · <a href="${base}#advanced">Edit the zone as JSON</a></p>
+    `${
+      o.header
+        ? `${o.header(resolved, all)}<p><a href="${base}/setup#advanced">Edit the zone as JSON</a></p>`
+        : `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${base}">${zoneName(resolved, all)}</a> · <a href="${base}/setup#advanced">Edit the zone as JSON</a></p>`
+    }
 <h2>Advanced settings · ${zoneName(resolved, all)}</h2>
 <p>Every setting for this zone. Changes apply at the next pass; one that loosens a safeguard asks you to confirm first.</p>
 ${savedNote(o.saved)}${readOnly ? o.adoptBanner : ''}

@@ -44,7 +44,13 @@ import {
   WAITING_ON_YOU_ID,
   zoneCards,
 } from './floor.js';
-import { linkTarget } from './links.js';
+import {
+  ACTIVITY_LOG_HREF,
+  githubSetupHref,
+  linkTarget,
+  PROJECTS_HREF,
+  projectHref,
+} from './links.js';
 import { STYLE } from './theme.js';
 import { relativeTime } from './time.js';
 import { type ZoneRef, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
@@ -285,8 +291,11 @@ function usageSection(u: HomeState['usage']): string {
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-/** A zone's page. */
-export const zoneHref = (id: string): string => `/zones/${encodeURIComponent(id)}`;
+/** A project's page and its sub-pages (defined in `links.ts`, which has no imports). */
+export { ACTIVITY_LOG_HREF, PROJECTS_HREF, projectHref };
+
+/** A zone's page: an alias of `projectHref` (zones are projects in the UI). */
+export const zoneHref = projectHref;
 
 /** A file on GitHub at the default branch, each segment of the repo and path URI-encoded. */
 const githubBlobHref = (repo: string, path: string): string => {
@@ -314,19 +323,19 @@ const projectNamer = (zones: readonly ZoneRef[]): ((id: string) => string) => {
 
 /** The page sizes the briefings pages offer (#132); anything else is the first. */
 export const PAGE_SIZES = [10, 20, 50, 100] as const;
-export type PageParams = { per: number; page: number; rpage: number };
+export type PageParams = { per: number; page: number };
 
 const positiveInt = (v: unknown): number =>
   typeof v === 'string' && /^[1-9][0-9]{0,8}$/.test(v) ? Number(v) : 1;
 
 /**
- * The briefings pages' paging: `per` among PAGE_SIZES, else 10; `page` and `rpage` positive
- * integers, else 1. Never refused: a stale bookmark still opens a page. Clamping to the last page
+ * The briefings pages' paging: `per` among PAGE_SIZES, else 10; `page` a positive integer,
+ * else 1. Never refused: a stale bookmark still opens a page. Clamping to the last page
  * is the renderer's, which knows the counts.
  */
-export function pageParams(q: { per?: unknown; page?: unknown; rpage?: unknown }): PageParams {
+export function pageParams(q: { per?: unknown; page?: unknown }): PageParams {
   const per = PAGE_SIZES.find((n) => String(n) === q.per) ?? PAGE_SIZES[0];
-  return { per, page: positiveInt(q.page), rpage: positiveInt(q.rpage) };
+  return { per, page: positiveInt(q.page) };
 }
 
 /** A project's open briefings (newest first) and rulings, as the briefings pages group them. */
@@ -424,7 +433,7 @@ function crewSection(lines: CrewLine[] | undefined, name: (id: string) => string
   const rows = lines
     .map(
       (c) =>
-        `<tr><td>${name(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="/zones/${encodeURIComponent(c.zoneId)}/goals">Goals</a> <a href="/zones/${encodeURIComponent(c.zoneId)}/issues/new">New issue</a> <a href="/zones/${encodeURIComponent(c.zoneId)}/intake">GOAL.md stub</a></td></tr>`,
+        `<tr><td>${name(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="${projectHref(c.zoneId, 'goals')}">Goals</a> <a href="${projectHref(c.zoneId, 'issues/new')}">New issue</a> <a href="${projectHref(c.zoneId, 'goals')}#goal-stub">GOAL.md stub</a></td></tr>`,
     )
     .join('');
   return card(
@@ -582,12 +591,11 @@ function dismissAllForm(zoneId: string, open: Briefing[], zones: readonly ZoneRe
 }
 
 /** A /briefings URL, unescaped: the zone id is URL-encoded, a page of 1 or less is left out. */
-function briefingsHref(q: { zone?: string; per: number; page?: number; rpage?: number }): string {
+function briefingsHref(q: { zone?: string; per: number; page?: number }): string {
   const parts = [
     ...(q.zone !== undefined ? [`zone=${encodeURIComponent(q.zone)}`] : []),
     `per=${q.per}`,
     ...(q.page !== undefined ? [`page=${q.page}`] : []),
-    ...(q.rpage !== undefined ? [`rpage=${q.rpage}`] : []),
   ];
   return `/briefings?${parts.join('&')}`;
 }
@@ -623,10 +631,10 @@ function paged<T>(
   };
 }
 
-const RULINGS_HEAD =
-  '<tr><th>Ruling</th><th>Zone</th><th>Briefing</th><th>Choice</th><th>Note</th><th>Ruled</th><th>Applied</th><th>Error</th><th>Diagnosis</th></tr>';
-
-/** Briefings waiting on Command, with a rule form each, and the rulings recorded so far. */
+/**
+ * Briefings waiting on Command, with a rule form each. Rulings are the project's Log (#621): each
+ * project links to its rulings there; `rulings` only resolve `Ruling n` references.
+ */
 export function renderBriefings(s: {
   open: Briefing[];
   rulings: Ruling[];
@@ -639,7 +647,6 @@ export function renderBriefings(s: {
   modes?: Readonly<Record<string, string>>;
   per?: number;
   page?: number;
-  rpage?: number;
   /** Each briefing's subject resolved (briefingAbout), by briefing id; else the raw subject. */
   about?: ReadonlyMap<number, About>;
   /** Each zone's filed crew issues by key (crewKeyNumbers), by zone id. */
@@ -649,21 +656,9 @@ export function renderBriefings(s: {
 }): string {
   const name = zoneNamer(s.zones);
   const per = s.per ?? PAGE_SIZES[0];
-  const crewOff = new Set(s.zones.filter((z) => !z.crew?.enabled).map((z) => z.id));
-  // Recorded, and held until the zone's crew is enabled again (applyPendingRulings).
-  const waiting = (r: Ruling) =>
-    r.appliedAt === null &&
-    r.applyError === null &&
-    r.effect !== null &&
-    WAITS_FOR_CREW.has(r.effect) &&
-    crewOff.has(r.zoneId);
-  const rulingRows = (rs: readonly Ruling[]) =>
-    rs
-      .map(
-        (r) =>
-          `<tr id="ruling-${escapeHtml(r.id)}"><td>${escapeHtml(r.id)}</td><td>${name(r.zoneId)}</td><td>${escapeHtml(r.briefingId)}</td><td>${escapeHtml(r.choice)}</td><td>${escapeHtml(r.note)}</td><td>${escapeHtml(r.createdAt)}</td><td>${escapeHtml(r.appliedAt ?? (waiting(r) ? 'waiting: crew disabled' : '-'))}</td><td>${escapeHtml(r.applyError ?? '')}</td><td>${escapeHtml(r.diagnosis ?? '')}</td></tr>`,
-      )
-      .join('');
+  /** The link that stands where a project's rulings were: its Log, rulings only (#621). */
+  const rulingsLink = (zoneId: string) =>
+    `<p class="rulings"><a href="${escapeHtml(projectLogHref(zoneId, 'rulings'))}">Rulings for ${name(zoneId)}</a></p>`;
   // What this page shows, so a reference to it is an anchor here and to anything else a link away.
   const shown = { briefings: new Set<number>(), rulings: new Set<number>() };
   const ctx: BlockContext = {
@@ -687,19 +682,10 @@ export function renderBriefings(s: {
     const open = all.filter((b) => !isNotice(b));
     const notices = all.filter(isNotice);
     for (const x of notices) shown.briefings.add(x.id);
-    const rulings = newestFirst(s.rulings);
     const b = paged(open, per, s.page ?? 1, 'Briefing pages', (page) =>
       briefingsHref({ zone, per, page }),
     );
-    const r = paged(
-      rulings,
-      per,
-      s.rpage ?? 1,
-      'Ruling pages',
-      (rpage) => `${briefingsHref({ zone, per, rpage })}#rulings`,
-    );
     for (const x of b.rows) shown.briefings.add(x.id);
-    for (const x of r.rows) shown.rulings.add(x.id);
     const list =
       (open.length === 0 ? '<p>Nothing is waiting on you.</p>' : blocks(b.rows, 'h3')) +
       (open.length > 0 ? b.nav : '') +
@@ -710,10 +696,7 @@ export function renderBriefings(s: {
         (all.length > 0 ? dismissAllForm(zone, s.open, s.zones) : '') +
         sizeSelector(zone, per) +
         list +
-        `<h2 id="rulings">Rulings (decisions recorded)</h2>` +
-        (rulings.length === 0
-          ? '<p class="empty">No rulings yet.</p>'
-          : `<table>${RULINGS_HEAD}${rulingRows(r.rows)}</table>${r.nav}`),
+        rulingsLink(zone),
       { live: true },
     );
   }
@@ -734,22 +717,13 @@ export function renderBriefings(s: {
   const total = busy.reduce((n, p) => n + p.open.length, 0);
   for (const p of projects) {
     for (const x of p.open.slice(0, per)) shown.briefings.add(x.id);
-    for (const x of p.rulings.slice(0, per)) shown.rulings.add(x.id);
   }
 
   const showAll = (p: Project) =>
     p.open.length > per
       ? `<p><a href="${escapeHtml(briefingsHref({ zone: p.id, per }))}">Show all ${p.open.length} in ${name(p.id)}</a></p>`
       : '';
-  const rulingsOf = (p: Project) =>
-    `<details class="rulings"><summary>Rulings (${p.rulings.length})</summary>` +
-    (p.rulings.length === 0
-      ? '<p class="empty">No rulings yet.</p>'
-      : `<table>${RULINGS_HEAD}${rulingRows(p.rulings.slice(0, per))}</table>`) +
-    (p.rulings.length > per
-      ? `<p><a href="${escapeHtml(`${briefingsHref({ zone: p.id, per })}#rulings`)}">All ${p.rulings.length} rulings of ${name(p.id)}</a></p>`
-      : '') +
-    '</details>';
+  const rulingsOf = (p: Project) => rulingsLink(p.id);
   // Each section ends with a marker, so a section can be told from the next in tests.
   const sections = [
     ...busy.map(
@@ -823,6 +797,57 @@ const ASK_SCRIPT = `<script>for(const f of document.querySelectorAll('form.ask')
  */
 export function askButton(focus: Focus): string {
   return `<form class="ask" data-focus-kind="${escapeHtml(focus.kind)}" data-focus-zone="${escapeHtml(focus.zoneId)}" data-focus-ref="${escapeHtml(focus.ref)}"><button>Ask about this</button></form>${ASK_SCRIPT}`;
+}
+
+/** The tabs of a project's pages (#616), in the order the tab bar shows them. */
+export type ProjectTab = 'overview' | 'work' | 'goals' | 'setup' | 'log';
+
+/** Where each project tab goes. */
+const PROJECT_TABS: readonly { tab: ProjectTab; label: string; href: (id: string) => string }[] = [
+  { tab: 'overview', label: 'Overview', href: (id) => projectHref(id) },
+  { tab: 'work', label: 'Work', href: (id) => projectHref(id, 'work') },
+  { tab: 'goals', label: 'Goals', href: (id) => projectHref(id, 'goals') },
+  { tab: 'setup', label: 'Setup', href: (id) => projectHref(id, 'setup') },
+  { tab: 'log', label: 'Log', href: (id) => projectLogHref(id) },
+];
+
+/** A project's tab bar (#616): every project page carries it, the current tab marked. */
+export function projectTabs(zone: Pick<ZoneRef, 'id'>, current: ProjectTab | undefined): string {
+  const links = PROJECT_TABS.map(
+    (t) =>
+      `<a href="${escapeHtml(t.href(zone.id))}"${t.tab === current ? ' aria-current="page"' : ''}>${t.label}</a>`,
+  ).join('');
+  return `<nav class="settings-tabs project-tabs" aria-label="Project tabs">${links}</nav>`;
+}
+
+/** The header's Pause or Resume button: it sets the zone's mode as the projects list's buttons do. */
+const PROJECT_MODE_SCRIPT = `<script>for(const b of document.querySelectorAll('button.project-mode')){if(b.dataset.bound)continue;b.dataset.bound='1';b.addEventListener('click',async()=>{const r=await jmFetch('/api/control/zones/'+encodeURIComponent(b.dataset.zone),{mode:b.dataset.mode});if(r.ok){location.reload();return;}const j=await r.json().catch(()=>({}));document.getElementById('project-mode-out').textContent=b.dataset.name+': '+(j.error||('refused ('+r.status+')'));});}</script>`;
+
+/**
+ * A project's header (#616), on every project page: the repository name and mode badge, the
+ * Briefings count, then Ask about this (zone focus unless the page names its own), Pause or
+ * Resume, and New issue; then the tab bar.
+ */
+export function projectHeader(p: {
+  zone: ZoneRef;
+  zones: readonly ZoneRef[];
+  /** The zone's current mode (`getZoneMode`). */
+  mode: string;
+  openBriefings: number;
+  current: ProjectTab | undefined;
+  ask?: Focus;
+}): string {
+  const { zone, zones, mode } = p;
+  const id = zone.id;
+  const [label, next] = mode === 'active' ? ['Pause', 'paused'] : ['Resume', 'active'];
+  const control = `<button type="button" class="project-mode" data-zone="${escapeHtml(id)}" data-name="${escapeHtml(zoneNameText(zone, zones))}" data-mode="${next}">${label}</button>`;
+  return (
+    `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${escapeHtml(githubSetupHref(id))}">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${escapeHtml(p.openBriefings)} open)</a></p>` +
+    `<header class="project-header"><h2>${zoneName(zone, zones)} ${badge(mode)}</h2>` +
+    `<p class="project-mode-label">${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>` +
+    `<div class="project-actions">${askButton(p.ask ?? { kind: 'zone', zoneId: id, ref: id })} ${control} <a href="${escapeHtml(projectHref(id, 'issues/new'))}">New issue</a> <span id="project-mode-out" role="status"></span></div>` +
+    `${PROJECT_MODE_SCRIPT}</header>${projectTabs(zone, p.current)}`
+  );
 }
 
 /**
@@ -926,12 +951,22 @@ export function renderGoals(s: {
   doneByRuling: ReadonlyMap<string, number>;
   /** The zone's goal changes (#363), oldest first. */
   goalChanges?: readonly GoalChange[];
+  /** The zone's current mode, for the project header (#616); its configured mode when absent. */
+  mode?: string;
+  /** The zone's open briefings, counted in the project header. */
+  openBriefings?: number;
+  /** The zone's crew row (#620), as Floor shows it: at the top of the page. */
+  crew?: CrewLine;
+  /** Now, for the crew row's relative times. */
+  now?: Date;
 }): string {
   const path = s.zone.crew?.goalPath ?? 'GOAL.md';
   const missing = s.goals?.parse.ok === false && s.goals.parse.error === `${path} not found`;
+  // No goal file yet (or not read yet): the stub builder opens, above the empty ladder (#620).
+  const noGoal = missing || s.goals === undefined;
   // Until the goal can change in the app (#336), the owner edits it on GitHub: a protected path.
   const edit = missing
-    ? `<p>${escapeHtml(path)} isn't in the repository yet. <a href="${escapeHtml(zoneHref(s.zone.id))}/intake">Write one with the intake page</a>.</p>`
+    ? `<p>${escapeHtml(path)} isn't in the repository yet. <a href="#goal-stub">Draft one with the GOAL.md stub builder</a>.</p>`
     : `<p>The goals live in ${escapeHtml(path)} in ${escapeHtml(s.zone.repo)}. It is a protected path: agent pull requests never change it, and Jumpmaster merges a change to it only when you approve it here. Propose a change in the chat, or <a href="${escapeHtml(githubBlobHref(s.zone.repo, path))}">open ${escapeHtml(path)} on GitHub</a> and use the pencil to edit it. The crew reads the change at its next cycle.</p>`;
   let ladder: string;
   if (!s.goals) {
@@ -992,12 +1027,34 @@ export function renderGoals(s: {
     s.skippedCrewUnpromoted.length === 0
       ? '<p>None.</p>'
       : `<ul>${s.skippedCrewUnpromoted.map((n) => `<li>${skippedLine(n)}</li>`).join('')}</ul>`;
+  const stub = goalStub(s.zone, noGoal);
   return page(
-    `<p><a href="/">Back</a> · <a href="${escapeHtml(zoneHref(s.zone.id))}">Zone</a></p><h2>Objectives (goal ladder): ${zoneName(s.zone, s.zones)}</h2>` +
-      askButton({ kind: 'goals', zoneId: s.zone.id, ref: s.zone.id }) +
+    projectHeader({
+      zone: s.zone,
+      zones: s.zones,
+      mode: s.mode ?? s.zone.mode ?? 'active',
+      openBriefings: s.openBriefings ?? 0,
+      current: 'goals',
+      ask: { kind: 'goals', zoneId: s.zone.id, ref: s.zone.id },
+    }) +
+      crewRow(s.crew, s.now ?? new Date()) +
+      (noGoal ? stub : '') +
+      `<h2>Objectives (goal ladder)</h2>` +
       `${ladder}${edit}${goalChangesBlock(s.goalChanges ?? [])}` +
       `<h2>Crew issues</h2><table><tr><th>Objective</th><th>Key</th><th>Title</th><th>State</th><th>Issue</th><th>Work item</th><th>Findings</th></tr>${issues}</table>` +
-      `<h2>Crew issues not started (no recorded promotion)</h2>${skipped}`,
+      `<h2>Crew issues not started (no recorded promotion)</h2>${skipped}` +
+      (noGoal ? '' : stub),
+  );
+}
+
+/** The project's crew row on Goals (#620): on or off, the last cycle, the next due, Fable. */
+function crewRow(c: CrewLine | undefined, now: Date): string {
+  if (!c) return '';
+  const last = c.lastCycle ? relativeTime(c.lastCycle, now) : '-';
+  const next = !c.enabled ? '-' : c.nextDue ? relativeTime(c.nextDue, now) : 'now';
+  return (
+    `<section id="crew"><h2>Crew</h2><table><tr><th>Crew</th><th>Last cycle</th><th>Next due</th><th>Fable</th></tr>` +
+    `<tr><td>${c.enabled ? 'on' : 'off'}</td><td>${last}</td><td>${next}</td><td>${escapeHtml(c.fable)}</td></tr></table></section>`
   );
 }
 
@@ -1050,10 +1107,10 @@ const FAVICON_LINK = `<link rel="icon" type="image/svg+xml" href="${FAVICON_HREF
  * comment, and links nowhere that would 404.
  */
 export const STORE_NAV_SLOT = '<!--jm-store-nav-->';
-export const STORE_NAV = `<a href="/zones">Zones</a><a href="/settings">Settings</a>`;
+export const STORE_NAV = `<a href="${PROJECTS_HREF}">Projects</a><a href="/settings">Settings</a>`;
 
 /** The pages every install has, in the order the operator reaches for them. */
-const NAV = `<a href="/">Floor</a><a href="/work">Work</a><a href="/drops">Drops</a><a href="/briefings">Briefings</a><a href="/chat">Chat</a><a href="/sticks">Sticks</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a><a href="/observations">Observations</a>`;
+const NAV = `<a href="/">Floor</a><a href="/work">Work</a><a href="/drops">Drops</a><a href="/briefings">Briefings</a><a href="/chat">Chat</a><a href="/sticks">Sticks</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a><a href="/activity/log">Log</a>`;
 
 /** Marks the link for the current page; the longest matching prefix wins. */
 const NAV_SCRIPT = `<script>(()=>{const p=location.pathname;let best=null,len=-1;for(const a of document.querySelectorAll('.topnav a')){const h=a.getAttribute('href');const hit=h==='/'?p==='/':p===h||p.startsWith(h+'/');if(hit&&h.length>len){best=a;len=h.length;}}if(best)best.setAttribute('aria-current','page');})();</script>`;
@@ -1162,9 +1219,13 @@ export const DROP_HEAD =
 const waitingOn = (i: WorkItem): string =>
   i.state === 'ready' && i.blockedBy.length > 0 ? `waiting on ${i.blockedBy.join(', ')}` : '';
 
-/** A work item's own page (#498). */
+/** A work item's own page (#498), under its project's Work tab (#619). */
 export const workItemHref = (i: Pick<WorkItem, 'dropZoneId' | 'issueNumber'>): string =>
-  `/work/${encodeURIComponent(i.dropZoneId)}/${i.issueNumber}`;
+  `${projectHref(i.dropZoneId, 'work')}/${i.issueNumber}`;
+
+/** A project's work list (#619), in `state` unless it is the default (active). */
+export const projectWorkHref = (zone: string, state?: string): string =>
+  `${projectHref(zone, 'work')}${state === undefined || state === 'active' ? '' : `?${new URLSearchParams({ state })}`}`;
 
 /** An issue's drop list on /drops. */
 const issueDropsHref = (i: Pick<WorkItem, 'dropZoneId' | 'issueNumber'>): string =>
@@ -1286,6 +1347,11 @@ const capital = (s: string): string => s.charAt(0).toUpperCase() + s.slice(1);
  */
 function listPage(p: {
   path: string;
+  /**
+   * A project page's header and tab bar (#619): it replaces the back link, and the page is that
+   * project's alone, so there is no project filter and links carry no `zone`.
+   */
+  header?: string;
   /** The heading, as HTML. */
   title: string;
   /** The heading as plain text, for the document title. */
@@ -1307,8 +1373,11 @@ function listPage(p: {
   note?: string;
 }): string {
   const href = (zone: string | undefined, state: string, kind = p.kind): string => {
+    // A project's own list is its project page; /work's links to one go there directly (#619).
+    if (p.path === '/work' && zone !== undefined && p.header === undefined)
+      return escapeHtml(projectWorkHref(zone, state));
     const q = new URLSearchParams();
-    if (zone !== undefined) q.set('zone', zone);
+    if (zone !== undefined && p.header === undefined) q.set('zone', zone);
     if (zone !== undefined && zone === p.zone && p.issue !== undefined)
       q.set('issue', String(p.issue));
     if (state !== p.defaultState) q.set('state', state);
@@ -1334,18 +1403,25 @@ function listPage(p: {
   const body = p.rows
     ? `<table>${p.head}${p.rows}</table>${p.note ? `<p class="muted">${p.note}</p>` : ''}`
     : `<p class="empty">${p.empty}</p>`;
+  const top =
+    p.header === undefined
+      ? `<p><a href="/">Back</a></p><h2>${p.title}</h2><nav class="filters" aria-label="Project"><p>${zoneLinks}</p></nav>`
+      : `${p.header}<h2>${p.title}</h2>`;
   return page(
-    `<p><a href="/">Back</a></p><h2>${p.title}</h2>` +
-      `<nav class="filters" aria-label="Project"><p>${zoneLinks}</p></nav>` +
-      `<nav class="filters" aria-label="State"><p>${stateLinks}</p></nav>${kindNav}${body}`,
+    `${top}<nav class="filters" aria-label="State"><p>${stateLinks}</p></nav>${kindNav}${body}`,
     { title: p.titleText },
   );
 }
 
-/** /work: work items of one zone or all, in one state or every state but done. */
+/**
+ * /work: work items of one zone or all, in one state or every state but done. With `header`, it is
+ * `/projects/:id/work` (#619): that project's list under its header and tab bar.
+ */
 export function renderWorkList(s: {
   zones: readonly ZoneRef[];
   zone?: string;
+  /** The project header and tab bar (`projectHeaderFor`), on a project's own list. */
+  header?: string;
   state: WorkFilter;
   /** Already filtered. */
   items: readonly WorkItem[];
@@ -1356,7 +1432,8 @@ export function renderWorkList(s: {
   const where = z ? ` in ${zoneName(z, s.zones)}` : '';
   const heading = (w: string): string => (z ? `${capital(words)} work${w}` : `All ${words} work`);
   return listPage({
-    path: '/work',
+    path: z && s.header !== undefined ? projectHref(z.id, 'work') : '/work',
+    ...(z && s.header !== undefined ? { header: s.header } : {}),
     title: heading(where),
     titleText: heading(z ? ` in ${zoneNameText(z, s.zones)}` : ''),
     zones: s.zones,
@@ -1374,7 +1451,7 @@ export function renderWorkList(s: {
 }
 
 /**
- * /work/:zone/:issue (#498): one issue's whole story. The header (issue, project, state, PR, head
+ * /projects/:zone/work/:issue (#498, #619): one issue's whole story, under the project header. The header (issue, project, state, PR, head
  * and verdict), the attempt counts, then every drop for it oldest first with its gates.
  */
 export function renderWorkItem(s: {
@@ -1384,13 +1461,15 @@ export function renderWorkItem(s: {
   /** The item's drops, in any order: shown oldest first. */
   drops: readonly Drop[];
   now?: Date;
+  /** The project header and tab bar (`projectHeaderFor`). */
+  header?: string;
 }): string {
   const { item: i, zones, detail: d } = s;
   const now = s.now ?? new Date();
   const zone = zones.find((z) => z.id === i.dropZoneId) ?? { id: i.dropZoneId, repo: i.dropZoneId };
   const repo = zones.some((z) => z.id === i.dropZoneId) ? zone.repo : undefined;
   const project = zoneName(zone, zones);
-  const workZoneHref = `/work?${new URLSearchParams({ zone: i.dropZoneId })}`;
+  const workZoneHref = projectWorkHref(i.dropZoneId);
   const crumbs =
     `<nav class="crumbs" aria-label="Breadcrumb"><p><a href="/work">Work</a> › ` +
     `<a href="${escapeHtml(workZoneHref)}">${project}</a> › #${escapeHtml(i.issueNumber)}</p></nav>`;
@@ -1423,7 +1502,8 @@ export function renderWorkItem(s: {
     ? `<table><tr><th>Role</th><th>State</th><th>Started</th><th>Elapsed</th><th>Gates</th><th>PR</th><th>Drop</th></tr>${rows}</table>`
     : '<p class="empty">No attempts yet.</p>';
   return page(
-    crumbs +
+    (s.header ?? '') +
+      crumbs +
       header +
       `<h3>Attempts</h3>${attempts}` +
       `<p><a href="${escapeHtml(issueDropsHref(i))}">All drops for this issue</a></p>`,
@@ -1529,7 +1609,7 @@ export function renderHome(state: HomeState): string {
     ? `<div class="warn setup-frame"><p><strong>Finish setting up Jumpmaster.</strong> <a href="/setup/next">Continue where you left off</a>: connect Claude and GitHub, check the runner, add a project and run the doctor.</p><form method="post" action="/setup/dismiss"><button>Dismiss</button></form></div>`
     : '';
   const addProject = state.setup?.addProject
-    ? '<p class="quick"><a href="/zones/new">Add a project</a></p>'
+    ? `<p class="quick"><a href="${PROJECTS_HREF}/new">Add a project</a></p>`
     : '';
   // The dashboard (#120): every number from floorCounts.
   const counts = floorCounts(state, now);
@@ -1805,7 +1885,7 @@ export type DropContext = { item?: WorkItem; zones?: readonly ZoneRef[]; now?: D
 function dropCrumbs(drop: Drop, item: WorkItem | undefined, project: string): string {
   const short = escapeHtml(drop.id.slice(0, 8));
   const trail = item
-    ? `<a href="/work">Work</a> › <a href="${escapeHtml(`/work?${new URLSearchParams({ zone: item.dropZoneId })}`)}">${project}</a> › <a href="${escapeHtml(workItemHref(item))}">#${escapeHtml(item.issueNumber)}</a> › ${short}`
+    ? `<a href="/work">Work</a> › <a href="${escapeHtml(projectWorkHref(item.dropZoneId))}">${project}</a> › <a href="${escapeHtml(workItemHref(item))}">#${escapeHtml(item.issueNumber)}</a> › ${short}`
     : `<a href="/drops">Drops</a> › ${short}`;
   return `<nav class="crumbs" aria-label="Breadcrumb"><p>${trail}</p></nav>`;
 }
@@ -1876,17 +1956,246 @@ export function renderDrop(
   );
 }
 
-/** Observe mode's would-do list, newest first. */
-export function renderObservations(rows: Observation[], zones: readonly ZoneRef[] = []): string {
-  const name = zoneNamer(zones);
-  const body = rows
+/**
+ * The base codes observe mode records today (#621), each before any `:<suffix>`. Every one has
+ * words in {@link observationWords}; a test fails when the server writes a `would_` code not here.
+ */
+export const OBSERVATION_ACTIONS = [
+  'would_carry_verdict',
+  'would_done',
+  'would_enqueue',
+  'would_merge',
+  'would_park',
+  'would_post_review',
+  'would_update_branch',
+  'would_wait',
+] as const;
+
+/** ` <it>`, or with `sep` before it, or nothing when there is no item. */
+const on = (it: string, sep = ' '): string => (it ? `${sep}${it}` : '');
+/** The detail, escaped, in parentheses; nothing when empty. */
+const why = (detail: string): string => (detail ? ` (${escapeHtml(detail)})` : '');
+
+/** `would_enqueue:<role>`: what starting the role's drop is, the item (HTML) given or `''`. */
+const ENQUEUE_WORDS: Readonly<Record<string, (it: string) => string>> = {
+  implement: (it) => `start implementing${on(it)}`,
+  resume: (it) => `resume${on(it) || ' work'}`,
+  review: (it) => `start reviewing${on(it)}`,
+  heal: (it) => `start healing${on(it)}`,
+  resolve: (it) => `start resolving conflicts${on(it, ' on ')}`,
+  arbitrate: (it) => `start an arbitration${on(it, ' on ')}`,
+  audit: (it) => `start an audit${on(it, ' of ')}`,
+  crew: (it) => `start a crew drop${on(it, ' on ')}`,
+  'crew-lead': (it) => `start a crew lead drop${on(it, ' on ')}`,
+  refute: (it) => `start a refute drop${on(it, ' on ')}`,
+  diagnose: (it) => `start a diagnosis${on(it, ' of ')}`,
+  triage: (it) => `start triage${on(it, ' of ')}`,
+};
+
+/**
+ * The words of each base code, the item (HTML) given or `''`: `told` when the sentence already
+ * carries the detail, so the row need not repeat it.
+ */
+const OBSERVATION_WORDS: Readonly<
+  Record<
+    (typeof OBSERVATION_ACTIONS)[number],
+    (
+      it: string,
+      detail: string,
+      suffix: string | undefined,
+    ) => { text: string; told: boolean } | undefined
+  >
+> = {
+  would_carry_verdict: (it) => ({
+    text: `carry the verdict forward${on(it, ' on ')}`,
+    told: false,
+  }),
+  would_done: (it, d) => ({ text: `mark ${it || 'the item'} done${why(d)}`, told: true }),
+  would_enqueue: (it, _d, suffix) => {
+    const words = suffix === undefined ? undefined : ENQUEUE_WORDS[suffix];
+    // A role without its own words is still a drop to start, named by the role.
+    const role = suffix ? ` ${escapeHtml(suffix)}` : '';
+    return { text: words ? words(it) : `start a${role} drop${on(it, ' on ')}`, told: false };
+  },
+  would_merge: (it) => ({ text: `merge${on(it)}`, told: false }),
+  would_park: (it, d) => ({ text: `park${on(it)}${why(d)}`, told: true }),
+  would_post_review: (it) => ({ text: `post the review${on(it, ' on ')}`, told: false }),
+  would_update_branch: (it) => ({ text: `update the branch${on(it, ' of ')}`, told: false }),
+  // `blocked` and `overlap` today; the detail says on what, whatever the suffix.
+  would_wait: (it, d) => ({ text: `hold${on(it) || ' work'}${why(d)}`, told: true }),
+};
+
+/**
+ * An observation as the Log shows it: the row, and its item's issue number when the item is known
+ * (`itemId` is the work item's id, not the issue's).
+ */
+export type LogObservation = Observation & { issueNumber?: number | null };
+
+/** The item an observation is about: its issue linked to its work item page, or its id. */
+function observedItem(row: Pick<LogObservation, 'zoneId' | 'itemId' | 'issueNumber'>): string {
+  if (row.issueNumber !== undefined && row.issueNumber !== null) {
+    const href = workItemHref({ dropZoneId: row.zoneId, issueNumber: row.issueNumber });
+    return `<a href="${escapeHtml(href)}">#${escapeHtml(row.issueNumber)}</a>`;
+  }
+  return row.itemId === null ? '' : `item ${escapeHtml(row.itemId)}`;
+}
+
+function observationLine(
+  row: Pick<LogObservation, 'zoneId' | 'itemId' | 'issueNumber' | 'action' | 'detail'>,
+): { text: string; told: boolean } {
+  const it = observedItem(row);
+  const at = row.action.indexOf(':');
+  const base = at === -1 ? row.action : row.action.slice(0, at);
+  const suffix = at === -1 ? undefined : row.action.slice(at + 1);
+  const known = OBSERVATION_ACTIONS.find((a) => a === base);
+  const words = known ? OBSERVATION_WORDS[known](it, row.detail, suffix) : undefined;
+  // A code without words is shown as it is, never dropped.
+  const { text, told } = words ?? {
+    text: `${escapeHtml(row.action)}${on(it, ' on ')}${why(row.detail)}`,
+    told: true,
+  };
+  return { text: `Would ${text}`, told };
+}
+
+/**
+ * Observe mode's decision in words (#621), as HTML: `would_enqueue:implement` on issue #4154 is
+ * "Would start implementing #4154", the issue linked to its work item. A code without words is
+ * "Would <code>", escaped.
+ */
+export function observationWords(
+  row: Pick<LogObservation, 'zoneId' | 'itemId' | 'issueNumber' | 'action' | 'detail'>,
+): string {
+  return observationLine(row).text;
+}
+
+/** The Log's filters (#621): every entry, observe mode's only, or rulings only. */
+export const LOG_KINDS = ['all', 'observed', 'rulings'] as const;
+export type LogKind = (typeof LOG_KINDS)[number];
+const LOG_KIND_LABELS: Record<LogKind, string> = {
+  all: 'All',
+  observed: 'Observed',
+  rulings: 'Rulings',
+};
+
+/** A project's Log tab (#621), filtered to `kind` unless it is all. */
+export const projectLogHref = (zoneId: string, kind: LogKind = 'all'): string =>
+  `${projectHref(zoneId, 'log')}${kind === 'all' ? '' : `?${new URLSearchParams({ kind })}`}`;
+
+/** One entry of the Log: when it happened, and its cells after When and Project. */
+type LogEntry = { at: string; zoneId: string; kind: 'observed' | 'ruling'; cells: string };
+
+/**
+ * The Log's entries newest first, both kinds merged by time (an observation by its last time), so
+ * a ruling made between two decisions sits between them.
+ */
+export function logEntries(
+  observations: readonly LogObservation[],
+  rulings: readonly Ruling[],
+  now: Date,
+  /** Zones whose crew is disabled: a recorded ruling that waits for the crew says so. */
+  crewOff: ReadonlySet<string> = new Set(),
+): LogEntry[] {
+  const observed = observations.map((o): LogEntry => {
+    const { text, told } = observationLine(o);
+    const detail = told || !o.detail ? '' : ` <small>${escapeHtml(o.detail)}</small>`;
+    return {
+      at: o.lastAt,
+      zoneId: o.zoneId,
+      kind: 'observed',
+      cells: `<td>${text}${detail}</td><td>${escapeHtml(o.count)}</td><td>${relativeTime(o.firstAt, now)}</td>`,
+    };
+  });
+  const ruled = rulings.map((r): LogEntry => {
+    const briefing = `/briefings/${encodeURIComponent(r.briefingId)}`;
+    // Recorded, and held until the zone's crew is enabled again (applyPendingRulings).
+    const waits = r.effect !== null && WAITS_FOR_CREW.has(r.effect) && crewOff.has(r.zoneId);
+    const state = r.applyError
+      ? `apply failed: ${escapeHtml(r.applyError)}`
+      : r.appliedAt
+        ? 'applied'
+        : waits
+          ? 'waiting: crew disabled'
+          : 'not applied yet';
+    const note = r.note ? ` · ${escapeHtml(r.note)}` : '';
+    const diagnosis = r.diagnosis ? ` · diagnosis: ${escapeHtml(r.diagnosis)}` : '';
+    return {
+      at: r.createdAt,
+      zoneId: r.zoneId,
+      kind: 'ruling',
+      cells:
+        `<td><a href="${escapeHtml(`${briefing}#ruling-${r.id}`)}">Ruling ${escapeHtml(r.id)}</a> on ` +
+        `<a href="${escapeHtml(briefing)}">Briefing ${escapeHtml(r.briefingId)}</a>: ` +
+        `${escapeHtml(r.label ?? r.choice)} <small>${state}${note}${diagnosis}</small></td><td>-</td><td>-</td>`,
+    };
+  });
+  // ISO times sort as text; the sort is stable, so equal times keep their list order.
+  return [...observed, ...ruled].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+}
+
+/**
+ * A project's Log tab (`/projects/:id/log`, with `header`) and the install-wide `/activity/log`
+ * (#621): one list, newest first, of observe mode's decisions in words and the rulings. Filtered to
+ * a project, the global page drops its Project column and shows the same rows as the project's tab.
+ */
+export function renderLog(s: {
+  zones: readonly (ZoneRef & { crew?: { enabled?: boolean } })[];
+  /** The project shown, on its tab or the global page filtered to it. */
+  zone?: string;
+  /** The project header and tab bar (`projectHeaderFor`): the page is the project's Log tab. */
+  header?: string;
+  kind: LogKind;
+  /** Already filtered to `zone`, when given. */
+  observations: readonly LogObservation[];
+  /** Already filtered to `zone`, when given. */
+  rulings: readonly Ruling[];
+  now: Date;
+}): string {
+  const tab = s.header !== undefined && s.zone !== undefined;
+  const name = zoneNamer(s.zones);
+  const href = (zone: string | undefined, kind: LogKind): string => {
+    if (tab && zone !== undefined) return projectLogHref(zone, kind);
+    const q = new URLSearchParams();
+    if (zone !== undefined) q.set('project', zone);
+    if (kind !== 'all') q.set('kind', kind);
+    const qs = q.toString();
+    return qs ? `${ACTIVITY_LOG_HREF}?${qs}` : ACTIVITY_LOG_HREF;
+  };
+  const link = (to: string, label: string, current: boolean): string =>
+    `<a href="${escapeHtml(to)}"${current ? ' aria-current="page"' : ''}>${label}</a>`;
+  const kindLinks = LOG_KINDS.map((k) =>
+    link(href(s.zone, k), LOG_KIND_LABELS[k], s.kind === k),
+  ).join(' · ');
+  const projectLinks = [
+    link(href(undefined, s.kind), 'All projects', s.zone === undefined),
+    ...s.zones.map((z) => link(href(z.id, s.kind), zoneName(z, s.zones), s.zone === z.id)),
+  ].join(' · ');
+  const entries = logEntries(
+    s.kind === 'rulings' ? [] : s.observations,
+    s.kind === 'observed' ? [] : s.rulings,
+    s.now,
+    new Set(s.zones.filter((z) => !z.crew?.enabled).map((z) => z.id)),
+  );
+  const withProject = s.zone === undefined;
+  const rows = entries
     .map(
-      (o) =>
-        `<tr><td>${name(o.zoneId)}</td><td>${escapeHtml(o.itemId ?? '')}</td><td>${escapeHtml(o.action)}</td><td>${escapeHtml(o.detail)}</td><td>${o.count}</td><td>${escapeHtml(o.firstAt)}</td><td>${escapeHtml(o.lastAt)}</td></tr>`,
+      (e) =>
+        `<tr class="log-${e.kind}"><td>${relativeTime(e.at, s.now)}</td>${withProject ? `<td>${name(e.zoneId)}</td>` : ''}${e.cells}</tr>`,
     )
     .join('');
+  const head = `<tr><th>When</th>${withProject ? '<th>Project</th>' : ''}<th>What</th><th>Count</th><th>First</th></tr>`;
+  const empty = {
+    all: 'Nothing logged yet.',
+    observed: 'Nothing observed yet.',
+    rulings: 'No rulings yet.',
+  }[s.kind];
+  const top = tab
+    ? `${s.header}<h2>Log</h2>`
+    : `<p><a href="/">Back</a></p><h2>Log${s.zone === undefined ? '' : ` of ${name(s.zone)}`}</h2><nav class="filters" aria-label="Project"><p>${projectLinks}</p></nav>`;
+  const titleText = s.zone === undefined ? 'Log' : `Log of ${zoneTextNamer(s.zones)(s.zone)}`;
   return page(
-    `<h2>Observations</h2><table><tr><th>Zone</th><th>Item</th><th>Would do</th><th>Detail</th><th>Count</th><th>First</th><th>Last</th></tr>${body}</table>`,
+    `${top}<nav class="filters" aria-label="Kind"><p>${kindLinks}</p></nav>` +
+      (rows ? `<table>${head}${rows}</table>` : `<p class="empty">${empty}</p>`),
+    { title: titleText },
   );
 }
 
@@ -1906,7 +2215,7 @@ export function renderDoctor(
         `<li><button data-doctor="/api/control/doctor/drop" data-body="${escapeHtml(JSON.stringify({ zone: z.id }))}">Doctor drop: ${name(z.id)}</button></li>`,
     )
     .join('');
-  const controls = `<p><button data-doctor="/api/control/doctor">Run the doctor</button></p><p>A doctor drop proves the Claude token, the clone, services and gates on a stick; it spends one turn of usage.</p>${drops ? `<ul class="doctor-drops">${drops}</ul>` : ''}${zones.length > 0 ? `<p>GitHub setup (token links, the ruleset file, CODEOWNERS): ${zones.map((z) => `<a href="/zones/${encodeURIComponent(z.id)}/github">${name(z.id)}</a>`).join(', ')}</p>` : ''}`;
+  const controls = `<p><button data-doctor="/api/control/doctor">Run the doctor</button></p><p>A doctor drop proves the Claude token, the clone, services and gates on a stick; it spends one turn of usage.</p>${drops ? `<ul class="doctor-drops">${drops}</ul>` : ''}${zones.length > 0 ? `<p>GitHub setup (token links, the ruleset file, CODEOWNERS): ${zones.map((z) => `<a href="${escapeHtml(githubSetupHref(z.id))}">${name(z.id)}</a>`).join(', ')}</p>` : ''}`;
   if (!run)
     return page(
       `<h2>Doctor</h2><p>No doctor run has finished yet. Run one here or with <code>jumpmaster ctl doctor</code>.</p>${controls}${DOCTOR_SCRIPT}`,
@@ -1974,8 +2283,8 @@ async function call(path, body) {
   return { status: r.status, body: await r.json().catch(() => ({})) };
 }`;
 
-/** The GOAL.md stub page's script: render the stub, then copy it. */
-const STUB_SCRIPT = `<script>
+/** The GOAL.md stub builder's script: render the stub, then copy it. */
+export const STUB_SCRIPT = `<script>
 const root = document.getElementById('intake');
 ${FORM_HELPERS}
 document.getElementById('stub-form').addEventListener('submit', async (e) => {
@@ -2045,8 +2354,11 @@ const intakeArea = (id: string, rows: number, required = false) =>
   `<textarea id="${id}" rows="${rows}" cols="80"${required ? ' required' : ''}></textarea>`;
 const intakeBase = (zone: ZoneRef) => `/api/control/zones/${encodeURIComponent(zone.id)}/intake`;
 
-/** The GOAL.md stub builder: the stub, then how to commit it; issues are filed on New issue. */
-export function renderIntake(zone: ZoneRef, zones: readonly ZoneRef[] = [zone]): string {
+/**
+ * The GOAL.md stub builder (#620), a section of Goals: the stub, then how to commit it; issues are
+ * filed on New issue. Collapsed unless the project has no goal file yet (`open`).
+ */
+export function goalStub(zone: ZoneRef, open: boolean): string {
   const field = intakeField;
   const area = intakeArea;
   const goal = `<h3>Step 1: the goal</h3><form id="stub-form">${field(
@@ -2062,17 +2374,20 @@ export function renderIntake(zone: ZoneRef, zones: readonly ZoneRef[] = [zone]):
   )}${field('stub-lighthouse', 'Lighthouse: what the project is for, in a few sentences', area('stub-lighthouse', 4, true))}${field('stub-objectives', 'Objectives, one per line, first first (at most 5)', area('stub-objectives', 5, true))}${field('stub-nongoals', 'Non-goals, one per line (optional)', area('stub-nongoals', 3))}${field('stub-constraints', 'Constraints, one per line (optional)', area('stub-constraints', 3))}<button>Render the stub</button> <span id="stub-status"></span></form>`;
   const commit = `<h3>Step 2: commit it by pull request</h3><p>GOAL.md is a protected path, so no agent may write it and Jumpmaster doesn't commit it either. Copy the stub, then on a branch of ${escapeHtml(zone.repo)}: save it as GOAL.md, commit, push, open a pull request, and merge it yourself. The crew reads it once it is on the default branch.</p><p><textarea id="stub-out" rows="16" cols="80" readonly></textarea><br><button type="button" id="stub-copy">Copy</button></p>`;
   const next = `<p>To file an issue, use <a href="${escapeHtml(zoneHref(zone.id))}/issues/new"><strong>New issue</strong></a>.</p>`;
-  return page(
-    `<h2>GOAL.md stub: ${zoneName(zone, zones)}</h2><div id="intake" data-base="${escapeHtml(intakeBase(zone))}">${goal}${commit}</div>${next}${STUB_SCRIPT}`,
-  );
+  return `<details id="goal-stub"${open ? ' open' : ''}><summary>Draft a GOAL.md</summary><div id="intake" data-base="${escapeHtml(intakeBase(zone))}">${goal}${commit}</div>${next}${STUB_SCRIPT}</details>`;
 }
 
 /** The New issue page: one ready issue, filed under objective 1 as soon as it is submitted. */
-export function renderNewIssue(zone: ZoneRef, zones: readonly ZoneRef[] = [zone]): string {
+export function renderNewIssue(
+  zone: ZoneRef,
+  zones: readonly ZoneRef[] = [zone],
+  /** The project header and tab bar (#616), in place of the link back to the project. */
+  header?: string,
+): string {
   const field = intakeField;
   const area = intakeArea;
   const form = `<p>Filed ready, under objective 1, as soon as you submit: it doesn't need GOAL.md merged first.</p><form id="issue-form">${field('issue-title', 'Title (at most 120 characters)', '<input id="issue-title" size="80" maxlength="120" required>')}${field('issue-context', 'Context', area('issue-context', 6, true))}${field('issue-acceptance', 'Acceptance criteria, one per line', area('issue-acceptance', 5, true))}${field('issue-tests', 'Required tests, one per line', area('issue-tests', 3, true))}${field('issue-out', 'Out of scope, one per line (optional)', area('issue-out', 3))}<button>File the issue</button> <span id="issue-status" role="status"></span> <button type="button" id="issue-again" hidden>File another</button></form>`;
   return page(
-    `<p><a href="${escapeHtml(zoneHref(zone.id))}">${zoneName(zone, zones)}</a></p><h2>New issue: ${zoneName(zone, zones)}</h2><div id="new-issue" data-base="${escapeHtml(intakeBase(zone))}" data-issues="${escapeHtml(issueUrl(zone.repo, 0).replace(/0$/, ''))}">${form}</div>${ISSUE_SCRIPT}`,
+    `${header ?? `<p><a href="${escapeHtml(zoneHref(zone.id))}">${zoneName(zone, zones)}</a></p>`}<h2>New issue: ${zoneName(zone, zones)}</h2><div id="new-issue" data-base="${escapeHtml(intakeBase(zone))}" data-issues="${escapeHtml(issueUrl(zone.repo, 0).replace(/0$/, ''))}">${form}</div>${ISSUE_SCRIPT}`,
   );
 }

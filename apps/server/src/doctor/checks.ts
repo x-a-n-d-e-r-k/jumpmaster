@@ -65,6 +65,7 @@ import {
   FAILURE_WINDOW_MS,
   lastArchiveFailure,
 } from '../transcripts.js';
+import { githubSetupHref } from '../ui/links.js';
 import { dispatchGate } from '../usage.js';
 import {
   APP_ID_MISMATCH,
@@ -2148,7 +2149,7 @@ async function codeownersCheck(
   const read = await readCodeowners(r, branch);
   if (!read.ok) return readFailed(base, 'author', `read ${read.path}`, 'Contents: read', read);
   const text = read.text;
-  const github = `/zones/${encodeURIComponent(zone.id)}/github`;
+  const github = githubSetupHref(zone.id);
   if (text === null)
     return {
       ...base,

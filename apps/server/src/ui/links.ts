@@ -6,3 +6,19 @@
 export function linkTarget(href: string): string {
   return /^https?:\/\//i.test(href) ? ' target="_blank" rel="noopener noreferrer"' : '';
 }
+
+/** The projects list page (issue #615: project pages moved from `/zones`). */
+export const PROJECTS_HREF = '/projects';
+
+/**
+ * A project's page, or one of its sub-pages (`goals`, `github`, `issues/new`…). The id is
+ * URI-encoded, so it is always exactly one path segment.
+ */
+export const projectHref = (id: string, sub?: string): string =>
+  `${PROJECTS_HREF}/${encodeURIComponent(id)}${sub ? `/${sub}` : ''}`;
+
+/** A project's GitHub setup: the GitHub section of its Setup tab (#618). */
+export const githubSetupHref = (id: string): string => `${projectHref(id, 'setup')}#github`;
+
+/** The install-wide Log (#621): every project's, or one project's with `?project=`. */
+export const ACTIVITY_LOG_HREF = '/activity/log';

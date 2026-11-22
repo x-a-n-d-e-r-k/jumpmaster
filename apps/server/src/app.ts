@@ -87,10 +87,11 @@ import { transcriptPruned } from './transcripts.js';
 import { registerAuthPages } from './ui/auth-pages.js';
 import { renderChatList, renderThread } from './ui/chat.js';
 import { registerConfirmPages } from './ui/confirm.js';
-import type { PendingLine } from './ui/floor.js';
-import { registerGithubPages } from './ui/github.js';
+import type { FloorInputs, PendingLine } from './ui/floor.js';
+import { githubSectionRenderer } from './ui/github.js';
 import { registerGoalConfirmPages } from './ui/goal-confirm.js';
 import {
+  ACTIVITY_LOG_HREF,
   type CrewLine,
   DROP_KINDS,
   DROP_LIST_LIMIT,
@@ -98,6 +99,9 @@ import {
   type DropKind,
   type HomeState,
   type ItemDetail,
+  LOG_KINDS,
+  type LogKind,
+  PROJECTS_HREF,
   pageParams,
   renderBriefing,
   renderBriefings,
@@ -106,9 +110,8 @@ import {
   renderDropList,
   renderGoals,
   renderHome,
-  renderIntake,
+  renderLog,
   renderNewIssue,
-  renderObservations,
   renderWorkItem,
   renderWorkList,
   STORE_NAV,
@@ -116,11 +119,12 @@ import {
   type StickLine,
   WORK_STATES,
 } from './ui/pages.js';
+import { registerRedirects } from './ui/redirects.js';
 import { claudeTokenDays, registerSettingsPages } from './ui/settings.js';
 import { registerSetupPages, wizardActive } from './ui/setup.js';
 import { renderInviteResult, renderSticks, type StickRow } from './ui/sticks.js';
 import { zoneTextNamer } from './ui/zone-name.js';
-import { registerZonesPages } from './ui/zones.js';
+import { projectHeaderFor, registerZonesPages } from './ui/zones.js';
 import { dispatchGate } from './usage.js';
 
 const ATTEMPT_KEYS: AttemptKey[] = [
@@ -222,6 +226,29 @@ function floorMerges(db: Db, at: Date): { merges24h?: Array<{ zoneId: string; at
   }
 }
 
+/**
+ * A zone's crew line, on Floor and on its Goals tab (#620): on or off, when its last lead cycle's
+ * drop was created, when the next is due by time (null once due), and Fable's status.
+ */
+function crewLine(db: Db, config: Config, z: Config['dropZones'][number], at: Date): CrewLine {
+  const last = db
+    .prepare(
+      `SELECT created_at AS at FROM drops WHERE drop_zone_id = ? AND role = 'crew-lead'
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(z.id) as { at: string } | undefined;
+  const next = last
+    ? new Date(Date.parse(last.at) + z.crew.cycleMinutes * 60_000).toISOString()
+    : null;
+  return {
+    zoneId: z.id,
+    enabled: z.crew.enabled,
+    lastCycle: last?.at ?? null,
+    nextDue: next !== null && Date.parse(next) > at.getTime() ? next : null,
+    fable: fableStatus(db, config, at).reason,
+  };
+}
+
 /** Fastify instance with stick and UI routes registered; the caller listens. Logger stays off: payloads carry tokens. */
 /** The home page's usage section: the gate, the stored state and the credits stop's counts. */
 function usageView(db: Db, config: Config, at: Date): NonNullable<HomeState['usage']> {
@@ -259,6 +286,25 @@ function stickLine(s: Stick, config: Config): StickLine {
     cannotRun: config.dropZones
       .map((z) => ({ zoneId: z.id, missing: missingFor(s, zoneRequirements(z, config)) }))
       .filter((c) => c.missing.length > 0),
+  };
+}
+
+/**
+ * What the floor's zone cards count, read from the database: shared by the floor and a project's
+ * Overview (#616), whose State sentence is its floor card's.
+ */
+function floorInputs(db: Db, config: Config, at: Date): FloorInputs {
+  const floor = floorBriefings(db, config.dropZones);
+  return {
+    zones: config.dropZones,
+    modes: Object.fromEntries(config.dropZones.map((z) => [z.id, getZoneMode(db, z.id, z.mode)])),
+    items: config.dropZones.flatMap((z) => listWorkItems(db, z.id)),
+    drops: listDrops(db, { states: ACTIVE_DROP_STATES, limit: FLOOR_DROP_LIMIT }),
+    ...floorMerges(db, at),
+    outbox: listOutbox(db, ['unknown', 'failed']),
+    briefings: floor.listed,
+    heldBriefings: floor.held,
+    sticks: listSticks(db).map((s) => stickLine(s, config)),
   };
 }
 
@@ -484,16 +530,24 @@ export function createApp(
       ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
       ...(deps.reach?.tailscale ? { tailscale: deps.reach.tailscale } : {}),
     });
-    // The GitHub half of setup for a zone: links and generated files, never a forge write.
-    registerGithubPages(app, {
-      store: deps.config,
-      now: deps.now,
-      ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
-      ...(deps.appTokens ? { appTokens: deps.appTokens } : {}),
-    });
     // The zones page (Task 11): every zone, a page per zone, and the add page.
-    registerZonesPages(app, { db: deps.db, store: deps.config, now: deps.now });
+    const store = deps.config;
+    registerZonesPages(app, {
+      db: deps.db,
+      store,
+      now: deps.now,
+      floor: (at) => floorInputs(deps.db, store.current(), at),
+      // The Setup tab's GitHub section (#618): the guide, read from GitHub, with each step's status.
+      github: githubSectionRenderer({
+        store,
+        now: deps.now,
+        ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
+        ...(deps.appTokens ? { appTokens: deps.appTokens } : {}),
+      }),
+    });
   }
+  // The pages that moved (issue #615): each old path answers 301/308 straight to its new one.
+  registerRedirects(app);
 
   // Every stick and its trooper count (issue #136): the count is set through the control route.
   app.get('/sticks', async (req, reply) => {
@@ -593,8 +647,6 @@ export function createApp(
     const { db, now } = deps;
     const config = cfg(req);
     const at = now();
-    const items = config.dropZones.flatMap((z) => listWorkItems(db, z.id));
-    const floor = floorBriefings(db, config.dropZones);
     const pending = pendingLinesFor(req);
     const html = renderHome({
       setup: {
@@ -617,44 +669,19 @@ export function createApp(
       ...(deps.config instanceof ConfigStore
         ? { claudeTokenDays: claudeTokenDays(deps.config, at) }
         : {}),
-      zones: config.dropZones,
+      ...floorInputs(db, config, at),
       killed: isKilled(db),
-      modes: Object.fromEntries(config.dropZones.map((z) => [z.id, getZoneMode(db, z.id, z.mode)])),
-      items,
-      drops: listDrops(db, { states: ACTIVE_DROP_STATES, limit: FLOOR_DROP_LIMIT }),
       now: at,
       usage: usageView(db, config, at),
-      ...floorMerges(db, at),
-      outbox: listOutbox(db, ['unknown', 'failed']),
-      briefings: floor.listed,
-      heldBriefings: floor.held,
       pending,
-      sticks: listSticks(db).map((s) => stickLine(s, config)),
-      crew: config.dropZones.map((z): CrewLine => {
-        const last = db
-          .prepare(
-            `SELECT created_at AS at FROM drops WHERE drop_zone_id = ? AND role = 'crew-lead'
-             ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-          )
-          .get(z.id) as { at: string } | undefined;
-        const next = last
-          ? new Date(Date.parse(last.at) + z.crew.cycleMinutes * 60_000).toISOString()
-          : null;
-        return {
-          zoneId: z.id,
-          enabled: z.crew.enabled,
-          lastCycle: last?.at ?? null,
-          nextDue: next !== null && Date.parse(next) > at.getTime() ? next : null,
-          fable: fableStatus(db, config, at).reason,
-        };
-      }),
+      crew: config.dropZones.map((z) => crewLine(db, config, z, at)),
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
 
   // Every open briefing grouped by project, or one zone's paged (`?zone=`: where the floor's lines
-  // and the zone page link, with that zone's bulk dismiss). `per`, `page` and `rpage` never refuse.
-  app.get<{ Querystring: { zone?: string; per?: string; page?: string; rpage?: string } }>(
+  // and the zone page link, with that zone's bulk dismiss). `per` and `page` never refuse.
+  app.get<{ Querystring: { zone?: string; per?: string; page?: string } }>(
     '/briefings',
     async (req, reply) => {
       const { db } = deps;
@@ -675,7 +702,7 @@ export function createApp(
         open,
         ...briefingContext(db, config.dropZones, open),
         pending: pendingDiagnoses(db, config.dropZones, open, deps.now()),
-        // Every ruling: each project counts its own, and pages or shows its newest `per`.
+        // Every ruling, for `Ruling n` references: the rulings themselves are the Log's (#621).
         rulings: zones.flatMap((z) => listRulings(db, z.id, ALL_RULINGS)),
         zones: config.dropZones,
         holds,
@@ -735,25 +762,55 @@ export function createApp(
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
 
-  app.get<{ Params: { zone: string; issue: string } }>('/work/:zone/:issue', async (req, reply) => {
-    const { db } = deps;
-    const config = cfg(req);
-    const zone = config.dropZones.find((z) => z.id === req.params.zone);
-    const n = issueFilter(req.params.issue, zone?.id);
-    const item = zone && typeof n === 'number' ? findWorkItem(db, zone.id, n) : undefined;
-    if (!item) return reply.code(404).type('text/plain').send('not found');
-    // SQLite's LIMIT -1 is no limit: the page shows every attempt.
-    const drops = listDrops(db, { zoneId: item.dropZoneId, workItemId: item.id, limit: -1 });
-    const detail = itemDetails(db, [item]).get(item.id);
-    const html = renderWorkItem({
-      item,
-      zones: config.dropZones,
-      ...(detail ? { detail } : {}),
-      drops,
-      now: deps.now(),
-    });
-    return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
-  });
+  // A project's work (#619): its list under the project header, Work current, and each item.
+  app.get<{ Params: { id: string }; Querystring: { state?: string } }>(
+    `${PROJECTS_HREF}/:id/work`,
+    async (req, reply) => {
+      const { db } = deps;
+      const zones = cfg(req).dropZones;
+      const zone = zones.find((z) => z.id === req.params.id);
+      if (!zone) return reply.code(404).type('text/plain').send('not found');
+      const f = listFilter({ state: req.query.state }, zones, ['active', ...WORK_STATES] as const);
+      if ('refuse' in f) return reply.code(404).type('text/plain').send(f.refuse);
+      const state = f.state ?? 'active';
+      const items = listWorkItems(db, zone.id).filter((i) =>
+        state === 'active' ? i.state !== 'done' : i.state === state,
+      );
+      const html = renderWorkList({
+        zones,
+        zone: zone.id,
+        header: projectHeaderFor(db, zone, zones, 'work'),
+        state,
+        items,
+        details: itemDetails(db, items),
+      });
+      return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+    },
+  );
+
+  app.get<{ Params: { id: string; issue: string } }>(
+    `${PROJECTS_HREF}/:id/work/:issue`,
+    async (req, reply) => {
+      const { db } = deps;
+      const zones = cfg(req).dropZones;
+      const zone = zones.find((z) => z.id === req.params.id);
+      const n = issueFilter(req.params.issue, zone?.id);
+      const item = zone && typeof n === 'number' ? findWorkItem(db, zone.id, n) : undefined;
+      if (!zone || !item) return reply.code(404).type('text/plain').send('not found');
+      // SQLite's LIMIT -1 is no limit: the page shows every attempt.
+      const drops = listDrops(db, { zoneId: item.dropZoneId, workItemId: item.id, limit: -1 });
+      const detail = itemDetails(db, [item]).get(item.id);
+      const html = renderWorkItem({
+        item,
+        zones,
+        ...(detail ? { detail } : {}),
+        drops,
+        now: deps.now(),
+        header: projectHeaderFor(db, zone, zones, 'work'),
+      });
+      return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+    },
+  );
 
   app.get<{ Querystring: { zone?: string; state?: string; issue?: string; kind?: string } }>(
     '/drops',
@@ -797,11 +854,12 @@ export function createApp(
     },
   );
 
-  app.get<{ Params: { id: string } }>('/zones/:id/goals', async (req, reply) => {
+  app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/goals`, async (req, reply) => {
     const { db } = deps;
     const config = cfg(req);
     const zone = config.dropZones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
+    const now = deps.now();
     const html = renderGoals({
       zone,
       zones: config.dropZones,
@@ -811,22 +869,21 @@ export function createApp(
       skippedCrewUnpromoted: lastSyncResult(zone.id)?.skippedCrewUnpromoted ?? [],
       doneByRuling: objectivesDone(db, zone.id),
       goalChanges: listGoalChanges(db, zone.id),
+      mode: getZoneMode(db, zone.id, zone.mode),
+      openBriefings: listBriefings(db, { zoneId: zone.id, state: 'open' }).length,
+      crew: crewLine(db, config, zone, now),
+      now,
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
 
-  app.get<{ Params: { id: string } }>('/zones/:id/intake', async (req, reply) => {
+  app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/issues/new`, async (req, reply) => {
     const zones = cfg(req).dropZones;
     const zone = zones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
-    return reply.type('text/html; charset=utf-8').send(withCsrf(req, renderIntake(zone, zones)));
-  });
-
-  app.get<{ Params: { id: string } }>('/zones/:id/issues/new', async (req, reply) => {
-    const zones = cfg(req).dropZones;
-    const zone = zones.find((z) => z.id === req.params.id);
-    if (!zone) return reply.code(404).type('text/plain').send('not found');
-    return reply.type('text/html; charset=utf-8').send(withCsrf(req, renderNewIssue(zone, zones)));
+    return reply
+      .type('text/html; charset=utf-8')
+      .send(withCsrf(req, renderNewIssue(zone, zones, projectHeaderFor(deps.db, zone, zones))));
   });
 
   // The crew chat's pages: without the chat service (an older compose file) `/chat` names the
@@ -867,10 +924,62 @@ export function createApp(
       .send(withCsrf(req, renderDoctor(latestDoctorRun(deps.db), cfg(req).dropZones))),
   );
 
-  app.get('/observations', async (req, reply) =>
-    reply
-      .type('text/html; charset=utf-8')
-      .send(withCsrf(req, renderObservations(listObservations(deps.db), cfg(req).dropZones))),
+  // The Log (#621): observe mode's decisions in words and the rulings, newest first. A project's
+  // tab and the install-wide page share the renderer; `kind` and `project` refuse what they don't know.
+  const logOf = (db: Db, zones: readonly { id: string }[], zoneId?: string) => {
+    const shown = zones.filter((z) => zoneId === undefined || z.id === zoneId);
+    const issues = new Map(
+      shown.flatMap((z) => listWorkItems(db, z.id)).map((i) => [i.id, i.issueNumber]),
+    );
+    return {
+      observations: listObservations(db, zoneId).map((o) => ({
+        ...o,
+        issueNumber: o.itemId === null ? null : (issues.get(o.itemId) ?? null),
+      })),
+      rulings: shown.flatMap((z) => listRulings(db, z.id, ALL_RULINGS)),
+    };
+  };
+  const logKind = (kind: unknown): LogKind | undefined =>
+    kind === undefined ? 'all' : LOG_KINDS.find((k) => k === kind);
+
+  app.get<{ Params: { id: string }; Querystring: { kind?: string } }>(
+    `${PROJECTS_HREF}/:id/log`,
+    async (req, reply) => {
+      const zones = cfg(req).dropZones;
+      const zone = zones.find((z) => z.id === req.params.id);
+      if (!zone) return reply.code(404).type('text/plain').send('not found');
+      const kind = logKind(req.query.kind);
+      if (!kind) return reply.code(404).type('text/plain').send('no such kind');
+      const html = renderLog({
+        zones,
+        zone: zone.id,
+        header: projectHeaderFor(deps.db, zone, zones, 'log'),
+        kind,
+        ...logOf(deps.db, zones, zone.id),
+        now: deps.now(),
+      });
+      return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+    },
+  );
+
+  app.get<{ Querystring: { project?: string; kind?: string } }>(
+    ACTIVITY_LOG_HREF,
+    async (req, reply) => {
+      const zones = cfg(req).dropZones;
+      const project = req.query.project;
+      if (project !== undefined && !zones.some((z) => z.id === project))
+        return reply.code(404).type('text/plain').send('no such project');
+      const kind = logKind(req.query.kind);
+      if (!kind) return reply.code(404).type('text/plain').send('no such kind');
+      const html = renderLog({
+        zones,
+        ...(project !== undefined ? { zone: project } : {}),
+        kind,
+        ...logOf(deps.db, zones, project),
+        now: deps.now(),
+      });
+      return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+    },
   );
 
   app.get<{ Params: { id: string } }>('/artifacts/:id', async (req, reply) => {

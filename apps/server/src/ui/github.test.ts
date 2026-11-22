@@ -9,7 +9,8 @@ import { setOperatorPassphrase } from '../auth/operator.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
 import type { DropZoneConfig } from '../config.js';
-import { openDb } from '../db/open.js';
+import { type Db, openDb } from '../db/open.js';
+import type { DoctorCheck } from '../doctor/checks.js';
 import {
   EXPIRATION_NOTE,
   RESOURCE_OWNER_NOTE,
@@ -20,7 +21,7 @@ import { MATRIX_AND_REUSABLE_NOTE } from '../github/workflows.js';
 import { APP_ENTRIES, APP_SECRETS, guidanceAppsOf } from '../test/app-guidance-fixture.js';
 import { makeZone } from '../test/fixtures.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
-import { mergeRulesetSection, zonePage } from './github.js';
+import { githubSection, mergeRulesetSection, stepStatus } from './github.js';
 import { escapeHtml, FAVICON_HREF } from './pages.js';
 
 const TOKEN = 'o'.repeat(32);
@@ -171,13 +172,16 @@ const links = (html: string): string[] =>
   [...html.matchAll(/\b(?:href|src)="([^"]*)"/g)].map((m) => (m[1] ?? '').replaceAll('&amp;', '&'));
 
 describe('the GitHub page of a zone', () => {
-  test('GET /zones/:id/github holds the recommendation, the token links, the checklist, the ruleset file and CODEOWNERS, escaped and without a credential', async () => {
+  test('GET /projects/:id/github holds the recommendation, the token links, the checklist, the ruleset file and CODEOWNERS, escaped and without a credential', async () => {
     const w = await world();
-    const r = await w.get('/zones/demo/github?reviewer=alice');
+    const r = await w.get('/projects/demo/setup?reviewer=alice');
     expect(r.statusCode, r.body).toBe(200);
     const html = r.body;
-    // Named by its repository, not its zone id (#99).
-    expect(html).toContain('<h2>GitHub for octo-org/demo</h2>');
+    // A section of Setup (#618), after Repository & labels and before Stack & checks.
+    expect(html).toContain('<section id="github" class="setup-section"><h3>GitHub</h3>');
+    expect(html.indexOf('id="project"')).toBeLessThan(html.indexOf('id="github"'));
+    expect(html.indexOf('id="github"')).toBeLessThan(html.indexOf('id="stack"'));
+    expect(html).toContain('<a href="#github">GitHub</a>');
     // The order the operator works in: accounts, tokens, collaborators, ruleset, CODEOWNERS.
     const at = (s: string) => html.indexOf(s);
     for (const s of [
@@ -231,7 +235,7 @@ describe('the GitHub page of a zone', () => {
   });
 
   test('the token step is short numbered steps, in the order they are done, with the lifetime note', async () => {
-    const html = (await (await world()).get('/zones/demo/github')).body;
+    const html = (await (await world()).get('/projects/demo/setup')).body;
     const steps = /<ol id="token-steps">([\s\S]*?)<\/ol>/.exec(html)?.[1] ?? '';
     const order = [
       'Sign in as',
@@ -252,7 +256,7 @@ describe('the GitHub page of a zone', () => {
 
   test('with no CI the warning comes before the download and says what the file still requires; starter says Jumpmaster parks protected paths', async () => {
     const html = (
-      await (await world({ noCi: true, identity: 'starter' })).get('/zones/demo/github')
+      await (await world({ noCi: true, identity: 'starter' })).get('/projects/demo/setup')
     ).body;
     const note = html.indexOf('a pull request must exist');
     expect(note).toBeGreaterThan(-1);
@@ -262,7 +266,7 @@ describe('the GitHub page of a zone', () => {
   });
 
   test('a two-bot zone folds its token links under Use tokens instead; a starter zone shows them as before; a personal starter zone is not the recommendation', async () => {
-    const two = (await (await world()).get('/zones/demo/github')).body;
+    const two = (await (await world()).get('/projects/demo/setup')).body;
     const details = two.indexOf('<details id="use-tokens"><summary>Use tokens instead</summary>');
     expect(details).toBeGreaterThan(-1);
     expect(details).toBeLessThan(two.indexOf('id="tokens"'));
@@ -273,7 +277,7 @@ describe('the GitHub page of a zone', () => {
     vi.restoreAllMocks();
 
     const starter = (
-      await (await world({ ownerType: 'User', identity: 'starter' })).get('/zones/demo/github')
+      await (await world({ ownerType: 'User', identity: 'starter' })).get('/projects/demo/setup')
     ).body;
     expect(starter).toContain('id="tokens"');
     expect(starter).not.toContain('id="use-tokens"');
@@ -284,13 +288,13 @@ describe('the GitHub page of a zone', () => {
 
   test('an app-author zone with no author PAT renders its guidance on the author app, not the no-author message', async () => {
     const appToken = ['ghs', 'PAGEAPPTOKEN'.repeat(3)].join('_');
-    const without = await (await world({ noAuthor: true })).get('/zones/demo/github');
-    expect(without.statusCode).toBe(409);
+    const without = await (await world({ noAuthor: true })).get('/projects/demo/setup');
+    expect(without.statusCode).toBe(200);
     expect(without.body).toContain('Set or replace the tokens');
     await app?.close();
     vi.restoreAllMocks();
     const r = await (await world({ noAuthor: true, authorApp: { token: appToken } })).get(
-      '/zones/demo/github',
+      '/projects/demo/setup',
     );
     expect(r.statusCode, r.body).toBe(200);
     expect(r.body).toContain('id="ruleset"');
@@ -299,22 +303,151 @@ describe('the GitHub page of a zone', () => {
     expect(r.body).not.toContain(appToken);
   });
 
-  test('an unknown zone is 404; a refused read says why, escaped, and links the GitHub step', async () => {
+  test('an unknown zone is 404; a refused read says why in the GitHub section, escaped, and links the GitHub step', async () => {
     const w = await world({ fail: 401 });
-    expect((await w.get('/zones/nope/github')).statusCode).toBe(404);
-    const r = await w.get('/zones/demo/github');
-    expect(r.statusCode).toBe(502);
+    expect((await w.get('/projects/nope/setup')).statusCode).toBe(404);
+    const r = await w.get('/projects/demo/setup');
+    expect(r.statusCode).toBe(200);
     expect(r.body).toContain('GitHub rejected the author token (401)');
-    expect(r.body).toContain('<h2>GitHub for octo-org/demo</h2>');
+    expect(r.body).toContain('<section id="github" class="setup-section"><h3>GitHub</h3>');
     expect(r.body).not.toContain('<b>');
     expect(r.body).toContain('href="/setup/forge"');
   });
 
-  test('home links each zone’s page, which links its GitHub page, as the doctor page does', async () => {
+  test('home links each zone’s page, which links its GitHub section, as the doctor page does', async () => {
     const w = await world();
-    expect((await w.get('/')).body).toContain('href="/zones/demo"');
-    expect((await w.get('/zones/demo')).body).toContain('href="/zones/demo/github"');
-    expect((await w.get('/doctor')).body).toContain('href="/zones/demo/github"');
+    expect((await w.get('/')).body).toContain('href="/projects/demo"');
+    expect((await w.get('/projects/demo')).body).toContain('href="/projects/demo/setup#github"');
+    expect((await w.get('/doctor')).body).toContain('href="/projects/demo/setup#github"');
+  });
+
+  test('the code owners form is outside the settings form, and asks for the Setup page again', async () => {
+    const html = (await (await world()).get('/projects/demo/setup?reviewer=alice')).body;
+    const start = html.indexOf('<form id="setup-form"');
+    expect(start).toBeGreaterThan(-1);
+    const form = html.slice(start, html.indexOf('</form>', start));
+    // No form inside Setup's form: the login names its own form instead.
+    expect(form.slice(1)).not.toContain('<form');
+    expect(form).toContain('<input name="reviewer" form="github-reviewer-form" value="alice"');
+    expect(html).toContain(
+      '<form id="github-reviewer-form" method="get" action="/projects/demo/setup#github"></form>',
+    );
+  });
+
+  test('the downloads and their file names are unchanged', async () => {
+    const html = (await (await world()).get('/projects/demo/setup')).body;
+    expect(html).toContain(
+      'download="jumpmaster-demo-ruleset.json">Download jumpmaster-demo-ruleset.json</a>',
+    );
+    expect(html).toMatch(
+      /<a href="data:application\/json;charset=utf-8,[^"]+" download="jumpmaster-demo-ruleset.json">/,
+    );
+    expect(html).toContain('<button type="button" data-copy="ruleset-text">Copy</button>');
+    expect(html).toContain('<button type="button" data-copy="codeowners-text">Copy</button>');
+    expect(html).toContain('<pre id="codeowners-text">');
+    expect(html).toContain('Create <code>.github/CODEOWNERS</code> on GitHub</a>');
+    // The copy buttons' script, once.
+    expect(html.split('navigator.clipboard.writeText').length).toBe(2);
+  });
+});
+
+/** A finished doctor run with these checks. */
+function doctorRun(db: Db, checks: Partial<DoctorCheck>[]) {
+  db.prepare(
+    "INSERT INTO doctor_runs (started_at, finished_at, results_json) VALUES ('a', 'b', ?)",
+  ).run(JSON.stringify(checks.map((c) => ({ zoneId: 'demo', summary: '', ...c }))));
+}
+
+/** The status paragraph of a step in a page. */
+const chipOf = (html: string, step: string): string => {
+  const at = html.indexOf(`<p class="step-status" data-step="${step}">`);
+  expect(at, step).toBeGreaterThan(-1);
+  return html.slice(at, html.indexOf('</p>', at));
+};
+
+describe('each step of the GitHub section shows its doctor status (#618)', () => {
+  test('a failing branch-rules check makes the ruleset missing, with the finding; a passing private-clone makes access done', async () => {
+    const w = await world();
+    doctorRun(w.db, [
+      { id: 'forge.branch-rules', status: 'fail', summary: 'no ruleset <b>protects</b> main' },
+      { id: 'forge.ci', status: 'pass', summary: 'ci reports' },
+      { id: 'forge.private-clone', status: 'pass', summary: 'public' },
+      { id: 'forge.codeowners', status: 'warn', summary: 'no CODEOWNERS file' },
+      // Another zone's labels pass: not this zone's.
+      { id: 'forge.labels', status: 'pass', zoneId: 'other' },
+    ]);
+    const html = (await w.get('/projects/demo/setup')).body;
+    const ruleset = chipOf(html, 'ruleset');
+    expect(ruleset).toContain('data-status="missing">missing</span>');
+    expect(ruleset).toContain('no ruleset &lt;b&gt;protects&lt;/b&gt; main');
+    expect(ruleset).not.toContain('ci reports');
+    expect(chipOf(html, 'access')).toContain('data-status="done">done</span>');
+    expect(chipOf(html, 'codeowners')).toContain('data-status="check">check</span>');
+    expect(chipOf(html, 'codeowners')).toContain('no CODEOWNERS file');
+    expect(chipOf(html, 'labels')).toContain('data-status="not-checked">not checked</span>');
+    // Each chip sits in its own step.
+    const at = (s: string) => html.indexOf(s);
+    expect(at('id="checklist"')).toBeLessThan(at('data-step="access"'));
+    expect(at('data-step="access"')).toBeLessThan(at('id="ruleset"'));
+    expect(at('id="ruleset"')).toBeLessThan(at('data-step="ruleset"'));
+    expect(at('id="codeowners"')).toBeLessThan(at('data-step="codeowners"'));
+  });
+
+  test('with no doctor run every step is not checked, never done', async () => {
+    const w = await world();
+    const html = (await w.get('/projects/demo/setup')).body;
+    for (const step of ['access', 'ruleset', 'codeowners', 'labels']) {
+      expect(chipOf(html, step)).toContain('data-status="not-checked">not checked</span>');
+      expect(chipOf(html, step)).not.toContain('done');
+    }
+    expect(html).not.toContain('data-status="done"');
+  });
+
+  test('a run with no matching check, or only part of a step, is not checked; all passing is done', async () => {
+    const w = await world();
+    doctorRun(w.db, [
+      { id: 'forge.ci', status: 'pass' },
+      { id: 'forge.labels', status: 'skip', summary: 'skipped' },
+      { id: 'forge.codeowners', status: 'pass' },
+    ]);
+    const html = (await w.get('/projects/demo/setup')).body;
+    expect(chipOf(html, 'ruleset')).toContain('data-status="not-checked"');
+    expect(chipOf(html, 'labels')).toContain('data-status="not-checked"');
+    expect(chipOf(html, 'access')).toContain('data-status="not-checked"');
+    expect(chipOf(html, 'codeowners')).toContain('data-status="done"');
+  });
+
+  test('with GitHub unreadable the section still lists every step with its status', async () => {
+    const w = await world({ fail: 401 });
+    doctorRun(w.db, [{ id: 'forge.private-clone', status: 'pass' }]);
+    const html = (await w.get('/projects/demo/setup')).body;
+    expect(html).toContain('<ul id="github-steps">');
+    expect(chipOf(html, 'access')).toContain('data-status="done"');
+    expect(chipOf(html, 'ruleset')).toContain('data-status="not-checked"');
+  });
+});
+
+describe('stepStatus', () => {
+  const c = (id: string, status: DoctorCheck['status'], zoneId: string | null = 'z') =>
+    ({ id, status, zoneId, summary: `${id} ${status}` }) as DoctorCheck;
+  test('maps pass, fail, warn and absence; an empty result is never done', () => {
+    expect(stepStatus(null, 'z', 'access').state).toBe('not-checked');
+    expect(stepStatus([], 'z', 'access').state).toBe('not-checked');
+    expect(stepStatus([c('forge.private-clone', 'pass')], 'z', 'access').state).toBe('done');
+    expect(stepStatus([c('forge.private-clone', 'pass', 'y')], 'z', 'access').state).toBe(
+      'not-checked',
+    );
+    expect(stepStatus([c('forge.labels', 'fail')], 'z', 'labels')).toEqual({
+      state: 'missing',
+      findings: ['forge.labels fail'],
+    });
+    expect(stepStatus([c('forge.labels', 'warn')], 'z', 'labels').state).toBe('check');
+    expect(
+      stepStatus([c('forge.branch-rules', 'pass'), c('forge.ci', 'warn')], 'z', 'ruleset').state,
+    ).toBe('check');
+    expect(
+      stepStatus([c('forge.branch-rules', 'pass'), c('forge.ci', 'pass')], 'z', 'ruleset').state,
+    ).toBe('done');
   });
 });
 
@@ -330,7 +463,7 @@ describe('the merge ruleset section (two-app zones)', () => {
 
   test('a two-app guidance renders the merge ruleset next to the main one; otherwise the page is unchanged', () => {
     const g = zoneGuidance(zone, detection, logins, {}, guidanceAppsOf(APP_ENTRIES));
-    const html = zonePage(zone, [zone], g, '');
+    const html = githubSection(zone, { ok: true, guidance: g, reviewer: '' }, null);
     const merge = g.mergeRuleset;
     if (!merge) throw new Error('no merge ruleset');
     expect(html).toContain('<section id="merge-ruleset">');
@@ -359,11 +492,13 @@ describe('the merge ruleset section (two-app zones)', () => {
 
     // Without apps, no section, and the page is what it was.
     const pat = zoneGuidance(zone, detection, logins);
-    const plain = zonePage(zone, [zone], pat, '');
+    const plain = githubSection(zone, { ok: true, guidance: pat, reviewer: '' }, null);
     expect(plain).not.toContain('merge-ruleset');
     // The section is the only thing it adds.
     const { mergeRuleset: _, ...without } = g;
-    expect(zonePage(zone, [zone], without, '')).toBe(html.replace(`${section}\n`, ''));
+    expect(githubSection(zone, { ok: true, guidance: without, reviewer: '' }, null)).toBe(
+      html.replace(`${section}\n`, ''),
+    );
   });
 
   test('a slug with markup is escaped in the checklist and the note', () => {
@@ -380,7 +515,7 @@ describe('the merge ruleset section (two-app zones)', () => {
     );
     expect(g.mergeRuleset?.note).toContain(hostile);
     expect(g.checklist.items.join('\n')).toContain(hostile);
-    const html = zonePage(zone, [zone], g, '');
+    const html = githubSection(zone, { ok: true, guidance: g, reviewer: '' }, null);
     expect(html).not.toContain(hostile);
     expect(html).toContain(escapeHtml(hostile));
   });

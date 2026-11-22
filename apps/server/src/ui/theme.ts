@@ -115,6 +115,7 @@ const SHELL = `
 main{max-width:76rem;margin:0 auto;padding:1.5rem 1.5rem 4rem}
 main>h2:first-child,main>p:first-child+h2{margin-top:.5rem}
 @media (max-width:720px){.topbar-in{padding:0 1rem;gap:.75rem;flex-wrap:wrap;padding-top:.5rem}.topnav{order:3;flex-basis:100%;padding-bottom:.375rem;margin:0 -.25rem}main{padding:1rem 1rem 3rem}h2{font-size:1.25rem;line-height:1.75rem}}
+.project-actions{display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;margin:0 0 1rem}.project-actions form{margin:0}
 nav.settings-tabs,.setup-steps{display:flex;gap:1.5rem;border-bottom:1px solid var(--stroke-soft-200);margin:0 0 1.5rem;overflow-x:auto;font-weight:500;color:var(--text-soft-400)}
 nav.settings-tabs>*,.setup-steps>*{padding:.875rem 0 .75rem;white-space:nowrap;border-bottom:2px solid transparent;margin-bottom:-1px}
 nav.settings-tabs a,.setup-steps a{color:var(--text-sub-600);border-radius:0}

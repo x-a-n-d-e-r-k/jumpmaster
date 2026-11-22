@@ -232,11 +232,11 @@ Configure the zone as above with `"mode": "observe"`. For a private repository, 
 observe sees PR decisions too. Each one's issue must carry the ready label, or it appears as
 `adopt_refused`.
 
-**Pass:** the server starts, and `/observations` fills up within a few passes.
+**Pass:** the server starts, and the Log (`/activity/log`) fills up within a few passes.
 
 ### 2. Observe
 
-Run this alongside the old system for at least a day. Compare `/observations` to what it really
+Run this alongside the old system for at least a day. Compare the Log (`/activity/log`) to what it really
 does, and investigate each difference.
 
 - `would_enqueue:review` is the steady state for a PR, because observe never produces a verdict.

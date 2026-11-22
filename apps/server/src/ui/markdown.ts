@@ -92,10 +92,11 @@ function bareUrlMask(text: string): Uint8Array {
  * Scanned left to right; at each position the first construct that closes wins: a code span,
  * a link `[text](url)`, `**bold**`, `*italic*`, `_italic_`. Every closing delimiter is the
  * first one after the opener, found through `forwardFinder`, so the scan is linear.
- * `**`, `*` and `_` emphasis opens only after a non-word character other than `/` (letters,
- * digits, `_` and `/` count as word), closes only before one, and never opens inside a bare URL,
- * so globs (`apps/**` paths, `**.ts`), `2*3*4`, `2**3**4`, snake_case and URLs stay text. A `**`
- * that cannot be bold is text as a pair: its second `*` never opens single emphasis.
+ * `**`, `*` and `_` emphasis opens only after a non-word character (letters, digits, `_` and
+ * `/` count as word) and never inside a bare URL; it closes only before a non-word character and
+ * never right after a `/`. So globs (`apps/**` paths, `**.ts`, `docs/**` at the end of a glob),
+ * `2*3*4`, `2**3**4`, snake_case and URLs stay text. A `**` that cannot be bold is text as a
+ * pair: its second `*` never opens single emphasis and its first never closes it.
  */
 function inline(text: string, refs: LinkRefs, inLink = false): string {
   const plain = (s: string) => (inLink ? escapeHtml(s) : linkify(s, refs));
@@ -103,7 +104,9 @@ function inline(text: string, refs: LinkRefs, inLink = false): string {
   const url = bareUrlMask(text);
   const opensAt = (i: number) =>
     url[i] !== 1 && !WORD_BEFORE.test(text.slice(Math.max(0, i - 2), i));
-  const closesAt = (j: number) => !WORD_AFTER.test(text.slice(j + 1, j + 3));
+  /** Whether the delimiter whose last character is at `j`, starting at `start`, may close. */
+  const closesAt = (start: number, j: number) =>
+    text[start - 1] !== '/' && !WORD_AFTER.test(text.slice(j + 1, j + 3));
   const nonSpace = (c: string | undefined) => c !== undefined && !/\s/.test(c);
 
   let out = '';
@@ -140,7 +143,7 @@ function inline(text: string, refs: LinkRefs, inLink = false): string {
       if (text[i + 1] === '*') {
         if (nonSpace(text[i + 2]) && opensAt(i)) {
           const j = next('**', i + 3);
-          if (j !== -1 && closesAt(j + 1)) {
+          if (j !== -1 && closesAt(j, j + 1)) {
             i = emit(i, j + 2, `<strong>${inline(text.slice(i + 2, j), refs, inLink)}</strong>`);
             continue;
           }
@@ -168,7 +171,8 @@ function inline(text: string, refs: LinkRefs, inLink = false): string {
   function emphasis(i: number, mark: '*' | '_'): number | undefined {
     if (!nonSpace(text[i + 1]) || text[i + 1] === mark || !opensAt(i)) return undefined;
     const j = next(mark, i + 1);
-    if (j === -1 || !nonSpace(text[j - 1]) || !closesAt(j)) return undefined;
+    if (j === -1 || !nonSpace(text[j - 1]) || text[j + 1] === mark || !closesAt(j, j))
+      return undefined;
     return emit(i, j + 1, `<em>${inline(text.slice(i + 1, j), refs, inLink)}</em>`);
   }
 }

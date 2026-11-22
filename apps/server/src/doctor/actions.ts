@@ -6,6 +6,7 @@ import {
   repoOf,
   type ZoneGuidance,
 } from '../github/guidance.js';
+import { githubSetupHref, PROJECTS_HREF, projectHref } from '../ui/links.js';
 import { DOC, type DoctorAction, type DoctorCheck } from './checks.js';
 
 /**
@@ -19,7 +20,7 @@ export type Action = DoctorAction;
 
 /** Which pages exist in this build: the doctor links to them once they do. */
 export type Pages = {
-  /** `/zones` and `/zones/:id` (Task 11). */
+  /** `/projects` and `/projects/:id` (Task 11; moved from `/zones` by issue #615). */
   zones: boolean;
   /** `/settings/install` and `/settings/history` (Task 13, with `/settings/mcp-tokens`). */
   settings: boolean;
@@ -37,7 +38,7 @@ export const PAGES_M45A: Pages = { zones: false, settings: false, credentials: f
 export function pagesOf(app: Pick<FastifyInstance, 'hasRoute'>): Pages {
   const has = (url: string) => app.hasRoute({ method: 'GET', url });
   return {
-    zones: has('/zones'),
+    zones: has(PROJECTS_HREF),
     settings: has('/settings/install') && has('/settings/history'),
     credentials: has('/settings/credentials'),
   };
@@ -46,7 +47,7 @@ export function pagesOf(app: Pick<FastifyInstance, 'hasRoute'>): Pages {
 export type ActionCtx = { zone?: DropZoneConfig; guidance?: ZoneGuidance; pages: Pages };
 
 const GITHUB = 'https://github.com';
-const zonePath = (zone: DropZoneConfig) => `/zones/${encodeURIComponent(zone.id)}`;
+const zonePath = (zone: DropZoneConfig) => projectHref(zone.id);
 
 /** The check's own troubleshooting entry (a heading per id), or the topic the check names. */
 const docs = (check: DoctorCheck): Action => ({
@@ -70,7 +71,7 @@ function credentials(check: DoctorCheck, ctx: ActionCtx): Action {
 function zoneSection(section: string, words: string) {
   return (check: DoctorCheck, ctx: ActionCtx): Action | undefined =>
     ctx.pages.zones && ctx.zone
-      ? app(`Edit the ${words} of ${ctx.zone.id}`, `${zonePath(ctx.zone)}#${section}`)
+      ? app(`Edit the ${words} of ${ctx.zone.id}`, `${zonePath(ctx.zone)}/setup#${section}`)
       : docs(check);
 }
 
@@ -95,9 +96,9 @@ function reads(role: 'author' | 'reviewer') {
       : docs(check);
 }
 
-/** Without the guidance (GitHub unreadable just now), the zone's GitHub page has every file. */
+/** Without the guidance (GitHub unreadable just now), the GitHub section of Setup has every file. */
 const githubPage = (ctx: ActionCtx, what: string): Action | undefined =>
-  ctx.zone ? app(`Get the ${what} for ${ctx.zone.id}`, `${zonePath(ctx.zone)}/github`) : undefined;
+  ctx.zone ? app(`Get the ${what} for ${ctx.zone.id}`, githubSetupHref(ctx.zone.id)) : undefined;
 
 type Rule = (check: DoctorCheck, ctx: ActionCtx) => Action | undefined;
 
@@ -178,7 +179,7 @@ const TABLE: Record<string, Rule> = {
         }
       : docs(check),
   'zone.mode': (_c, ctx) =>
-    ctx.pages.zones ? app('Open the zones', '/zones') : app('Open home (zone modes)', '/'),
+    ctx.pages.zones ? app('Open the zones', PROJECTS_HREF) : app('Open home (zone modes)', '/'),
   // The zone page's sections (Task 11): Stack, Egress, Merging, and Advanced for the rest.
   'zone.preset': zoneSection('stack', 'preset'),
   'zone.services': zoneSection('stack', 'services'),
