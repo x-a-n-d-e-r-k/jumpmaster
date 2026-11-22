@@ -810,6 +810,34 @@ describe('credential.shadowed for an app entry: every named action clears it (is
     expectNoSecrets(`${only.body}\n${none.body}\n${s.body}\n${w.logs.join('\n')}`);
   });
 
+  for (const prefer of [false, true]) {
+    for (const how of ['deleted', 'unparsable'] as const) {
+      test(`the file ${how} without a reload (prefer-vault ${prefer}): the remove is refused and the vault copy stays (issue #611)`, async () => {
+        const w = shadowWorld();
+        if (prefer)
+          expect(
+            (await inject('POST', '/api/control/secrets/vault/prefer', { prefer: true }))
+              .statusCode,
+          ).toBe(200);
+        const path = join(w.secretsDir, 'github-app', 'acme', 'reviewer.json');
+        if (how === 'deleted') rmSync(path);
+        else writeFileSync(path, '{ not json', { mode: 0o600 });
+        // No reload: the store still lists the file.
+        const r = await removeCopy();
+        expect(r.statusCode).toBe(409);
+        expect(r.json().error).toContain('no file sets github-app/acme/reviewer');
+        expect(w.vault.meta(REVIEWER)).toBeDefined();
+        expect(w.store.resolvedApps().get('acme')?.reviewer.source).not.toBe('missing');
+        expect(
+          listAudit(w.db).filter(
+            (a) => a.action === 'secret.remove' && JSON.stringify(a).includes('removed'),
+          ),
+        ).toHaveLength(0);
+        expectNoSecrets(`${r.body}\n${w.logs.join('\n')}`);
+      });
+    }
+  }
+
   test('the vault off: 409 VAULT_DISABLED', async () => {
     world({ vaultOff: true });
     const r = await removeCopy();

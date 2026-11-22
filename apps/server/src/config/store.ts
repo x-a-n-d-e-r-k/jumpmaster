@@ -897,7 +897,39 @@ export class ConfigStore implements ConfigSource {
       vault.restore(name, before);
       return { ok: false, issues: 'issues' in r ? r.issues : [] };
     }
+    // The role must still resolve to an entry, its file (issue #611): otherwise the vault entry
+    // was its only copy, so it is put back.
+    const now = this.appsValue.get(owner)?.[role];
+    if (now?.source === 'missing' || this.appFileOnDisk(owner, role) === undefined) {
+      vault.restore(name, before);
+      this.refreshSecrets();
+      return {
+        ok: false,
+        issues: [
+          {
+            path: name,
+            message: `no file sets ${name}: the vault entry is its only copy, so it stays`,
+          },
+        ],
+      };
+    }
     return { ok: true, deleted };
+  }
+
+  /**
+   * The path of `github-app/<owner>/<role>`'s file in the secrets directory when it exists and
+   * reads as a valid app entry now, on disk (issue #611): not the cached resolution, which changes
+   * only on a reload. Undefined otherwise; nothing is logged and no error text leaves.
+   */
+  appFileOnDisk(owner: string, role: AppRole): string | undefined {
+    const secretsDir = this.o.boot.secretsDir;
+    if (!secretsDir) return undefined;
+    try {
+      const r = readAppEntry({ vault: 'disabled', secretsDir }, owner, role);
+      return r.source === 'file' ? r.path : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** Removes a vault entry and swaps the credentials; refused when the vault is off. */
