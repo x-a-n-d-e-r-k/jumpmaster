@@ -1251,7 +1251,7 @@ describe('the GOAL.md stub builder on Goals (#620)', () => {
     const html = goalStub(zone2, true);
     const script = html.slice(html.indexOf('<script>'), html.lastIndexOf('</script>') + 9);
     expect(script).toBe(STUB_SCRIPT);
-    vm.runInContext(script.replace(/^<script>|<\/script>$/g, ''), ctx);
+    vm.runInContext(script.slice('<script>'.length, -'</script>'.length), ctx);
     const listeners = el('stub-form').listeners as Record<string, (ev: unknown) => Promise<void>>;
     await listeners.submit?.({ preventDefault: () => {} });
     expect(calls).toHaveLength(1);
