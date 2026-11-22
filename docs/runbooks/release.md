@@ -330,9 +330,10 @@ release keep working through an upgrade; any other digest is `404 { error: 'not 
 lock' }`. An image not yet complete is `404 { error: 'not mirrored', state }` with `state` one of
 `pending`, `fetching` or `failed: <reason>`; a platform the image does not have is `404`.
 
-The sticks page has an **Images** card listing each image with its platforms, size and state, and
-the doctor's `server.image-mirror` says the same: `info` with no lock (a checkout has nothing to
-mirror), `pass` when every image is complete, `warn` naming each failure.
+The **Images** tab of Sticks (`/system/sticks/images`) lists each image, current release first,
+with its platforms, size, state and short digest, and the doctor's `server.image-mirror` says the
+same: `info` with no lock (a checkout has nothing to mirror), `pass` when every image is complete,
+`warn` naming each failure.
 
 ### The stick's half (issue #141)
 

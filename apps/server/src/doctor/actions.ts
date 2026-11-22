@@ -14,7 +14,7 @@ import {
   SYSTEM_HISTORY_HREF,
   SYSTEM_OTHER_MACHINES_HREF,
   SYSTEM_SERVER_HREF,
-  SYSTEM_STICKS_HREF,
+  SYSTEM_STICKS_IMAGES_HREF,
 } from '../ui/links.js';
 import { DOC, type DoctorAction, type DoctorCheck } from './checks.js';
 
@@ -114,7 +114,7 @@ type Rule = (check: DoctorCheck, ctx: ActionCtx) => Action | undefined;
 const TABLE: Record<string, Rule> = {
   'config.listen': settings(SYSTEM_SERVER_HREF, 'Open System, Server'),
   'server.public-url': settings(SYSTEM_OTHER_MACHINES_HREF, 'Open System, Server, Other machines'),
-  'server.image-mirror': () => app('See the images on Sticks', SYSTEM_STICKS_HREF),
+  'server.image-mirror': () => app('See the images on Sticks', SYSTEM_STICKS_IMAGES_HREF),
   'claude.plan': settings(SYSTEM_SERVER_HREF, 'Open System, Server'),
   'usage.gate': settings(SYSTEM_SERVER_HREF, 'Open System, Server'),
   'config.file': settings(SYSTEM_HISTORY_HREF, 'Open System, History'),

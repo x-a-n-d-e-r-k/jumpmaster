@@ -108,6 +108,27 @@ describe('the Images tab, /system/sticks/images (issue #140, #624)', () => {
     expect(visible).toContain('sha256:0123456789ab');
   });
 
+  test('a digest that is not a sha256 one shows as it is, in full', () => {
+    const odd = 'md5:0123456789abcdef0123456789abcdef';
+    const html = renderStickImages({
+      lock: true,
+      images: [image('t', 'complete', { digest: odd })],
+    });
+    expect(html).toContain(`<code title="${odd}">${odd}</code>`);
+  });
+
+  test('a release with no images gets no heading', () => {
+    const onlyCurrent = renderStickImages({ lock: true, images: [image('n', 'complete')] });
+    expect(onlyCurrent).toContain('<h3>Current</h3>');
+    expect(onlyCurrent).not.toContain('<h3>Previous</h3>');
+    const onlyPrevious = renderStickImages({
+      lock: true,
+      images: [image('o', 'complete', { current: false })],
+    });
+    expect(onlyPrevious).toContain('<h3>Previous</h3>');
+    expect(onlyPrevious).not.toContain('<h3>Current</h3>');
+  });
+
   test('Copy writes the full digest to the clipboard', async () => {
     const full = `sha256:${'b'.repeat(64)}`;
     const html = renderStickImages({
@@ -195,12 +216,7 @@ describe('a stick starting up on /sticks (issue #157)', () => {
 
   test('while the report is present the row shows the starting line, and polls', () => {
     const html = renderSticks({
-      sticks: [
-        {
-          ...row,
-          starting: { image: `ghcr.io/o/jumpmaster-trooper@${digest}` },
-        },
-      ],
+      sticks: [{ ...row, starting: { image: `ghcr.io/o/jumpmaster-trooper@${digest}` } }],
       zones: [],
       now: t0,
     });
@@ -320,6 +336,62 @@ describe('the Remove confirmation (issue #255, #624)', () => {
     await click(yes);
     expect(posts).toEqual(['/api/control/sticks/s1/remove']);
     expect(reloads).toBe(1);
+  });
+
+  describe('in a vm: the poll leaves the table alone while a confirmation is open', () => {
+    const src =
+      [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+        .map((m) => m[1] ?? '')
+        .find((s) => s.includes('jmPoll')) ?? '';
+    // One poll tick: `openBefore` is the confirmation's state when the timer fires, `openDuring`
+    // its state once the fetch has answered.
+    const tick = async (openBefore: boolean, openDuring: boolean) => {
+      let open = openBefore;
+      const timers: (() => Promise<void>)[] = [];
+      let fetches = 0;
+      let replaced = 0;
+      const cur = { replaceWith: () => void replaced++ };
+      vm.runInNewContext(src, {
+        document: {
+          addEventListener: () => {},
+          getElementById: (id: string) => (id === 'sticks-live' ? cur : null),
+          querySelector: (sel: string) =>
+            sel === '#sticks-live [data-poll]'
+              ? {}
+              : sel === '#sticks-live .confirm:not([hidden])'
+                ? open
+                  ? {}
+                  : null
+                : null,
+        },
+        fetch: async () => {
+          fetches++;
+          open = openDuring;
+          return { ok: true, text: async () => '<div id="sticks-live"></div>' };
+        },
+        DOMParser: class {
+          parseFromString() {
+            return { getElementById: () => ({}) };
+          }
+        },
+        location: { pathname: '/system/sticks' },
+        setTimeout: (fn: () => Promise<void>) => void timers.push(fn),
+      });
+      await timers[0]?.();
+      return { fetches, replaced };
+    };
+
+    test('closed throughout: the table is replaced', async () => {
+      expect(await tick(false, false)).toEqual({ fetches: 1, replaced: 1 });
+    });
+
+    test('open when the timer fires: no fetch', async () => {
+      expect(await tick(true, true)).toEqual({ fetches: 0, replaced: 0 });
+    });
+
+    test('opened while the fetch is in flight: the answer is dropped', async () => {
+      expect(await tick(false, true)).toEqual({ fetches: 1, replaced: 0 });
+    });
   });
 });
 

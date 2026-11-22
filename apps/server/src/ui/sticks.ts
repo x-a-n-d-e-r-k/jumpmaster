@@ -8,11 +8,7 @@ import { MAX_INVITE_SLOTS } from '../install/invite.js';
 import { TS_AUTHKEY_PLACEHOLDER } from '../install/stick-sh.js';
 import { PUBLIC_URL_NEEDED, PUBLIC_URL_PAGE } from '../reach.js';
 import { type StickUpgradeView, upgradeWords } from '../stick-upgrade-words.js';
-import { SYSTEM_STICKS_ADD_HREF, SYSTEM_STICKS_HREF } from './links.js';
-
-/** The Sticks area's Images tab (#624). */
-export const SYSTEM_STICKS_IMAGES_HREF = `${SYSTEM_STICKS_HREF}/images`;
-
+import { SYSTEM_STICKS_ADD_HREF, SYSTEM_STICKS_HREF, SYSTEM_STICKS_IMAGES_HREF } from './links.js';
 import { escapeHtml, page, type StickLine, systemNav } from './pages.js';
 import { type ZoneRef, zoneNamer } from './zone-name.js';
 
@@ -125,14 +121,14 @@ export function upgradeLine(st: Pick<StickRow, 'id' | 'name' | 'upgrade'>): stri
  * a refusal that needs sudo shows the passphrase field. The slots, Cancel, Remove, Upgrade and Retry controls
  * are found by delegation, so rows the poll replaces keep working. Remove opens its row's
  * confirmation in the page (#624), and only its confirm button posts; the poll leaves the table
- * alone while a confirmation is open.
+ * alone while a confirmation is open, including one opened while its fetch was in flight.
  */
 const STICKS_SCRIPT = `<script>
 async function jmSticks(path,body){const p=document.getElementById('sticks-sudo');if(p&&p.value){const s=await jmFetch('/api/control/sudo',{passphrase:p.value});p.value='';if(!s.ok){p.closest('p').hidden=false;p.focus();return {ok:false,error:'The passphrase was not accepted.'};}}const r=await jmFetch(path,body);if(r.ok)return {ok:true,r};const j=await r.json().catch(()=>({}));if(r.status===403&&j.sudo&&p){p.closest('p').hidden=false;p.focus();return {ok:false,error:'Enter your passphrase, then press again.'};}return {ok:false,error:j.error??String(r.status),settings:j.settings};}
 document.addEventListener('submit',async(e)=>{const f=e.target.closest('form[data-slots]');if(!f)return;e.preventDefault();const out=f.querySelector('output');const b=f.querySelector('button');b.disabled=true;out.textContent='';try{const r=await jmFetch(f.dataset.slots,{slots:Number(f.querySelector('input').value)});const j=await r.json().catch(()=>({}));out.textContent=r.ok?'Saved: '+j.slots+' at once, from its next lease.':'Refused: '+(j.error??r.status);}catch(err){out.textContent='Refused: '+err;}finally{b.disabled=false;}});
 document.addEventListener('click',async(e)=>{const b=e.target.closest('button[data-cancel],button[data-remove],button[data-confirm],button[data-keep],button[data-upgrade]');if(!b)return;if(b.dataset.remove||'keep' in b.dataset){const c=b.closest('td').querySelector('.confirm');c.hidden='keep' in b.dataset;if(!c.hidden)c.querySelector('button[data-confirm]').focus();return;}const out=(b.closest('td')||b.parentElement).querySelector('output');b.disabled=true;const a=await jmSticks(b.dataset.cancel||b.dataset.confirm||b.dataset.upgrade,{});b.disabled=false;if(a.ok)location.reload();else if(out)out.textContent='Refused: '+a.error;});
 const add=document.getElementById('add-stick');if(add)add.addEventListener('submit',async(e)=>{e.preventDefault();const out=document.getElementById('add-out');out.textContent='';const n=add.querySelector('[name=slots]').value.trim();const a=await jmSticks('${SYSTEM_STICKS_ADD_HREF}',{name:add.querySelector('[name=name]').value.trim(),slots:n===''?'auto':Number(n),kind:(add.querySelector('[name=kind]:checked')||{value:'line'}).value});if(a.ok){const html=await a.r.text();document.open();document.write(html);document.close();return;}out.textContent='Refused: '+a.error;if(a.settings){const l=document.createElement('a');l.href=a.settings;l.textContent=' Other machines';out.append(l);}});
-function jmPoll(){if(!document.querySelector('#sticks-live [data-poll]'))return;setTimeout(async()=>{try{if(!document.querySelector('#sticks-live .confirm:not([hidden])')){const r=await fetch(location.pathname,{headers:{accept:'text/html'}});if(r.ok){const d=new DOMParser().parseFromString(await r.text(),'text/html');const next=d.getElementById('sticks-live');const cur=document.getElementById('sticks-live');if(next&&cur)cur.replaceWith(next);}}}catch{}jmPoll();},3000);}
+function jmPoll(){if(!document.querySelector('#sticks-live [data-poll]'))return;const open=()=>document.querySelector('#sticks-live .confirm:not([hidden])');setTimeout(async()=>{try{if(!open()){const r=await fetch(location.pathname,{headers:{accept:'text/html'}});if(r.ok){const d=new DOMParser().parseFromString(await r.text(),'text/html');const next=d.getElementById('sticks-live');const cur=document.getElementById('sticks-live');if(next&&cur&&!open())cur.replaceWith(next);}}}catch{}jmPoll();},3000);}
 jmPoll();
 </script>`;
 

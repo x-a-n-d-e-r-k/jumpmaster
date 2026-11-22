@@ -38,6 +38,8 @@ export const SYSTEM_HREF = '/system';
 /** The sticks page (#623: moved from `/sticks`) and its Add a stick POST. */
 export const SYSTEM_STICKS_HREF = `${SYSTEM_HREF}/sticks`;
 export const SYSTEM_STICKS_ADD_HREF = `${SYSTEM_STICKS_HREF}/add`;
+/** The Sticks area's Images tab (#624). */
+export const SYSTEM_STICKS_IMAGES_HREF = `${SYSTEM_STICKS_HREF}/images`;
 
 /** The install's credentials (#623: moved from `/settings/credentials`). */
 export const SYSTEM_CREDENTIALS_HREF = `${SYSTEM_HREF}/credentials`;
