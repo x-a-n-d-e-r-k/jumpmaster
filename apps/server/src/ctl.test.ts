@@ -1365,7 +1365,7 @@ describe('ctl status, round 2', () => {
       detail: 'check `docker compose logs stick`',
       waitingOn: 'you',
       also: [
-        { text: 'demo: no Claude token', href: '/settings/credentials' },
+        { text: 'demo: no Claude token', href: '/system/credentials' },
         { text: 'no pass yet since \u001b]0;title\u0007start' },
       ],
       action: { label: 'See the items on home', href: '/' },
@@ -1374,7 +1374,7 @@ describe('ctl status, round 2', () => {
     expect(r.out).toEqual([
       '1 parked: no CI result: [31mred[0m',
       'check docker compose logs stick',
-      '- demo: no Claude token (fix: /settings/credentials)',
+      '- demo: no Claude token (fix: /system/credentials)',
       '- no pass yet since ]0;titlestart',
       'next: See the items on home: /',
     ]);

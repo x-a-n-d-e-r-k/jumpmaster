@@ -134,7 +134,7 @@ describe('appCreateSection', () => {
     expect(html).not.toContain('/setup/github-app/start');
     expect(html).not.toContain('<form');
     expect(html).toContain('The vault must be on first');
-    expect(html).toContain('href="/settings/credentials"');
+    expect(html).toContain('href="/system/credentials"');
   });
 
   test('without sudo the forms are wired to ask for the passphrase first; with sudo they are not', () => {

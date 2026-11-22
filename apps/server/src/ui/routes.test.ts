@@ -34,6 +34,7 @@ import { opMarker } from '../outbox.js';
 import { crewOn, GOAL } from '../test/crew.js';
 import { harness, toPrOpen } from '../test/flowHarness.js';
 import { operatorSession } from '../test/helpers.js';
+import { renderSticks } from './sticks.js';
 
 const get = async (h: Awaited<ReturnType<typeof harness>>, url: string) => h.view(url);
 
@@ -66,9 +67,9 @@ async function crewHarness() {
 describe('UI routes', () => {
   test('/doctor shows the latest run, escaped, and refuses a foreign Host', async () => {
     const h = await harness();
-    const foreign = await h.view('/doctor', { host: 'evil.test' });
+    const foreign = await h.view('/system', { host: 'evil.test' });
     expect(foreign.statusCode).toBe(403);
-    expect((await get(h, '/doctor')).body).toContain('No doctor run has finished yet');
+    expect((await get(h, '/system')).body).toContain('No doctor run has finished yet');
     const checks = [
       { id: 'config.listen', zoneId: null, status: 'pass', summary: 'loopback only' },
       {
@@ -85,7 +86,7 @@ describe('UI routes', () => {
         "INSERT INTO doctor_runs (started_at, finished_at, results_json) VALUES ('a', 'b', ?)",
       )
       .run(JSON.stringify(checks));
-    const html = (await get(h, '/doctor')).body;
+    const html = (await get(h, '/system')).body;
     expect(html).toContain('missing &lt;script&gt;');
     expect(html).toMatch(/<tr class="fail">.*forge\.labels/);
     expect(html).toContain('gh label create agent-ready');
@@ -509,9 +510,9 @@ describe('doctor fix links (Task 8)', () => {
       expect(
         actionFor({ id, zoneId: null, status: 'fail', summary: 'x' }, { pages })?.href,
         id,
-      ).toBe('/settings/credentials');
-    expect(seen.has('GET /settings/credentials')).toBe(true);
-    expect((await h.view('/settings/credentials')).statusCode).toBe(200);
+      ).toBe('/system/credentials');
+    expect(seen.has('GET /system/credentials')).toBe(true);
+    expect((await h.view('/system/credentials')).statusCode).toBe(200);
   });
 
   test('the doctor page renders fails first with their action links escaped and artifact downloads', async () => {
@@ -556,7 +557,7 @@ describe('doctor fix links (Task 8)', () => {
         "INSERT INTO doctor_runs (started_at, finished_at, results_json) VALUES ('a', 'b', ?)",
       )
       .run(JSON.stringify(checks));
-    const html = (await get(h, '/doctor')).body;
+    const html = (await get(h, '/system')).body;
     const order = [...html.matchAll(/<tr class="(\w+)">/g)].map((m) => m[1]);
     expect(order).toEqual(['fail', 'fail', 'fail', 'warn', 'pass']);
     expect(html).toContain(
@@ -1433,7 +1434,7 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
       { maxSlots: 4 },
     );
     setStickDesiredSlots(h.db, 's2', 3);
-    const res = await h.view('/sticks');
+    const res = await h.view('/system/sticks');
     expect(res.statusCode).toBe(200);
     const html = res.body;
     const row = (name: string) =>
@@ -1456,10 +1457,11 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
     expect(m3).toContain('never seen');
     // The harness's own stick, enrolled with 4 and never leased.
     expect(html).toMatch(/<input[^>]*type="number"[^>]*max="4"[^>]*value="4"/);
-    // Linked from the nav and from the floor's Sticks summary.
-    expect(html).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/sticks">Sticks<\/a>.*<\/nav>/);
+    // Linked from the System sub-nav, Sticks current (#623), and from the floor's Sticks summary.
+    expect(html).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/system">System<\/a>.*<\/nav>/);
+    expect(html).toContain('<a href="/system/sticks" aria-current="page">Sticks</a>');
     const home = (await h.view('/')).body;
-    expect(home).toMatch(/<details id="sticks"[^>]*>.*<a href="\/sticks">.*<\/details>/);
+    expect(home).toMatch(/<details id="sticks"[^>]*>.*<a href="\/system\/sticks">.*<\/details>/);
   });
 
   test('anonymous: /sticks is refused as /work is', async () => {
@@ -1467,7 +1469,7 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
     const anon = async (url: string) => (await h.app.inject({ method: 'GET', url })).statusCode;
     const work = await anon('/activity/work');
     expect(work).not.toBe(200);
-    expect(await anon('/sticks')).toBe(work);
+    expect(await anon('/system/sticks')).toBe(work);
   });
 
   test("posting through the page's route changes the count the next lease answers with", async () => {
@@ -1481,7 +1483,7 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
         payload: { freeSlots: 0, maxSlots },
       });
     expect((await lease(6)).headers['x-jumpmaster-slots']).toBe('4');
-    const html = (await h.view('/sticks')).body;
+    const html = (await h.view('/system/sticks')).body;
     const url = html.match(/data-slots="([^"]*)"/)?.[1];
     expect(url).toBe(`/api/control/sticks/${id}/slots`);
     const session = operatorSession(h.db, h.now());
@@ -1502,7 +1504,7 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ id, slots: 6, maxSlots: 6 });
     expect((await lease(6)).headers['x-jumpmaster-slots']).toBe('6');
-    expect((await h.view('/sticks')).body).toContain('Running now: 0 of 6');
+    expect((await h.view('/system/sticks')).body).toContain('Running now: 0 of 6');
   });
 });
 
@@ -1680,9 +1682,9 @@ describe('project pages live under /projects (issue #615)', () => {
       '/activity',
       '/activity/work',
       '/activity/drops',
-      '/doctor',
-      '/settings/credentials',
-      '/settings/flags',
+      '/system',
+      '/system/credentials',
+      '/system/advanced',
     ]) {
       const res = await h.view(url);
       expect(res.statusCode, url).toBe(200);
@@ -2071,7 +2073,7 @@ describe('the Activity board (#622)', () => {
       '/drops/sweep-1',
       `/projects/main/work/${w.issueNumber}`,
       '/briefings',
-      '/doctor',
+      '/system',
     ]) {
       const res = await h.view(url);
       expect(res.statusCode, url).toBe(200);
@@ -2082,5 +2084,134 @@ describe('the Activity board (#622)', () => {
       }
     }
     expect(checked).toBeGreaterThan(0);
+  });
+});
+
+describe('the System area (#623)', () => {
+  const PAGES: [string, string][] = [
+    ['/system', 'Health'],
+    ['/system/sticks', 'Sticks'],
+    ['/system/credentials', 'Credentials'],
+    ['/system/server', 'Server'],
+    ['/system/mcp-tokens', 'MCP tokens'],
+    ['/system/history', 'History'],
+    ['/system/advanced', 'Advanced'],
+  ];
+  const system = () =>
+    harness({
+      live: true,
+      zone: { protectedPaths: ['.github/**', 'CODEOWNERS', 'GOAL.md'] },
+    });
+  /** The System sub-nav of a page: its links in order, and the one marked current. */
+  const subnav = (html: string) => {
+    const at = html.indexOf('<nav class="subnav" aria-label="System">');
+    const nav = at === -1 ? '' : html.slice(at, html.indexOf('</nav>', at));
+    return {
+      count: html.split('<nav class="subnav" aria-label="System">').length - 1,
+      links: [...nav.matchAll(/<a href="([^"]*)"[^>]*>([^<]*)<\/a>/g)].map((m) => [m[1], m[2]]),
+      current: [...nav.matchAll(/<a href="([^"]*)" aria-current="page">([^<]*)<\/a>/g)].map((m) => [
+        m[1],
+        m[2],
+      ]),
+    };
+  };
+
+  test.each(PAGES)('%s answers 200 with the System sub-nav, %s current', async (url, label) => {
+    const h = await system();
+    const res = await h.view(url);
+    expect(res.statusCode).toBe(200);
+    const nav = subnav(res.body);
+    expect(nav.count).toBe(1);
+    expect(nav.links).toEqual(PAGES.map(([href, l]) => [href, l]));
+    expect(nav.current).toEqual([[url, label]]);
+    // The settings tab strip is gone.
+    expect(res.body).not.toContain('settings-tabs"');
+  });
+
+  test('Health is the doctor page, titled Health, and the top nav links System', async () => {
+    const h = await system();
+    const body = (await h.view('/system')).body;
+    expect(body).toContain('<title>Jumpmaster: Health</title>');
+    expect(body).toContain('<h2>Health</h2>');
+    expect(body).toContain('data-doctor="/api/control/doctor"');
+    expect(body).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/system">System<\/a>.*<\/nav>/);
+  });
+
+  test('Zone problems is on Health, once and above the check table, and not on Credentials', async () => {
+    const h = await system();
+    const count = (html: string, s: string) => html.split(s).length - 1;
+    const health = (await h.view('/system')).body;
+    const credentials = (await h.view('/system/credentials')).body;
+    expect(count(health, 'Zone problems')).toBe(1);
+    expect(count(credentials, 'Zone problems')).toBe(0);
+    // Above the check table, once a run has one.
+    h.db
+      .prepare(
+        "INSERT INTO doctor_runs (started_at, finished_at, results_json) VALUES ('a', 'b', ?)",
+      )
+      .run(JSON.stringify([{ id: 'config.uid', zoneId: null, status: 'fail', summary: 'bad' }]));
+    const ran = (await h.view('/system')).body;
+    const table = ran.indexOf('<th>Status</th>');
+    expect(table).toBeGreaterThan(-1);
+    expect(ran.indexOf('<h3>Zone problems</h3>')).toBeGreaterThan(-1);
+    expect(ran.indexOf('<h3>Zone problems</h3>')).toBeLessThan(table);
+    expect(count(ran, 'Zone problems')).toBe(1);
+  });
+
+  test('Server is the install settings followed by Other machines', async () => {
+    const h = await system();
+    const body = (await h.view('/system/server')).body;
+    const install = body.indexOf('<form id="install"');
+    const other = body.indexOf('<h3 id="other-machines">Other machines</h3>');
+    expect(install).toBeGreaterThan(-1);
+    expect(other).toBeGreaterThan(install);
+    expect(body).toContain('<form id="public-url-form"');
+    // The install script finds its form by id: no other element may carry it.
+    expect(body.split('id="install"').length - 1).toBe(1);
+    const ids = [...body.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]);
+    expect(ids.filter((id, i) => ids.indexOf(id) !== i)).toEqual([]);
+  });
+
+  test('a form on /system/sticks posts to /system/sticks/add', async () => {
+    const h = await system();
+    const body = (await h.view('/system/sticks')).body;
+    // With no public address the page says how to set one instead of offering the form.
+    expect(body).toContain('href="/system/server#other-machines"');
+    const html = renderSticks({
+      sticks: [],
+      zones: [],
+      now: new Date(),
+      publicUrl: 'https://jm.example',
+    });
+    const forms = [...html.matchAll(/<form\b[^>]*>/g)].map((m) => m[0]);
+    expect(forms).toContain('<form id="add-stick" method="post" action="/system/sticks/add">');
+    // The form's script posts there too.
+    expect(body).toContain("jmSticks('/system/sticks/add'");
+    expect(body).not.toContain("'/sticks/add'");
+  });
+
+  test('a sweep: no rendered href or form action starts with /settings, /doctor or /sticks', async () => {
+    const h = await system();
+    let checked = 0;
+    for (const url of [
+      '/',
+      '/activity',
+      '/briefings',
+      '/projects',
+      `/projects/${h.zone.id}`,
+      `/projects/${h.zone.id}/setup`,
+      ...PAGES.map(([u]) => u),
+    ]) {
+      const res = await h.view(url);
+      expect(res.statusCode, url).toBe(200);
+      for (const m of res.body.matchAll(/\b(?:href|action)="([^"]*)"/g)) {
+        const target = m[1] ?? '';
+        checked++;
+        expect(target, `${url} links ${target}`).not.toMatch(/^\/(settings|doctor|sticks)\b/);
+      }
+      // Nor a script's page path: only the API keeps these words.
+      expect(res.body, url).not.toMatch(/["'`]\/(settings|doctor|sticks)\b/);
+    }
+    expect(checked).toBeGreaterThan(50);
   });
 });

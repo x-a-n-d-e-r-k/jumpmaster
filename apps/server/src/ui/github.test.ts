@@ -318,7 +318,7 @@ describe('the GitHub page of a zone', () => {
     const w = await world();
     expect((await w.get('/')).body).toContain('href="/projects/demo"');
     expect((await w.get('/projects/demo')).body).toContain('href="/projects/demo/setup#github"');
-    expect((await w.get('/doctor')).body).toContain('href="/projects/demo/setup#github"');
+    expect((await w.get('/system')).body).toContain('href="/projects/demo/setup#github"');
   });
 
   test('the code owners form is outside the settings form, and asks for the Setup page again', async () => {

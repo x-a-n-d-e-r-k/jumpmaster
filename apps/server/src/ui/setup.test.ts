@@ -622,7 +622,7 @@ describe('the wizard, round 2', () => {
 
   test('every pattern attribute in the pages compiles under the v flag, as browsers compile it', async () => {
     const w = await world();
-    const pages = [...STEPS.map((s) => `/setup/${s}`), '/', '/doctor'];
+    const pages = [...STEPS.map((s) => `/setup/${s}`), '/', '/system'];
     const found: string[] = [];
     for (const url of pages) {
       const body = (await w.get(url)).body;
@@ -675,7 +675,7 @@ describe('the wizard, round 2', () => {
 
   test('every plan has a prose label, here and in Settings, and the stored values are unchanged', async () => {
     const w = await world();
-    for (const url of ['/setup/claude', '/settings/credentials']) {
+    for (const url of ['/setup/claude', '/system/credentials']) {
       const html = (await w.get(url)).body;
       const select = /<select name="plan">(.*?)<\/select>/s.exec(html)?.[1] ?? '';
       const options = [...select.matchAll(/<option value="([^"]+)"[^>]*>([^<]*)<\/option>/g)];
@@ -1096,7 +1096,7 @@ describe('two bots on GitHub Apps, tokens under "Use tokens instead" (#446)', ()
 
   test('Settings passes no flag: the token links fold whenever two bots are recommended', () => {
     for (const ownerType of ['User', 'Organization'] as const) {
-      const html = guideSection(guide({ ownerType }), '/settings/credentials', apps());
+      const html = guideSection(guide({ ownerType }), '/system/credentials', apps());
       expect(html).toContain(DETAILS);
     }
   });

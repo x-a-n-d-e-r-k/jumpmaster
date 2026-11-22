@@ -1780,7 +1780,7 @@ describe('credential checks (Task 4)', () => {
           'For a GitHub App entry (github-app/<owner>/<role>), keep the one you mean: delete the file secrets/github-app/<owner>/<role>.json (then jumpmaster ctl secrets reload), or remove the vault copy with jumpmaster ctl secrets remove github-app/<owner>/<role>.',
         );
         expect(c.fix).not.toMatch(/replace/i);
-        expect(c.fix).not.toContain('/settings/credentials');
+        expect(c.fix).not.toContain('/system/credentials');
         expect(c.fix).not.toContain('/key');
       }
     });
@@ -1993,7 +1993,7 @@ describe('vault.key judges the effective key path (#258)', () => {
     expect(one(await w.run(), 'vault.key')).toMatchObject({
       status: 'skip',
       summary:
-        'no vault key (the vault is off: turn it on under Settings, Credentials, or set JM_VAULT_KEY_FILE): credentials come from files and the environment only',
+        'no vault key (the vault is off: turn it on under System, Credentials, or set JM_VAULT_KEY_FILE): credentials come from files and the environment only',
     });
   });
 });

@@ -21,7 +21,7 @@ import {
 } from '../github/guidance.js';
 import { MATRIX_AND_REUSABLE_NOTE } from '../github/workflows.js';
 import type { AppRole } from '../vault/github-app-entries.js';
-import { githubSetupHref, linkTarget } from './links.js';
+import { githubSetupHref, linkTarget, SYSTEM_CREDENTIALS_HREF } from './links.js';
 import { escapeHtml } from './pages.js';
 
 /**
@@ -165,7 +165,7 @@ export function appCreateSection(
 <p>Instead of two tokens, Jumpmaster can act as two GitHub Apps: an author app and a reviewer app, registered under the account that owns the repository. Each button opens GitHub with the app filled in; you confirm it there, then install it on the repository. Its private key goes straight into the encrypted vault and is never shown.</p>`;
   if (!apps.vaultOn)
     return `${head}
-<p class="warn" id="apps-vault-off">The vault must be on first: an app's private key is kept only in the encrypted vault. Turn it on in <a href="/settings/credentials">Settings, Credentials</a>, then come back here.</p></section>`;
+<p class="warn" id="apps-vault-off">The vault must be on first: an app's private key is kept only in the encrypted vault. Turn it on in <a href="${SYSTEM_CREDENTIALS_HREF}">System, Credentials</a>, then come back here.</p></section>`;
   const repoOwner = answer.repo.split('/')[0] ?? '';
   const org = answer.ownerType === 'Organization';
   const owner = escapeHtml(repoOwner);

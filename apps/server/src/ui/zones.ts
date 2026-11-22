@@ -15,7 +15,12 @@ import { FORM_SCRIPT, zoneToForm } from '../zones/form.js';
 import { renderFlags } from './flags.js';
 import { type FloorInputs, floorCounts, listHref, stateSentence } from './floor.js';
 import { COPY_SCRIPT, githubReviewerForm } from './github.js';
-import { ACTIVITY_DROPS_HREF, githubSetupHref } from './links.js';
+import {
+  ACTIVITY_DROPS_HREF,
+  githubSetupHref,
+  SYSTEM_CREDENTIALS_HREF,
+  SYSTEM_HREF,
+} from './links.js';
 import {
   badge,
   escapeHtml,
@@ -157,14 +162,14 @@ function listPage(store: ConfigStore, db: Db): string {
       const stopping = stoppingLine(db, z.id);
       const name = zoneNameText(z, config.dropZones);
       const problem = mine.length
-        ? `<span class="problem">${escapeHtml(mine[0]?.message)}</span> <a href="/settings/credentials">Fix in Settings, Credentials</a>`
+        ? `<span class="problem">${escapeHtml(mine[0]?.message)}</span> <a href="${SYSTEM_CREDENTIALS_HREF}">Fix in System, Credentials</a>`
         : '-';
       // Only the moves that apply from the zone's current mode.
       const button = (m: string, label: string) =>
         mode === m
           ? ''
           : `<button class="mode" data-zone="${escapeHtml(z.id)}" data-name="${escapeHtml(name)}" data-mode="${m}">${label}</button> `;
-      return `<tr><td><a href="${zoneHref(z.id)}">${zoneName(z, config.dropZones)}</a></td><td>${escapeHtml(MODE_LABELS[mode] ?? mode)}${stopping ? `<br><strong>${escapeHtml(stopping)}</strong>` : ''}</td><td>${escapeHtml(z.preset ?? z.image)}</td><td>${escapeHtml(z.egress?.mode ?? 'off')}</td><td>${escapeHtml(z.identity)}</td><td>${last ? `<a href="/drops/${encodeURIComponent(last.id)}">${escapeHtml(last.role)}, ${escapeHtml(last.state)}</a>` : '-'}</td><td>${fails === undefined ? '-' : `<a href="/doctor">${fails}</a>`}</td><td>${problem}</td><td>${button('paused', 'Pause')}${button('active', 'Resume')}${button('observe', 'Observe')}${fileMode || stopping ? '' : stopButton(z.id, name)}<a href="${escapeHtml(githubSetupHref(z.id))}">GitHub</a></td></tr>`;
+      return `<tr><td><a href="${zoneHref(z.id)}">${zoneName(z, config.dropZones)}</a></td><td>${escapeHtml(MODE_LABELS[mode] ?? mode)}${stopping ? `<br><strong>${escapeHtml(stopping)}</strong>` : ''}</td><td>${escapeHtml(z.preset ?? z.image)}</td><td>${escapeHtml(z.egress?.mode ?? 'off')}</td><td>${escapeHtml(z.identity)}</td><td>${last ? `<a href="/drops/${encodeURIComponent(last.id)}">${escapeHtml(last.role)}, ${escapeHtml(last.state)}</a>` : '-'}</td><td>${fails === undefined ? '-' : `<a href="${SYSTEM_HREF}">${fails}</a>`}</td><td>${problem}</td><td>${button('paused', 'Pause')}${button('active', 'Resume')}${button('observe', 'Observe')}${fileMode || stopping ? '' : stopButton(z.id, name)}<a href="${escapeHtml(githubSetupHref(z.id))}">GitHub</a></td></tr>`;
     })
     .join('');
   return page(
@@ -500,7 +505,7 @@ function overviewPage(
         `<li><a href="/briefings/${encodeURIComponent(String(b.id))}">${escapeHtml(b.decision)}</a></li>`,
     ),
     ...failing.map(
-      (c) => `<li><a href="/doctor">${escapeHtml(c.id)}</a>: ${escapeHtml(c.summary)}</li>`,
+      (c) => `<li><a href="${SYSTEM_HREF}">${escapeHtml(c.id)}</a>: ${escapeHtml(c.summary)}</li>`,
     ),
   ];
   const needsYou = `<section id="needs-you"><h3>Needs you</h3>${
@@ -542,7 +547,7 @@ function overviewPage(
   const worst = run
     ? (DOCTOR_WORST_FIRST.find((st) => checks.some((c) => c.status === st)) ?? 'no checks')
     : 'not run yet';
-  const health = `<section id="health"><h3>Health</h3><ul><li>Doctor: <a href="/doctor">${escapeHtml(worst)}</a></li><li>Egress: ${escapeHtml(zone.egress?.mode ?? 'off')}</li><li>Accounts: ${escapeHtml(zone.identity)}</li></ul></section>`;
+  const health = `<section id="health"><h3>Health</h3><ul><li>Doctor: <a href="${SYSTEM_HREF}">${escapeHtml(worst)}</a></li><li>Egress: ${escapeHtml(zone.egress?.mode ?? 'off')}</li><li>Accounts: ${escapeHtml(zone.identity)}</li></ul></section>`;
 
   return page(
     projectHeader({

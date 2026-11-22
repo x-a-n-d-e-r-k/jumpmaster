@@ -777,7 +777,7 @@ describe('credential.shadowed for an app entry: every named action clears it (is
     expect(r.json().error).toMatch(/^managed by /);
     expect(c.fix).not.toMatch(/replace/i);
     expect(c.fix).not.toContain('/key');
-    expect(c.fix).not.toContain('/settings/credentials');
+    expect(c.fix).not.toContain('/system/credentials');
     expect(w.vault.meta(REVIEWER)).toBeDefined();
   });
 
