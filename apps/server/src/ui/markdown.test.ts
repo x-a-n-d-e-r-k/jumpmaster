@@ -123,6 +123,8 @@ describe('renderChatMarkdown', () => {
       'a**b '.repeat(n / 5),
       '/**'.repeat(n / 3),
       '**a** **/'.repeat(n / 9),
+      '**/a b/** '.repeat(n / 10),
+      '*.a b/** '.repeat(n / 9),
       '*a '.repeat(n / 3),
       ' _a'.repeat(n / 3),
       '`a '.repeat(n / 3),
@@ -148,6 +150,16 @@ describe('renderChatMarkdown', () => {
     );
     expect(md('2**3**4')).toBe('<p>2**3**4</p>');
     expect(md('see https://example.com/a**b**c')).toBe('<p>see https://example.com/a**b**c</p>');
+  });
+
+  test('a glob ending in ** does not close bold or italic', () => {
+    expect(md('matches **/*.test.ts and apps/**')).toBe('<p>matches **/*.test.ts and apps/**</p>');
+    expect(md('**/*.md and docs/**')).toBe('<p>**/*.md and docs/**</p>');
+    expect(md('**/dist is ignored, like build/**.')).toBe(
+      '<p>**/dist is ignored, like build/**.</p>',
+    );
+    expect(md('*.ts or src/**')).toBe('<p>*.ts or src/**</p>');
+    expect(md('*a b** c')).toBe('<p>*a b** c</p>');
   });
 
   test('bold still renders in ordinary positions', () => {
