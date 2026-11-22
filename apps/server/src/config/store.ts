@@ -1319,7 +1319,7 @@ const zoneIdsOf = (doc: Record<string, unknown>): string[] =>
   );
 
 export const VAULT_DISABLED =
-  'the vault is off: turn it on under Settings, Credentials (or set JM_VAULT_KEY_FILE, a 32-byte key file under ./secrets), or write the credential to its file under secrets/';
+  'the vault is off: turn it on under System, Credentials (or set JM_VAULT_KEY_FILE, a 32-byte key file under ./secrets), or write the credential to its file under secrets/';
 
 /** How a start's errors name the key file Settings wrote (no variable names it). */
 const SETTINGS_KEY_LABEL = 'the vault key file turned on in Settings';

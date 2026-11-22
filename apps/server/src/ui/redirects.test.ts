@@ -219,16 +219,82 @@ describe('the redirect table (issue #615)', () => {
     });
   });
 
-  test('every entry goes straight to a /projects or /activity path: one hop, never another moved path', async () => {
+  describe('the install-wide pages move under System (#623)', () => {
+    const SYSTEM: [string, string][] = [
+      ['/doctor', '/system'],
+      ['/sticks', '/system/sticks'],
+      ['/sticks/add', '/system/sticks/add'],
+      ['/settings', '/system/credentials'],
+      ['/settings/credentials', '/system/credentials'],
+      ['/settings/install', '/system/server'],
+      ['/settings/other-machines', '/system/server#other-machines'],
+      ['/settings/mcp-tokens', '/system/mcp-tokens'],
+      ['/settings/history', '/system/history'],
+      ['/settings/flags', '/system/advanced'],
+    ];
+
+    test.each(SYSTEM)('%s is a 301 (GET, HEAD) and a 308 (POST) to %s', async (from, to) => {
+      const app = bare();
+      for (const method of ['GET', 'HEAD'] as const) {
+        const res = await app.inject({ method, url: from });
+        expect([method, res.statusCode, res.headers.location]).toEqual([method, 301, to]);
+      }
+      const post = await app.inject({ method: 'POST', url: from, payload: { a: 1 } });
+      expect([post.statusCode, post.headers.location]).toEqual([308, to]);
+    });
+
+    test('POST /sticks/add is a 308 to /system/sticks/add', async () => {
+      const res = await bare().inject({
+        method: 'POST',
+        url: '/sticks/add',
+        payload: { name: 'x' },
+      });
+      expect([res.statusCode, res.headers.location]).toEqual([308, '/system/sticks/add']);
+    });
+
+    test('the query is kept: /settings/flags?saved=1, and before the hash of Other machines', async () => {
+      const app = bare();
+      for (const [url, to] of [
+        ['/settings/flags?saved=1', '/system/advanced?saved=1'],
+        ['/settings/install?saved=4', '/system/server?saved=4'],
+        ['/settings/other-machines?x=1', '/system/server?x=1#other-machines'],
+        ['/doctor?x=1', '/system?x=1'],
+      ]) {
+        const res = await app.inject({ method: 'GET', url });
+        expect([url, res.statusCode, res.headers.location]).toEqual([url, 301, to]);
+      }
+    });
+
+    test('in the app, each lands on a page that renders', async () => {
+      const h = await harness({
+        live: true,
+        zone: { protectedPaths: ['.github/**', 'CODEOWNERS', 'GOAL.md'] },
+      });
+      for (const [from, to] of SYSTEM) {
+        if (from === '/sticks/add') continue;
+        const res = await h.view(from);
+        expect([from, res.statusCode, res.headers.location]).toEqual([from, 301, to]);
+        const page = await h.view(to.replace(/#.*/, ''));
+        expect([to, page.statusCode]).toEqual([to, 200]);
+      }
+    });
+  });
+
+  test('every entry goes straight to a /projects, /activity or /system path: one hop, never another moved path', async () => {
     const app = bare();
     for (const r of REDIRECTS) {
       const path = r.from.replace(/:id|:zone/g, 'jm').replace(':issue', '487');
       const url = r.query ? `${path}?${r.query}=jm` : path;
       const res = await app.inject({ method: 'GET', url });
       const location = String(res.headers.location);
-      expect(/^\/(projects|activity)\//.test(location) || location === '/projects', url).toBe(true);
+      expect(
+        /^\/(projects|activity|system)\//.test(location) ||
+          ['/projects', '/system'].includes(location),
+        url,
+      ).toBe(true);
       // The target is not itself redirected.
-      expect((await app.inject({ method: 'GET', url: location })).statusCode, location).toBe(404);
+      const target = location.replace(/#.*/, '');
+      expect((await app.inject({ method: 'GET', url: target })).statusCode, location).toBe(404);
     }
   });
 

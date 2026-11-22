@@ -84,7 +84,7 @@ const isOwnerType = (v: unknown): v is OwnerType =>
   typeof v === 'string' && (OWNER_TYPES as readonly string[]).includes(v);
 
 const NO_VAULT =
-  'The vault is off, so the new app could not be saved. Turn the vault on first (Settings, Credentials), then create the app.';
+  'The vault is off, so the new app could not be saved. Turn the vault on first (System, Credentials), then create the app.';
 
 export function registerGitHubAppRoutes(app: FastifyInstance, deps: GitHubAppRouteDeps): void {
   const { db, store, now, log, manifestStore } = deps;

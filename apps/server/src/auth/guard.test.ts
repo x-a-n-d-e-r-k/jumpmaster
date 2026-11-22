@@ -118,7 +118,7 @@ describe('route classes', () => {
     expect(routeClass('/api/other')).toBe('control');
     for (const p of ['/login', '/logout', '/setup', '/setup/code', '/setup/passphrase'])
       expect(routeClass(p)).toBe('auth');
-    for (const p of ['/', '/doctor', '/drops/:id', '/artifacts/:id', '/setupx', '/loginx'])
+    for (const p of ['/', '/system', '/drops/:id', '/artifacts/:id', '/setupx', '/loginx'])
       expect(routeClass(p)).toBe('page');
     // The wizard's steps need a session: only the claim itself is an auth route.
     for (const p of [
@@ -138,7 +138,7 @@ describe('setup mode', () => {
   test('with no operator every page redirects to /setup, and /setup accepts only the printed code', async () => {
     const w = await world();
     expect(w.printed).toHaveLength(1);
-    for (const url of ['/', '/doctor', '/briefings', '/projects/main/goals', '/login']) {
+    for (const url of ['/', '/system', '/briefings', '/projects/main/goals', '/login']) {
       const res = await w.get(url);
       expect([url, res.statusCode, res.headers.location]).toEqual([url, 302, '/setup']);
     }
@@ -279,21 +279,21 @@ describe('setup mode', () => {
 describe('login and sessions', () => {
   test('login sets an HttpOnly SameSite=Strict cookie, rotates the session id and follows next only to a single-slash path', async () => {
     const w = await world({ operator: true });
-    const anon = await w.get('/doctor?x=1');
+    const anon = await w.get('/system?x=1');
     expect([anon.statusCode, anon.headers.location]).toEqual([
       302,
-      '/login?next=%2Fdoctor%3Fx%3D1',
+      '/login?next=%2Fsystem%3Fx%3D1',
     ]);
-    const form = await w.get('/login?next=%2Fdoctor');
+    const form = await w.get('/login?next=%2Fsystem');
     expect(form.statusCode).toBe(200);
-    expect(form.body).toContain('name="next" value="/doctor"');
+    expect(form.body).toContain('name="next" value="/system"');
     const old = createSession(w.db, t0);
     const res = await w.post(
       '/login',
-      { passphrase: PASS, next: '/doctor' },
+      { passphrase: PASS, next: '/system' },
       { cookie: `jm_session=${old.id}` },
     );
-    expect([res.statusCode, res.headers.location]).toEqual([303, '/doctor']);
+    expect([res.statusCode, res.headers.location]).toEqual([303, '/system']);
     const set = cookieOf(res, 'jm_session') as string;
     expect(set).toMatch(/^jm_session=[\w-]+; HttpOnly; SameSite=Strict; Path=\/; Max-Age=604800$/);
     expect(set).not.toContain('Secure');
@@ -321,7 +321,7 @@ describe('login and sessions', () => {
   test('next refuses a character outside printable ASCII (never a 500 from the Location header) and any dot segment, encoded or not', async () => {
     for (const bad of [
       '/settings/ä',
-      '/doctor?x=é',
+      '/system?x=é',
       '/a b',
       '/settings ',
       '/./settings',
@@ -338,11 +338,11 @@ describe('login and sessions', () => {
     ])
       expect([bad, safeNext(bad)]).toEqual([bad, '/']);
     for (const good of [
-      '/settings/install',
-      '/settings/history?x=1',
+      '/system/server',
+      '/system/history?x=1',
       '/projects/web#egress',
       '/a.b/c..d/.e',
-      '/doctor?next=/../x',
+      '/system?next=/../x',
     ])
       expect([good, safeNext(good)]).toEqual([good, good]);
     const w = await world({ operator: true });
@@ -753,7 +753,7 @@ describe('round 2', () => {
       await w.get('/login'),
       await w.post('/login', { passphrase: 'not the passphrase' }),
       await w.get('/', { cookie: s.cookie }),
-      await w.get('/doctor', { cookie: s.cookie }),
+      await w.get('/system', { cookie: s.cookie }),
     ]) {
       expect(res.headers['cache-control']).toBe('no-store');
     }

@@ -71,10 +71,10 @@ describe('making an invite (Add a stick)', () => {
     w.sudo();
     const r = await w.add({ name: 'vps-1', slots: 'auto' });
     expect(r.statusCode).toBe(409);
-    expect(r.json()).toMatchObject({ settings: '/settings/other-machines' });
-    expect(r.json().error).toContain('/settings/other-machines');
+    expect(r.json()).toMatchObject({ settings: '/system/server#other-machines' });
+    expect(r.json().error).toContain('/system/server#other-machines');
     // The page offers the link instead of the form.
-    expect(await w.page()).toContain('<a href="/settings/other-machines">');
+    expect(await w.page()).toContain('<a href="/system/server#other-machines">');
   });
 
   test('the result page shows the line once, never cached; only a hash is stored and the audit row has no code', async () => {

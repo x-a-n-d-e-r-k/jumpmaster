@@ -221,7 +221,7 @@ describe('saving server.publicUrl', () => {
       payload: new URLSearchParams({ token, passphrase: PASS }).toString(),
     });
     expect(done.statusCode, done.body).toBe(303);
-    expect(done.headers.location).toBe('/settings/other-machines');
+    expect(done.headers.location).toBe('/system/server#other-machines');
     expect(w.store.current().server?.publicUrl).toBe('https://c.d.ts.net');
     const rows = listAudit(w.db)
       .reverse()
@@ -333,7 +333,7 @@ describe('Check', () => {
 
 describe('the Other machines section', () => {
   const page = async (w: ReturnType<typeof world>) =>
-    (await w.inject({ method: 'GET', url: '/settings/other-machines', headers: w.browser })).body;
+    (await w.inject({ method: 'GET', url: '/system/server', headers: w.browser })).body;
 
   test('without the tailscale CLI: no command, the general note', async () => {
     const w = world();
@@ -381,16 +381,18 @@ describe('the Other machines section', () => {
 
   test('the sticks page says where to set the address while it is unset, and shows it once set', async () => {
     const w = world();
-    const before = (await w.inject({ method: 'GET', url: '/sticks', headers: w.browser })).body;
+    const before = (await w.inject({ method: 'GET', url: '/system/sticks', headers: w.browser }))
+      .body;
     expect(before).toContain('Set the address other machines reach this server at');
-    expect(before).toContain('href="/settings/other-machines"');
+    expect(before).toContain('href="/system/server#other-machines"');
     await w.inject({
       method: 'PUT',
       url: URL_PATH,
       headers: w.bearer,
       payload: { publicUrl: 'https://a.b.ts.net' },
     });
-    const after = (await w.inject({ method: 'GET', url: '/sticks', headers: w.browser })).body;
+    const after = (await w.inject({ method: 'GET', url: '/system/sticks', headers: w.browser }))
+      .body;
     expect(after).not.toContain('Set the address other machines reach this server at');
     expect(after).toContain('https://a.b.ts.net');
   });

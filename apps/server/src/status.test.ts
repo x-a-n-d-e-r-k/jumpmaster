@@ -68,7 +68,7 @@ const problem = (o: Partial<CredentialProblem> = {}): CredentialProblem => ({
   zoneId: 'main',
   kind: 'missing',
   credential: 'claudeToken',
-  message: 'no Claude token is set: enter it under Settings, Credentials',
+  message: 'no Claude token is set: enter it under System, Credentials',
   ...o,
 });
 const outbox = (o: Partial<OutboxRow> = {}): OutboxRow => ({
@@ -225,16 +225,16 @@ const STEPS: Step[] = [
   [
     'credentials',
     (i) => void ((i.zones[1] as StatusZone).credentialProblems = []),
-    'Blocked: docs needs claudeToken: no Claude token is set: enter it under Settings, Credentials',
+    'Blocked: docs needs claudeToken: no Claude token is set: enter it under System, Credentials',
     'credentials',
-    '/settings/credentials',
+    '/system/credentials',
   ],
   [
     'doctor',
     (i) => void (i.doctor = { fails: [] }),
     '2 doctor fails, first forge.labels',
     'doctor',
-    '/doctor',
+    '/system',
   ],
   [
     'briefings',
@@ -333,8 +333,8 @@ describe('statusOf', () => {
     // The detail explains the headline only; every other cause is a short item with its fix.
     expect(s.detail).toBe('');
     expect(s.also).toEqual([
-      { text: 'docs: no Claude token', href: '/settings/credentials' },
-      { text: '1 doctor fail (forge.labels), from a run before the last pass', href: '/doctor' },
+      { text: 'docs: no Claude token', href: '/system/credentials' },
+      { text: '1 doctor fail (forge.labels), from a run before the last pass', href: '/system' },
       { text: 'a setting takes effect at the next restart' },
     ]);
     // An older doctor fail alone never takes the headline.
@@ -371,12 +371,12 @@ describe('statusOf', () => {
     expect(blocked.headline).toBe('Blocked: main needs githubAuthorToken: no author token');
     expect(blocked.waitingOn).toBe('credentials');
     expect(blocked.action).toEqual({
-      label: 'Open Settings, Credentials',
-      href: '/settings/credentials',
+      label: 'Open System, Credentials',
+      href: '/system/credentials',
     });
     // The other problem is listed, in the short form; the headline's own is not repeated.
     expect(blocked.also).toEqual([
-      { text: 'main: the reviewer token is the same as another', href: '/settings/credentials' },
+      { text: 'main: the reviewer token is the same as another', href: '/system/credentials' },
     ]);
     // Before the Credentials tab exists, the wizard step that sets it.
     const early = statusOf(

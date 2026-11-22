@@ -8,7 +8,8 @@ import { MAX_INVITE_SLOTS } from '../install/invite.js';
 import { TS_AUTHKEY_PLACEHOLDER } from '../install/stick-sh.js';
 import { PUBLIC_URL_NEEDED, PUBLIC_URL_PAGE } from '../reach.js';
 import { type StickUpgradeView, upgradeWords } from '../stick-upgrade-words.js';
-import { escapeHtml, page, type StickLine } from './pages.js';
+import { SYSTEM_STICKS_ADD_HREF, SYSTEM_STICKS_HREF } from './links.js';
+import { escapeHtml, page, type StickLine, systemNav } from './pages.js';
 import { type ZoneRef, zoneNamer } from './zone-name.js';
 
 /** The ceiling a stick reports with no JM_MAX_SLOTS and a JM_SLOTS of 4 or less. */
@@ -124,7 +125,7 @@ const STICKS_SCRIPT = `<script>
 async function jmSticks(path,body){const p=document.getElementById('sticks-sudo');if(p&&p.value){const s=await jmFetch('/api/control/sudo',{passphrase:p.value});p.value='';if(!s.ok){p.closest('p').hidden=false;p.focus();return {ok:false,error:'The passphrase was not accepted.'};}}const r=await jmFetch(path,body);if(r.ok)return {ok:true,r};const j=await r.json().catch(()=>({}));if(r.status===403&&j.sudo&&p){p.closest('p').hidden=false;p.focus();return {ok:false,error:'Enter your passphrase, then press again.'};}return {ok:false,error:j.error??String(r.status),settings:j.settings};}
 document.addEventListener('submit',async(e)=>{const f=e.target.closest('form[data-slots]');if(!f)return;e.preventDefault();const out=f.querySelector('output');const b=f.querySelector('button');b.disabled=true;out.textContent='';try{const r=await jmFetch(f.dataset.slots,{slots:Number(f.querySelector('input').value)});const j=await r.json().catch(()=>({}));out.textContent=r.ok?'Saved: '+j.slots+' at once, from its next lease.':'Refused: '+(j.error??r.status);}catch(err){out.textContent='Refused: '+err;}finally{b.disabled=false;}});
 document.addEventListener('click',async(e)=>{const b=e.target.closest('button[data-cancel],button[data-remove],button[data-upgrade]');if(!b)return;if(b.dataset.remove&&!confirm(b.dataset.ask))return;const out=b.parentElement.querySelector('output');b.disabled=true;const a=await jmSticks(b.dataset.cancel||b.dataset.remove||b.dataset.upgrade,{});b.disabled=false;if(a.ok)location.reload();else if(out)out.textContent='Refused: '+a.error;});
-const add=document.getElementById('add-stick');if(add)add.addEventListener('submit',async(e)=>{e.preventDefault();const out=document.getElementById('add-out');out.textContent='';const n=add.querySelector('[name=slots]').value.trim();const a=await jmSticks('/sticks/add',{name:add.querySelector('[name=name]').value.trim(),slots:n===''?'auto':Number(n),kind:(add.querySelector('[name=kind]:checked')||{value:'line'}).value});if(a.ok){const html=await a.r.text();document.open();document.write(html);document.close();return;}out.textContent='Refused: '+a.error;if(a.settings){const l=document.createElement('a');l.href=a.settings;l.textContent=' Settings';out.append(l);}});
+const add=document.getElementById('add-stick');if(add)add.addEventListener('submit',async(e)=>{e.preventDefault();const out=document.getElementById('add-out');out.textContent='';const n=add.querySelector('[name=slots]').value.trim();const a=await jmSticks('${SYSTEM_STICKS_ADD_HREF}',{name:add.querySelector('[name=name]').value.trim(),slots:n===''?'auto':Number(n),kind:(add.querySelector('[name=kind]:checked')||{value:'line'}).value});if(a.ok){const html=await a.r.text();document.open();document.write(html);document.close();return;}out.textContent='Refused: '+a.error;if(a.settings){const l=document.createElement('a');l.href=a.settings;l.textContent=' Other machines';out.append(l);}});
 function jmPoll(){if(!document.querySelector('#sticks-live [data-poll]'))return;setTimeout(async()=>{try{const r=await fetch(location.pathname,{headers:{accept:'text/html'}});if(r.ok){const d=new DOMParser().parseFromString(await r.text(),'text/html');const next=d.getElementById('sticks-live');const cur=document.getElementById('sticks-live');if(next&&cur)cur.replaceWith(next);}}catch{}jmPoll();},3000);}
 jmPoll();
 </script>`;
@@ -194,7 +195,7 @@ export function renderSticks(s: {
       ? '<p class="empty">No stick has enrolled. Add one below, or see <code>docs/runbooks/install.md</code>.</p>'
       : `<table><tr><th>Stick</th><th>Status</th><th>Version</th><th>Capabilities</th><th>Zones</th><th>Troopers</th><th></th></tr>${rows}</table>`;
   return page(
-    `<h2>Sticks</h2><p>How many troopers each stick runs at once. A change applies on the stick's next lease, with no restart; lowering it stops nothing that runs. <code>jumpmaster ctl sticks</code> does the same.</p>${reach}` +
+    `${systemNav('sticks')}<h2>Sticks</h2><p>How many troopers each stick runs at once. A change applies on the stick's next lease, with no restart; lowering it stops nothing that runs. <code>jumpmaster ctl sticks</code> does the same.</p>${reach}` +
       `<div id="sticks-live">${table}${waiting}</div>${addForm(s.publicUrl)}${STICKS_SCRIPT}${images}`,
     { title: 'Sticks' },
   );
@@ -209,7 +210,7 @@ function addForm(publicUrl: string | undefined): string {
   const fields = `<p><label>Name <input name="name" required maxlength="64" pattern="[A-Za-z0-9._\\-]{1,64}" placeholder="vps-1"></label> <label>Troopers <input name="slots" type="number" min="1" max="${MAX_INVITE_SLOTS}" placeholder="Auto"></label> <span class="muted">Leave Troopers empty for Auto: as many as the machine allows.</span></p>`;
   const how = `<fieldset><legend>How will you install it?</legend><label><input type="radio" name="kind" value="line" checked> Paste a line</label> <span class="muted">on the machine; the code works for 24 hours.</span><br><label><input type="radio" name="kind" value="cloud_init"> Cloud-init user data</label> <span class="muted">when you create the VPS; the code works for 1 hour.</span></fieldset>`;
   const body = publicUrl
-    ? `<form id="add-stick">${fields}${how}${SUDO_FIELD}<p><button class="primary">Add a stick</button> <output id="add-out" aria-live="polite"></output></p></form>`
+    ? `<form id="add-stick" method="post" action="${SYSTEM_STICKS_ADD_HREF}">${fields}${how}${SUDO_FIELD}<p><button class="primary">Add a stick</button> <output id="add-out" aria-live="polite"></output></p></form>`
     : `<p class="warn"><a href="${PUBLIC_URL_PAGE}">${PUBLIC_URL_NEEDED}</a> to add a stick: the new machine downloads it from that address.</p>${SUDO_FIELD}`;
   return `<h3>Add a stick</h3><p>One line pasted on a Linux machine (x86_64 or aarch64) or a Mac with Docker Desktop that reaches this server, such as a VPS on your tailnet, installs a stick and enrolls it.</p>${body}`;
 }
@@ -232,10 +233,10 @@ export function renderInviteResult(
       ? `<section id="panel-paste"><p>On the machine, as a user who can sudo:</p><pre><code id="install-line">${escapeHtml(r.line)}</code></pre><p><button data-copy="install-line">Copy</button></p><p>It installs Docker if the machine has none (it asks first; add <code>--yes</code> before the code not to be asked), downloads cosign and the stick image from this server, verifies the image's signature offline, starts the stick and waits for it to enroll. The machine needs no registry or GitHub access.</p><p>Its first step swaps the code for an install token, so the code is spent within a second of pasting; if the install then fails, it cancels the invite, and you make a new code here.</p></section>`
       : `<section id="panel-cloud"><p>Paste this as the user data (cloud-init) when you create the VPS. Replace <code>${TS_AUTHKEY_PLACEHOLDER}</code> with an auth key from your Tailscale admin console (Settings, Keys) first: the machine joins your tailnet, then runs the installer line. Create the VPS within the hour, or the code expires.</p><pre><code id="cloud-init">${escapeHtml(r.cloudInit)}</code></pre><p><button data-copy="cloud-init">Copy</button></p></section>`;
   return page(
-    `<h2>Add a stick: ${escapeHtml(r.name)}</h2>` +
+    `${systemNav('sticks')}<h2>Add a stick: ${escapeHtml(r.name)}</h2>` +
       `<p class="warn"><strong>This code works once, until ${escapeHtml(r.expiresAt)} (${lasts}). It won't be shown again:</strong> copy what you need now. Troopers: ${escapeHtml(troopers)}.</p>` +
       form +
-      `<p><a href="/sticks">Back to the sticks page</a>: it reads "${escapeHtml(r.name)}: waiting for it to check in" until the stick enrolls.</p>${script}`,
+      `<p><a href="${SYSTEM_STICKS_HREF}">Back to the sticks page</a>: it reads "${escapeHtml(r.name)}: waiting for it to check in" until the stick enrolls.</p>${script}`,
     { title: 'Add a stick' },
   );
 }

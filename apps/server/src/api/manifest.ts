@@ -28,7 +28,7 @@ export type ControlRoute = {
 /** What `ctl` says when a route is missing because its switch is off. */
 export const SWITCHES: Record<Switch, string> = {
   'mcp.enabled':
-    "Command's MCP server is off: turn on mcp.enabled under Settings, Install (it takes effect at the next restart)",
+    "Command's MCP server is off: turn on mcp.enabled under System, Server (it takes effect at the next restart)",
 };
 
 export const CONTROL_ROUTES: ControlRoute[] = [
