@@ -2,16 +2,14 @@ import vm from 'node:vm';
 import { describe, expect, test } from 'vitest';
 import type { MirrorStatus } from '../images/mirror.js';
 import { t0 } from '../test/helpers.js';
+import { escapeHtml } from './pages.js';
 import {
-  COPY_DIGEST_SCRIPT,
+  COPY_DIGEST_JS,
   renderInviteResult,
   renderStickImages,
   renderSticks,
-  STICKS_SCRIPT,
+  STICKS_JS,
 } from './sticks.js';
-
-/** A page script's body, for a vm run. */
-const body = (script: string) => script.replace(/^<script>|<\/script>$/g, '');
 
 const digest = `sha256:${'a'.repeat(64)}`;
 const image = (
@@ -144,8 +142,8 @@ describe('the Images tab, /system/sticks/images (issue #140, #624)', () => {
       lock: true,
       images: [image('t', 'complete', { digest: full })],
     });
-    expect(html).toContain(COPY_DIGEST_SCRIPT);
-    const src = body(COPY_DIGEST_SCRIPT);
+    expect(html).toContain(`<script>${COPY_DIGEST_JS}</script>`);
+    const src = COPY_DIGEST_JS;
     const listeners: ((e: unknown) => Promise<void>)[] = [];
     const written: string[] = [];
     const button = {
@@ -254,18 +252,15 @@ describe('the Remove confirmation (issue #255, #624)', () => {
     running: 0,
   };
   const html = renderSticks({ sticks: [stick], zones: [], now: t0 });
-  const decode = (s: string) =>
-    s
-      .replaceAll('&#39;', "'")
-      .replaceAll('&#x27;', "'")
-      .replaceAll('&apos;', "'")
-      .replaceAll('&amp;', '&');
   const confirmBox = /<div class="confirm"[^>]*>(.*?)<\/div>/.exec(html);
-  const askText = decode(/<p>(.*?)<\/p>/.exec(confirmBox?.[1] ?? '')?.[1] ?? '');
+  // The prompt as rendered (escaped HTML); expectations are escaped the same way.
+  const askHtml = /<p>(.*?)<\/p>/.exec(confirmBox?.[1] ?? '')?.[1] ?? '';
 
   test('says the stick keeps its credentials and a join-token stick can enroll again', () => {
-    expect(askText).toContain(
-      "This stick keeps any credentials it was already sent. Rotate the Claude and GitHub tokens if you don't trust it. A stick that enrolled with the join token can enroll again until that token is changed.",
+    expect(askHtml).toContain(
+      escapeHtml(
+        "This stick keeps any credentials it was already sent. Rotate the Claude and GitHub tokens if you don't trust it. A stick that enrolled with the join token can enroll again until that token is changed.",
+      ),
     );
   });
 
@@ -275,18 +270,18 @@ describe('the Remove confirmation (issue #255, #624)', () => {
     expect(cells).toHaveLength(7);
     expect(cells.at(-1)).toContain('data-remove="/api/control/sticks/s1/remove"');
     expect(confirmBox?.[0]).toMatch(/^<div class="confirm" role="alertdialog" hidden/);
-    expect(askText).toMatch(/^Remove the stick vps-1\?/);
+    expect(askHtml.startsWith(escapeHtml('Remove the stick vps-1?'))).toBe(true);
     expect(html).not.toContain('confirm(');
   });
 
   test('in a vm: Remove shows the confirmation naming the stick, and posts only once it is confirmed', async () => {
-    expect(html).toContain(STICKS_SCRIPT);
-    const src = body(STICKS_SCRIPT);
+    expect(html).toContain(`<script>${STICKS_JS}</script>`);
+    const src = STICKS_JS;
     const clicks: ((e: unknown) => Promise<void>)[] = [];
     const posts: string[] = [];
     let reloads = 0;
     const out = { textContent: '' };
-    const box = { hidden: true, textContent: askText, querySelector: () => yes };
+    const box = { hidden: true, textContent: askHtml, querySelector: () => yes };
     const button = (dataset: Record<string, string>) => {
       const b = {
         dataset,
@@ -344,7 +339,7 @@ describe('the Remove confirmation (issue #255, #624)', () => {
   });
 
   describe('in a vm: the poll leaves the table alone while a confirmation is open', () => {
-    const src = body(STICKS_SCRIPT);
+    const src = STICKS_JS;
     // One poll tick: `openBefore` is the confirmation's state when the timer fires, `openDuring`
     // its state once the fetch has answered.
     const tick = async (openBefore: boolean, openDuring: boolean) => {
