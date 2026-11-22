@@ -1,6 +1,6 @@
 import type { DropResult } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
-import { listBriefings, ruleBriefing, syncParkBriefings } from '../briefings.js';
+import { CLOSE_FAILED, listBriefings, ruleBriefing, syncParkBriefings } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import { listOutbox, listWorkItems, setKilled, setZoneMode } from '../db/repo.js';
 import { commentMarker } from '../outbox.js';
@@ -329,6 +329,75 @@ describe('a diagnosis that finds the parked item already done (#536)', () => {
       expect(followUps(h)).toHaveLength(0);
       await h.reconcile();
       expect(followUps(h)).toHaveLength(0);
+    });
+
+    /** Command's ruling on issue 1, if any: its error once it gave up. */
+    const ruling = (h: Harness) =>
+      h.db
+        .prepare(
+          `SELECT r.applied_at AS appliedAt, r.apply_error AS error FROM rulings r
+             JOIN briefings b ON b.id = r.briefing_id WHERE b.subject = 'item:1'`,
+        )
+        .get() as { appliedAt: string | null; error: string | null } | undefined;
+
+    test.each([
+      ['its comment', 'createIssueComment'],
+      ['its close', 'updateIssue'],
+    ] as const)(
+      'the close fails, then Command rules Close as done and %s fails once: no follow-up',
+      async (_n, method) => {
+        const h = await closeFailed();
+        const before = closes(h).length;
+        expect(ruleBriefing(h.db, briefing(h)?.id ?? -1, 'close', '', h.now()).ok).toBe(true);
+        // Command's write fails once: the ruling stays pending, the item parked, the briefing ruled.
+        h.forge.author.failNext(method, 'throw');
+        await h.reconcile();
+        expect(ruling(h)).toMatchObject({ appliedAt: null, error: null });
+        expect(item(h)?.state).toBe('parked');
+        expect(h.forge.state.issues.get(1)?.state).toBe('open');
+        expect(followUps(h)).toHaveLength(0);
+        expect(claims(h)).toMatchObject([{ state: 'verifying' }]);
+        const crewClose = claimKeys('main', claims(h)[0]?.id ?? -1).close;
+        expect(claimOps(h).find((o) => o.opKey === crewClose)).toBeUndefined();
+        await flush(h);
+        expect(followUps(h)).toHaveLength(0);
+        // Past the outbox deadline a write whose answer was lost is read back, then sent again.
+        h.at(24 * 60);
+        await h.reconcile();
+        expect(h.forge.state.issues.get(1)?.state).toBe('closed');
+        expect(item(h)?.state).toBe('done');
+        expect(followUps(h)).toHaveLength(0);
+        expect(claims(h)).toMatchObject([{ state: 'superseded' }]);
+        expect(claimOps(h).find((o) => o.opKey === crewClose)).toBeUndefined();
+        // Every close that reached the forge was Command's: none by the crew.
+        expect(h.forge.state.issues.get(1)?.stateReason).toBe('completed');
+        expect(closes(h).length).toBeGreaterThan(before);
+        await h.reconcile();
+        expect(followUps(h)).toHaveLength(0);
+      },
+    );
+
+    test('the close fails, then Command rules Close as done and it gives up: at most one follow-up, no crew close', async () => {
+      const h = await closeFailed();
+      const before = closes(h).length;
+      expect(ruleBriefing(h.db, briefing(h)?.id ?? -1, 'close', '', h.now()).ok).toBe(true);
+      // Command's comment is lost once and never read back: each pass counts a try until it gives up.
+      h.forge.author.failNext('createIssueComment', 'throw');
+      for (let n = 0; n < 20 && !ruling(h)?.error; n++) {
+        await h.reconcile();
+        if (!ruling(h)?.error) expect(followUps(h)).toHaveLength(0);
+      }
+      expect(ruling(h)?.error).toMatch(new RegExp(`^${CLOSE_FAILED}`));
+      await h.reconcile();
+      await flush(h);
+      expect(h.forge.state.issues.get(1)?.state).toBe('open');
+      expect(claims(h)).toMatchObject([{ state: 'superseded' }]);
+      expect(followUps(h).length).toBeLessThanOrEqual(1);
+      expect(closes(h)).toHaveLength(before);
+      const crewClose = claimKeys('main', claims(h)[0]?.id ?? -1).close;
+      expect(claimOps(h).find((o) => o.opKey === crewClose)).toBeUndefined();
+      await h.reconcile();
+      expect(followUps(h).length).toBeLessThanOrEqual(1);
     });
 
     test('the close fails, then the issue is closed by hand: no follow-up', async () => {
