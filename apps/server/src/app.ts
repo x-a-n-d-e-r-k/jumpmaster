@@ -90,7 +90,12 @@ import { registerConfirmPages } from './ui/confirm.js';
 import type { FloorInputs, PendingLine } from './ui/floor.js';
 import { githubSectionRenderer } from './ui/github.js';
 import { registerGoalConfirmPages } from './ui/goal-confirm.js';
-import { SYSTEM_HREF, SYSTEM_STICKS_ADD_HREF, SYSTEM_STICKS_HREF } from './ui/links.js';
+import {
+  SYSTEM_HREF,
+  SYSTEM_STICKS_ADD_HREF,
+  SYSTEM_STICKS_HREF,
+  SYSTEM_STICKS_IMAGES_HREF,
+} from './ui/links.js';
 import {
   ACTIVITY_DROPS_HREF,
   ACTIVITY_HREF,
@@ -129,7 +134,7 @@ import {
 import { registerRedirects } from './ui/redirects.js';
 import { claudeTokenDays, registerSettingsPages } from './ui/settings.js';
 import { registerSetupPages, wizardActive } from './ui/setup.js';
-import { renderInviteResult, renderSticks, type StickRow } from './ui/sticks.js';
+import { renderInviteResult, renderStickImages, renderSticks, type StickRow } from './ui/sticks.js';
 import { zoneTextNamer } from './ui/zone-name.js';
 import { projectHeaderFor, registerZonesPages } from './ui/zones.js';
 import { dispatchGate } from './usage.js';
@@ -584,10 +589,16 @@ export function createApp(
       zones: config.dropZones,
       now: deps.now(),
       ...(publicOrigin(config) ? { publicUrl: publicOrigin(config) as string } : {}),
-      ...(deps.images ? { images: deps.images.status() } : {}),
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
+
+  // The release images the server mirrors for sticks (issue #140), on their own tab (#624).
+  app.get(SYSTEM_STICKS_IMAGES_HREF, async (req, reply) =>
+    reply
+      .type('text/html; charset=utf-8')
+      .send(withCsrf(req, renderStickImages(deps.images?.status()))),
+  );
 
   // Add a stick (issue #138): a session with sudo makes a one-time code, shown once on the page
   // this answers with (never cached). A refusal is JSON for the form to show.

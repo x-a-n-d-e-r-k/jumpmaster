@@ -1311,7 +1311,7 @@ Before you start:
   ([Reaching the server from other machines](#reaching-the-server-from-other-machines)). Until it is
   set, **Add a stick** is refused with a link to System, Server, Other machines.
 - The server runs a release image, so it has an image lock, and the mirror shows the stick image
-  as complete under **Images** on `/system/sticks`.
+  as complete on the **Images** tab of Sticks (`/system/sticks/images`).
 
 **On the sticks page** (`/system/sticks`), under **Add a stick**:
 

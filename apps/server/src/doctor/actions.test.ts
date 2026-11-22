@@ -49,11 +49,11 @@ describe('the action table', () => {
     expect([...new Set(listed)].sort()).toEqual([...CHECK_IDS].sort());
   });
 
-  test('server.image-mirror (issue #140) links to the images on the sticks page', () => {
+  test('server.image-mirror (issue #140) links to the Images tab of Sticks', () => {
     expect(actionFor(fail('server.image-mirror'), { pages: PAGES_M45A })).toEqual({
       kind: 'app',
       label: 'See the images on Sticks',
-      href: '/system/sticks',
+      href: '/system/sticks/images',
     });
   });
 

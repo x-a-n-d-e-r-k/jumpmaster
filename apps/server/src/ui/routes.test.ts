@@ -2172,6 +2172,19 @@ describe('the System area (#623)', () => {
     expect(ids.filter((id, i) => ids.indexOf(id) !== i)).toEqual([]);
   });
 
+  test("/system/sticks/images is the Sticks area's Images tab, Sticks current in the sub-nav (#624)", async () => {
+    const h = await system();
+    const res = await h.view('/system/sticks/images');
+    expect(res.statusCode).toBe(200);
+    expect(subnav(res.body).current).toEqual([['/system/sticks', 'Sticks']]);
+    expect(res.body).toContain('<a href="/system/sticks/images" aria-current="page">Images</a>');
+    expect(res.body).toContain('<h2>Images</h2>');
+    // The sticks page links it, and holds no image rows.
+    const sticks = (await h.view('/system/sticks')).body;
+    expect(sticks).toContain('<a href="/system/sticks/images">Images</a>');
+    expect(sticks).not.toContain('data-image=');
+  });
+
   test('a form on /system/sticks posts to /system/sticks/add', async () => {
     const h = await system();
     const body = (await h.view('/system/sticks')).body;
