@@ -2,13 +2,14 @@ import { RESTART_PATHS } from '../config/boot.js';
 import { type FlagGroup, type FlagRow, type FlagScope, flagRows } from '../config/catalog.js';
 import type { ConfigStore } from '../config/store.js';
 import type { DropZoneConfig } from '../config.js';
+import { SYSTEM_OTHER_MACHINES_HREF } from './links.js';
 import { escapeHtml, PROJECTS_HREF, page, projectHref } from './pages.js';
 import { CONFIG_ANSWER_FN, RESTART_NOTE, settingControl, settingId } from './setting-controls.js';
 import { type ZoneRef, zoneName, zoneNameText } from './zone-name.js';
 
 /**
  * The advanced settings pages: a zone's (`/projects/:id/flags`, issue #322) and the install's
- * (`/settings/flags`, issue #323). Each lists every setting of its scope in the catalog, one per
+ * (`/system/advanced`, issue #323; #623 moved it from `/settings/flags`). Each lists every setting of its scope in the catalog, one per
  * row, grouped, with its plain words, a control, whether the document sets it and a Reset. One
  * Save sends one merge patch of what changed through `PATCH /api/control/config`, as the JSON
  * editor and the Install tab do, so every guard and confirmation applies unchanged: the page only
@@ -61,7 +62,7 @@ function elsewhereLink(f: FlagsForm, r: FlagRow): string {
   const sentence = r.entry.elsewhere ?? '';
   if (f.scope === 'install') {
     return r.key === 'server.publicUrl'
-      ? ' <a href="/settings/other-machines">the Other machines tab</a>'
+      ? ` <a href="${SYSTEM_OTHER_MACHINES_HREF}">Other machines</a>`
       : '';
   }
   const base = projectHref(f.target.zone?.id ?? '');

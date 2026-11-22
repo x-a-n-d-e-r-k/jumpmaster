@@ -42,7 +42,7 @@ describe('credentialProblems', () => {
         kind: 'missing',
         credential: 'claudeToken',
         message:
-          'no Claude token is set: enter it under Settings, Credentials, or write secrets/claude_token',
+          'no Claude token is set: enter it under System, Credentials, or write secrets/claude_token',
       },
     ]);
   });
@@ -97,7 +97,7 @@ describe('credentialProblems', () => {
         kind: 'missing',
         credential: 'zone:web:NPM_TOKEN',
         message:
-          'gate secret NPM_TOKEN is not set: enter it under Settings, Credentials, or set JM_ZONE_SECRET_WEB_NPM_TOKEN',
+          'gate secret NPM_TOKEN is not set: enter it under System, Credentials, or set JM_ZONE_SECRET_WEB_NPM_TOKEN',
       },
       {
         zoneId: 'web',

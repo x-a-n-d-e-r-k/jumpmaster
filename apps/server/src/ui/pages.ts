@@ -54,6 +54,13 @@ import {
   linkTarget,
   PROJECTS_HREF,
   projectHref,
+  SYSTEM_ADVANCED_HREF,
+  SYSTEM_CREDENTIALS_HREF,
+  SYSTEM_HISTORY_HREF,
+  SYSTEM_HREF,
+  SYSTEM_MCP_TOKENS_HREF,
+  SYSTEM_SERVER_HREF,
+  SYSTEM_STICKS_HREF,
 } from './links.js';
 import { STYLE } from './theme.js';
 import { relativeTime } from './time.js';
@@ -478,7 +485,7 @@ function sticksSection(
             return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${s.lastSeenAt ? volatile(escapeHtml(s.lastSeenAt)) : 'never'}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
           })
           .join('')}</table>`;
-  const manage = '<p><a href="/sticks">Set each stick\'s troopers on the sticks page</a></p>';
+  const manage = `<p><a href="${SYSTEM_STICKS_HREF}">Set each stick\'s troopers on the sticks page</a></p>`;
   return `<details id="sticks" class="card sticks"><summary>${escapeHtml(sticksSummary(lines, now))}</summary>${body}${manage}</details>`;
 }
 
@@ -1113,15 +1120,83 @@ export const FAVICON_HREF = `data:image/svg+xml,${encodeURIComponent(
 const FAVICON_LINK = `<link rel="icon" type="image/svg+xml" href="${FAVICON_HREF}">`;
 
 /**
- * Where the store-only links (Zones, Settings) go. `page()` cannot know the install's mode, so
+ * Where the store-only links (Projects) go. `page()` cannot know the install's mode, so
  * the app fills this in for a store install (`withStoreNav`); a config-file install keeps the
  * comment, and links nowhere that would 404.
  */
 export const STORE_NAV_SLOT = '<!--jm-store-nav-->';
-export const STORE_NAV = `<a href="${PROJECTS_HREF}">Projects</a><a href="/settings">Settings</a>`;
+export const STORE_NAV = `<a href="${PROJECTS_HREF}">Projects</a>`;
 
 /** The pages every install has, in the order the operator reaches for them. */
-const NAV = `<a href="/">Floor</a><a href="${ACTIVITY_HREF}">Activity</a><a href="/briefings">Briefings</a><a href="/chat">Chat</a><a href="/sticks">Sticks</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a>`;
+const NAV = `<a href="/">Floor</a><a href="${ACTIVITY_HREF}">Activity</a><a href="/briefings">Briefings</a><a href="/chat">Chat</a>${STORE_NAV_SLOT}<a href="${SYSTEM_HREF}">System</a>`;
+
+/** The System area's pages (#623), in its sub-nav's order; all but Health and Sticks are a store install's. */
+export type SystemPage =
+  | 'health'
+  | 'sticks'
+  | 'credentials'
+  | 'server'
+  | 'mcp-tokens'
+  | 'history'
+  | 'advanced';
+const SYSTEM_PAGES: readonly [SystemPage, string, string][] = [
+  ['health', SYSTEM_HREF, 'Health'],
+  ['sticks', SYSTEM_STICKS_HREF, 'Sticks'],
+  ['credentials', SYSTEM_CREDENTIALS_HREF, 'Credentials'],
+  ['server', SYSTEM_SERVER_HREF, 'Server'],
+  ['mcp-tokens', SYSTEM_MCP_TOKENS_HREF, 'MCP tokens'],
+  ['history', SYSTEM_HISTORY_HREF, 'History'],
+  ['advanced', SYSTEM_ADVANCED_HREF, 'Advanced'],
+];
+const systemLinks = (pages: typeof SYSTEM_PAGES, current?: SystemPage): string =>
+  pages
+    .map(
+      ([key, href, label]) =>
+        `<a href="${href}"${key === current ? ' aria-current="page"' : ''}>${label}</a>`,
+    )
+    .join(' · ');
+const SYSTEM_ALWAYS = SYSTEM_PAGES.slice(0, 2);
+const SYSTEM_STORE = SYSTEM_PAGES.slice(2);
+
+/**
+ * Where the System sub-nav's store-only links go on Health and Sticks: as `STORE_NAV_SLOT`, the
+ * app fills it in for a store install, and a config-file install links nowhere that would 404.
+ */
+export const SYSTEM_STORE_NAV_SLOT = '<!--jm-system-store-nav-->';
+export const SYSTEM_STORE_NAV = ` · ${systemLinks(SYSTEM_STORE)}`;
+
+/**
+ * The System sub-nav (#623): Health · Sticks · Credentials · Server · MCP tokens · History ·
+ * Advanced, the current page marked. A store-only page draws every link; Health and Sticks leave
+ * the store-only ones to the slot.
+ */
+export function systemNav(current: SystemPage): string {
+  const links = SYSTEM_STORE.some(([key]) => key === current)
+    ? systemLinks(SYSTEM_PAGES, current)
+    : `${systemLinks(SYSTEM_ALWAYS, current)}${SYSTEM_STORE_NAV_SLOT}`;
+  return `<nav class="subnav" aria-label="System"><p>${links}</p></nav>`;
+}
+
+/** A credential a zone needs and lacks, as the config store reports it. */
+export type ZoneProblemView = { zoneId: string; credential: string; kind: string; message: string };
+
+/** Zone problems (moved from Credentials to Health, #623): each zone's missing credential. */
+export function zoneProblemsSection(
+  problems: readonly ZoneProblemView[],
+  zones: readonly ZoneRef[],
+): string {
+  const name = zoneNamer(zones);
+  const list =
+    problems.length === 0
+      ? '<p>No zone is missing a credential it needs.</p>'
+      : `<ul class="problems">${problems
+          .map(
+            (p) =>
+              `<li><strong>${name(p.zoneId)}</strong> (${escapeHtml(p.credential)}, ${escapeHtml(p.kind)}): ${escapeHtml(p.message)}</li>`,
+          )
+          .join('')}</ul>`;
+  return `<h3>Zone problems</h3>${list}`;
+}
 
 /** The Activity area's pages (#622), in its sub-nav's order. */
 export type ActivityPage = 'board' | 'work' | 'drops' | 'log';
@@ -1602,7 +1677,7 @@ export function tokenAgeBanner(days: number | undefined): string {
     days >= TOKEN_LIFE_DAYS
       ? 'past its one-year life: drops fail to authenticate until it is replaced'
       : `and expires around day ${TOKEN_LIFE_DAYS}`;
-  return `<p class="warn token-age"><strong>The Claude token is ${days} days old</strong> ${when}. Run <code>claude setup-token</code> on your own computer and replace it under <a href="/settings/credentials">Settings, Credentials</a>.</p>`;
+  return `<p class="warn token-age"><strong>The Claude token is ${days} days old</strong> ${when}. Run <code>claude setup-token</code> on your own computer and replace it under <a href="${SYSTEM_CREDENTIALS_HREF}">System, Credentials</a>.</p>`;
 }
 
 export function renderHome(state: HomeState): string {
@@ -2382,7 +2457,11 @@ const DOCTOR_SCRIPT = `<script>for(const b of document.querySelectorAll('button[
 export function renderDoctor(
   run: { id: number; finishedAt: string | null; checks: DoctorCheckView[] } | null,
   zones: DropZoneConfig[],
+  /** A store install's zone problems (#623: shown above the check table); none in file mode. */
+  problems?: readonly ZoneProblemView[],
 ): string {
+  const head = `${systemNav('health')}<h2>Health</h2>`;
+  const zoneProblems = problems ? zoneProblemsSection(problems, zones) : '';
   const name = zoneNamer(zones);
   // One doctor drop button per project, as a list under its explanation.
   const drops = zones
@@ -2394,7 +2473,8 @@ export function renderDoctor(
   const controls = `<p><button data-doctor="/api/control/doctor">Run the doctor</button></p><p>A doctor drop proves the Claude token, the clone, services and gates on a stick; it spends one turn of usage.</p>${drops ? `<ul class="doctor-drops">${drops}</ul>` : ''}${zones.length > 0 ? `<p>GitHub setup (token links, the ruleset file, CODEOWNERS): ${zones.map((z) => `<a href="${escapeHtml(githubSetupHref(z.id))}">${name(z.id)}</a>`).join(', ')}</p>` : ''}`;
   if (!run)
     return page(
-      `<h2>Doctor</h2><p>No doctor run has finished yet. Run one here or with <code>jumpmaster ctl doctor</code>.</p>${controls}${DOCTOR_SCRIPT}`,
+      `${head}<p>No doctor run has finished yet. Run one here or with <code>jumpmaster ctl doctor</code>.</p>${controls}${zoneProblems}${DOCTOR_SCRIPT}`,
+      { title: 'Health' },
     );
   const n = (s: string) => run.checks.filter((c) => c.status === s).length;
   // Fails first, then warns, then the rest, each group in the run's order.
@@ -2413,7 +2493,8 @@ export function renderDoctor(
     })
     .join('');
   return page(
-    `<h2>Doctor</h2><p>Run ${run.id}, finished ${escapeHtml(run.finishedAt ?? '-')}: ${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('info') > 0 ? `, ${n('info')} info` : ''}.</p>${controls}<table><tr><th>Status</th><th>Zone</th><th>Check</th><th>Finding</th></tr>${rows}</table>${DOCTOR_SCRIPT}`,
+    `${head}<p>Run ${run.id}, finished ${escapeHtml(run.finishedAt ?? '-')}: ${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('info') > 0 ? `, ${n('info')} info` : ''}.</p>${controls}${zoneProblems}<table><tr><th>Status</th><th>Zone</th><th>Check</th><th>Finding</th></tr>${rows}</table>${DOCTOR_SCRIPT}`,
+    { title: 'Health' },
   );
 }
 

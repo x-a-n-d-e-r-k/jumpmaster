@@ -309,7 +309,7 @@ The setting is read once at start: **restart the server** after changing it. Wit
 ### Mint, list and revoke tokens
 
 Tokens are issued only by the operator control route. Since M4.5 the browser does it under
-Settings, MCP tokens (making one asks for your passphrase again, since the value is shown), and
+System, MCP tokens (making one asks for your passphrase again, since the value is shown), and
 `jumpmaster ctl mcp-tokens mint <zone> <read|write> --days N [--label <text>]`, `list` and
 `revoke <id>` do it from a terminal. A token belongs to one zone and one scope (`read` or
 `write`), lasts `days` (1 to 90), and is returned **once**: the server keeps only its SHA-256.

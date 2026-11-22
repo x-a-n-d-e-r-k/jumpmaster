@@ -31,3 +31,28 @@ export const ACTIVITY_DROPS_HREF = `${ACTIVITY_HREF}/drops`;
 
 /** The install-wide Log (#621): every project's, or one project's with `?project=`. */
 export const ACTIVITY_LOG_HREF = `${ACTIVITY_HREF}/log`;
+
+/** The System area (#623): Health, the doctor's page (moved from `/doctor`). */
+export const SYSTEM_HREF = '/system';
+
+/** The sticks page (#623: moved from `/sticks`) and its Add a stick POST. */
+export const SYSTEM_STICKS_HREF = `${SYSTEM_HREF}/sticks`;
+export const SYSTEM_STICKS_ADD_HREF = `${SYSTEM_STICKS_HREF}/add`;
+
+/** The install's credentials (#623: moved from `/settings/credentials`). */
+export const SYSTEM_CREDENTIALS_HREF = `${SYSTEM_HREF}/credentials`;
+
+/** The install settings, then Other machines (#623: from `/settings/install` and `/settings/other-machines`). */
+export const SYSTEM_SERVER_HREF = `${SYSTEM_HREF}/server`;
+
+/** Other machines: the second section of Server. */
+export const SYSTEM_OTHER_MACHINES_HREF = `${SYSTEM_SERVER_HREF}#other-machines`;
+
+/** Command's MCP tokens (#623: moved from `/settings/mcp-tokens`). */
+export const SYSTEM_MCP_TOKENS_HREF = `${SYSTEM_HREF}/mcp-tokens`;
+
+/** The config's revisions (#623: moved from `/settings/history`). */
+export const SYSTEM_HISTORY_HREF = `${SYSTEM_HREF}/history`;
+
+/** Every install-wide setting (#623: moved from `/settings/flags`). */
+export const SYSTEM_ADVANCED_HREF = `${SYSTEM_HREF}/advanced`;

@@ -1348,7 +1348,7 @@ describe('the status banner (Task 12, round 2)', () => {
       waitingOn: 'stick',
       action: { label: 'See the sticks', href: '/' },
       also: [
-        { text: 'demo: no Claude token', href: '/settings/credentials' },
+        { text: 'demo: no Claude token', href: '/system/credentials' },
         { text: 'docs is paused', href: '/projects/docs' },
         { text: 'evil', href: 'javascript:alert(1)' },
         { text: 'no pass yet since start' },
@@ -1358,7 +1358,7 @@ describe('the status banner (Task 12, round 2)', () => {
     expect(html).toContain('<p>check <code>docker compose logs stick</code> &lt;now&gt;</p>');
     expect(html).not.toContain('`');
     expect(html).toContain(
-      '<ul class="also"><li>demo: no Claude token <a href="/settings/credentials">Fix</a></li><li>docs is paused <a href="/projects/docs">Fix</a></li><li>evil</li><li>no pass yet since start</li></ul>',
+      '<ul class="also"><li>demo: no Claude token <a href="/system/credentials">Fix</a></li><li>docs is paused <a href="/projects/docs">Fix</a></li><li>evil</li><li>no pass yet since start</li></ul>',
     );
     expect(html).not.toContain('javascript:');
     // The action link goes through the same check.
@@ -1922,12 +1922,12 @@ describe('external links open in a new tab (#133)', () => {
       action: { label: 'Open PR #7', href: 'https://github.com/o/r/pull/7' },
       also: [
         { text: 'ext', href: 'https://github.com/o/r/settings' },
-        { text: 'int', href: '/settings/credentials' },
+        { text: 'int', href: '/system/credentials' },
       ],
     });
     expect(html).toContain(`<a href="https://github.com/o/r/pull/7" ${NEW_TAB}>Open PR #7</a>`);
     expect(html).toContain(`<a href="https://github.com/o/r/settings" ${NEW_TAB}>Fix</a>`);
-    expect(html).toContain('<a href="/settings/credentials">Fix</a>');
+    expect(html).toContain('<a href="/system/credentials">Fix</a>');
   });
 
   test('the floor’s PR link (its "Open PR #N") opens in a new tab; its in-app links do not', () => {

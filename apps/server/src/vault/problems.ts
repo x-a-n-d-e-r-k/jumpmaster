@@ -49,7 +49,7 @@ export function credentialProblems(
   const out: CredentialProblem[] = [];
   const add = (kind: CredentialProblem['kind'], credential: CredentialName, message: string) =>
     out.push({ zoneId: zone.id, kind, credential, message });
-  const where = (file: string) => `enter it under Settings, Credentials, or write secrets/${file}`;
+  const where = (file: string) => `enter it under System, Credentials, or write secrets/${file}`;
 
   if (!present(resolved.claudeToken))
     add('missing', 'claudeToken', `no Claude token is set: ${where('claude_token')}`);
@@ -130,7 +130,7 @@ export function credentialProblems(
       add(
         'missing',
         credential,
-        `gate secret ${name} is not set: enter it under Settings, Credentials, or set ${gateSecretVar(zone.id, name)}`,
+        `gate secret ${name} is not set: enter it under System, Credentials, or set ${gateSecretVar(zone.id, name)}`,
       );
     else if ((r?.value?.length ?? 0) < MIN_GATE_SECRET)
       add(

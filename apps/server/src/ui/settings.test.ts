@@ -201,7 +201,7 @@ const rowOf = (html: string, name: string): string => {
 };
 
 describe('the credentials tab', () => {
-  test('the credentials tab shows source and path, fingerprint, login and dates for each credential, the zone problems, and no value', async () => {
+  test('the credentials page shows source and path, fingerprint, login and dates for each credential, and no value; the zone problems are on Health', async () => {
     const w = await world();
     expect((await w.call('POST', '/api/control/sudo', { passphrase: PASS })).statusCode).toBe(200);
     const claude = await w.call('PUT', '/api/control/secrets/claudeToken', {
@@ -212,12 +212,12 @@ describe('the credentials tab', () => {
     expect(
       (await w.call('PUT', '/api/control/secrets/githubAuthorToken', { value: AUTHOR })).statusCode,
     ).toBe(200);
-    const r = await w.get('/settings/credentials');
+    const r = await w.get('/system/credentials');
     expect(r.statusCode).toBe(200);
     const html = r.body;
-    // The tabs, as Task 13 will grow them.
-    expect(html).toContain('<nav class="settings-tabs">');
-    expect(html).toContain('<strong>Credentials</strong>');
+    // The System sub-nav (#623), Credentials current.
+    expect(html).toContain('<nav class="subnav" aria-label="System">');
+    expect(html).toContain('<a href="/system/credentials" aria-current="page">Credentials</a>');
 
     const c = rowOf(html, 'claudeToken');
     expect(c).toContain('Claude token (claude setup-token)');
@@ -243,13 +243,24 @@ describe('the credentials tab', () => {
 
     expect(rowOf(html, 'githubReadToken')).toMatch(/not set/);
 
-    // Every zone's credential problems, with their messages.
+    // Every zone's credential problems, with their messages: on Health once, not here (#623).
     const problems = w.store.problems();
     expect(problems.some((p) => p.credential === 'githubReadToken')).toBe(true);
-    expect(html).toContain('<h3>Zone problems</h3>');
-    for (const p of problems) expect(html).toContain(p.message.replaceAll("'", '&#39;'));
+    const health = (await w.get('/system')).body;
+    const count = (h: string, s: string) => h.split(s).length - 1;
+    expect(count(health, '<h3>Zone problems</h3>')).toBe(1);
+    expect(count(html, 'Zone problems')).toBe(0);
+    expect(html).not.toContain('<ul class="problems">');
+    for (const p of problems) {
+      const message = p.message.replaceAll("'", '&#39;');
+      expect(health).toContain(message);
+      expect(count(health, `${message}</li>`)).toBe(1);
+    }
     // Each problem names its zone by repository (#99).
-    expect(html).toContain('<li><strong>octo/demo</strong> (');
+    expect(health).toContain('<li><strong>octo/demo</strong> (');
+    // Above the check table.
+    const table = health.indexOf('<th>Status</th>');
+    if (table !== -1) expect(health.indexOf('<h3>Zone problems</h3>')).toBeLessThan(table);
 
     for (const secret of [CLAUDE, AUTHOR, REVIEWER, TOKEN, 'join-secret-value-4'])
       expect(html).not.toContain(secret);
@@ -257,7 +268,7 @@ describe('the credentials tab', () => {
 
   test('Replace is disabled with the managed-by text for a file credential, and for a vault one opens a sudo prompt and PUTs the value only in the body', async () => {
     const w = await world({ env: { JM_GITHUB_READ_TOKEN: READ } });
-    const html = (await w.get('/settings/credentials')).body;
+    const html = (await w.get('/system/credentials')).body;
     // File and environment credentials: read-only, with where they come from and how to change it.
     // A variable or file credential is never a dead button: Replace moves credentials to the vault.
     const reviewer = rowOf(html, 'githubReviewerToken');
@@ -292,7 +303,7 @@ describe('the credentials tab', () => {
     expect(html).toContain('id="sudo-prompt" hidden');
     expect(html).toContain(CREDENTIALS_SCRIPT);
     await w.call('POST', '/api/control/sudo', { passphrase: PASS });
-    expect((await w.get('/settings/credentials')).body).toContain('data-sudo="1"');
+    expect((await w.get('/system/credentials')).body).toContain('data-sudo="1"');
 
     // The browser path, without a browser: the script's replace, on a stub fetch.
     const prompted = await runReplace({ name: 'claudeToken', value: CLAUDE, sudo: false });
@@ -378,11 +389,11 @@ describe('the credentials tab', () => {
         })
       ).statusCode,
     ).toBe(200);
-    for (const url of ['/settings/credentials', '/']) {
+    for (const url of ['/system/credentials', '/']) {
       const body = (await w.get(url)).body;
       expect(body, url).toMatch(banner);
       expect(body, url).toContain('The Claude token is 331 days old');
-      expect(body, url).toContain('href="/settings/credentials"');
+      expect(body, url).toContain('href="/system/credentials"');
     }
     // Past its year: the banner says it has expired.
     w.at(plus(t0, 40 * DAY));
@@ -394,28 +405,26 @@ describe('the credentials tab', () => {
       value: CLAUDE,
       declaredCreatedAt: new Date(t0.getTime() - 329 * DAY).toISOString().slice(0, 10),
     });
-    for (const url of ['/settings/credentials', '/'])
+    for (const url of ['/system/credentials', '/'])
       expect((await fresh.get(url)).body, url).not.toMatch(banner);
   });
 
-  test('/settings redirects to the credentials tab until the other tabs exist', async () => {
+  test('/settings is a 301 to System, Credentials (#623); home links System', async () => {
     const w = await world();
     const r = await w.get('/settings');
-    expect(r.statusCode).toBe(302);
-    expect(r.headers.location).toBe('/settings/credentials');
+    expect(r.statusCode).toBe(301);
+    expect(r.headers.location).toBe('/system/credentials');
     // Home links to it.
-    expect((await w.get('/')).body).toContain('<a href="/settings">Settings</a>');
+    expect((await w.get('/')).body).toContain('<a href="/system">System</a>');
   });
 
   test("the wizard's Claude and forge controls are here: the plan, the token date, the repository recommendation and its token links", async () => {
     const w = await world();
-    const html = (await w.get('/settings/credentials')).body;
+    const html = (await w.get('/system/credentials')).body;
     // The Claude plan (file mode: shown where it is set).
     expect(html).toMatch(/Plan <strong>pro<\/strong> \(set in the config file\)/);
     // The recommendation form, reading GitHub without writing.
-    expect(html).toContain(
-      '<form method="get" action="/settings/credentials" id="recommend-form">',
-    );
+    expect(html).toContain('<form method="get" action="/system/credentials" id="recommend-form">');
   });
 });
 
@@ -424,7 +433,7 @@ describe('creating the GitHub Apps from the Credentials tab (#374, spec §4.1)',
 
   test('a two-bot guide shows the create forms, wired to ask for the passphrase without sudo', async () => {
     const w = await world();
-    const r = await w.get('/settings/credentials?repo=acme%2Fdemo');
+    const r = await w.get('/system/credentials?repo=acme%2Fdemo');
     expect(r.statusCode).toBe(200);
     expect(r.body).toContain('GitHub Apps (recommended for two bots)');
     const forms =
@@ -438,7 +447,7 @@ describe('creating the GitHub Apps from the Credentials tab (#374, spec §4.1)',
     expect(r.body).toContain('form.app-create[data-sudo-first]');
     expect(r.body).toContain('id="sudo-prompt"');
     w.sudo();
-    const held = await w.get('/settings/credentials?repo=acme%2Fdemo');
+    const held = await w.get('/system/credentials?repo=acme%2Fdemo');
     expect(held.body).not.toMatch(/action="\/setup\/github-app\/start"[^>]*data-sudo-first/);
   });
 
@@ -461,7 +470,7 @@ describe('creating the GitHub Apps from the Credentials tab (#374, spec §4.1)',
       }),
       { now: t0 },
     );
-    const r = await w.get('/settings/credentials?repo=Acme%2Fdemo');
+    const r = await w.get('/system/credentials?repo=Acme%2Fdemo');
     expect(r.statusCode).toBe(200);
     expect(r.body).toContain('Created: <code>jm-author-acme</code>');
     expect(r.body).toContain('https://github.com/apps/jm-author-acme/installations/new');
@@ -478,7 +487,7 @@ describe('creating the GitHub Apps from the Credentials tab (#374, spec §4.1)',
     writeFileSync(join(w.secrets, 'github-app', 'acme', 'author.json'), '{ broken', {
       mode: 0o644,
     });
-    const r = await w.get('/settings/credentials?repo=acme%2Fdemo');
+    const r = await w.get('/system/credentials?repo=acme%2Fdemo');
     expect(r.statusCode).toBe(200);
     expect(r.body).toContain('Create the author app');
     expect(r.body).not.toContain('{ broken');
@@ -486,7 +495,7 @@ describe('creating the GitHub Apps from the Credentials tab (#374, spec §4.1)',
 
   test('the vault off: no buttons, a link to turn it on, and the token links as before', async () => {
     const w = await world({ vaultOff: true });
-    const r = await w.get('/settings/credentials?repo=acme%2Fdemo');
+    const r = await w.get('/system/credentials?repo=acme%2Fdemo');
     expect(r.statusCode).toBe(200);
     expect(r.body).not.toContain('/setup/github-app/start');
     expect(r.body).toContain('The vault must be on first');
@@ -502,7 +511,7 @@ describe('the credentials tab, round 2', () => {
     expect(empty.calls).toEqual([]);
     // Inline: each Replace form carries its own status beside the button.
     const w = await world();
-    const claude = rowOf((await w.get('/settings/credentials')).body, 'claudeToken');
+    const claude = rowOf((await w.get('/system/credentials')).body, 'claudeToken');
     expect(claude).toMatch(
       /<button>Replace<\/button> <span class="replace-out" role="status"><\/span><\/form>/,
     );
@@ -517,7 +526,7 @@ describe('the credentials tab, round 2', () => {
       value: CLAUDE,
       declaredCreatedAt: made,
     });
-    const tab = (await w.get('/settings/credentials')).body;
+    const tab = (await w.get('/system/credentials')).body;
     expect(rowOf(tab, 'claudeToken')).toContain(`<td data-col="created">${made}</td>`);
     for (const body of [tab, (await w.get('/')).body])
       expect(body).toContain('The Claude token is 331 days old');
@@ -536,7 +545,7 @@ describe('the credentials tab, round 2', () => {
     await first.call('PUT', '/api/control/secrets/claudeToken', { value: CLAUDE });
     // The same database under another vault key: the stored value no longer decrypts.
     const w = await world({ dbMode: true, dbFile: first.dbFile });
-    const row = rowOf((await w.get('/settings/credentials')).body, 'claudeToken');
+    const row = rowOf((await w.get('/system/credentials')).body, 'claudeToken');
     expect(row).toContain('does not decrypt');
     expect(row).toContain(
       '<button type="button" class="remove" data-name="claudeToken">Remove</button>',
@@ -559,7 +568,7 @@ describe('the credentials tab, round 2', () => {
     expect(some.status).toContain('2 running drops still carry the previous token');
     const tested = await runAction('test', 'claudeToken');
     expect(tested.result).toBe('ok');
-    expect(tested.appended).toContain('<a href="/settings/credentials">Refresh the list</a>');
+    expect(tested.appended).toContain('<a href="/system/credentials">Refresh the list</a>');
   });
 });
 
@@ -573,7 +582,7 @@ const settingRow = (html: string, path: string): string => {
 describe('the ultra plan (#144)', () => {
   test('both plan lists offer Ultra ($200/mo); choosing it is saved and shown selected on reload', async () => {
     const w = await world({ dbMode: true, doc: { dropZones: [ZONE] } });
-    for (const url of ['/settings/credentials', '/settings/install']) {
+    for (const url of ['/system/credentials', '/system/server']) {
       const html = (await w.get(url)).body;
       expect(html, url).toMatch(/<option value="ultra"[^>]*>Ultra \(\$200\/mo\)<\/option>/);
       // The other plans have prose labels too (#161).
@@ -585,7 +594,7 @@ describe('the ultra plan (#144)', () => {
     });
     expect(r.statusCode, r.body).toBe(200);
     expect(w.store.current().claude.plan).toBe('ultra');
-    for (const url of ['/settings/credentials', '/settings/install'])
+    for (const url of ['/system/credentials', '/system/server'])
       expect((await w.get(url)).body, url).toMatch(/<option value="ultra" selected>/);
     // The floor follows the saved plan: no 5-hour meter, Fable's and Opus's windows as stored.
     recordUsageWindows(
@@ -604,17 +613,15 @@ describe('the ultra plan (#144)', () => {
 describe('settings, part two (Task 13)', () => {
   test('the install tab marks mcp.enabled as restart-needed, shows the boot settings read-only with their source, and applies the rest live', async () => {
     const w = await world({ dbMode: true, doc: { dropZones: [ZONE] } });
-    const r = await w.get('/settings/install');
+    const r = await w.get('/system/server');
     expect(r.statusCode).toBe(200);
     const html = r.body;
     // Not a live page (#404): only the Floor and the briefings refresh themselves.
     expect(html).not.toContain(LIVE_MARKER);
-    // Each tab a path, the current one in bold; /settings goes to the first.
-    expect(html).toContain('<strong>Install</strong>');
+    // The System sub-nav, Server current (#623).
+    expect(html).toContain('<a href="/system/server" aria-current="page">Server</a>');
     for (const tab of ['credentials', 'mcp-tokens', 'history'])
-      expect(html).toContain(`<a href="/settings/${tab}">`);
-    const s = await w.get('/settings');
-    expect([s.statusCode, s.headers.location]).toEqual([302, '/settings/credentials']);
+      expect(html).toContain(`<a href="/system/${tab}">`);
 
     // mcp.enabled (and the body limit) only apply at the next start: said beside each.
     expect(settingRow(html, 'mcp.enabled')).toContain('takes effect at the next restart');
@@ -671,7 +678,7 @@ describe('settings, part two (Task 13)', () => {
       expectRevision: w.store.revision(),
     });
     expect(mcp.json()).toMatchObject({ restartNeeded: ['mcp.enabled'] });
-    const after = (await w.get('/settings/install')).body;
+    const after = (await w.get('/system/server')).body;
     expect(after).toMatch(/class="warn restart-pending"[^>]*>.*Restart pending.*mcp\.enabled/s);
     expect(after).toContain('docker compose restart jumpmaster');
 
@@ -700,8 +707,8 @@ describe('settings, part two (Task 13)', () => {
         body: {
           patch: { pollSeconds: 45, claude: { plan: 'max' } },
           expectRevision: 7,
-          returnTo: '/settings/install',
-          cancelTo: '/settings/install',
+          returnTo: '/system/server',
+          cancelTo: '/system/server',
         },
       },
     ]);
@@ -716,7 +723,7 @@ describe('settings, part two (Task 13)', () => {
 
     // File mode: every value read-only where the file sets it, with the reader's warnings.
     const f = await world({ file: { pollSeconds: 1 } });
-    const file = (await f.get('/settings/install')).body;
+    const file = (await f.get('/system/server')).body;
     expect(file).toContain('set in the config file');
     expect(file).toMatch(/<fieldset disabled>/);
     expect(file).toContain('pollSeconds 1 is outside 5..86400: running with 5; set it in range');
@@ -731,7 +738,7 @@ describe('settings, part two (Task 13)', () => {
 
   test('requireSignedImages weakening is offered only as the ctl-or-file note, and stopOnOverage to false goes to the confirmation page', async () => {
     const w = await world({ dbMode: true, doc: { requireSignedImages: true } });
-    const html = (await w.get('/settings/install')).body;
+    const html = (await w.get('/system/server')).body;
     const signed = settingRow(html, 'requireSignedImages');
     // On, and not a control a session can turn off: the note says where it is turned off.
     expect(signed).toMatch(
@@ -757,8 +764,8 @@ describe('settings, part two (Task 13)', () => {
     const stop = await w.call('PATCH', '/api/control/config', {
       patch: { usage: { stopOnOverage: false } },
       expectRevision: w.store.revision(),
-      returnTo: '/settings/install',
-      cancelTo: '/settings/install',
+      returnTo: '/system/server',
+      cancelTo: '/system/server',
     });
     expect(stop.statusCode).toBe(409);
     const j = stop.json() as { needsConfirmation: boolean; confirm: string };
@@ -766,7 +773,7 @@ describe('settings, part two (Task 13)', () => {
     const confirm = await w.get(j.confirm);
     expect(confirm.statusCode).toBe(200);
     expect(confirm.body).toContain('Dispatch will continue on usage credits');
-    expect(confirm.body).toContain('<a href="/settings/install">Cancel</a>');
+    expect(confirm.body).toContain('<a href="/system/server">Cancel</a>');
     expect(w.store.current().usage.stopOnOverage).not.toBe(false);
 
     // The page follows the route's answer: to the confirmation page, or the ctl-or-file note.
@@ -811,8 +818,8 @@ describe('settings, part two (Task 13)', () => {
     });
     expect(first.statusCode).toBe(200);
     const value = (first.json() as { token: string }).token;
-    const html = (await w.get('/settings/mcp-tokens')).body;
-    expect(html).toContain('<strong>MCP tokens</strong>');
+    const html = (await w.get('/system/mcp-tokens')).body;
+    expect(html).toContain('<a href="/system/mcp-tokens" aria-current="page">MCP tokens</a>');
     // The mint form: the zone, the scope, the days (1 to 90) and a label.
     expect(html).toMatch(/<form id="mint">/);
     // The zone is named by its repository; the value sent stays the id (#99).
@@ -879,15 +886,15 @@ describe('settings, part two (Task 13)', () => {
     });
     expect(minted.statusCode).toBe(200);
     expect((await w.call('DELETE', '/api/control/mcp-tokens/1', {})).statusCode).toBe(200);
-    const listed = (await w.get('/settings/mcp-tokens')).body;
+    const listed = (await w.get('/system/mcp-tokens')).body;
     expect(listed).toContain('data-sudo="1"');
     expect(listed.slice(listed.indexOf('<tr data-token="1"'))).toMatch(/revoked/);
     expect(listed).not.toContain((minted.json() as { token: string }).token);
 
     // With the MCP server off, the tab says how to turn it on instead.
     const off = await world({ dbMode: true, doc: { dropZones: [ZONE] } });
-    const offHtml = (await off.get('/settings/mcp-tokens')).body;
-    expect(offHtml).toContain('<a href="/settings/install">');
+    const offHtml = (await off.get('/system/mcp-tokens')).body;
+    expect(offHtml).toContain('<a href="/system/server">');
     expect(offHtml).not.toContain('<form id="mint">');
   });
 
@@ -922,8 +929,8 @@ describe('settings, part two (Task 13)', () => {
     expect((await w.token('DELETE', '/api/control/zones/main')).statusCode).toBe(200);
     const removed = w.store.revision();
 
-    const html = (await w.get('/settings/history')).body;
-    expect(html).toContain('<strong>History</strong>');
+    const html = (await w.get('/system/history')).body;
+    expect(html).toContain('<a href="/system/history" aria-current="page">History</a>');
     const rev = (id: number) => rowIn(html, id);
     // Its changes, path by path; the zone add was guarded (its code runs with the Claude token).
     expect(rev(poll)).toContain('pollSeconds');
@@ -943,8 +950,8 @@ describe('settings, part two (Task 13)', () => {
     const back = await w.call('POST', '/api/control/config/rollback', {
       id: added,
       expectRevision: removed,
-      returnTo: '/settings/history',
-      cancelTo: '/settings/history',
+      returnTo: '/system/history',
+      cancelTo: '/system/history',
     });
     expect(back.statusCode).toBe(403);
     expect(back.json()).toMatchObject({ sessionForbidden: ['dropZones[main].image'] });
@@ -952,7 +959,7 @@ describe('settings, part two (Task 13)', () => {
     expect((await w.token('POST', '/api/control/config/rollback', { id: added })).statusCode).toBe(
       200,
     );
-    const again = (await w.get('/settings/history')).body;
+    const again = (await w.get('/system/history')).body;
     const top = again.slice(again.indexOf(`<tr data-revision="${w.store.revision()}"`));
     expect(top.slice(0, top.indexOf('</tr>'))).toContain('class="mark readds"');
     expect(top.slice(0, top.indexOf('</tr>'))).toContain('re-added main');
@@ -966,17 +973,17 @@ describe('settings, part two (Task 13)', () => {
     expect((await patch(false)).statusCode).toBe(200);
     const weak = w.store.revision();
     expect((await patch(true)).statusCode).toBe(200);
-    expect(rowIn((await w.get('/settings/history')).body, weak)).toContain('class="mark guarded"');
+    expect(rowIn((await w.get('/system/history')).body, weak)).toContain('class="mark guarded"');
     const held = await w.call('POST', '/api/control/config/rollback', {
       id: weak,
       expectRevision: w.store.revision(),
-      returnTo: '/settings/history',
-      cancelTo: '/settings/history',
+      returnTo: '/system/history',
+      cancelTo: '/system/history',
     });
     expect(held.statusCode).toBe(409);
     const confirm = await w.get((held.json() as { confirm: string }).confirm);
     expect(confirm.statusCode).toBe(200);
-    expect(confirm.body).toContain('<a href="/settings/history">Cancel</a>');
+    expect(confirm.body).toContain('<a href="/system/history">Cancel</a>');
     expect(w.store.current().usage.stopOnOverage).toBe(true);
 
     // The page's Revert: asks first (naming the re-add), then posts the rollback with the id.
@@ -1006,8 +1013,8 @@ describe('settings, part two (Task 13)', () => {
         body: {
           id: 2,
           expectRevision: 4,
-          returnTo: '/settings/history',
-          cancelTo: '/settings/history',
+          returnTo: '/system/history',
+          cancelTo: '/system/history',
         },
       },
     ]);
@@ -1075,7 +1082,7 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
     expect(reveal).toEqual({ textContent: 'jmm_shownonce', hidden: false });
     // The page holds the list in that container, so the script can replace it.
     const w = await world({ dbMode: true, doc: { mcp: { enabled: true }, dropZones: [ZONE] } });
-    expect((await w.get('/settings/mcp-tokens')).body).toMatch(
+    expect((await w.get('/system/mcp-tokens')).body).toMatch(
       /<div id="token-list" data-zones="[^"]*"><p>No MCP tokens yet.<\/p><\/div>/,
     );
   });
@@ -1087,7 +1094,7 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
       return html.slice(at, html.indexOf('</tr>', at));
     };
     // Db mode, no listen or data variable set: every row is the default, with how to set it.
-    const none = (await (await world({ dbMode: true })).get('/settings/install')).body;
+    const none = (await (await world({ dbMode: true })).get('/system/server')).body;
     for (const [path, env] of [
       ['listen.host', 'JM_LISTEN_HOST'],
       ['listen.port', 'JM_LISTEN_PORT'],
@@ -1113,7 +1120,7 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
         JM_DATA_DIR: '/data',
       },
     });
-    const env = (await set.get('/settings/install')).body;
+    const env = (await set.get('/system/server')).body;
     for (const name of ['JM_LISTEN_HOST', 'JM_LISTEN_PORT', 'JM_ALLOWED_HOSTS', 'JM_DATA_DIR'])
       expect(env).toContain(`the environment: <code>${name}</code>`);
     expect(bootRow(env, 'listen.tlsTerminated')).toContain(
@@ -1121,7 +1128,7 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
     );
     // File mode, a file with dataDir and no listen: dataDir from the file, the listen rows default.
     const f = await world();
-    const file = (await f.get('/settings/install')).body;
+    const file = (await f.get('/system/server')).body;
     expect(bootRow(file, 'dataDir')).toContain('the config file');
     for (const path of ['listen.host', 'listen.port', 'listen.allowedHosts'])
       expect(bootRow(file, path)).toContain(
@@ -1134,7 +1141,7 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
     const g = await world({
       file: { listen: { host: '127.0.0.1', port: 7420, tlsTerminated: true } },
     });
-    const gHtml = (await g.get('/settings/install')).body;
+    const gHtml = (await g.get('/system/server')).body;
     for (const path of ['listen.host', 'listen.port', 'listen.tlsTerminated'])
       expect(bootRow(gHtml, path)).toContain('the config file');
     expect(bootRow(gHtml, 'listen.allowedHosts')).toContain('the default');
@@ -1155,21 +1162,21 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
         went = to;
       },
     );
-    expect([r, went]).toEqual(['saved', '/settings/install?saved=9']);
+    expect([r, went]).toEqual(['saved', '/system/server?saved=9']);
     const w = await world({ dbMode: true, doc: { dropZones: [ZONE] } });
-    const saved = (await w.get('/settings/install?saved=2')).body;
+    const saved = (await w.get('/system/server?saved=2')).body;
     expect(saved).toContain(
       '<p class="saved" role="status">Saved as revision 2: it takes effect at the next pass.</p>',
     );
     // Only a revision number is echoed; anything else says nothing.
     for (const q of ['?saved=<b>', '?saved=1e3', '?saved=', ''])
-      expect((await w.get(`/settings/install${q}`)).body).not.toContain('class="saved"');
+      expect((await w.get(`/system/server${q}`)).body).not.toContain('class="saved"');
     // A save that needs a restart: the badge on the reloaded page says it.
     await w.token('PATCH', '/api/control/config', {
       patch: { mcp: { enabled: true } },
       expectRevision: w.store.revision(),
     });
-    const after = (await w.get(`/settings/install?saved=${w.store.revision()}`)).body;
+    const after = (await w.get(`/system/server?saved=${w.store.revision()}`)).body;
     expect(after).toContain(`Saved as revision ${w.store.revision()}`);
     expect(after).toContain('restart-pending');
   });
@@ -1179,7 +1186,7 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
       dbMode: true,
       doc: { usage: { throttleUtilization: 0.855 }, dropZones: [ZONE] },
     });
-    const html = (await w.get('/settings/install')).body;
+    const html = (await w.get('/system/server')).body;
     expect(settingRow(html, 'usage.throttleUtilization')).toMatch(
       /<input type="number" min="0" max="1" step="any" id="setting-usage-throttleUtilization"[^>]* value="0.855">/,
     );
@@ -1190,7 +1197,7 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
 
   test('B4: every Install control and the MCP form fields have an accessible name', async () => {
     const w = await world({ dbMode: true, doc: { mcp: { enabled: true }, dropZones: [ZONE] } });
-    const html = (await w.get('/settings/install')).body;
+    const html = (await w.get('/system/server')).body;
     const controls = [...html.matchAll(/<(input|select)[^>]*data-path="([^"]+)"[^>]*>/g)];
     expect(controls.length).toBe(15);
     for (const [tag, , path] of controls) {
@@ -1198,7 +1205,7 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
       expect([path, id]).toEqual([path, expect.any(String)]);
       expect(html).toContain(`<label for="${id}"><code>${path}</code></label>`);
     }
-    const mcp = (await w.get('/settings/mcp-tokens')).body;
+    const mcp = (await w.get('/system/mcp-tokens')).body;
     const start = mcp.indexOf('<form id="mint">');
     const form = mcp.slice(start, mcp.indexOf('</form>', start));
     for (const name of ['zoneId', 'scope', 'days', 'label'])
@@ -1239,6 +1246,38 @@ describe('the Other machines tab (issue #254)', () => {
       await (bad.ctx.jmSavePublicUrl as (...a: unknown[]) => Promise<string>)('x', out2, () => {}),
     ).toBe('refused');
     expect(out2.textContent).toBe('must be a plain https origin');
+  });
+
+  test('jmGo redraws this page when only the hash differs, and navigates otherwise', () => {
+    const at = (href: string) => {
+      const u = new URL(href);
+      const loc = {
+        href,
+        pathname: u.pathname,
+        search: u.search,
+        hash: u.hash,
+        reloads: 0,
+        reload() {
+          loc.reloads += 1;
+        },
+      };
+      const s = pageScript(OTHER_MACHINES_SCRIPT, () => ({ ok: true, status: 200, json: {} }), {
+        location: loc,
+        URL,
+      });
+      (s.ctx.jmGo as (to: string) => void)('/system/server#other-machines');
+      return loc;
+    };
+    const same = at('http://h/system/server');
+    expect(same.reloads).toBe(1);
+    expect(same.hash).toBe('#other-machines');
+    expect(same.href).toBe('http://h/system/server');
+    const other = at('http://h/config/confirm/abc');
+    expect(other.reloads).toBe(0);
+    expect(other.href).toBe('/system/server#other-machines');
+    const query = at('http://h/system/server?saved=3');
+    expect(query.reloads).toBe(0);
+    expect(query.href).toBe('/system/server#other-machines');
   });
 });
 
@@ -1414,7 +1453,7 @@ describe('turning the vault on and preferring it (#101)', () => {
       env: { JM_SECRETS_DIR: '' },
       file: { dataDir: data },
     });
-    let html = (await without.get('/settings/credentials')).body;
+    let html = (await without.get('/system/credentials')).body;
     expect(html).toContain(VAULT_KEY_IN_DATA_DIR);
     expect(html).toContain('<button type="button" id="vault-on">Turn on the vault</button>');
     // Turning it on still works.
@@ -1422,18 +1461,18 @@ describe('turning the vault on and preferring it (#101)', () => {
       200,
     );
     expect((await without.call('POST', '/api/control/secrets/vault/on', {})).statusCode).toBe(200);
-    html = (await without.get('/settings/credentials')).body;
+    html = (await without.get('/system/credentials')).body;
     expect(html).not.toContain('id="vault-on"');
     expect(readFileSync(join(data, 'vault', 'vault_key'), 'utf8')).not.toBe('');
     const withDir = await world({ vaultOff: true });
-    html = (await withDir.get('/settings/credentials')).body;
+    html = (await withDir.get('/system/credentials')).body;
     expect(html).toContain('id="vault-on"');
     expect(html).not.toContain(VAULT_KEY_IN_DATA_DIR);
   });
 
   test('with the vault off the tab offers Turn on the vault; turned on, it offers Prefer the vault and Copy into the vault', async () => {
     const w = await world({ vaultOff: true, env: { JM_GITHUB_READ_TOKEN: READ } });
-    let html = (await w.get('/settings/credentials')).body;
+    let html = (await w.get('/system/credentials')).body;
     expect(html).toContain('<button type="button" id="vault-on">Turn on the vault</button>');
     expect(html).not.toContain('id="prefer-vault"');
     expect(rowOf(html, 'githubReadToken')).not.toContain('Copy into the vault');
@@ -1441,7 +1480,7 @@ describe('turning the vault on and preferring it (#101)', () => {
     expect((await w.call('POST', '/api/control/sudo', { passphrase: PASS })).statusCode).toBe(200);
     expect((await w.call('POST', '/api/control/secrets/vault/on', {})).statusCode).toBe(200);
     const key = readFileSync(join(w.secrets, 'vault_key'), 'utf8').trim();
-    html = (await w.get('/settings/credentials')).body;
+    html = (await w.get('/system/credentials')).body;
     expect(html).not.toContain(key);
     expect(html).not.toContain('id="vault-on"');
     expect(html).toMatch(
@@ -1467,7 +1506,7 @@ describe('turning the vault on and preferring it (#101)', () => {
     const copy = await w.call('POST', '/api/control/secrets/githubReadToken/copy-to-vault', {});
     expect(copy.statusCode).toBe(200);
     expect(copy.body).not.toContain(READ);
-    let html = (await w.get('/settings/credentials')).body;
+    let html = (await w.get('/system/credentials')).body;
     expect(rowOf(html, 'githubReadToken')).toContain(
       'environment variable <code>JM_GITHUB_READ_TOKEN</code>, overriding the vault',
     );
@@ -1476,7 +1515,7 @@ describe('turning the vault on and preferring it (#101)', () => {
     expect(
       (await w.call('POST', '/api/control/secrets/vault/prefer', { prefer: true })).statusCode,
     ).toBe(200);
-    html = (await w.get('/settings/credentials')).body;
+    html = (await w.get('/system/credentials')).body;
     expect(html).toMatch(/<input type="checkbox" id="prefer-vault" checked[^>]*> Prefer the vault/);
     expect(rowOf(html, 'githubReadToken')).toContain(
       'vault (encrypted), overriding <code>JM_GITHUB_READ_TOKEN</code>',
@@ -1490,7 +1529,7 @@ describe('turning the vault on and preferring it (#101)', () => {
     await w.call('POST', '/api/control/sudo', { passphrase: PASS });
     await w.call('POST', '/api/control/secrets/vault/on', {});
     await w.call('POST', '/api/control/secrets/githubReadToken/copy-to-vault', {});
-    let html = (await w.get('/settings/credentials')).body;
+    let html = (await w.get('/system/credentials')).body;
     expect(rowOf(html, 'githubReadToken')).toContain(
       '<button type="button" class="remove" data-name="githubReadToken">Remove from the vault</button>',
     );
@@ -1498,7 +1537,7 @@ describe('turning the vault on and preferring it (#101)', () => {
     const rm = await w.call('DELETE', '/api/control/secrets/githubReadToken', undefined);
     expect(rm.statusCode).toBe(200);
     expect(rm.body).not.toContain(READ);
-    html = (await w.get('/settings/credentials')).body;
+    html = (await w.get('/system/credentials')).body;
     expect(rowOf(html, 'githubReadToken')).not.toContain('class="remove"');
     expect(rowOf(html, 'githubReadToken')).toContain(
       'environment variable <code>JM_GITHUB_READ_TOKEN</code>',
@@ -1548,7 +1587,7 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
 
   test('lists exactly the install flagRows, one link per zone, and the same auth as the other tabs', async () => {
     const w = await world({ dbMode: true, doc: { dropZones: [ZONE, REF] } });
-    const r = await w.get('/settings/flags');
+    const r = await w.get('/system/advanced');
     expect(r.statusCode).toBe(200);
     const rows = installRows(w.store);
     expect(rows.length).toBeGreaterThan(0);
@@ -1570,29 +1609,31 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
     expect(r.body).toContain('<button id="flags-save">Save changes</button>');
     // The elsewhere rows: publicUrl links to the Other machines tab; the jitter says ctl or file.
     expect(flagRow(r.body, 'server.publicUrl')).toContain(
-      'Changed in the Other machines tab. <a href="/settings/other-machines">',
+      'Changed under Other machines, on System, Server. <a href="/system/server#other-machines">',
     );
     const jitter = flagRow(r.body, 'usage.probeJitterSeconds');
     expect(jitter).toContain('Changed with jumpmaster ctl settings set or in the config file.');
     expect(jitter).not.toContain('<a ');
     // D1: as the other settings pages, no session gets no page.
-    const anon = await w.anon('/settings/flags');
-    expect(anon.statusCode).toBe((await w.anon('/settings/install')).statusCode);
+    const anon = await w.anon('/system/advanced');
+    expect(anon.statusCode).toBe((await w.anon('/system/server')).statusCode);
     expect(anon.statusCode).not.toBe(200);
   });
 
-  test('the settings tabs include Advanced after History, linking to /settings/flags', async () => {
+  test('the System sub-nav ends with Advanced after History, linking to /system/advanced', async () => {
     const w = await world({ dbMode: true });
-    const install = (await w.get('/settings/install')).body;
-    const nav = install.slice(install.indexOf('<nav class="settings-tabs">'));
+    const install = (await w.get('/system/server')).body;
+    const nav = install.slice(install.indexOf('<nav class="subnav" aria-label="System">'));
     const tabs = nav.slice(0, nav.indexOf('</nav>'));
-    expect(tabs).toMatch(/History<\/a> · <a href="\/settings\/flags">Advanced<\/a>$/);
-    expect((await w.get('/settings/flags')).body).toContain('<strong>Advanced</strong>');
+    expect(tabs).toMatch(/History<\/a> · <a href="\/system\/advanced">Advanced<\/a><\/p>$/);
+    expect((await w.get('/system/advanced')).body).toContain(
+      '<a href="/system/advanced" aria-current="page">Advanced</a>',
+    );
   });
 
   test('in file mode every control is disabled, there is no Save, under the install banner', async () => {
     const w = await world();
-    const html = (await w.get('/settings/flags')).body;
+    const html = (await w.get('/system/advanced')).body;
     expect(html).toContain('(file mode), so they are read-only here');
     expect(html).not.toContain('Save changes');
     expect(html).not.toContain('class="reset"');
@@ -1604,7 +1645,7 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
 
   test('every row whose key is in RESTART_PATHS says so, and no other row does', async () => {
     const w = await world({ dbMode: true });
-    const html = (await w.get('/settings/flags')).body;
+    const html = (await w.get('/system/advanced')).body;
     const rows = flagRowsHtml(html);
     expect(rows.filter(([k]) => (RESTART_PATHS as readonly string[]).includes(k))).toHaveLength(
       RESTART_PATHS.length,
@@ -1630,7 +1671,7 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
     expect(build([{ key: 'pollSeconds', reset: true }])).toEqual({ pollSeconds: null });
     let went = '';
     const r = await (ctx.jmSaveFlags as (...a: unknown[]) => Promise<string>)(
-      { savedTo: '/settings/flags' },
+      { savedTo: '/system/advanced' },
       patch,
       5,
       stubStatus(),
@@ -1646,12 +1687,12 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
         body: {
           patch: { pollSeconds: 30 },
           expectRevision: 5,
-          returnTo: '/settings/flags',
-          cancelTo: '/settings/flags',
+          returnTo: '/system/advanced',
+          cancelTo: '/system/advanced',
         },
       },
     ]);
-    expect(went).toBe('/settings/flags?saved=8');
+    expect(went).toBe('/system/advanced?saved=8');
   });
 
   test('pollSeconds 60 → 30 from this page is applied', async () => {
@@ -1663,13 +1704,13 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
     const r = await w.call('PATCH', '/api/control/config', {
       patch,
       expectRevision: w.store.revision(),
-      returnTo: '/settings/flags',
-      cancelTo: '/settings/flags',
+      returnTo: '/system/advanced',
+      cancelTo: '/system/advanced',
     });
     expect(r.statusCode, r.body).toBe(200);
     expect(w.store.current().pollSeconds).toBe(30);
-    expect((await w.get('/settings/flags?saved=2')).body).toContain('Saved as revision 2');
-    expect((await w.get('/settings/flags?saved=<b>')).body).not.toContain('Saved as revision');
+    expect((await w.get('/system/advanced?saved=2')).body).toContain('Saved as revision 2');
+    expect((await w.get('/system/advanced?saved=<b>')).body).not.toContain('Saved as revision');
   });
 
   test('D5 parity (guarded): turning stopOnOverage off from this page and from /settings/install gets the same 409', async () => {
@@ -1687,8 +1728,8 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
     expect(mine).toEqual(theirs);
     const answers = [];
     for (const [patch, to] of [
-      [mine, '/settings/flags'],
-      [theirs, '/settings/install'],
+      [mine, '/system/advanced'],
+      [theirs, '/system/server'],
     ] as const) {
       const r = await w.call('PATCH', '/api/control/config', {
         patch,
@@ -1699,8 +1740,8 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
       expect(r.statusCode).toBe(409);
       const j = r.json() as { needsConfirmation: boolean; guarded: unknown; confirm: string };
       answers.push({ needsConfirmation: j.needsConfirmation, guarded: j.guarded });
-      if (to === '/settings/flags')
-        expect((await w.get(j.confirm)).body).toContain('<a href="/settings/flags">Cancel</a>');
+      if (to === '/system/advanced')
+        expect((await w.get(j.confirm)).body).toContain('<a href="/system/advanced">Cancel</a>');
     }
     expect(answers[0]?.needsConfirmation).toBe(true);
     expect(answers[0]).toEqual(answers[1]);
@@ -1710,7 +1751,7 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
 
   test('D5 parity (forbidden): requireSignedImages off is refused from both, and the row is disabled only while on', async () => {
     const off = await world({ dbMode: true });
-    const offRow = flagRow((await off.get('/settings/flags')).body, 'requireSignedImages');
+    const offRow = flagRow((await off.get('/system/advanced')).body, 'requireSignedImages');
     expect(offRow).toMatch(/<input type="checkbox"[^>]*data-path="requireSignedImages"[^>]*>/);
     expect(offRow).not.toContain('disabled');
     // Off: it can be turned on and saved.
@@ -1724,7 +1765,7 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
 
     const w = await world({ dbMode: true, doc: { requireSignedImages: true } });
     const before = w.store.revision();
-    const row = flagRow((await w.get('/settings/flags')).body, 'requireSignedImages');
+    const row = flagRow((await w.get('/system/advanced')).body, 'requireSignedImages');
     expect(row).toMatch(/data-path="requireSignedImages"[^>]* checked disabled/);
     expect(row).toContain('set with <code>jumpmaster ctl</code> or in the config file');
     // A synthetic field: the page never offers this control enabled while it's on.
@@ -1753,12 +1794,12 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
     const install = renderFlagsForm({
       scope: 'install',
       rows: flagRows('install', doc, doc),
-      target: { savedTo: '/settings/flags' },
+      target: { savedTo: '/system/advanced' },
       revision: w.store.revision(),
       readOnly: false,
       forbiddenNote: note,
     });
-    expect((await w.get('/settings/flags')).body).toContain(install);
+    expect((await w.get('/system/advanced')).body).toContain(install);
     const zone = (doc.dropZones as Record<string, unknown>[])[1] as Record<string, unknown>;
     const zoneForm = renderFlagsForm({
       scope: 'zone',
@@ -1838,7 +1879,7 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
 
   test('two owners: acme has its slugs, install links and Test buttons; alice is not created and has no Test', async () => {
     const w = await twoOwners();
-    const r = await w.get('/settings/credentials');
+    const r = await w.get('/system/credentials');
     expect(r.statusCode).toBe(200);
     const section = sectionOf(r.body);
     expect(section).toContain('GitHub App entries');
@@ -1880,7 +1921,7 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
     if (vault === 'disabled') throw new Error('expected a vault');
     vault.recordTest(appEntryName('acme', 'author'), { at: t0, result: 'ok as jm-a[bot]' });
     w.store.refreshSecrets();
-    const html = (await w.get('/settings/credentials')).body;
+    const html = (await w.get('/system/credentials')).body;
     const alice = appRowOf(html, 'alice', 'author');
     expect(alice).toContain(`file <code>${file}</code>`);
     expect(alice).toContain('https://github.com/apps/jm-alice/installations/new');
@@ -1977,7 +2018,7 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
       now: t0,
     });
     w.store.refreshSecrets();
-    const html = (await w.get('/settings/credentials')).body;
+    const html = (await w.get('/system/credentials')).body;
     const row = appRowOf(html, 'acme', 'author');
     expect(row).toContain('does not decrypt');
     expect(row).not.toContain('<button');
@@ -1994,7 +2035,7 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
       { mode: 0o600 },
     );
     w.store.refreshSecrets();
-    const html = (await w.get('/settings/credentials')).body;
+    const html = (await w.get('/system/credentials')).body;
     const a = appRowOf(html, 'acme', 'author');
     expect(a).toContain(
       '<button type="button" class="app-test" data-owner="acme" data-role="author">Test</button> <button type="button" class="app-replace" data-owner="acme" data-role="author">Replace key</button>',
@@ -2021,7 +2062,7 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
       now: t0,
     });
     u.store.refreshSecrets();
-    const uh = (await u.get('/settings/credentials')).body;
+    const uh = (await u.get('/system/credentials')).body;
     expect(appRowOf(uh, 'acme', 'author')).not.toContain('Replace key');
     expect(sectionOf(uh)).not.toContain('app-replace');
   });
@@ -2110,7 +2151,7 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
       dbMode: true,
       doc: { dropZones: [zoneOn('solo', 'solo/x', { identity: 'starter', ciRequired: true })] },
     });
-    const html = (await w.get('/settings/credentials')).body;
+    const html = (await w.get('/system/credentials')).body;
     const section = sectionOf(html);
     expect(section).toContain('GitHub Apps are for two-bot mode: starter zones use tokens.');
     expect(section).not.toContain('<tr data-app=');
@@ -2119,7 +2160,7 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
 
   test('the page holds neither PEM body lines nor client ids of the stored entries', async () => {
     const w = await twoOwners();
-    const raw = (await w.get('/settings/credentials')).body;
+    const raw = (await w.get('/system/credentials')).body;
     // CLAIM = PROOF: the fixture entries carry both, and the vault hands them back.
     const vault = w.store.vault();
     if (vault === 'disabled') throw new Error('expected a vault');
@@ -2138,7 +2179,7 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
   test('a slug with <script> is HTML-escaped in the page and URL-encoded in both links', async () => {
     const slug = 'x"><script>alert(1)</script>';
     const w = await twoOwners({ slug });
-    const html = (await w.get('/settings/credentials')).body;
+    const html = (await w.get('/system/credentials')).body;
     const row = appRowOf(html, 'acme', 'author');
     expect(html).not.toContain('<script>alert(1)</script>');
     const enc = encodeURIComponent(slug);
@@ -2149,7 +2190,7 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
 
   test('with ?repo=acme%2Fdemo the page has one id="github-apps" and the create forms still render', async () => {
     const w = await world({ dbMode: true, doc: { dropZones: [zoneOn('web', 'acme/demo')] } });
-    const r = await w.get('/settings/credentials?repo=acme%2Fdemo');
+    const r = await w.get('/system/credentials?repo=acme%2Fdemo');
     expect(r.statusCode).toBe(200);
     expect(r.body.match(/id="github-apps"/g) ?? []).toHaveLength(1);
     expect(r.body.match(/id="app-entries"/g) ?? []).toHaveLength(1);
@@ -2162,7 +2203,7 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
 
   test('a PAT-only install: each PAT row is as before, and no app button has the test class', async () => {
     const w = await world({ env: { JM_GITHUB_READ_TOKEN: READ } });
-    const html = (await w.get('/settings/credentials')).body;
+    const html = (await w.get('/system/credentials')).body;
     const at = (s: string) => s.replaceAll(w.secrets, '<secrets>');
     expect(PAT_ROWS).not.toEqual({});
     for (const [name, row] of Object.entries(PAT_ROWS)) expect(at(rowOf(html, name))).toBe(row);

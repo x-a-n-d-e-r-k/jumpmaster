@@ -1759,9 +1759,9 @@ function registerConfigRoutes(
   scope.post('/api/control/server/public-url/check', async (req, reply) => {
     const publicUrl = (req.jmConfig ?? store.current()).server?.publicUrl;
     if (!publicUrl)
-      return reply
-        .code(409)
-        .send({ error: `${PUBLIC_URL_NEEDED}: Settings, Other machines (${PUBLIC_URL_PAGE})` });
+      return reply.code(409).send({
+        error: `${PUBLIC_URL_NEEDED}: System, Server, Other machines (${PUBLIC_URL_PAGE})`,
+      });
     return checkReach(publicUrl, ctx.reach ?? {});
   });
 

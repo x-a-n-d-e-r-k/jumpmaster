@@ -141,9 +141,12 @@ The residual: a host was observed because a drop reached it, and a drop that mis
 steered by a hostile issue, say) may have reached a host to make it look needed. Adopt only hosts
 you recognise; the drops listed beside each one say where it came from.
 
-## Settings
+## System
 
-`/settings` has four tabs: **Credentials**, **Install**, **MCP tokens** and **History**.
+`/system` is the System area. Its sub-nav: **Health** (the doctor, with the zones' credential
+problems above the checks), **Sticks**, **Credentials**, **Server** (the install settings, then
+Other machines), **MCP tokens**, **History** and **Advanced**. The old `/doctor`, `/sticks` and
+`/settings/…` paths redirect to their pages here.
 
 ### Credentials and rotation
 
@@ -266,7 +269,7 @@ author app is not installed on the repository. So the pair and the installations
    **GitHub App entries**: use the install link on the saved page after **Finish**, or the
    **Install it on the repository** link beside each created app on `/setup/forge`.
 3. Add the zone for the new owner's repository ([Add a project](#add-a-project)), with two-bot
-   accounts. The owner's rows appear under Settings → Credentials, **GitHub App entries**, once
+   accounts. The owner's rows appear under System → Credentials, **GitHub App entries**, once
    this zone exists.
 4. Run discovery as above: `/setup/github-app/installed`, **Find the installations**, confirm with
    your passphrase.
@@ -289,7 +292,7 @@ this, so the new key is made on GitHub and pasted into Jumpmaster:
 
 1. Open the app's page on GitHub (the row's **App** slug links to it) and go to **Private keys** →
    **Generate a private key**. GitHub downloads a `.pem` file.
-2. On Settings → Credentials, under **GitHub App entries**, press **Replace key** on that owner and
+2. On System → Credentials, under **GitHub App entries**, press **Replace key** on that owner and
    role's row, paste the whole `.pem` file, and enter your passphrase when asked.
 3. Jumpmaster tests the key with GitHub before storing it. A key for another app, or a key GitHub
    rejects, is refused and nothing changes: the old key stays in use.
@@ -336,7 +339,7 @@ stored.
 
 ### Install settings
 
-**Install** (`/settings/install`) holds the install-wide settings: `pollSeconds`,
+**Server** (`/system/server`) holds the install-wide settings: `pollSeconds`,
 `usage.throttleUtilization`, `usage.stopOnOverage`, `claude.plan`, `claude.fableModel`,
 `claude.fableWeeklyDropCap`, `claude.fableMaxUtilization`, `claude.fableReview`,
 `claude.fableReviewMaxUtilization`, `requireSignedImages` and `mcp.*`. **Save** applies them at the
@@ -407,7 +410,7 @@ prints the same (`--json` for the object).
 
 ## The doctor: actions and artifacts
 
-`/doctor` shows the latest run; **Run the doctor** runs another (`ctl doctor`, or `ctl doctor
+`/system` shows the latest run; **Run the doctor** runs another (`ctl doctor`, or `ctl doctor
 <zone>` for one zone; `ctl doctor --last` prints the latest run without running one). Each check
 that isn't a pass shows its fix and its action: a link to the page that fixes it here, a GitHub
 page, or a button for the two writes, **Create the missing labels** (`ctl labels <zone>`) and
@@ -501,7 +504,7 @@ restarts).
 
 ## Sticks
 
-The **Sticks** page (`/sticks`) lists every stick: whether it is live, its version and
+The **Sticks** page (`/system/sticks`) lists every stick: whether it is live, its version and
 capabilities, the zones it can't run, and how many troopers it runs at once. Change the count and
 Save: the stick picks it up on its next lease answer, with no restart. Lowering it stops nothing;
 the stick takes no new drop until fewer than the new count are running. The count goes up to the
@@ -520,7 +523,7 @@ date, an update available (with an **Upgrade to v…** button), older than in-pl
 `ctl sticks upgrade <name-or-id>` upgrades one stick and prints the reason when it can't;
 `ctl sticks upgrade --all` upgrades every stick that can be and lists the ones it skipped.
 
-A stick on another machine reaches the server at `server.publicUrl` (Settings, Other machines, or
+A stick on another machine reaches the server at `server.publicUrl` (System, Server, Other machines, or
 `ctl public-url set https://…`; `ctl public-url check` fetches its `/healthz`). Each change is
 audited as `server.public_url`. See install.md, "Reaching the server from other machines".
 
@@ -589,7 +592,7 @@ keeping the file modes (`cp -a`, or `tar -cpf`); keep the copy readable by you a
 
 A restore of `data/` without `secrets/vault_key` means re-entering each credential: `bootstrap`
 makes a new key and warns that `data/` already holds a database, the doctor's `vault.key` names
-the entries that no longer decrypt, and Settings, Credentials shows each as `not set: the stored
+the entries that no longer decrypt, and System, Credentials shows each as `not set: the stored
 value does not decrypt with the vault key (enter it again)`. **Remove** it and enter it again.
 A file credential under `secrets/` needs nothing.
 
@@ -676,7 +679,7 @@ collaborator invitations accepted and their tokens, and your own Claude token fr
    to merge.
 4. **Change a running zone.** Pause the zone on Zones; on its page, change a gate's timeout in
    **Stack** and save; resume it. The next drop uses the new timeout, with no restart.
-5. **Rotate a token.** Under Settings, Credentials, replace the author token with a new one; revoke
+5. **Rotate a token.** Under System, Credentials, replace the author token with a new one; revoke
    the old one on GitHub once the page no longer says a running drop carries it.
 6. **A second repository.** Add a second project, import its ruleset file, create its labels, and
    run the doctor until it shows no fail.
