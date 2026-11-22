@@ -10,7 +10,9 @@ install and run.
 
 The current milestone is M5: GitHub App authentication, built as specified in
 `docs/superpowers/specs/2026-11-13-github-app-auth.md` (the spec). Each objective below is one
-task of the spec's §13. Read the named sections of the spec before planning; the spec, the spike
+task of the spec's §13, except "GitLab forge adapter", which is the GitLab adapter that spec §9 and
+the design spec's §5.5 (`docs/superpowers/specs/2026-10-19-jumpmaster-design.md`) assume and
+Task 12 builds on. Read the named sections of the spec before planning; the spec, the spike
 results in `docs/spikes/2026-11-14-github-app.md`, and the push container already on `main`
 (spec Task 4) are the ground truth. File issues small enough for one drop each, in dependency
 order, each naming the spec sections it implements.
@@ -21,7 +23,7 @@ order, each naming the spec sections it implements.
 `testCredential` and fingerprints for apps, PEM scrubbing, `pairFor` by credential kind, the read
 source.
 
-### Broker and JWT (spec Task 5)
+### Broker and JWT (spec Task 5) (done)
 
 `apps/server/src/forge/github-app.ts`: sign the app JWT, mint installation tokens narrowed to the
 zone's repository and to the permission subset of each use in §4.2's table, cache the server's own
@@ -35,34 +37,71 @@ The broker (#105), the scrub set (#106) and the server-token cache (#111) come f
 lease, push and kill-switch hookup waits for Task 7's credential resolution (Command rulings 23,
 26 and 28).
 
-### Forge identity (spec Task 6)
+### Forge identity (spec Task 6) (done)
 
 §4.3: a token provider and the forge's identity in `GitHubForge`; every caller that reads the
 token's account; `viewerIsAdmin`; ruleset bypass per ruleset with the absent-field fallback;
 `repoAccess`; the bot login set in `ours()` and `flow/reconcile.ts`; the check-runs read.
 
-### Manifest flow (spec Task 8)
+### Manifest flow (spec Task 8) (done)
 
 §4.1: the owner choice (personal or organization, preselected from the repository), one app pair
 per owner, the manifest builder that refuses `administration` and `workflows`, single-use state,
 immediate redemption with log scrubbing, the conversion checks, the Finish confirmation, the
 install link and installation discovery; the wizard's and Settings → Credentials' buttons.
 
-### Doctor and guidance (spec Task 9)
+### Doctor and guidance (spec Task 9) (done)
 
 §6's app column, the slug check, the `jumpmaster-merge` ruleset file, CODEOWNERS text for app
 reviewers, `recommendIdentity` for apps, and token links for starter mode and "Use tokens
 instead". `forge.actions-approval` may be deferred.
 
-### Runbooks and SECURITY.md (spec Task 10)
+### Runbooks and SECURITY.md (spec Task 10) (done)
 
 Install (GitHub Apps first for two-bot, tokens for starter and as the alternative), operate (key
 rotation, adding a repository or an owner, pending pushes), troubleshooting by check id, the key's
 reach.
 
+### GitLab forge adapter
+
+Design spec §5.5 and spec §9: a zone can live on GitLab (gitlab.com or a self-managed instance),
+running on bot-user personal access tokens (`gitlab-pat`), the GitLab counterpart of today's
+GitHub PAT path. Parts, in this order:
+
+- **Zone forge kind**: a zone records its forge (`github`, the default, or `gitlab`) and, for
+  GitLab, the instance's base URL and the project path. Existing zones read as `github` with no
+  migration step, and every GitHub code path stays byte-identical.
+- **A fake GitLab** for tests (in the style of the existing fake GitHub), covering the REST calls
+  the adapter makes. Tests never reach gitlab.com.
+- **`GitLabForge`** implementing the existing `Forge` interface, in reviewable slices: issues,
+  labels and comments; branches, files and compare; merge requests (open, find by source branch,
+  changed files, change digest); approvals as reviews; pipelines and jobs as checks, with retry;
+  SHA-pinned merge (`sha` on accept) and rebase as the branch update; protected branches and
+  approval rules as branch rules; project member access levels as `isTrusted`, `isMaintainer`
+  and `repoAccess`. Where GitLab has no counterpart (for example "blocked by" links on the Free
+  tier), the method is a documented no-op or an explicit refusal that the callers already handle.
+  Each slice says so in its PR.
+- **Credential kind `gitlab-pat`**: per-zone author and reviewer entries in the vault, a
+  `testCredential` that reads `GET /user`, fingerprints, and `pairFor` building a `GitLabForge`
+  pair for a GitLab zone.
+- **Clone and push**: the trooper's git auth scope and the push container accept the zone's
+  GitLab host, and the token reaches only the push container, as on GitHub. A change to egress
+  allowlists, CI or another protected path goes to Command as a briefing, not an issue.
+- **Wizard and doctor**: the project step accepts a GitLab project URL, and the doctor's forge
+  checks have a GitLab column (token valid, access level Developer or above, no `sudo` or
+  `admin_mode` scope, approvals counted where approval rules exist).
+
+The zone forge kind and the fake GitLab come first; the `GitLabForge` slices need both; the
+credential kind, clone and push, and wizard and doctor need `GitLabForge`. This objective is the
+prerequisite of "GitLab adapter (spec Task 12)" (Command ruling 106).
+
 ### GitLab adapter (spec Task 12)
 
 §9: the bootstrap token, project-token minting with `self_rotate`, the per-zone credential kinds.
+It waits for "GitLab forge adapter": the `gitlab-project-token` kind plugs into the `GitLabForge`
+and the `gitlab-pat` kind that objective delivers. The standalone token client
+(`apps/server/src/forge/gitlab-tokens.ts`, #540 and #595) and GitLab token redaction (#539)
+have already merged.
 
 ## Constraints
 
@@ -70,7 +109,8 @@ reach.
   keeps an operator's work lowest and say so in the PR.
 - Starter mode stays on personal access tokens; GitHub Apps are for two-bot mode only. PAT mode
   must keep working unchanged at every step: no issue may break an existing PAT install.
-- No manifest, token or code path ever asks for `administration` or `workflows`.
+- No manifest, token or code path ever asks for `administration` or `workflows`. On GitLab, no
+  token is ever requested with `sudo` or `admin_mode`, or above Maintainer.
 - No write token in any container an agent ran in. Per-drop and per-push tokens are narrowed to
   the drop's repository.
 - Never log, return or render a token, a private key or a client secret. Tests prove it for every
