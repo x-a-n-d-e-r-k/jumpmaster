@@ -19,3 +19,6 @@ export const projectHref = (id: string, sub?: string): string =>
 
 /** A project's GitHub setup: the GitHub section of its Setup tab (#618). */
 export const githubSetupHref = (id: string): string => `${projectHref(id, 'setup')}#github`;
+
+/** The install-wide Log (#621): every project's, or one project's with `?project=`. */
+export const ACTIVITY_LOG_HREF = '/activity/log';

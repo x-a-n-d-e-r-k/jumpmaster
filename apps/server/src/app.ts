@@ -91,6 +91,7 @@ import type { FloorInputs, PendingLine } from './ui/floor.js';
 import { githubSectionRenderer } from './ui/github.js';
 import { registerGoalConfirmPages } from './ui/goal-confirm.js';
 import {
+  ACTIVITY_LOG_HREF,
   type CrewLine,
   DROP_KINDS,
   DROP_LIST_LIMIT,
@@ -98,6 +99,8 @@ import {
   type DropKind,
   type HomeState,
   type ItemDetail,
+  LOG_KINDS,
+  type LogKind,
   PROJECTS_HREF,
   pageParams,
   renderBriefing,
@@ -107,8 +110,8 @@ import {
   renderDropList,
   renderGoals,
   renderHome,
+  renderLog,
   renderNewIssue,
-  renderObservations,
   renderWorkItem,
   renderWorkList,
   STORE_NAV,
@@ -677,8 +680,8 @@ export function createApp(
   });
 
   // Every open briefing grouped by project, or one zone's paged (`?zone=`: where the floor's lines
-  // and the zone page link, with that zone's bulk dismiss). `per`, `page` and `rpage` never refuse.
-  app.get<{ Querystring: { zone?: string; per?: string; page?: string; rpage?: string } }>(
+  // and the zone page link, with that zone's bulk dismiss). `per` and `page` never refuse.
+  app.get<{ Querystring: { zone?: string; per?: string; page?: string } }>(
     '/briefings',
     async (req, reply) => {
       const { db } = deps;
@@ -699,7 +702,7 @@ export function createApp(
         open,
         ...briefingContext(db, config.dropZones, open),
         pending: pendingDiagnoses(db, config.dropZones, open, deps.now()),
-        // Every ruling: each project counts its own, and pages or shows its newest `per`.
+        // Every ruling, for `Ruling n` references: the rulings themselves are the Log's (#621).
         rulings: zones.flatMap((z) => listRulings(db, z.id, ALL_RULINGS)),
         zones: config.dropZones,
         holds,
@@ -921,10 +924,62 @@ export function createApp(
       .send(withCsrf(req, renderDoctor(latestDoctorRun(deps.db), cfg(req).dropZones))),
   );
 
-  app.get('/observations', async (req, reply) =>
-    reply
-      .type('text/html; charset=utf-8')
-      .send(withCsrf(req, renderObservations(listObservations(deps.db), cfg(req).dropZones))),
+  // The Log (#621): observe mode's decisions in words and the rulings, newest first. A project's
+  // tab and the install-wide page share the renderer; `kind` and `project` refuse what they don't know.
+  const logOf = (db: Db, zones: readonly { id: string }[], zoneId?: string) => {
+    const shown = zones.filter((z) => zoneId === undefined || z.id === zoneId);
+    const issues = new Map(
+      shown.flatMap((z) => listWorkItems(db, z.id)).map((i) => [i.id, i.issueNumber]),
+    );
+    return {
+      observations: listObservations(db, zoneId).map((o) => ({
+        ...o,
+        issueNumber: o.itemId === null ? null : (issues.get(o.itemId) ?? null),
+      })),
+      rulings: shown.flatMap((z) => listRulings(db, z.id, ALL_RULINGS)),
+    };
+  };
+  const logKind = (kind: unknown): LogKind | undefined =>
+    kind === undefined ? 'all' : LOG_KINDS.find((k) => k === kind);
+
+  app.get<{ Params: { id: string }; Querystring: { kind?: string } }>(
+    `${PROJECTS_HREF}/:id/log`,
+    async (req, reply) => {
+      const zones = cfg(req).dropZones;
+      const zone = zones.find((z) => z.id === req.params.id);
+      if (!zone) return reply.code(404).type('text/plain').send('not found');
+      const kind = logKind(req.query.kind);
+      if (!kind) return reply.code(404).type('text/plain').send('no such kind');
+      const html = renderLog({
+        zones,
+        zone: zone.id,
+        header: projectHeaderFor(deps.db, zone, zones, 'log'),
+        kind,
+        ...logOf(deps.db, zones, zone.id),
+        now: deps.now(),
+      });
+      return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+    },
+  );
+
+  app.get<{ Querystring: { project?: string; kind?: string } }>(
+    ACTIVITY_LOG_HREF,
+    async (req, reply) => {
+      const zones = cfg(req).dropZones;
+      const project = req.query.project;
+      if (project !== undefined && !zones.some((z) => z.id === project))
+        return reply.code(404).type('text/plain').send('no such project');
+      const kind = logKind(req.query.kind);
+      if (!kind) return reply.code(404).type('text/plain').send('no such kind');
+      const html = renderLog({
+        zones,
+        ...(project !== undefined ? { zone: project } : {}),
+        kind,
+        ...logOf(deps.db, zones, project),
+        now: deps.now(),
+      });
+      return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+    },
   );
 
   app.get<{ Params: { id: string } }>('/artifacts/:id', async (req, reply) => {

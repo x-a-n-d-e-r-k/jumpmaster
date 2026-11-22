@@ -145,14 +145,60 @@ describe('the redirect table (issue #615)', () => {
     });
   });
 
-  test('every entry goes straight to a /projects path: one hop, never another moved path', async () => {
+  describe('the observations list is the Log (#621)', () => {
+    test('/observations is a 301 to /activity/log, the query kept; POST is a 308', async () => {
+      const app = bare();
+      for (const [url, to] of [
+        ['/observations', '/activity/log'],
+        ['/observations?x=a%20b', '/activity/log?x=a%20b'],
+        ['/observations?zone=', '/activity/log?zone='],
+      ]) {
+        const res = await app.inject({ method: 'GET', url });
+        expect([url, res.statusCode, res.headers.location]).toEqual([url, 301, to]);
+        const head = await app.inject({ method: 'HEAD', url });
+        expect([url, head.statusCode, head.headers.location]).toEqual([url, 301, to]);
+        const post = await app.inject({ method: 'POST', url });
+        expect([url, post.statusCode, post.headers.location]).toEqual([url, 308, to]);
+      }
+    });
+
+    test('/observations?zone=jm is a 301 to /projects/jm/log, the rest of the query kept', async () => {
+      const app = bare();
+      for (const [url, to] of [
+        ['/observations?zone=jm', '/projects/jm/log'],
+        ['/observations?zone=jm&kind=rulings', '/projects/jm/log?kind=rulings'],
+        ['/observations?zone=a%2Fb', '/projects/a%2Fb/log'],
+      ]) {
+        const res = await app.inject({ method: 'GET', url });
+        expect([url, res.statusCode, res.headers.location]).toEqual([url, 301, to]);
+        const head = await app.inject({ method: 'HEAD', url });
+        expect([url, head.statusCode, head.headers.location]).toEqual([url, 301, to]);
+        const post = await app.inject({ method: 'POST', url });
+        expect([url, post.statusCode, post.headers.location]).toEqual([url, 308, to]);
+      }
+    });
+
+    test('in the app, both land on a page that renders', async () => {
+      const h = await harness({});
+      for (const [from, to] of [
+        ['/observations', '/activity/log'],
+        ['/observations?zone=main', '/projects/main/log'],
+      ]) {
+        const res = await h.view(from);
+        expect([from, res.statusCode, res.headers.location]).toEqual([from, 301, to]);
+        expect((await h.view(to)).statusCode, to).toBe(200);
+      }
+    });
+  });
+
+  test('every entry goes straight to a /projects or /activity path: one hop, never another moved path', async () => {
     const app = bare();
     for (const r of REDIRECTS) {
       const path = r.from.replace(/:id|:zone/g, 'jm').replace(':issue', '487');
       const url = r.query ? `${path}?${r.query}=jm` : path;
       const res = await app.inject({ method: 'GET', url });
       const location = String(res.headers.location);
-      expect(location.startsWith('/projects'), url).toBe(true);
+      expect(/^\/(projects|activity)\//.test(location) || location === '/projects', url).toBe(true);
       // The target is not itself redirected.
       expect((await app.inject({ method: 'GET', url: location })).statusCode, location).toBe(404);
     }

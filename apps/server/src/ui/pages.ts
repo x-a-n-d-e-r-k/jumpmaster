@@ -44,7 +44,13 @@ import {
   WAITING_ON_YOU_ID,
   zoneCards,
 } from './floor.js';
-import { githubSetupHref, linkTarget, PROJECTS_HREF, projectHref } from './links.js';
+import {
+  ACTIVITY_LOG_HREF,
+  githubSetupHref,
+  linkTarget,
+  PROJECTS_HREF,
+  projectHref,
+} from './links.js';
 import { STYLE } from './theme.js';
 import { relativeTime } from './time.js';
 import { type ZoneRef, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
@@ -286,7 +292,7 @@ function usageSection(u: HomeState['usage']): string {
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /** A project's page and its sub-pages (defined in `links.ts`, which has no imports). */
-export { PROJECTS_HREF, projectHref };
+export { ACTIVITY_LOG_HREF, PROJECTS_HREF, projectHref };
 
 /** A zone's page: an alias of `projectHref` (zones are projects in the UI). */
 export const zoneHref = projectHref;
@@ -317,19 +323,19 @@ const projectNamer = (zones: readonly ZoneRef[]): ((id: string) => string) => {
 
 /** The page sizes the briefings pages offer (#132); anything else is the first. */
 export const PAGE_SIZES = [10, 20, 50, 100] as const;
-export type PageParams = { per: number; page: number; rpage: number };
+export type PageParams = { per: number; page: number };
 
 const positiveInt = (v: unknown): number =>
   typeof v === 'string' && /^[1-9][0-9]{0,8}$/.test(v) ? Number(v) : 1;
 
 /**
- * The briefings pages' paging: `per` among PAGE_SIZES, else 10; `page` and `rpage` positive
- * integers, else 1. Never refused: a stale bookmark still opens a page. Clamping to the last page
+ * The briefings pages' paging: `per` among PAGE_SIZES, else 10; `page` a positive integer,
+ * else 1. Never refused: a stale bookmark still opens a page. Clamping to the last page
  * is the renderer's, which knows the counts.
  */
-export function pageParams(q: { per?: unknown; page?: unknown; rpage?: unknown }): PageParams {
+export function pageParams(q: { per?: unknown; page?: unknown }): PageParams {
   const per = PAGE_SIZES.find((n) => String(n) === q.per) ?? PAGE_SIZES[0];
-  return { per, page: positiveInt(q.page), rpage: positiveInt(q.rpage) };
+  return { per, page: positiveInt(q.page) };
 }
 
 /** A project's open briefings (newest first) and rulings, as the briefings pages group them. */
@@ -585,12 +591,11 @@ function dismissAllForm(zoneId: string, open: Briefing[], zones: readonly ZoneRe
 }
 
 /** A /briefings URL, unescaped: the zone id is URL-encoded, a page of 1 or less is left out. */
-function briefingsHref(q: { zone?: string; per: number; page?: number; rpage?: number }): string {
+function briefingsHref(q: { zone?: string; per: number; page?: number }): string {
   const parts = [
     ...(q.zone !== undefined ? [`zone=${encodeURIComponent(q.zone)}`] : []),
     `per=${q.per}`,
     ...(q.page !== undefined ? [`page=${q.page}`] : []),
-    ...(q.rpage !== undefined ? [`rpage=${q.rpage}`] : []),
   ];
   return `/briefings?${parts.join('&')}`;
 }
@@ -626,10 +631,10 @@ function paged<T>(
   };
 }
 
-const RULINGS_HEAD =
-  '<tr><th>Ruling</th><th>Zone</th><th>Briefing</th><th>Choice</th><th>Note</th><th>Ruled</th><th>Applied</th><th>Error</th><th>Diagnosis</th></tr>';
-
-/** Briefings waiting on Command, with a rule form each, and the rulings recorded so far. */
+/**
+ * Briefings waiting on Command, with a rule form each. Rulings are the project's Log (#621): each
+ * project links to its rulings there; `rulings` only resolve `Ruling n` references.
+ */
 export function renderBriefings(s: {
   open: Briefing[];
   rulings: Ruling[];
@@ -642,7 +647,6 @@ export function renderBriefings(s: {
   modes?: Readonly<Record<string, string>>;
   per?: number;
   page?: number;
-  rpage?: number;
   /** Each briefing's subject resolved (briefingAbout), by briefing id; else the raw subject. */
   about?: ReadonlyMap<number, About>;
   /** Each zone's filed crew issues by key (crewKeyNumbers), by zone id. */
@@ -652,21 +656,9 @@ export function renderBriefings(s: {
 }): string {
   const name = zoneNamer(s.zones);
   const per = s.per ?? PAGE_SIZES[0];
-  const crewOff = new Set(s.zones.filter((z) => !z.crew?.enabled).map((z) => z.id));
-  // Recorded, and held until the zone's crew is enabled again (applyPendingRulings).
-  const waiting = (r: Ruling) =>
-    r.appliedAt === null &&
-    r.applyError === null &&
-    r.effect !== null &&
-    WAITS_FOR_CREW.has(r.effect) &&
-    crewOff.has(r.zoneId);
-  const rulingRows = (rs: readonly Ruling[]) =>
-    rs
-      .map(
-        (r) =>
-          `<tr id="ruling-${escapeHtml(r.id)}"><td>${escapeHtml(r.id)}</td><td>${name(r.zoneId)}</td><td>${escapeHtml(r.briefingId)}</td><td>${escapeHtml(r.choice)}</td><td>${escapeHtml(r.note)}</td><td>${escapeHtml(r.createdAt)}</td><td>${escapeHtml(r.appliedAt ?? (waiting(r) ? 'waiting: crew disabled' : '-'))}</td><td>${escapeHtml(r.applyError ?? '')}</td><td>${escapeHtml(r.diagnosis ?? '')}</td></tr>`,
-      )
-      .join('');
+  /** The link that stands where a project's rulings were: its Log, rulings only (#621). */
+  const rulingsLink = (zoneId: string) =>
+    `<p class="rulings"><a href="${escapeHtml(projectLogHref(zoneId, 'rulings'))}">Rulings for ${name(zoneId)}</a></p>`;
   // What this page shows, so a reference to it is an anchor here and to anything else a link away.
   const shown = { briefings: new Set<number>(), rulings: new Set<number>() };
   const ctx: BlockContext = {
@@ -690,19 +682,10 @@ export function renderBriefings(s: {
     const open = all.filter((b) => !isNotice(b));
     const notices = all.filter(isNotice);
     for (const x of notices) shown.briefings.add(x.id);
-    const rulings = newestFirst(s.rulings);
     const b = paged(open, per, s.page ?? 1, 'Briefing pages', (page) =>
       briefingsHref({ zone, per, page }),
     );
-    const r = paged(
-      rulings,
-      per,
-      s.rpage ?? 1,
-      'Ruling pages',
-      (rpage) => `${briefingsHref({ zone, per, rpage })}#rulings`,
-    );
     for (const x of b.rows) shown.briefings.add(x.id);
-    for (const x of r.rows) shown.rulings.add(x.id);
     const list =
       (open.length === 0 ? '<p>Nothing is waiting on you.</p>' : blocks(b.rows, 'h3')) +
       (open.length > 0 ? b.nav : '') +
@@ -713,10 +696,7 @@ export function renderBriefings(s: {
         (all.length > 0 ? dismissAllForm(zone, s.open, s.zones) : '') +
         sizeSelector(zone, per) +
         list +
-        `<h2 id="rulings">Rulings (decisions recorded)</h2>` +
-        (rulings.length === 0
-          ? '<p class="empty">No rulings yet.</p>'
-          : `<table>${RULINGS_HEAD}${rulingRows(r.rows)}</table>${r.nav}`),
+        rulingsLink(zone),
       { live: true },
     );
   }
@@ -737,22 +717,13 @@ export function renderBriefings(s: {
   const total = busy.reduce((n, p) => n + p.open.length, 0);
   for (const p of projects) {
     for (const x of p.open.slice(0, per)) shown.briefings.add(x.id);
-    for (const x of p.rulings.slice(0, per)) shown.rulings.add(x.id);
   }
 
   const showAll = (p: Project) =>
     p.open.length > per
       ? `<p><a href="${escapeHtml(briefingsHref({ zone: p.id, per }))}">Show all ${p.open.length} in ${name(p.id)}</a></p>`
       : '';
-  const rulingsOf = (p: Project) =>
-    `<details class="rulings"><summary>Rulings (${p.rulings.length})</summary>` +
-    (p.rulings.length === 0
-      ? '<p class="empty">No rulings yet.</p>'
-      : `<table>${RULINGS_HEAD}${rulingRows(p.rulings.slice(0, per))}</table>`) +
-    (p.rulings.length > per
-      ? `<p><a href="${escapeHtml(`${briefingsHref({ zone: p.id, per })}#rulings`)}">All ${p.rulings.length} rulings of ${name(p.id)}</a></p>`
-      : '') +
-    '</details>';
+  const rulingsOf = (p: Project) => rulingsLink(p.id);
   // Each section ends with a marker, so a section can be told from the next in tests.
   const sections = [
     ...busy.map(
@@ -831,20 +802,13 @@ export function askButton(focus: Focus): string {
 /** The tabs of a project's pages (#616), in the order the tab bar shows them. */
 export type ProjectTab = 'overview' | 'work' | 'goals' | 'setup' | 'log';
 
-/**
- * Where each project tab goes. Log links to the install-wide list filtered to the project until its
- * own project page lands.
- */
+/** Where each project tab goes. */
 const PROJECT_TABS: readonly { tab: ProjectTab; label: string; href: (id: string) => string }[] = [
   { tab: 'overview', label: 'Overview', href: (id) => projectHref(id) },
   { tab: 'work', label: 'Work', href: (id) => projectHref(id, 'work') },
   { tab: 'goals', label: 'Goals', href: (id) => projectHref(id, 'goals') },
   { tab: 'setup', label: 'Setup', href: (id) => projectHref(id, 'setup') },
-  {
-    tab: 'log',
-    label: 'Log',
-    href: (id) => `/observations?${new URLSearchParams({ zone: id })}`,
-  },
+  { tab: 'log', label: 'Log', href: (id) => projectLogHref(id) },
 ];
 
 /** A project's tab bar (#616): every project page carries it, the current tab marked. */
@@ -1146,7 +1110,7 @@ export const STORE_NAV_SLOT = '<!--jm-store-nav-->';
 export const STORE_NAV = `<a href="${PROJECTS_HREF}">Projects</a><a href="/settings">Settings</a>`;
 
 /** The pages every install has, in the order the operator reaches for them. */
-const NAV = `<a href="/">Floor</a><a href="/work">Work</a><a href="/drops">Drops</a><a href="/briefings">Briefings</a><a href="/chat">Chat</a><a href="/sticks">Sticks</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a><a href="/observations">Observations</a>`;
+const NAV = `<a href="/">Floor</a><a href="/work">Work</a><a href="/drops">Drops</a><a href="/briefings">Briefings</a><a href="/chat">Chat</a><a href="/sticks">Sticks</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a><a href="/activity/log">Log</a>`;
 
 /** Marks the link for the current page; the longest matching prefix wins. */
 const NAV_SCRIPT = `<script>(()=>{const p=location.pathname;let best=null,len=-1;for(const a of document.querySelectorAll('.topnav a')){const h=a.getAttribute('href');const hit=h==='/'?p==='/':p===h||p.startsWith(h+'/');if(hit&&h.length>len){best=a;len=h.length;}}if(best)best.setAttribute('aria-current','page');})();</script>`;
@@ -1992,17 +1956,246 @@ export function renderDrop(
   );
 }
 
-/** Observe mode's would-do list, newest first. */
-export function renderObservations(rows: Observation[], zones: readonly ZoneRef[] = []): string {
-  const name = zoneNamer(zones);
-  const body = rows
+/**
+ * The base codes observe mode records today (#621), each before any `:<suffix>`. Every one has
+ * words in {@link observationWords}; a test fails when the server writes a `would_` code not here.
+ */
+export const OBSERVATION_ACTIONS = [
+  'would_carry_verdict',
+  'would_done',
+  'would_enqueue',
+  'would_merge',
+  'would_park',
+  'would_post_review',
+  'would_update_branch',
+  'would_wait',
+] as const;
+
+/** ` <it>`, or with `sep` before it, or nothing when there is no item. */
+const on = (it: string, sep = ' '): string => (it ? `${sep}${it}` : '');
+/** The detail, escaped, in parentheses; nothing when empty. */
+const why = (detail: string): string => (detail ? ` (${escapeHtml(detail)})` : '');
+
+/** `would_enqueue:<role>`: what starting the role's drop is, the item (HTML) given or `''`. */
+const ENQUEUE_WORDS: Readonly<Record<string, (it: string) => string>> = {
+  implement: (it) => `start implementing${on(it)}`,
+  resume: (it) => `resume${on(it) || ' work'}`,
+  review: (it) => `start reviewing${on(it)}`,
+  heal: (it) => `start healing${on(it)}`,
+  resolve: (it) => `start resolving conflicts${on(it, ' on ')}`,
+  arbitrate: (it) => `start an arbitration${on(it, ' on ')}`,
+  audit: (it) => `start an audit${on(it, ' of ')}`,
+  crew: (it) => `start a crew drop${on(it, ' on ')}`,
+  'crew-lead': (it) => `start a crew lead drop${on(it, ' on ')}`,
+  refute: (it) => `start a refute drop${on(it, ' on ')}`,
+  diagnose: (it) => `start a diagnosis${on(it, ' of ')}`,
+  triage: (it) => `start triage${on(it, ' of ')}`,
+};
+
+/**
+ * The words of each base code, the item (HTML) given or `''`: `told` when the sentence already
+ * carries the detail, so the row need not repeat it.
+ */
+const OBSERVATION_WORDS: Readonly<
+  Record<
+    (typeof OBSERVATION_ACTIONS)[number],
+    (
+      it: string,
+      detail: string,
+      suffix: string | undefined,
+    ) => { text: string; told: boolean } | undefined
+  >
+> = {
+  would_carry_verdict: (it) => ({
+    text: `carry the verdict forward${on(it, ' on ')}`,
+    told: false,
+  }),
+  would_done: (it, d) => ({ text: `mark ${it || 'the item'} done${why(d)}`, told: true }),
+  would_enqueue: (it, _d, suffix) => {
+    const words = suffix === undefined ? undefined : ENQUEUE_WORDS[suffix];
+    // A role without its own words is still a drop to start, named by the role.
+    const role = suffix ? ` ${escapeHtml(suffix)}` : '';
+    return { text: words ? words(it) : `start a${role} drop${on(it, ' on ')}`, told: false };
+  },
+  would_merge: (it) => ({ text: `merge${on(it)}`, told: false }),
+  would_park: (it, d) => ({ text: `park${on(it)}${why(d)}`, told: true }),
+  would_post_review: (it) => ({ text: `post the review${on(it, ' on ')}`, told: false }),
+  would_update_branch: (it) => ({ text: `update the branch${on(it, ' of ')}`, told: false }),
+  // `blocked` and `overlap` today; the detail says on what, whatever the suffix.
+  would_wait: (it, d) => ({ text: `hold${on(it) || ' work'}${why(d)}`, told: true }),
+};
+
+/**
+ * An observation as the Log shows it: the row, and its item's issue number when the item is known
+ * (`itemId` is the work item's id, not the issue's).
+ */
+export type LogObservation = Observation & { issueNumber?: number | null };
+
+/** The item an observation is about: its issue linked to its work item page, or its id. */
+function observedItem(row: Pick<LogObservation, 'zoneId' | 'itemId' | 'issueNumber'>): string {
+  if (row.issueNumber !== undefined && row.issueNumber !== null) {
+    const href = workItemHref({ dropZoneId: row.zoneId, issueNumber: row.issueNumber });
+    return `<a href="${escapeHtml(href)}">#${escapeHtml(row.issueNumber)}</a>`;
+  }
+  return row.itemId === null ? '' : `item ${escapeHtml(row.itemId)}`;
+}
+
+function observationLine(
+  row: Pick<LogObservation, 'zoneId' | 'itemId' | 'issueNumber' | 'action' | 'detail'>,
+): { text: string; told: boolean } {
+  const it = observedItem(row);
+  const at = row.action.indexOf(':');
+  const base = at === -1 ? row.action : row.action.slice(0, at);
+  const suffix = at === -1 ? undefined : row.action.slice(at + 1);
+  const known = OBSERVATION_ACTIONS.find((a) => a === base);
+  const words = known ? OBSERVATION_WORDS[known](it, row.detail, suffix) : undefined;
+  // A code without words is shown as it is, never dropped.
+  const { text, told } = words ?? {
+    text: `${escapeHtml(row.action)}${on(it, ' on ')}${why(row.detail)}`,
+    told: true,
+  };
+  return { text: `Would ${text}`, told };
+}
+
+/**
+ * Observe mode's decision in words (#621), as HTML: `would_enqueue:implement` on issue #4154 is
+ * "Would start implementing #4154", the issue linked to its work item. A code without words is
+ * "Would <code>", escaped.
+ */
+export function observationWords(
+  row: Pick<LogObservation, 'zoneId' | 'itemId' | 'issueNumber' | 'action' | 'detail'>,
+): string {
+  return observationLine(row).text;
+}
+
+/** The Log's filters (#621): every entry, observe mode's only, or rulings only. */
+export const LOG_KINDS = ['all', 'observed', 'rulings'] as const;
+export type LogKind = (typeof LOG_KINDS)[number];
+const LOG_KIND_LABELS: Record<LogKind, string> = {
+  all: 'All',
+  observed: 'Observed',
+  rulings: 'Rulings',
+};
+
+/** A project's Log tab (#621), filtered to `kind` unless it is all. */
+export const projectLogHref = (zoneId: string, kind: LogKind = 'all'): string =>
+  `${projectHref(zoneId, 'log')}${kind === 'all' ? '' : `?${new URLSearchParams({ kind })}`}`;
+
+/** One entry of the Log: when it happened, and its cells after When and Project. */
+type LogEntry = { at: string; zoneId: string; kind: 'observed' | 'ruling'; cells: string };
+
+/**
+ * The Log's entries newest first, both kinds merged by time (an observation by its last time), so
+ * a ruling made between two decisions sits between them.
+ */
+export function logEntries(
+  observations: readonly LogObservation[],
+  rulings: readonly Ruling[],
+  now: Date,
+  /** Zones whose crew is disabled: a recorded ruling that waits for the crew says so. */
+  crewOff: ReadonlySet<string> = new Set(),
+): LogEntry[] {
+  const observed = observations.map((o): LogEntry => {
+    const { text, told } = observationLine(o);
+    const detail = told || !o.detail ? '' : ` <small>${escapeHtml(o.detail)}</small>`;
+    return {
+      at: o.lastAt,
+      zoneId: o.zoneId,
+      kind: 'observed',
+      cells: `<td>${text}${detail}</td><td>${escapeHtml(o.count)}</td><td>${relativeTime(o.firstAt, now)}</td>`,
+    };
+  });
+  const ruled = rulings.map((r): LogEntry => {
+    const briefing = `/briefings/${encodeURIComponent(r.briefingId)}`;
+    // Recorded, and held until the zone's crew is enabled again (applyPendingRulings).
+    const waits = r.effect !== null && WAITS_FOR_CREW.has(r.effect) && crewOff.has(r.zoneId);
+    const state = r.applyError
+      ? `apply failed: ${escapeHtml(r.applyError)}`
+      : r.appliedAt
+        ? 'applied'
+        : waits
+          ? 'waiting: crew disabled'
+          : 'not applied yet';
+    const note = r.note ? ` · ${escapeHtml(r.note)}` : '';
+    const diagnosis = r.diagnosis ? ` · diagnosis: ${escapeHtml(r.diagnosis)}` : '';
+    return {
+      at: r.createdAt,
+      zoneId: r.zoneId,
+      kind: 'ruling',
+      cells:
+        `<td><a href="${escapeHtml(`${briefing}#ruling-${r.id}`)}">Ruling ${escapeHtml(r.id)}</a> on ` +
+        `<a href="${escapeHtml(briefing)}">Briefing ${escapeHtml(r.briefingId)}</a>: ` +
+        `${escapeHtml(r.label ?? r.choice)} <small>${state}${note}${diagnosis}</small></td><td>-</td><td>-</td>`,
+    };
+  });
+  // ISO times sort as text; the sort is stable, so equal times keep their list order.
+  return [...observed, ...ruled].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+}
+
+/**
+ * A project's Log tab (`/projects/:id/log`, with `header`) and the install-wide `/activity/log`
+ * (#621): one list, newest first, of observe mode's decisions in words and the rulings. Filtered to
+ * a project, the global page drops its Project column and shows the same rows as the project's tab.
+ */
+export function renderLog(s: {
+  zones: readonly (ZoneRef & { crew?: { enabled?: boolean } })[];
+  /** The project shown, on its tab or the global page filtered to it. */
+  zone?: string;
+  /** The project header and tab bar (`projectHeaderFor`): the page is the project's Log tab. */
+  header?: string;
+  kind: LogKind;
+  /** Already filtered to `zone`, when given. */
+  observations: readonly LogObservation[];
+  /** Already filtered to `zone`, when given. */
+  rulings: readonly Ruling[];
+  now: Date;
+}): string {
+  const tab = s.header !== undefined && s.zone !== undefined;
+  const name = zoneNamer(s.zones);
+  const href = (zone: string | undefined, kind: LogKind): string => {
+    if (tab && zone !== undefined) return projectLogHref(zone, kind);
+    const q = new URLSearchParams();
+    if (zone !== undefined) q.set('project', zone);
+    if (kind !== 'all') q.set('kind', kind);
+    const qs = q.toString();
+    return qs ? `${ACTIVITY_LOG_HREF}?${qs}` : ACTIVITY_LOG_HREF;
+  };
+  const link = (to: string, label: string, current: boolean): string =>
+    `<a href="${escapeHtml(to)}"${current ? ' aria-current="page"' : ''}>${label}</a>`;
+  const kindLinks = LOG_KINDS.map((k) =>
+    link(href(s.zone, k), LOG_KIND_LABELS[k], s.kind === k),
+  ).join(' · ');
+  const projectLinks = [
+    link(href(undefined, s.kind), 'All projects', s.zone === undefined),
+    ...s.zones.map((z) => link(href(z.id, s.kind), zoneName(z, s.zones), s.zone === z.id)),
+  ].join(' · ');
+  const entries = logEntries(
+    s.kind === 'rulings' ? [] : s.observations,
+    s.kind === 'observed' ? [] : s.rulings,
+    s.now,
+    new Set(s.zones.filter((z) => !z.crew?.enabled).map((z) => z.id)),
+  );
+  const withProject = s.zone === undefined;
+  const rows = entries
     .map(
-      (o) =>
-        `<tr><td>${name(o.zoneId)}</td><td>${escapeHtml(o.itemId ?? '')}</td><td>${escapeHtml(o.action)}</td><td>${escapeHtml(o.detail)}</td><td>${o.count}</td><td>${escapeHtml(o.firstAt)}</td><td>${escapeHtml(o.lastAt)}</td></tr>`,
+      (e) =>
+        `<tr class="log-${e.kind}"><td>${relativeTime(e.at, s.now)}</td>${withProject ? `<td>${name(e.zoneId)}</td>` : ''}${e.cells}</tr>`,
     )
     .join('');
+  const head = `<tr><th>When</th>${withProject ? '<th>Project</th>' : ''}<th>What</th><th>Count</th><th>First</th></tr>`;
+  const empty = {
+    all: 'Nothing logged yet.',
+    observed: 'Nothing observed yet.',
+    rulings: 'No rulings yet.',
+  }[s.kind];
+  const top = tab
+    ? `${s.header}<h2>Log</h2>`
+    : `<p><a href="/">Back</a></p><h2>Log${s.zone === undefined ? '' : ` of ${name(s.zone)}`}</h2><nav class="filters" aria-label="Project"><p>${projectLinks}</p></nav>`;
+  const titleText = s.zone === undefined ? 'Log' : `Log of ${zoneTextNamer(s.zones)(s.zone)}`;
   return page(
-    `<h2>Observations</h2><table><tr><th>Zone</th><th>Item</th><th>Would do</th><th>Detail</th><th>Count</th><th>First</th><th>Last</th></tr>${body}</table>`,
+    `${top}<nav class="filters" aria-label="Kind"><p>${kindLinks}</p></nav>` +
+      (rows ? `<table>${head}${rows}</table>` : `<p class="empty">${empty}</p>`),
+    { title: titleText },
   );
 }
 

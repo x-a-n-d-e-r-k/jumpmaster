@@ -946,7 +946,7 @@ describe('a project: tabs, header and Overview (#616)', () => {
       ['Work', '/projects/main/work', false],
       ['Goals', '/projects/main/goals', false],
       ['Setup', '/projects/main/setup', false],
-      ['Log', '/observations?zone=main', false],
+      ['Log', '/projects/main/log', false],
     ]);
     const setup = tabsOf((await w.get('/projects/main/setup')).body);
     expect(setup.filter(([, , c]) => c).map(([l]) => l)).toEqual(['Setup']);
