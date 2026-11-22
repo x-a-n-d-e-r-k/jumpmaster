@@ -183,7 +183,7 @@ describe('renderHome', () => {
     expect(html).toContain('href="https://github.com/o/r/issues/12"');
     expect(html).toMatch(/<a href="https:\/\/github\.com\/o\/r\/issues\/12"[^>]*>#12<\/a>/);
     expect(html).toContain('<a href="/projects/main/work/12">fix &lt;b&gt;it&lt;/b&gt;</a>');
-    expect(html).not.toContain('/drops?zone=main');
+    expect(html).not.toContain('/activity/drops?zone=main');
     expect(html).not.toContain('<b>');
   });
 
@@ -1625,15 +1625,17 @@ describe('renderWorkList and renderDropList (#119)', () => {
     );
     // A project's work is its Work tab (#619): /work links there directly, never via ?zone=.
     expect(html).toContain('<a href="/projects/main/work?state=ready">octo/demo</a>');
-    expect(html).toContain('<a href="/work?state=ready">All projects</a>');
+    expect(html).toContain('<a href="/activity/work?state=ready">All projects</a>');
     expect(html).toContain('<a href="/projects/ref/work?state=parked">Parked</a>');
     expect(html).toContain('<a href="/projects/ref/work">Active</a>');
     expect(html).not.toContain('zone=');
     const drops = renderDropList({ zones, state: 'failed', drops: [], items: [], limited: false });
-    expect(drops).toContain('<a href="/drops?state=failed" aria-current="page">All projects</a>');
-    expect(drops).toContain('<a href="/drops?zone=main&amp;state=failed">octo/demo</a>');
-    expect(drops).toContain('<a href="/drops?state=active">Active</a>');
-    expect(drops).toContain('<a href="/drops">All states</a>');
+    expect(drops).toContain(
+      '<a href="/activity/drops?state=failed" aria-current="page">All projects</a>',
+    );
+    expect(drops).toContain('<a href="/activity/drops?zone=main&amp;state=failed">octo/demo</a>');
+    expect(drops).toContain('<a href="/activity/drops?state=active">Active</a>');
+    expect(drops).toContain('<a href="/activity/drops">All states</a>');
   });
 
   test('empty results: the page-specific line and no table', () => {
@@ -1651,10 +1653,11 @@ describe('renderWorkList and renderDropList (#119)', () => {
     expect(renderDropList({ ...args, limited: false })).not.toContain('Showing the newest 200');
   });
 
-  test('the page nav links Work and Drops', () => {
+  test('the page nav links Activity, which holds Work and Drops (#622)', () => {
     const html = page('x');
-    expect(html).toContain('<a href="/work">Work</a>');
-    expect(html).toContain('<a href="/drops">Drops</a>');
+    expect(html).toContain('<a href="/activity">Activity</a>');
+    expect(html).not.toContain('<a href="/work">');
+    expect(html).not.toContain('<a href="/drops">');
   });
 });
 
@@ -1943,8 +1946,8 @@ describe('external links open in a new tab (#133)', () => {
     expect(html).toContain(
       `<a href="https://github.com/octo/demo/pull/9" ${NEW_TAB}>Open PR #9</a>`,
     );
-    expect(html).toMatch(/<a href="\/work"[^>]*>/);
-    expect(html).not.toMatch(/<a href="\/work"[^>]*target=/);
+    expect(html).toMatch(/<a href="\/activity"[^>]*>/);
+    expect(html).not.toMatch(/<a href="\/activity"[^>]*target=/);
     expect(html).toMatch(/<a [^>]*href="\/drops\/d1"[^>]*>/);
     expect(html).not.toMatch(/<a [^>]*href="\/drops\/d1"[^>]*target=/);
   });
@@ -2646,7 +2649,7 @@ describe('the drop page header and system-event groups (#499)', () => {
     );
     expect(html.indexOf('<dl class="drop-summary">')).toBeLessThan(html.indexOf('<h3>Transcript'));
     expect(html).toContain(
-      '<a href="/work">Work</a> › <a href="/projects/jm/work">octo/jm</a> › <a href="/projects/jm/work/487">#487</a> › abcdef12',
+      '<a href="/activity/work">Work</a> › <a href="/projects/jm/work">octo/jm</a> › <a href="/projects/jm/work/487">#487</a> › abcdef12',
     );
     expect(html).not.toContain('href="/">Back');
   });
@@ -2675,8 +2678,8 @@ describe('the drop page header and system-event groups (#499)', () => {
       now,
     });
     expect(summaryOf(html)).toContain('<dd>crew</dd>');
-    expect(html).toContain('<a href="/drops">Drops</a> › abcdef12');
-    expect(html).not.toContain('<a href="/work">Work</a> ›');
+    expect(html).toContain('<a href="/activity/drops">Drops</a> › abcdef12');
+    expect(html).not.toContain('<a href="/activity/work">Work</a> ›');
   });
 
   test('a drop with no work item, stick or times shows - in those fields', () => {

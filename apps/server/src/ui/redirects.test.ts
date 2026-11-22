@@ -121,27 +121,55 @@ describe('the redirect table (issue #615)', () => {
         expect([url, post.statusCode, post.headers.location]).toEqual([url, 308, to]);
       }
     });
+  });
 
-    test('/work without a zone is not redirected; it still renders in the app', async () => {
+  describe('the cross-project lists move under Activity (#622)', () => {
+    test('/work and /drops are a 301 to /activity/…, the query kept; POST is a 308', async () => {
       const app = bare();
-      for (const url of ['/work', '/work?state=parked', '/work?zone=']) {
+      for (const [url, to] of [
+        ['/work', '/activity/work'],
+        ['/work?state=parked', '/activity/work?state=parked'],
+        ['/work?zone=', '/activity/work?zone='],
+        ['/drops', '/activity/drops'],
+        ['/drops?state=active&kind=all', '/activity/drops?state=active&kind=all'],
+        ['/drops?zone=jm&issue=4', '/activity/drops?zone=jm&issue=4'],
+      ]) {
         const res = await app.inject({ method: 'GET', url });
-        expect([url, res.statusCode, res.headers.location]).toEqual([url, 404, undefined]);
+        expect([url, res.statusCode, res.headers.location]).toEqual([url, 301, to]);
+        const head = await app.inject({ method: 'HEAD', url });
+        expect([url, head.statusCode, head.headers.location]).toEqual([url, 301, to]);
+        const post = await app.inject({ method: 'POST', url });
+        expect([url, post.statusCode, post.headers.location]).toEqual([url, 308, to]);
       }
-      // Non-vacuous: the same bare app does redirect the zoned list.
-      expect((await app.inject({ method: 'GET', url: '/work?zone=jm' })).statusCode).toBe(301);
+    });
+
+    test('/work?zone=jm still goes to the project Work tab, in one hop', async () => {
+      const app = bare();
+      for (const [url, to] of [
+        ['/work?zone=jm', '/projects/jm/work'],
+        ['/work?state=parked&zone=jm', '/projects/jm/work?state=parked'],
+      ]) {
+        const res = await app.inject({ method: 'GET', url });
+        expect([url, res.statusCode, res.headers.location]).toEqual([url, 301, to]);
+      }
+    });
+
+    test('/drops/:id does not move', async () => {
+      const res = await bare().inject({ method: 'GET', url: '/drops/abc' });
+      expect([res.statusCode, res.headers.location]).toEqual([404, undefined]);
+    });
+
+    test('in the app, each lands on a page that renders', async () => {
       const h = await harness({});
-      for (const url of ['/work', '/work?state=parked']) {
-        const res = await h.view(url);
-        expect([url, res.statusCode]).toEqual([url, 200]);
-        expect(res.body, url).toContain('work</h2>');
+      for (const [from, to] of [
+        ['/work?state=parked', '/activity/work?state=parked'],
+        ['/drops?state=active&kind=all', '/activity/drops?state=active&kind=all'],
+        ['/work?zone=main&state=parked', '/projects/main/work?state=parked'],
+      ]) {
+        const res = await h.view(from);
+        expect([from, res.statusCode, res.headers.location]).toEqual([from, 301, to]);
+        expect((await h.view(to)).statusCode, to).toBe(200);
       }
-      const zoned = await h.view('/work?zone=main&state=parked');
-      expect([zoned.statusCode, zoned.headers.location]).toEqual([
-        301,
-        '/projects/main/work?state=parked',
-      ]);
-      expect((await h.view('/projects/main/work?state=parked')).statusCode).toBe(200);
     });
   });
 
