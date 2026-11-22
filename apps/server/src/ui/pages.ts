@@ -2118,7 +2118,12 @@ const intakeArea = (id: string, rows: number, required = false) =>
 const intakeBase = (zone: ZoneRef) => `/api/control/zones/${encodeURIComponent(zone.id)}/intake`;
 
 /** The GOAL.md stub builder: the stub, then how to commit it; issues are filed on New issue. */
-export function renderIntake(zone: ZoneRef, zones: readonly ZoneRef[] = [zone]): string {
+export function renderIntake(
+  zone: ZoneRef,
+  zones: readonly ZoneRef[] = [zone],
+  /** The project header and tab bar (#616). */
+  header = '',
+): string {
   const field = intakeField;
   const area = intakeArea;
   const goal = `<h3>Step 1: the goal</h3><form id="stub-form">${field(
@@ -2135,16 +2140,21 @@ export function renderIntake(zone: ZoneRef, zones: readonly ZoneRef[] = [zone]):
   const commit = `<h3>Step 2: commit it by pull request</h3><p>GOAL.md is a protected path, so no agent may write it and Jumpmaster doesn't commit it either. Copy the stub, then on a branch of ${escapeHtml(zone.repo)}: save it as GOAL.md, commit, push, open a pull request, and merge it yourself. The crew reads it once it is on the default branch.</p><p><textarea id="stub-out" rows="16" cols="80" readonly></textarea><br><button type="button" id="stub-copy">Copy</button></p>`;
   const next = `<p>To file an issue, use <a href="${escapeHtml(zoneHref(zone.id))}/issues/new"><strong>New issue</strong></a>.</p>`;
   return page(
-    `<h2>GOAL.md stub: ${zoneName(zone, zones)}</h2><div id="intake" data-base="${escapeHtml(intakeBase(zone))}">${goal}${commit}</div>${next}${STUB_SCRIPT}`,
+    `${header}<h2>GOAL.md stub: ${zoneName(zone, zones)}</h2><div id="intake" data-base="${escapeHtml(intakeBase(zone))}">${goal}${commit}</div>${next}${STUB_SCRIPT}`,
   );
 }
 
 /** The New issue page: one ready issue, filed under objective 1 as soon as it is submitted. */
-export function renderNewIssue(zone: ZoneRef, zones: readonly ZoneRef[] = [zone]): string {
+export function renderNewIssue(
+  zone: ZoneRef,
+  zones: readonly ZoneRef[] = [zone],
+  /** The project header and tab bar (#616), in place of the link back to the project. */
+  header?: string,
+): string {
   const field = intakeField;
   const area = intakeArea;
   const form = `<p>Filed ready, under objective 1, as soon as you submit: it doesn't need GOAL.md merged first.</p><form id="issue-form">${field('issue-title', 'Title (at most 120 characters)', '<input id="issue-title" size="80" maxlength="120" required>')}${field('issue-context', 'Context', area('issue-context', 6, true))}${field('issue-acceptance', 'Acceptance criteria, one per line', area('issue-acceptance', 5, true))}${field('issue-tests', 'Required tests, one per line', area('issue-tests', 3, true))}${field('issue-out', 'Out of scope, one per line (optional)', area('issue-out', 3))}<button>File the issue</button> <span id="issue-status" role="status"></span> <button type="button" id="issue-again" hidden>File another</button></form>`;
   return page(
-    `<p><a href="${escapeHtml(zoneHref(zone.id))}">${zoneName(zone, zones)}</a></p><h2>New issue: ${zoneName(zone, zones)}</h2><div id="new-issue" data-base="${escapeHtml(intakeBase(zone))}" data-issues="${escapeHtml(issueUrl(zone.repo, 0).replace(/0$/, ''))}">${form}</div>${ISSUE_SCRIPT}`,
+    `${header ?? `<p><a href="${escapeHtml(zoneHref(zone.id))}">${zoneName(zone, zones)}</a></p>`}<h2>New issue: ${zoneName(zone, zones)}</h2><div id="new-issue" data-base="${escapeHtml(intakeBase(zone))}" data-issues="${escapeHtml(issueUrl(zone.repo, 0).replace(/0$/, ''))}">${form}</div>${ISSUE_SCRIPT}`,
   );
 }

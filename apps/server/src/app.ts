@@ -122,7 +122,7 @@ import { claudeTokenDays, registerSettingsPages } from './ui/settings.js';
 import { registerSetupPages, wizardActive } from './ui/setup.js';
 import { renderInviteResult, renderSticks, type StickRow } from './ui/sticks.js';
 import { zoneTextNamer } from './ui/zone-name.js';
-import { registerZonesPages } from './ui/zones.js';
+import { projectHeaderFor, registerZonesPages } from './ui/zones.js';
 import { dispatchGate } from './usage.js';
 
 const ATTEMPT_KEYS: AttemptKey[] = [
@@ -508,6 +508,7 @@ export function createApp(
     // The GitHub half of setup for a zone: links and generated files, never a forge write.
     registerGithubPages(app, {
       store: deps.config,
+      header: (zone, zones) => projectHeaderFor(deps.db, zone, zones),
       now: deps.now,
       ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
       ...(deps.appTokens ? { appTokens: deps.appTokens } : {}),
@@ -840,14 +841,18 @@ export function createApp(
     const zones = cfg(req).dropZones;
     const zone = zones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
-    return reply.type('text/html; charset=utf-8').send(withCsrf(req, renderIntake(zone, zones)));
+    return reply
+      .type('text/html; charset=utf-8')
+      .send(withCsrf(req, renderIntake(zone, zones, projectHeaderFor(deps.db, zone, zones))));
   });
 
   app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/issues/new`, async (req, reply) => {
     const zones = cfg(req).dropZones;
     const zone = zones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
-    return reply.type('text/html; charset=utf-8').send(withCsrf(req, renderNewIssue(zone, zones)));
+    return reply
+      .type('text/html; charset=utf-8')
+      .send(withCsrf(req, renderNewIssue(zone, zones, projectHeaderFor(deps.db, zone, zones))));
   });
 
   // The crew chat's pages: without the chat service (an older compose file) `/chat` names the

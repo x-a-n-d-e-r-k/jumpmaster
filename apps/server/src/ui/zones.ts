@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { withCsrf } from '../auth/guard.js';
 import { listBriefings } from '../briefings.js';
 import type { ConfigStore } from '../config/store.js';
-import { STARTER_WARNING } from '../config.js';
+import { type DropZoneConfig, STARTER_WARNING } from '../config.js';
 import type { Db } from '../db/open.js';
 import { getZoneMode, type ZoneWaits, zoneStopping, zoneWaits } from '../db/repo.js';
 import { egressSeen } from '../doctor/checks.js';
@@ -19,6 +19,7 @@ import {
   escapeHtml,
   MODE_LABELS,
   PROJECTS_HREF,
+  type ProjectTab,
   page,
   projectHeader,
   projectHref,
@@ -27,7 +28,7 @@ import {
 } from './pages.js';
 import { getWizard, projectBody } from './setup.js';
 import { relativeTime } from './time.js';
-import { zoneName, zoneNameText } from './zone-name.js';
+import { type ZoneRef, zoneName, zoneNameText } from './zone-name.js';
 
 /**
  * The zones page (§10.3): every zone with its mode, egress, identity, last drop, doctor fails and
@@ -38,6 +39,25 @@ import { zoneName, zoneNameText } from './zone-name.js';
  * with where to make it. In file mode every section is read-only under the adopt banner. All text
  * from the config, the forge and the drops is escaped; the page holds no secret.
  */
+
+/**
+ * The project header and tab bar (#616) for a project page outside the tabs (GitHub, the GOAL.md
+ * stub, New issue, advanced settings): the zone's mode and open briefings from the database.
+ */
+export function projectHeaderFor(
+  db: Db,
+  zone: DropZoneConfig,
+  zones: readonly ZoneRef[],
+  current?: ProjectTab,
+): string {
+  return projectHeader({
+    zone,
+    zones,
+    mode: getZoneMode(db, zone.id, zone.mode),
+    openBriefings: listBriefings(db, { zoneId: zone.id, state: 'open' }).length,
+    current,
+  });
+}
 
 const EGRESS_WINDOW_MS = 14 * 86_400_000;
 /** How many drop links one observed host lists; the rest are a link to the zone's drops of every kind. */
@@ -608,6 +628,7 @@ export function registerZonesPages(
     async (req, reply) => {
       const saved = /^\d{1,9}$/.test(req.query.saved ?? '') ? Number(req.query.saved) : undefined;
       const body = renderFlags(store, req.params.id, {
+        header: (zone, zones) => projectHeaderFor(db, zone, zones),
         adoptBanner: ADOPT_BANNER,
         forbiddenNote: FORBIDDEN_NOTE,
         ...(saved === undefined ? {} : { saved }),

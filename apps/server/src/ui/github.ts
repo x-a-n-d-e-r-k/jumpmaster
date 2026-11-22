@@ -280,9 +280,11 @@ export function zonePage(
   zones: readonly ZoneRef[],
   g: ZoneGuidance,
   reviewer: string,
+  /** The project header and tab bar (#616). */
+  header = '',
 ): string {
   return page(
-    `<h2>GitHub for ${zoneName(zone, zones)}</h2>
+    `${header}<h2>GitHub for ${zoneName(zone, zones)}</h2>
 <p>What Jumpmaster needs on GitHub, as links and files: nothing here changes GitHub; the clicks and the commit are yours. The doctor checks each part.</p>
 ${recommendationSection(g.recommendation)}
 <p>This zone runs as ${escapeHtml(zone.identity)}${zone.authorMayBeAdmin ? ' (the author account owns the repository, so it can merge)' : ''}${zone.identity === g.recommendation.identity ? '' : ': not the recommendation above. Changing it changes which tokens and rules it needs'}.</p>
@@ -312,6 +314,8 @@ export function registerGithubPages(
   deps: {
     store: ConfigStore;
     now(): Date;
+    /** The project header and tab bar (#616) for the zone's page. */
+    header?: (zone: DropZoneConfig, zones: readonly ZoneRef[]) => string;
     guidanceForge?: (repo: string, token: string) => GuidanceForge;
     /** The app token source: an app-author zone's guidance reads on its author app (§4.4). */
     appTokens?: Pick<AppTokenSource, 'provider'>;
@@ -323,6 +327,7 @@ export function registerGithubPages(
     const config = req.jmConfig ?? store.current();
     const zone = config.dropZones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
+    const header = deps.header?.(zone, config.dropZones) ?? '';
     const q = Query.safeParse(req.query ?? {});
     const reviewers = q.success ? reviewersOf(q.data.reviewer) : null;
     const send = (status: number, body: string) =>
@@ -344,12 +349,18 @@ export function registerGithubPages(
       return send(
         r.status,
         page(
-          `<h2>GitHub for ${zoneName(zone, config.dropZones)}</h2><p class="warn">${escapeHtml(r.error)}</p><p>Set or replace the tokens in the <a href="/setup/forge">GitHub step</a>, then come back.</p>`,
+          `${header}<h2>GitHub for ${zoneName(zone, config.dropZones)}</h2><p class="warn">${escapeHtml(r.error)}</p><p>Set or replace the tokens in the <a href="/setup/forge">GitHub step</a>, then come back.</p>`,
         ),
       );
     return send(
       200,
-      zonePage(zone, config.dropZones, r.guidance, q.success ? (q.data.reviewer ?? '') : ''),
+      zonePage(
+        zone,
+        config.dropZones,
+        r.guidance,
+        q.success ? (q.data.reviewer ?? '') : '',
+        header,
+      ),
     );
   });
 }

@@ -1603,6 +1603,14 @@ describe('project pages live under /projects (issue #615)', () => {
     },
   );
 
+  test.each(PROJECT_PAGES)('/projects/jm%s carries the project header and tab bar', async (sub) => {
+    const h = await seeded();
+    const body = (await h.view(`/projects/jm${sub}`)).body;
+    expect(body).toContain('<nav class="settings-tabs project-tabs" aria-label="Project tabs">');
+    expect(body).toContain('<header class="project-header">');
+    expect(body).toContain('href="/projects/jm/issues/new">New issue</a>');
+  });
+
   test('/projects and /projects/new are 200', async () => {
     const h = await seeded();
     expect((await h.view('/projects')).statusCode).toBe(200);

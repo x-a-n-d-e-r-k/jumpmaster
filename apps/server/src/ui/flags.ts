@@ -1,9 +1,10 @@
 import { RESTART_PATHS } from '../config/boot.js';
 import { type FlagGroup, type FlagRow, type FlagScope, flagRows } from '../config/catalog.js';
 import type { ConfigStore } from '../config/store.js';
+import type { DropZoneConfig } from '../config.js';
 import { escapeHtml, PROJECTS_HREF, page, projectHref } from './pages.js';
 import { CONFIG_ANSWER_FN, RESTART_NOTE, settingControl, settingId } from './setting-controls.js';
-import { zoneName, zoneNameText } from './zone-name.js';
+import { type ZoneRef, zoneName, zoneNameText } from './zone-name.js';
 
 /**
  * The advanced settings pages: a zone's (`/projects/:id/flags`, issue #322) and the install's
@@ -265,7 +266,13 @@ export const savedNote = (saved: number | undefined): string =>
 export function renderFlags(
   store: ConfigStore,
   id: string,
-  o: { adoptBanner: string; forbiddenNote: string; saved?: number },
+  o: {
+    adoptBanner: string;
+    forbiddenNote: string;
+    saved?: number;
+    /** The project header and tab bar, in place of the breadcrumb (#616). */
+    header?: (zone: DropZoneConfig, zones: readonly ZoneRef[]) => string;
+  },
 ): string | undefined {
   const doc = store.document() as Record<string, unknown>;
   const zones = (Array.isArray(doc.dropZones) ? doc.dropZones : []) as Record<string, unknown>[];
@@ -285,7 +292,11 @@ export function renderFlags(
     forbiddenNote: o.forbiddenNote,
   });
   return page(
-    `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${base}">${zoneName(resolved, all)}</a> · <a href="${base}/setup#advanced">Edit the zone as JSON</a></p>
+    `${
+      o.header
+        ? `${o.header(resolved, all)}<p><a href="${base}/setup#advanced">Edit the zone as JSON</a></p>`
+        : `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${base}">${zoneName(resolved, all)}</a> · <a href="${base}/setup#advanced">Edit the zone as JSON</a></p>`
+    }
 <h2>Advanced settings · ${zoneName(resolved, all)}</h2>
 <p>Every setting for this zone. Changes apply at the next pass; one that loosens a safeguard asks you to confirm first.</p>
 ${savedNote(o.saved)}${readOnly ? o.adoptBanner : ''}
