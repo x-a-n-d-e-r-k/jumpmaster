@@ -454,6 +454,14 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       }
     });
 
+    // Every route but enroll needs a stick's bearer: check it before the body is read, so an
+    // unauthenticated client cannot make the server parse an 8 MiB body (issue #644). The
+    // handlers still authenticate and check ownership, epoch and state; this only adds a check.
+    scope.addHook('onRequest', async (req, reply) => {
+      if (req.method === 'POST' && req.routeOptions.url === '/api/sticks/enroll') return;
+      if (!authStick(req)) return reply.code(401).send({ error: 'unauthorized' });
+    });
+
     scope.post('/api/sticks/enroll', async (req, reply) => {
       const body = EnrollBody.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: 'invalid body' });
