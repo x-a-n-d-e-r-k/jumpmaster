@@ -579,7 +579,7 @@ describe('the dashboard', () => {
     const html = renderHome(home({ zones: [zone('A'), B], items: [wi('a b', 'parked')] }));
     expect(listHref('/work', 'a b', 'parked')).toBe('/work?zone=a%20b&state=parked');
     expect(html).toContain('<a href="/work?zone=a%20b&amp;state=parked">1 parked</a>');
-    expect(html).toContain('href="/zones/a%20b"');
+    expect(html).toContain('href="/projects/a%20b"');
     expect(html).toContain('href="/drops?zone=a%20b&amp;state=active&amp;kind=all"');
     expect(html).toMatch(/data-tile="running" href="\/drops\?[^"]*kind=all"/);
     const needs = renderHome(home({ zones: [B], briefings: [br('a b')] }));
@@ -622,7 +622,7 @@ describe('the dashboard', () => {
     const html = renderHome(home({ zones: [], setup: { active: false, addProject: true } }));
     expect(html).not.toContain('class="totals"');
     expect(html).toContain('No project yet');
-    expect(html).toContain('<a href="/zones/new">Add a project</a>');
+    expect(html).toContain('<a href="/projects/new">Add a project</a>');
   });
 });
 

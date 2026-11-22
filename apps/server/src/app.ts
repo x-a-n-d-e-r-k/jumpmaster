@@ -98,6 +98,7 @@ import {
   type DropKind,
   type HomeState,
   type ItemDetail,
+  PROJECTS_HREF,
   pageParams,
   renderBriefing,
   renderBriefings,
@@ -116,6 +117,7 @@ import {
   type StickLine,
   WORK_STATES,
 } from './ui/pages.js';
+import { registerRedirects } from './ui/redirects.js';
 import { claudeTokenDays, registerSettingsPages } from './ui/settings.js';
 import { registerSetupPages, wizardActive } from './ui/setup.js';
 import { renderInviteResult, renderSticks, type StickRow } from './ui/sticks.js';
@@ -494,6 +496,8 @@ export function createApp(
     // The zones page (Task 11): every zone, a page per zone, and the add page.
     registerZonesPages(app, { db: deps.db, store: deps.config, now: deps.now });
   }
+  // The pages that moved (issue #615): each old path answers 301/308 straight to its new one.
+  registerRedirects(app);
 
   // Every stick and its trooper count (issue #136): the count is set through the control route.
   app.get('/sticks', async (req, reply) => {
@@ -797,7 +801,7 @@ export function createApp(
     },
   );
 
-  app.get<{ Params: { id: string } }>('/zones/:id/goals', async (req, reply) => {
+  app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/goals`, async (req, reply) => {
     const { db } = deps;
     const config = cfg(req);
     const zone = config.dropZones.find((z) => z.id === req.params.id);
@@ -815,14 +819,14 @@ export function createApp(
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
 
-  app.get<{ Params: { id: string } }>('/zones/:id/intake', async (req, reply) => {
+  app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/intake`, async (req, reply) => {
     const zones = cfg(req).dropZones;
     const zone = zones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, renderIntake(zone, zones)));
   });
 
-  app.get<{ Params: { id: string } }>('/zones/:id/issues/new', async (req, reply) => {
+  app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/issues/new`, async (req, reply) => {
     const zones = cfg(req).dropZones;
     const zone = zones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');

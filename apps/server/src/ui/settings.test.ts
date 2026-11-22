@@ -1559,8 +1559,8 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
     expect(keys.some((k) => k.startsWith('dropZones'))).toBe(false);
     expect(r.body).toContain('Advanced settings · this install');
     expect(r.body).toContain('Each zone has its own advanced settings:');
-    const links = [...r.body.matchAll(/<a href="(\/zones\/[^"]*\/flags)">/g)].map((m) => m[1]);
-    expect(links).toEqual(['/zones/main/flags', '/zones/ref/flags']);
+    const links = [...r.body.matchAll(/<a href="(\/projects\/[^"]*\/flags)">/g)].map((m) => m[1]);
+    expect(links).toEqual(['/projects/main/flags', '/projects/ref/flags']);
     // pollSeconds: a number input in Pace with the schema's bounds.
     const pace = r.body.slice(r.body.indexOf('<section data-group="pace">'));
     expect(pace.slice(0, pace.indexOf('</section>'))).toContain('data-flag="pollSeconds"');
@@ -1599,7 +1599,7 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
     const controls = [...html.matchAll(/<(input|select|textarea)[^>]*data-path="[^"]*"[^>]*>/g)];
     expect(controls.length).toBeGreaterThan(0);
     for (const c of controls) expect(c[0]).toMatch(/ disabled/);
-    expect(html).toContain('<a href="/zones/main/flags">');
+    expect(html).toContain('<a href="/projects/main/flags">');
   });
 
   test('every row whose key is in RESTART_PATHS says so, and no other row does', async () => {
@@ -1763,12 +1763,12 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
     const zoneForm = renderFlagsForm({
       scope: 'zone',
       rows: flagRows('zone', zone, doc),
-      target: { savedTo: '/zones/ref/flags', zone: { id: 'ref', index: 1 } },
+      target: { savedTo: '/projects/ref/flags', zone: { id: 'ref', index: 1 } },
       revision: w.store.revision(),
       readOnly: false,
       forbiddenNote: note,
     });
-    expect((await w.get('/zones/ref/flags')).body).toContain(zoneForm);
+    expect((await w.get('/projects/ref/flags')).body).toContain(zoneForm);
     expect(install).not.toEqual(zoneForm);
   });
 });

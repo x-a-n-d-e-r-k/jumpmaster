@@ -23,11 +23,11 @@ import {
 import { MATRIX_AND_REUSABLE_NOTE } from '../github/workflows.js';
 import type { AppRole } from '../vault/github-app-entries.js';
 import { linkTarget } from './links.js';
-import { escapeHtml, page } from './pages.js';
+import { escapeHtml, PROJECTS_HREF, page, projectHref } from './pages.js';
 import { type ZoneRef, zoneName } from './zone-name.js';
 
 /**
- * The GitHub half of setup, as a page per zone (`/zones/:id/github`) and as sections the setup
+ * The GitHub half of setup, as a page per zone (`/projects/:id/github`) and as sections the setup
  * wizard reuses: links and generated text, never a forge write. Every piece of forge text is
  * escaped here, and an href is rendered only when it is under https://github.com/ (or the
  * generated file as a data URL to download).
@@ -289,7 +289,7 @@ ${recommendationSection(g.recommendation)}
 ${zone.identity === 'starter' ? tokensSection(g.pat, rolesOf(zone)) : useTokensInstead(tokensSection(g.pat, rolesOf(zone)))}
 ${checklistSection(g.checklist)}
 ${rulesetSection(g.ruleset, g.rulesUrl, zone.identity)}
-${g.mergeRuleset ? `${mergeRulesetSection(g.mergeRuleset, g.rulesUrl)}\n` : ''}${codeownersSection(g.codeowners, { action: `/zones/${encodeURIComponent(zone.id)}/github`, reviewer }, zone.identity)}
+${g.mergeRuleset ? `${mergeRulesetSection(g.mergeRuleset, g.rulesUrl)}\n` : ''}${codeownersSection(g.codeowners, { action: projectHref(zone.id, 'github'), reviewer }, zone.identity)}
 ${COPY_SCRIPT}`,
   );
 }
@@ -319,7 +319,7 @@ export function registerGithubPages(
 ): void {
   const { store, now } = deps;
   const forgeOf = deps.guidanceForge ?? githubGuidanceForge;
-  app.get<{ Params: { id: string } }>('/zones/:id/github', async (req, reply) => {
+  app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/github`, async (req, reply) => {
     const config = req.jmConfig ?? store.current();
     const zone = config.dropZones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');

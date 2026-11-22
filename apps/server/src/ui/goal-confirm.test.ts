@@ -211,7 +211,7 @@ describe('the goal-change confirm page (#363)', () => {
     const w = await world();
     const r = await w.app.inject({
       method: 'GET',
-      url: '/zones/main/goals',
+      url: '/projects/main/goals',
       headers: { host: HOST, cookie: w.one.cookie },
     });
     expect(r.statusCode).toBe(200);

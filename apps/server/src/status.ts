@@ -25,6 +25,7 @@ import { isReservationReason } from './flow/decide.js';
 import { missingFor, zoneRequirements } from './leases.js';
 import { isBlocked, isOverlapReason, openPrCap } from './scheduler.js';
 import { redactionList } from './scrub.js';
+import { PROJECTS_HREF, projectHref } from './ui/links.js';
 import { wizardActive } from './ui/setup.js';
 import { dispatchGate, type Gate } from './usage.js';
 import { type CredentialProblem, credentialProblems } from './vault/problems.js';
@@ -189,7 +190,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
       : p.credential === 'claudeToken'
         ? '/setup/claude'
         : '/setup/forge';
-  const zoneHref = (id: string) => (pages.zones ? `/zones/${encodeURIComponent(id)}` : '/');
+  const zoneHref = (id: string) => (pages.zones ? projectHref(id) : '/');
   const activeZones = zones.filter((z) => z.mode === 'active');
   // Work the next pass would take: ready items the scheduler does not skip as blocked, in active
   // zones not parked for a credential (a paused or parked zone's work is held by that, not the gate).
@@ -465,7 +466,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
       headline: `Paused by you: ${zones.map((z) => `${name(z.id)} (${z.mode})`).join(', ')}`,
       detail: draining.join(' '),
       waitingOn: 'you',
-      action: { label: 'Open the zones', href: pages.zones ? '/zones' : '/' },
+      action: { label: 'Open the zones', href: pages.zones ? PROJECTS_HREF : '/' },
     });
   }
 
@@ -579,8 +580,8 @@ export function statusOf(input: StatusInput, now: Date): Status {
     detail: '',
     waitingOn: 'you',
     action: zoneOne
-      ? { label: 'New issue', href: `/zones/${encodeURIComponent(zoneOne.id)}/issues/new` }
-      : { label: 'Add a project', href: pages.zones ? '/zones' : '/setup/project' },
+      ? { label: 'New issue', href: projectHref(zoneOne.id, 'issues/new') }
+      : { label: 'Add a project', href: pages.zones ? PROJECTS_HREF : '/setup/project' },
   });
 }
 

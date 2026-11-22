@@ -248,7 +248,7 @@ const STEPS: Step[] = [
     (i) => void (z0(i).mode = 'active'),
     'Paused by you: main (paused), docs (paused)',
     'you',
-    '/zones',
+    '/projects',
   ],
   [
     'outbox',
@@ -283,7 +283,7 @@ const STEPS: Step[] = [
     () => {},
     'Idle: no ready issues. Label one drop-ready or file a new issue',
     'you',
-    '/zones/main/issues/new',
+    '/projects/main/issues/new',
   ],
 ];
 
@@ -607,7 +607,7 @@ describe('ready work held in a paused or observing zone (#495)', () => {
     );
     expect(s.headline).toBe('Nothing will start: 3 ready issues wait in paused octo/merlin');
     expect(s.waitingOn).toBe('you');
-    expect(s.action).toEqual({ label: 'Open octo/merlin', href: '/zones/merlin' });
+    expect(s.action).toEqual({ label: 'Open octo/merlin', href: '/projects/merlin' });
   });
 
   test('two held zones are both named', () => {
@@ -630,7 +630,7 @@ describe('ready work held in a paused or observing zone (#495)', () => {
 
   test('the idle action is New issue on the first active zone (#500)', () => {
     const s = statusOf(base({ zones: [zone({ id: 'docs', mode: 'paused' }), zone()] }), NOW);
-    expect(s.action).toEqual({ label: 'New issue', href: '/zones/main/issues/new' });
+    expect(s.action).toEqual({ label: 'New issue', href: '/projects/main/issues/new' });
   });
 
   test('with no ready items anywhere the idle line is unchanged', () => {
@@ -643,7 +643,7 @@ describe('the detail and its list (round 2: S1, M2, M3)', () => {
   test('a paused zone among active ones is listed with a link to it', () => {
     const s = statusOf(base({ zones: [zone(), zone({ id: 'docs', mode: 'paused' })] }), NOW);
     expect(s.headline).toMatch(/^Idle/);
-    expect(s.also).toEqual([{ text: 'docs is paused', href: '/zones/docs' }]);
+    expect(s.also).toEqual([{ text: 'docs is paused', href: '/projects/docs' }]);
   });
 
   test('before the first pass the list says so, and fails count as new', () => {
@@ -739,7 +739,7 @@ describe('round 3', () => {
     );
     expect(busy.also).toContainEqual({
       text: 'main: waiting: 2 open PRs (cap 2)',
-      href: '/zones/main',
+      href: '/projects/main',
     });
   });
 
@@ -836,7 +836,7 @@ describe('zones named by a namer (#99)', () => {
       'octo/other (docs) is paused',
     ]);
     // The links keep the id.
-    expect(also?.[1]?.href).toBe('/zones/docs');
+    expect(also?.[1]?.href).toBe('/projects/docs');
 
     const draining = statusOf(
       base({

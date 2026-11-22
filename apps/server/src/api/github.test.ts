@@ -510,7 +510,7 @@ describe('the two-app callers (issue #482)', () => {
     expect(r.statusCode, r.body).toBe(200);
     const text = mergeRulesetJson(Number(APP_ENTRIES.author.appId));
     expect(r.json().mergeRuleset.text).toBe(text);
-    const page = await w.page('/zones/demo/github');
+    const page = await w.page('/projects/demo/github');
     expect(page.statusCode, page.body).toBe(200);
     expect(page.body).toContain('<section id="merge-ruleset">');
 
@@ -537,7 +537,7 @@ describe('the two-app callers (issue #482)', () => {
     const r = await w.api('/api/control/zones/demo/github');
     expect(r.statusCode, r.body).toBe(200);
     expect(r.json()).not.toHaveProperty('mergeRuleset');
-    const page = await w.page('/zones/demo/github');
+    const page = await w.page('/projects/demo/github');
     expect(page.statusCode).toBe(200);
     expect(page.body).not.toContain('<section id="merge-ruleset">');
   });

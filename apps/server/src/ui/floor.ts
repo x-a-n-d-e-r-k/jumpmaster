@@ -2,6 +2,7 @@ import { isNotice } from '../briefings.js';
 import type { Pending } from '../config/confirm.js';
 import { ACTIVE_DROP_STATES } from '../db/repo.js';
 import { STICK_LIVE_MS } from '../doctor/checks.js';
+import { projectHref } from './links.js';
 import type { HomeState, StickLine } from './pages.js';
 import { type ZoneRef, zoneName } from './zone-name.js';
 
@@ -220,7 +221,7 @@ function zoneCard(z: ZoneFloor, zone: ZoneRef, zones: readonly ZoneRef[]): strin
   const c = z.counts;
   const id = zone.id;
   const heading =
-    `<h2><a href="${esc(`/zones/${encodeURIComponent(id)}`)}">${zoneName(zone, zones)}</a>` +
+    `<h2><a href="${esc(projectHref(id))}">${zoneName(zone, zones)}</a>` +
     ` <span class="badge ${MODE_TONE[z.mode] ?? ''}">${esc(z.mode)}</span>` +
     ` <span class="card-state">${z.state === 'held' ? (HELD_LABEL[z.mode] ?? STATE_LABEL.held) : STATE_LABEL[z.state]}</span></h2>`;
   const allZero =
