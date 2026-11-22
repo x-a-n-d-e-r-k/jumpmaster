@@ -35,7 +35,13 @@ import {
 } from '../forge/github.js';
 import { log } from '../log.js';
 import { type ForgePair, type OpResult, opKeys } from '../outbox.js';
-import type { CarryFacts, MergeReservation, Snapshot } from './decide.js';
+import {
+  type CarryFacts,
+  codeScanningKey,
+  type Feedback,
+  type MergeReservation,
+  type Snapshot,
+} from './decide.js';
 import {
   administrationOf,
   branchProtectionProblems,
@@ -612,6 +618,45 @@ async function codeScanningAlerts(
 }
 
 /**
+ * The code-scanning key of the item's latest succeeded heal whose stored feedback came from `ci`
+ * and whose input carries `codeScanning` (#653), read as `lastHealFeedback` reads heal drops. Only
+ * heals created at or after the item's latest applied `retry_item` ruling count, so Command's
+ * Retry gets one more heal. null when there is none.
+ */
+export function lastCiHealKey(db: Db, item: Pick<WorkItem, 'id' | 'dropZoneId'>): string[] | null {
+  const retry = db
+    .prepare(
+      `SELECT MAX(r.applied_at) AS appliedAt FROM rulings r JOIN briefings b ON b.id = r.briefing_id
+       WHERE r.zone_id = ? AND b.subject = ? AND r.choice_effect = 'retry_item'
+         AND r.applied_at IS NOT NULL`,
+    )
+    .get(item.dropZoneId, `item:${item.id}`) as { appliedAt: string | null } | undefined;
+  const rows = db
+    .prepare(
+      `SELECT input_json AS inputJson FROM drops
+       WHERE work_item_id = ? AND role = 'heal' AND state = 'succeeded' AND created_at >= ?
+       ORDER BY created_at DESC, rowid DESC`,
+    )
+    .all(item.id, retry?.appliedAt ?? '') as { inputJson: string | null }[];
+  for (const row of rows) {
+    let input: { feedback?: Feedback | null; codeScanning?: unknown } | null;
+    try {
+      input = JSON.parse(row.inputJson ?? 'null') as typeof input;
+    } catch {
+      continue;
+    }
+    if (input?.feedback?.source !== 'ci' || !Array.isArray(input.codeScanning)) continue;
+    const annotations = (input.codeScanning as { annotations?: unknown }[]).flatMap((c) =>
+      Array.isArray(c?.annotations) ? (c.annotations as CheckAnnotation[]) : [],
+    );
+    return codeScanningKey(
+      annotations.filter((a) => typeof a?.title === 'string' && typeof a.path === 'string'),
+    );
+  }
+  return null;
+}
+
+/**
  * Assembles everything `decide` reads for one pr_open item. Forge facts are read fresh; failed
  * reads fail closed (see `Snapshot` field docs). Upserts `pull_requests` and maintains
  * `work_items.waiting_since`.
@@ -784,6 +829,7 @@ export async function buildSnapshot(
     compare,
     checks,
     codeScanning,
+    lastCiHealKey: lastCiHealKey(db, item),
     forgeUnavailable,
     forgeDenied,
     requiredChecks: pass.requiredChecks,

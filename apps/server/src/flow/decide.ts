@@ -4,6 +4,7 @@ import {
   type ChangeDigest,
   type CheckAnnotation,
   type ChecksFacts,
+  CODE_SCANNING_APP,
   type CompareFacts,
   type ForgeReview,
   type PullFacts,
@@ -34,6 +35,12 @@ export interface Snapshot {
    * `checks.state` is `failure`; a check whose read failed has an empty list. [] when none.
    */
   codeScanning: CodeScanning[];
+  /**
+   * The code-scanning key (`codeScanningKey`) of the item's latest succeeded `ci` heal whose
+   * input carried code-scanning alerts, counting only heals created at or after the item's latest
+   * applied `retry_item` ruling (#653). null when there is none.
+   */
+  lastCiHealKey: string[] | null;
   /** Name of the first fresh read that threw (other than getPull); null when all reads succeeded. */
   forgeUnavailable: string | null;
   /** The first read refused with 403: a token permission problem, not a transient one. */
@@ -130,6 +137,44 @@ export type Feedback = { source: 'human' | 'review' | 'ci' | 'crew'; text: strin
 
 /** One failed code-scanning check and its alerts' annotations (#652). */
 export type CodeScanning = { check: string; annotations: CheckAnnotation[] };
+
+/** `title|path` of an alert: what a code-scanning key is made of. */
+const alertKey = (a: CheckAnnotation): string => `${a.title}|${a.path}`;
+
+/** A set of code-scanning annotations as a key: their `title|path`, de-duplicated and sorted. */
+export function codeScanningKey(annotations: readonly CheckAnnotation[]): string[] {
+  return [...new Set(annotations.map(alertKey))].sort();
+}
+
+/**
+ * A park when a `ci` heal already saw exactly these code-scanning alerts (#653): every failed
+ * check is code scanning, each with alerts, and their key is the last counted `ci` heal's. Another
+ * heal would chase an alert the design may accept; Command decides instead. null otherwise.
+ */
+function codeScanningLoop(s: Snapshot): Action | null {
+  const failed = s.checks.failed;
+  if (s.lastCiHealKey === null || failed.length === 0) return null;
+  const annotations: CheckAnnotation[] = [];
+  for (const f of failed) {
+    if (f.app !== CODE_SCANNING_APP) return null;
+    const found = s.codeScanning.find((c) => c.check === f.name);
+    if (!found || found.annotations.length === 0) return null;
+    annotations.push(...found.annotations);
+  }
+  const key = codeScanningKey(annotations);
+  const last = s.lastCiHealKey;
+  if (key.length !== last.length || key.some((k, i) => k !== last[i])) return null;
+  const first = annotations.toSorted(
+    (a, b) =>
+      (alertKey(a) < alertKey(b) ? -1 : alertKey(a) > alertKey(b) ? 1 : 0) ||
+      a.startLine - b.startLine,
+  )[0];
+  if (!first) return null;
+  return {
+    kind: 'park',
+    reason: `code scanning still flags ${first.title} at ${first.path}:${first.startLine} after a heal: fix it with a Retry note, or dismiss the alert in GitHub and re-run the CodeQL check`,
+  };
+}
 
 export type Action =
   | { kind: 'wait'; on: 'drop' | 'ci' | 'forge' | 'outbox' | 'merge-reservation' }
@@ -408,6 +453,8 @@ export function decide(s: Snapshot): Action {
         reason: `CI did not run to completion on ${head.slice(0, 7)}: ${list}; rerun the jobs, then Retry`,
       };
     }
+    const loop = codeScanningLoop(s);
+    if (loop) return loop;
     const lines = failed.map((f) => `\n- ${f.name}: ${f.conclusion}`).join('');
     return {
       kind: 'enqueue',
