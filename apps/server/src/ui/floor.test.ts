@@ -556,7 +556,7 @@ describe('the dashboard', () => {
   test('a working card shows zero Working counts as 0', () => {
     const html = renderHome(home({ zones: [zone('A')], drops: [dr('A', 'running')] }));
     const card = html.slice(html.indexOf('data-zone="A"'));
-    expect(card).toContain('href="/work?zone=A&amp;state=ready"><b>0</b><span>Queued</span>');
+    expect(card).toContain('href="/projects/A/work?state=ready"><b>0</b><span>Queued</span>');
   });
 
   test('a merge count that failed to load shows "–", never 0', () => {
@@ -577,8 +577,8 @@ describe('the dashboard', () => {
   test('zone links carry the zone id URL-encoded', () => {
     const B = zone('a b');
     const html = renderHome(home({ zones: [zone('A'), B], items: [wi('a b', 'parked')] }));
-    expect(listHref('/work', 'a b', 'parked')).toBe('/work?zone=a%20b&state=parked');
-    expect(html).toContain('<a href="/work?zone=a%20b&amp;state=parked">1 parked</a>');
+    expect(listHref('/work', 'a b', 'parked')).toBe('/projects/a%20b/work?state=parked');
+    expect(html).toContain('<a href="/projects/a%20b/work?state=parked">1 parked</a>');
     expect(html).toContain('href="/projects/a%20b"');
     expect(html).toContain('href="/drops?zone=a%20b&amp;state=active&amp;kind=all"');
     expect(html).toMatch(/data-tile="running" href="\/drops\?[^"]*kind=all"/);

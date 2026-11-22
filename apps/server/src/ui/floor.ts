@@ -176,6 +176,9 @@ export function floorCounts(
  * every kind, so the list matches the count that links to it, crew drops included (#497).
  */
 export function listHref(path: string, zone: string | undefined, state?: string): string {
+  // A project's work is its Work tab (#619), not the install-wide list filtered to it.
+  if (path === '/work' && zone !== undefined)
+    return `${projectHref(zone, 'work')}${state === undefined ? '' : `?state=${encodeURIComponent(state)}`}`;
   const q: string[] = [];
   if (zone !== undefined) q.push(`zone=${encodeURIComponent(zone)}`);
   if (state !== undefined) q.push(`state=${encodeURIComponent(state)}`);

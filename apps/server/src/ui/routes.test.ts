@@ -691,27 +691,26 @@ describe('/work and /drops list pages (#119)', () => {
       createdAt,
     });
 
-  test('?zone= keeps that zone’s rows only, and names the zone by repository', async () => {
+  test('a project’s work keeps that zone’s rows only, and names the zone by repository', async () => {
     const { h, item } = await lists();
     item('main', 'parked', 'main parked one');
     item('main', 'parked', 'main parked two');
     item('ref', 'parked', 'ref parked');
-    const res = await h.view('/work?zone=main&state=parked');
+    const res = await h.view('/projects/main/work?state=parked');
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('main parked one');
     expect(res.body).toContain('main parked two');
     expect(res.body).not.toContain('ref parked');
     expect(res.body).toContain('Parked work in octo/demo');
     expect(res.body).not.toContain('zone main');
-    // Filter links name each zone by its repository and keep the state.
-    expect(res.body).toContain('href="/work?zone=ref&amp;state=parked">octo/ref</a>');
-    expect(res.body).toMatch(/href="\/work\?state=parked"[^>]*>All projects<\/a>/);
     expect(res.body).toMatch(
-      /<a href="\/work\?zone=main&amp;state=parked" aria-current="page">octo\/demo<\/a>/,
+      /<a href="\/projects\/main\/work\?state=parked" aria-current="page">Parked<\/a>/,
     );
-    expect(res.body).toMatch(
-      /<a href="\/work\?zone=main&amp;state=parked" aria-current="page">Parked<\/a>/,
-    );
+    // /work's project filter names each zone by its repository, keeps the state and goes to the
+    // project's own list (#619).
+    const all = (await h.view('/work?state=parked')).body;
+    expect(all).toContain('href="/projects/ref/work?state=parked">octo/ref</a>');
+    expect(all).toMatch(/href="\/work\?state=parked"[^>]*>All projects<\/a>/);
   });
 
   test('?state=parked drops a ready row; the default shows everything but done', async () => {
@@ -743,7 +742,7 @@ describe('/work and /drops list pages (#119)', () => {
   test('no matching rows: the empty line, and no table', async () => {
     const { h, item } = await lists();
     item('ref', 'parked');
-    const work = (await h.view('/work?zone=main&state=parked')).body;
+    const work = (await h.view('/projects/main/work?state=parked')).body;
     expect(work).toContain('No parked work in octo/demo.');
     expect(work).not.toContain('<table');
     const drops = (await h.view('/drops?zone=ref')).body;
@@ -853,7 +852,7 @@ describe('/work and /drops list pages (#119)', () => {
     });
   });
 
-  describe('/work/:zone/:issue (#498)', () => {
+  describe('/projects/:zone/work/:issue (#498, #619)', () => {
     const five = (h: Awaited<ReturnType<typeof harness>>, zoneId: string) =>
       upsertWorkItem(
         h.db,
@@ -912,7 +911,7 @@ describe('/work and /drops list pages (#119)', () => {
       });
       updateDrop(h.db, 'impl-bad-0000', { resultJson: gates(1) });
       updateDrop(h.db, 'impl-ok-0000', { resultJson: gates(0) });
-      const res = await h.view('/work/main/5');
+      const res = await h.view('/projects/main/work/5');
       expect(res.statusCode).toBe(200);
       const body = res.body;
       const rows = body.match(/<tr class="attempt">.*?<\/tr>/g) ?? [];
@@ -930,7 +929,7 @@ describe('/work and /drops list pages (#119)', () => {
       expect(rows[2]).toContain('#42');
       // Breadcrumb and the drop-list link.
       expect(body).toContain('<a href="/work">Work</a>');
-      expect(body).toContain('<a href="/work?zone=main">octo/demo</a>');
+      expect(body).toContain('<a href="/projects/main/work">octo/demo</a>');
       expect(body).toContain('href="/drops?zone=main&amp;issue=5">All drops for this issue</a>');
     });
 
@@ -940,22 +939,22 @@ describe('/work and /drops list pages (#119)', () => {
       const b = five(h, 'ref');
       drop(h, 'main-five-1', 'failed', 'main', '2026-01-01T00:00:00.000Z', a.id);
       drop(h, 'ref-five-11', 'failed', 'ref', '2026-01-01T00:00:00.000Z', b.id);
-      const main = (await h.view('/work/main/5')).body;
+      const main = (await h.view('/projects/main/work/5')).body;
       expect(main).toContain('href="/drops/main-five-1"');
       expect(main).not.toContain('ref-five');
       expect(main).toContain('main five');
-      const ref = (await h.view('/work/ref/5')).body;
+      const ref = (await h.view('/projects/ref/work/5')).body;
       expect(ref).toContain('href="/drops/ref-five-11"');
       expect(ref).not.toContain('main-five');
     });
 
     test.each([
-      '/work/main/0',
-      '/work/main/x',
-      '/work/main/05',
-      '/work/main/1.5',
-      '/work/nope/5',
-      '/work/main/999',
+      '/projects/main/work/0',
+      '/projects/main/work/x',
+      '/projects/main/work/05',
+      '/projects/main/work/1.5',
+      '/projects/nope/work/5',
+      '/projects/main/work/999',
     ])('%s is 404', async (url) => {
       const { h } = await lists();
       five(h, 'main');
@@ -1046,7 +1045,6 @@ describe('/work and /drops list pages (#119)', () => {
   });
 
   test.each([
-    ['/work?zone=nope', 'no such zone'],
     ['/drops?zone=nope', 'no such zone'],
     ['/work?state=bogus', 'no such state'],
     ['/drops?state=bogus', 'no such state'],
@@ -1101,7 +1099,7 @@ describe('/work and /drops list pages (#119)', () => {
     expect(tile('parked', 'class="totals"')).toEqual({ href: '/work?state=parked', n: '2' });
     expect(tile('merged', 'class="totals"')).toEqual({ href: '/work?state=done', n: '1' });
     expect(tile('merged', 'data-zone="main"')).toEqual({
-      href: '/work?zone=main&amp;state=done',
+      href: '/projects/main/work?state=done',
       n: '1',
     });
     expect(tile('running', 'data-zone="ref"')).toEqual({
@@ -1109,7 +1107,7 @@ describe('/work and /drops list pages (#119)', () => {
       n: '1',
     });
     // The failed merge counts as blocked on main's card; main comes first, then ref.
-    expect(home).toContain('<a href="/work?zone=main&amp;state=parked">2 parked</a>');
+    expect(home).toContain('<a href="/projects/main/work?state=parked">2 parked</a>');
     expect(home).toContain('1 forge write unknown or failed');
     expect(home.indexOf('data-zone="main"')).toBeLessThan(home.indexOf('data-zone="ref"'));
     expect(home).toContain('data-state="blocked" data-zone="main"');
@@ -1592,7 +1590,7 @@ describe('project pages live under /projects (issue #615)', () => {
     await h.reconcile();
     return h;
   }
-  const PROJECT_PAGES = ['', '/setup', '/goals', '/intake', '/issues/new', '/flags'];
+  const PROJECT_PAGES = ['', '/setup', '/goals', '/intake', '/issues/new', '/flags', '/work'];
 
   test.each(PROJECT_PAGES)(
     '/projects/<id>%s is 200 for a known zone and 404 for an unknown one',
@@ -1636,6 +1634,7 @@ describe('project pages live under /projects (issue #615)', () => {
       '/projects/jm',
       '/projects/jm/goals',
       '/projects/jm/setup',
+      '/projects/jm/work',
       '/work',
       '/drops',
       '/doctor',
@@ -1650,6 +1649,9 @@ describe('project pages live under /projects (issue #615)', () => {
         expect(href.startsWith('/zones'), `${url} links ${href}`).toBe(false);
         // The GitHub guide moved into Setup (#618): links go to its section, not the old page.
         expect(href, `${url} links ${href}`).not.toMatch(/^\/projects\/[^/]+\/github\b/);
+        // A project's work moved under it (#619): no link to /work/<zone>/… or /work?zone=.
+        expect(href, `${url} links ${href}`).not.toMatch(/^\/work\/[^/?#]/);
+        expect(href, `${url} links ${href}`).not.toMatch(/^\/work\?(.*&(amp;)?)?zone=/);
         seen.add(href.endsWith('#github') ? href : href.replace(/#.*$/, ''));
       }
       // Nor any page path in a script or a form target: only the API keeps /zones.
@@ -1666,7 +1668,108 @@ describe('project pages live under /projects (issue #615)', () => {
       '/projects/jm/flags',
       '/projects/jm/setup',
       '/projects/ref/flags',
+      '/projects/jm/work',
     ])
       expect(seen, href).toContain(href);
+    // Non-vacuous for work items: a rendered page linked one, under its project.
+    expect([...seen].some((x) => /^\/projects\/jm\/work\/[1-9]\d*$/.test(x))).toBe(true);
+  });
+});
+
+describe("a project's Work tab (#619)", () => {
+  async function seeded() {
+    const h = await harness({ zone: { id: 'jm' }, extraZones: [{ id: 'ref', repo: 'octo/ref' }] });
+    for (const z of [h.zone, { id: 'ref', repo: 'octo/ref' }])
+      upsertDropZone(h.db, { id: z.id, repo: z.repo, defaultBranch: 'main', configJson: '{}' });
+    const item = (zoneId: string, n: number, state: WorkItemState, title: string) => {
+      const w = upsertWorkItem(
+        h.db,
+        {
+          dropZoneId: zoneId,
+          issueNumber: n,
+          title,
+          body: 'b',
+          author: 'human',
+          priority: 2,
+          isFix: false,
+          issueCreatedAt: '2026-01-01T00:00:00.000Z',
+        },
+        h.now(),
+      );
+      if (state !== 'ready') setWorkItemState(h.db, w.id, state, undefined, h.now());
+      return w;
+    };
+    item('jm', 487, 'ready', 'jm ready one');
+    item('jm', 488, 'parked', 'jm parked one');
+    item('jm', 489, 'done', 'jm done one');
+    item('ref', 487, 'ready', 'ref ready one');
+    return h;
+  }
+
+  test('/projects/jm/work lists only jm’s items, with the tab bar (Work current) and New issue', async () => {
+    const h = await seeded();
+    const res = await h.view('/projects/jm/work');
+    expect(res.statusCode).toBe(200);
+    const body = res.body;
+    expect(body).toContain('jm ready one');
+    expect(body).toContain('jm parked one');
+    expect(body).not.toContain('jm done one');
+    expect(body).not.toContain('ref ready one');
+    expect(body).toContain('<nav class="settings-tabs project-tabs" aria-label="Project tabs">');
+    expect(body).toContain('<a href="/projects/jm/work" aria-current="page">Work</a>');
+    expect(body).toContain('href="/projects/jm/issues/new">New issue</a>');
+    // New issue sits at the top: in the header, before the list.
+    expect(body.indexOf('>New issue</a>')).toBeLessThan(body.indexOf('jm ready one'));
+    // The same state filters as /work, on the project's own path; no project filter.
+    expect(body).toContain('<a href="/projects/jm/work" aria-current="page">Active</a>');
+    for (const s of ['ready', 'in_flight', 'pr_open', 'parked', 'done'])
+      expect(body).toContain(`href="/projects/jm/work?state=${s}"`);
+    expect(body).not.toContain('aria-label="Project"><p>');
+    expect(body).toContain('<a href="/projects/jm/work/487">jm ready one</a>');
+  });
+
+  test('/projects/jm/work?state=parked filters', async () => {
+    const h = await seeded();
+    const res = await h.view('/projects/jm/work?state=parked');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('jm parked one');
+    expect(res.body).not.toContain('jm ready one');
+    expect(res.body).toContain(
+      '<a href="/projects/jm/work?state=parked" aria-current="page">Parked</a>',
+    );
+    const done = (await h.view('/projects/jm/work?state=done')).body;
+    expect(done).toContain('jm done one');
+    expect(done).not.toContain('jm parked one');
+  });
+
+  test('/projects/jm/work/487 renders the item with the project header and tab bar', async () => {
+    const h = await seeded();
+    const res = await h.view('/projects/jm/work/487');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('jm ready one');
+    expect(res.body).not.toContain('ref ready one');
+    expect(res.body).toContain('<header class="project-header">');
+    expect(res.body).toContain('<a href="/projects/jm/work" aria-current="page">Work</a>');
+    expect(res.body).toContain('<h3>Attempts</h3>');
+  });
+
+  test.each([
+    '/projects/nope/work',
+    '/projects/nope/work/487',
+    '/projects/jm/work/999',
+    '/projects/jm/work/0',
+    '/projects/jm/work/x',
+    '/projects/jm/work?state=bogus',
+  ])('%s is 404', async (url) => {
+    const h = await seeded();
+    expect((await h.view(url)).statusCode).toBe(404);
+  });
+
+  test('/work’s rows and project filters link straight to the project pages', async () => {
+    const h = await seeded();
+    const body = (await h.view('/work')).body;
+    expect(body).toContain('<a href="/projects/jm/work/487">jm ready one</a>');
+    expect(body).toContain('<a href="/projects/ref/work/487">ref ready one</a>');
+    expect(body).toContain('href="/projects/ref/work">octo/ref</a>');
   });
 });

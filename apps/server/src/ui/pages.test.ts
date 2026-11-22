@@ -172,7 +172,7 @@ describe('renderHome', () => {
     );
     expect(html).toContain('href="https://github.com/o/r/issues/12"');
     expect(html).toMatch(/<a href="https:\/\/github\.com\/o\/r\/issues\/12"[^>]*>#12<\/a>/);
-    expect(html).toContain('<a href="/work/main/12">fix &lt;b&gt;it&lt;/b&gt;</a>');
+    expect(html).toContain('<a href="/projects/main/work/12">fix &lt;b&gt;it&lt;/b&gt;</a>');
     expect(html).not.toContain('/drops?zone=main');
     expect(html).not.toContain('<b>');
   });
@@ -1446,12 +1446,14 @@ describe('renderWorkList and renderDropList (#119)', () => {
   test('filter links keep the other parameter and mark the current choice', () => {
     const html = renderWorkList({ zones, zone: 'ref', state: 'ready', items: [] });
     expect(html).toContain(
-      '<a href="/work?zone=ref&amp;state=ready" aria-current="page">octo/ref</a>',
+      '<a href="/projects/ref/work?state=ready" aria-current="page">octo/ref</a>',
     );
-    expect(html).toContain('<a href="/work?zone=main&amp;state=ready">octo/demo</a>');
+    // A project's work is its Work tab (#619): /work links there directly, never via ?zone=.
+    expect(html).toContain('<a href="/projects/main/work?state=ready">octo/demo</a>');
     expect(html).toContain('<a href="/work?state=ready">All projects</a>');
-    expect(html).toContain('<a href="/work?zone=ref&amp;state=parked">Parked</a>');
-    expect(html).toContain('<a href="/work?zone=ref">Active</a>');
+    expect(html).toContain('<a href="/projects/ref/work?state=parked">Parked</a>');
+    expect(html).toContain('<a href="/projects/ref/work">Active</a>');
+    expect(html).not.toContain('zone=');
     const drops = renderDropList({ zones, state: 'failed', drops: [], items: [], limited: false });
     expect(drops).toContain('<a href="/drops?state=failed" aria-current="page">All projects</a>');
     expect(drops).toContain('<a href="/drops?zone=main&amp;state=failed">octo/demo</a>');
@@ -2468,7 +2470,7 @@ describe('the drop page header and system-event groups (#499)', () => {
     expect(html).toContain('<code>abcdef12-3456-7890-abcd-ef1234567890</code>');
     const s = summaryOf(html);
     expect(s).toContain('<a href="/projects/jm">octo/jm</a>');
-    expect(s).toContain('<a href="/work/jm/487">#487 Header</a>');
+    expect(s).toContain('<a href="/projects/jm/work/487">#487 Header</a>');
     expect(s).toContain('kidney');
     expect(s).toContain('https://github.com/octo/jm/pull/12');
     expect(s).toContain('<code>0123456</code>');
@@ -2480,7 +2482,7 @@ describe('the drop page header and system-event groups (#499)', () => {
     );
     expect(html.indexOf('<dl class="drop-summary">')).toBeLessThan(html.indexOf('<h3>Transcript'));
     expect(html).toContain(
-      '<a href="/work">Work</a> › <a href="/work?zone=jm">octo/jm</a> › <a href="/work/jm/487">#487</a> › abcdef12',
+      '<a href="/work">Work</a> › <a href="/projects/jm/work">octo/jm</a> › <a href="/projects/jm/work/487">#487</a> › abcdef12',
     );
     expect(html).not.toContain('href="/">Back');
   });
