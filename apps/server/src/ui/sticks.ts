@@ -9,6 +9,10 @@ import { TS_AUTHKEY_PLACEHOLDER } from '../install/stick-sh.js';
 import { PUBLIC_URL_NEEDED, PUBLIC_URL_PAGE } from '../reach.js';
 import { type StickUpgradeView, upgradeWords } from '../stick-upgrade-words.js';
 import { SYSTEM_STICKS_ADD_HREF, SYSTEM_STICKS_HREF } from './links.js';
+
+/** The Sticks area's Images tab (#624). */
+export const SYSTEM_STICKS_IMAGES_HREF = `${SYSTEM_STICKS_HREF}/images`;
+
 import { escapeHtml, page, type StickLine, systemNav } from './pages.js';
 import { type ZoneRef, zoneNamer } from './zone-name.js';
 
@@ -119,14 +123,16 @@ export function upgradeLine(st: Pick<StickRow, 'id' | 'name' | 'upgrade'>): stri
 /**
  * Every write on this page: the passphrase first when it was asked for (sudo), then the request;
  * a refusal that needs sudo shows the passphrase field. The slots, Cancel, Remove, Upgrade and Retry controls
- * are found by delegation, so rows the poll replaces keep working.
+ * are found by delegation, so rows the poll replaces keep working. Remove opens its row's
+ * confirmation in the page (#624), and only its confirm button posts; the poll leaves the table
+ * alone while a confirmation is open.
  */
 const STICKS_SCRIPT = `<script>
 async function jmSticks(path,body){const p=document.getElementById('sticks-sudo');if(p&&p.value){const s=await jmFetch('/api/control/sudo',{passphrase:p.value});p.value='';if(!s.ok){p.closest('p').hidden=false;p.focus();return {ok:false,error:'The passphrase was not accepted.'};}}const r=await jmFetch(path,body);if(r.ok)return {ok:true,r};const j=await r.json().catch(()=>({}));if(r.status===403&&j.sudo&&p){p.closest('p').hidden=false;p.focus();return {ok:false,error:'Enter your passphrase, then press again.'};}return {ok:false,error:j.error??String(r.status),settings:j.settings};}
 document.addEventListener('submit',async(e)=>{const f=e.target.closest('form[data-slots]');if(!f)return;e.preventDefault();const out=f.querySelector('output');const b=f.querySelector('button');b.disabled=true;out.textContent='';try{const r=await jmFetch(f.dataset.slots,{slots:Number(f.querySelector('input').value)});const j=await r.json().catch(()=>({}));out.textContent=r.ok?'Saved: '+j.slots+' at once, from its next lease.':'Refused: '+(j.error??r.status);}catch(err){out.textContent='Refused: '+err;}finally{b.disabled=false;}});
-document.addEventListener('click',async(e)=>{const b=e.target.closest('button[data-cancel],button[data-remove],button[data-upgrade]');if(!b)return;if(b.dataset.remove&&!confirm(b.dataset.ask))return;const out=b.parentElement.querySelector('output');b.disabled=true;const a=await jmSticks(b.dataset.cancel||b.dataset.remove||b.dataset.upgrade,{});b.disabled=false;if(a.ok)location.reload();else if(out)out.textContent='Refused: '+a.error;});
+document.addEventListener('click',async(e)=>{const b=e.target.closest('button[data-cancel],button[data-remove],button[data-confirm],button[data-keep],button[data-upgrade]');if(!b)return;if(b.dataset.remove||'keep' in b.dataset){const c=b.closest('td').querySelector('.confirm');c.hidden='keep' in b.dataset;if(!c.hidden)c.querySelector('button[data-confirm]').focus();return;}const out=(b.closest('td')||b.parentElement).querySelector('output');b.disabled=true;const a=await jmSticks(b.dataset.cancel||b.dataset.confirm||b.dataset.upgrade,{});b.disabled=false;if(a.ok)location.reload();else if(out)out.textContent='Refused: '+a.error;});
 const add=document.getElementById('add-stick');if(add)add.addEventListener('submit',async(e)=>{e.preventDefault();const out=document.getElementById('add-out');out.textContent='';const n=add.querySelector('[name=slots]').value.trim();const a=await jmSticks('${SYSTEM_STICKS_ADD_HREF}',{name:add.querySelector('[name=name]').value.trim(),slots:n===''?'auto':Number(n),kind:(add.querySelector('[name=kind]:checked')||{value:'line'}).value});if(a.ok){const html=await a.r.text();document.open();document.write(html);document.close();return;}out.textContent='Refused: '+a.error;if(a.settings){const l=document.createElement('a');l.href=a.settings;l.textContent=' Other machines';out.append(l);}});
-function jmPoll(){if(!document.querySelector('#sticks-live [data-poll]'))return;setTimeout(async()=>{try{const r=await fetch(location.pathname,{headers:{accept:'text/html'}});if(r.ok){const d=new DOMParser().parseFromString(await r.text(),'text/html');const next=d.getElementById('sticks-live');const cur=document.getElementById('sticks-live');if(next&&cur)cur.replaceWith(next);}}catch{}jmPoll();},3000);}
+function jmPoll(){if(!document.querySelector('#sticks-live [data-poll]'))return;setTimeout(async()=>{try{if(!document.querySelector('#sticks-live .confirm:not([hidden])')){const r=await fetch(location.pathname,{headers:{accept:'text/html'}});if(r.ok){const d=new DOMParser().parseFromString(await r.text(),'text/html');const next=d.getElementById('sticks-live');const cur=document.getElementById('sticks-live');if(next&&cur)cur.replaceWith(next);}}}catch{}jmPoll();},3000);}
 jmPoll();
 </script>`;
 
@@ -136,14 +142,11 @@ export function renderSticks(s: {
   now: Date;
   /** `server.publicUrl` as an origin; absent, nothing that needs it is offered (issue #139). */
   publicUrl?: string;
-  /** The release images the server mirrors for sticks (issue #140); absent, no card. */
-  images?: MirrorStatus;
   /** Invites waiting for their stick to check in (issue #138). */
   pending?: PendingInviteRow[];
 }): string {
   const name = zoneNamer(s.zones);
   const reach = reachLine(s.publicUrl);
-  const images = s.images ? imagesCard(s.images) : '';
   const pending = (s.pending ?? [])
     .map((i) => {
       const url = `/api/control/sticks/invites/${encodeURIComponent(i.id)}/cancel`;
@@ -184,7 +187,9 @@ export function renderSticks(s: {
           : '');
       const removeUrl = `/api/control/sticks/${encodeURIComponent(st.id)}/remove`;
       const ask = `Remove the stick ${st.name}? Its token is revoked at once; drops it leased go back to the queue. Run the installer with --uninstall on that machine to remove its container. This stick keeps any credentials it was already sent. Rotate the Claude and GitHub tokens if you don't trust it. A stick that enrolled with the join token can enroll again until that token is changed.`;
-      const remove = `<button class="danger" data-remove="${escapeHtml(removeUrl)}" data-ask="${escapeHtml(ask)}">Remove</button> <output aria-live="polite"></output>`;
+      const remove =
+        `<button class="danger" data-remove="${escapeHtml(removeUrl)}">Remove</button>` +
+        `<div class="confirm" role="alertdialog" hidden><p>${escapeHtml(ask)}</p><button type="button" class="danger" data-confirm="${escapeHtml(removeUrl)}">Remove ${escapeHtml(st.name)}</button> <button type="button" data-keep>Keep it</button></div> <output aria-live="polite"></output>`;
       // An upgrading stick is watched until it settles.
       const poll = !stage.live || st.upgrade?.status === 'upgrading';
       return `<tr${poll ? ' data-poll' : ''} data-stick="${escapeHtml(st.id)}"><td>${escapeHtml(st.name)}</td><td>${status}</td><td>${escapeHtml(st.version ?? '-')}${upgradeLine(st)}</td><td>${escapeHtml(st.capabilities.join(', ') || '-')}</td><td>${runs}</td><td>${troopers}</td><td>${remove}</td></tr>`;
@@ -195,8 +200,8 @@ export function renderSticks(s: {
       ? '<p class="empty">No stick has enrolled. Add one below, or see <code>docs/runbooks/install.md</code>.</p>'
       : `<table><tr><th>Stick</th><th>Status</th><th>Version</th><th>Capabilities</th><th>Zones</th><th>Troopers</th><th></th></tr>${rows}</table>`;
   return page(
-    `${systemNav('sticks')}<h2>Sticks</h2><p>How many troopers each stick runs at once. A change applies on the stick's next lease, with no restart; lowering it stops nothing that runs. <code>jumpmaster ctl sticks</code> does the same.</p>${reach}` +
-      `<div id="sticks-live">${table}${waiting}</div>${addForm(s.publicUrl)}${STICKS_SCRIPT}${images}`,
+    `${systemNav('sticks')}${sticksTabs('sticks')}<h2>Sticks</h2><p>How many troopers each stick runs at once. A change applies on the stick's next lease, with no restart; lowering it stops nothing that runs. <code>jumpmaster ctl sticks</code> does the same.</p>${reach}` +
+      `<div id="sticks-live">${table}${waiting}</div>${addForm(s.publicUrl)}${STICKS_SCRIPT}`,
     { title: 'Sticks' },
   );
 }
@@ -243,20 +248,61 @@ export function renderInviteResult(
 
 const mib = (bytes: number): string => `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 
-/** The images card: each image the mirror holds for sticks, its platforms, size and state. */
-function imagesCard(m: MirrorStatus): string {
-  const intro =
-    '<p>The release images this server keeps for sticks, with their signatures: a stick fetches them from here and verifies each signature itself.</p>';
+/** The Sticks area's second-level tabs (#624): Sticks · Images, the current one marked. */
+export function sticksTabs(current: 'sticks' | 'images'): string {
+  const tab = (key: 'sticks' | 'images', href: string, label: string) =>
+    `<a href="${href}"${key === current ? ' aria-current="page"' : ''}>${label}</a>`;
+  return `<nav class="settings-tabs sticks-tabs" aria-label="Sticks tabs">${tab('sticks', SYSTEM_STICKS_HREF, 'Sticks')}${tab('images', SYSTEM_STICKS_IMAGES_HREF, 'Images')}</nav>`;
+}
+
+/** `sha256:` and the first 12 hex characters of a digest; anything else as it is. */
+export function shortDigest(digest: string): string {
+  const m = /^sha256:([0-9a-f]{12})[0-9a-f]*$/i.exec(digest);
+  return m ? `sha256:${m[1]}` : digest;
+}
+
+/** Copy puts a digest's full value on the clipboard. */
+const COPY_DIGEST_SCRIPT = `<script>document.addEventListener('click',async(e)=>{const b=e.target.closest('button[data-copy-digest]');if(!b)return;try{await navigator.clipboard.writeText(b.dataset.copyDigest);b.textContent='Copied';}catch{b.textContent='Copy failed';}});</script>`;
+
+function imageRow(i: MirrorStatus['images'][number]): string {
+  const state = i.state === 'failed' ? `failed: ${i.error ?? 'unknown'}` : i.state;
+  const d = escapeHtml(i.digest);
+  const digest = `<code title="${d}">${escapeHtml(shortDigest(i.digest))}</code> <button type="button" data-copy-digest="${d}">Copy</button>`;
+  return `<tr data-image="${escapeHtml(i.name)}"><td>${escapeHtml(i.name)}</td><td>${escapeHtml(i.platforms.join(', ') || '-')}</td><td>${i.size > 0 ? mib(i.size) : '-'}</td><td>${escapeHtml(state)}</td><td>${digest}</td></tr>`;
+}
+
+/** The images body: the current release's images first, then the previous one's still served. */
+function imagesBody(m: MirrorStatus | undefined): string {
+  if (!m) return '<p class="empty">This server mirrors no images for sticks.</p>';
   if (!m.lock && m.images.length === 0)
-    return `<h3>Images</h3><p class="empty">No image lock: this server runs from a checkout, so there is nothing to mirror.</p>`;
-  const rows = m.images
-    .map((i) => {
-      const state = i.state === 'failed' ? `failed: ${i.error ?? 'unknown'}` : i.state;
-      const when = i.current ? '' : ' (previous release)';
-      return `<tr data-image="${escapeHtml(i.name)}"><td>${escapeHtml(i.name)}</td><td>${escapeHtml(i.platforms.join(', ') || '-')}</td><td>${i.size > 0 ? mib(i.size) : '-'}</td><td>${escapeHtml(state + when)}</td><td><code>${escapeHtml(i.digest)}</code></td></tr>`;
-    })
-    .join('');
-  return `<h3>Images</h3>${intro}<table><tr><th>Image</th><th>Platforms</th><th>Size</th><th>State</th><th>Digest</th></tr>${rows}</table>`;
+    return '<p class="empty">No image lock: this server runs from a checkout, so there is nothing to mirror.</p>';
+  const head =
+    '<tr><th>Image</th><th>Platforms</th><th>Size</th><th>State</th><th>Digest</th></tr>';
+  const group = (title: string, rows: MirrorStatus['images']) =>
+    rows.length === 0
+      ? ''
+      : `<h3>${title}</h3><table>${head}${rows.map(imageRow).join('')}</table>`;
+  return (
+    group(
+      'Current',
+      m.images.filter((i) => i.current),
+    ) +
+    group(
+      'Previous',
+      m.images.filter((i) => !i.current),
+    )
+  );
+}
+
+/**
+ * The Images tab (#624): each image the mirror holds for sticks, by release, with its platforms,
+ * size, state and short digest (the full one in its title and its Copy button).
+ */
+export function renderStickImages(m: MirrorStatus | undefined): string {
+  return page(
+    `${systemNav('sticks')}${sticksTabs('images')}<h2>Images</h2><p>The release images this server keeps for sticks, with their signatures: a stick fetches them from here and verifies each signature itself.</p>${imagesBody(m)}${COPY_DIGEST_SCRIPT}`,
+    { title: 'Stick images' },
+  );
 }
 
 /**

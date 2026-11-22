@@ -129,7 +129,13 @@ import {
 import { registerRedirects } from './ui/redirects.js';
 import { claudeTokenDays, registerSettingsPages } from './ui/settings.js';
 import { registerSetupPages, wizardActive } from './ui/setup.js';
-import { renderInviteResult, renderSticks, type StickRow } from './ui/sticks.js';
+import {
+  renderInviteResult,
+  renderStickImages,
+  renderSticks,
+  type StickRow,
+  SYSTEM_STICKS_IMAGES_HREF,
+} from './ui/sticks.js';
 import { zoneTextNamer } from './ui/zone-name.js';
 import { projectHeaderFor, registerZonesPages } from './ui/zones.js';
 import { dispatchGate } from './usage.js';
@@ -169,7 +175,15 @@ function itemDetails(db: Db, items: readonly WorkItem[]): Map<number, ItemDetail
     details.set(i.id, {
       ...(pr ? { headSha: pr.headSha } : {}),
       ...gateAllowedOf(db, i.id, pr),
-      ...(v ? { verdict: { decision: v.decision, forced: v.forced, summary: v.summary } } : {}),
+      ...(v
+        ? {
+            verdict: {
+              decision: v.decision,
+              forced: v.forced,
+              summary: v.summary,
+            },
+          }
+        : {}),
       attempts: Object.fromEntries(ATTEMPT_KEYS.map((k) => [k, getAttempts(db, i.id, k).count])),
     });
   }
@@ -227,7 +241,9 @@ const FLOOR_DROP_LIMIT = 1000;
  */
 function floorMerges(db: Db, at: Date): { merges24h?: ReturnType<typeof listMergesSince> } {
   try {
-    return { merges24h: listMergesSince(db, new Date(at.getTime() - 24 * 3_600_000)) };
+    return {
+      merges24h: listMergesSince(db, new Date(at.getTime() - 24 * 3_600_000)),
+    };
   } catch {
     return {};
   }
@@ -291,7 +307,10 @@ function stickLine(s: Stick, config: Config): StickLine {
     capabilities: s.capabilities,
     imagePolicy: s.imagePolicy,
     cannotRun: config.dropZones
-      .map((z) => ({ zoneId: z.id, missing: missingFor(s, zoneRequirements(z, config)) }))
+      .map((z) => ({
+        zoneId: z.id,
+        missing: missingFor(s, zoneRequirements(z, config)),
+      }))
       .filter((c) => c.missing.length > 0),
   };
 }
@@ -306,7 +325,10 @@ function floorInputs(db: Db, config: Config, at: Date): FloorInputs {
     zones: config.dropZones,
     modes: Object.fromEntries(config.dropZones.map((z) => [z.id, getZoneMode(db, z.id, z.mode)])),
     items: config.dropZones.flatMap((z) => listWorkItems(db, z.id)),
-    drops: listDrops(db, { states: ACTIVE_DROP_STATES, limit: FLOOR_DROP_LIMIT }),
+    drops: listDrops(db, {
+      states: ACTIVE_DROP_STATES,
+      limit: FLOOR_DROP_LIMIT,
+    }),
     ...floorMerges(db, at),
     outbox: listOutbox(db, ['unknown', 'failed']),
     briefings: floor.listed,
@@ -584,10 +606,16 @@ export function createApp(
       zones: config.dropZones,
       now: deps.now(),
       ...(publicOrigin(config) ? { publicUrl: publicOrigin(config) as string } : {}),
-      ...(deps.images ? { images: deps.images.status() } : {}),
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
+
+  // The release images the server mirrors for sticks (issue #140), on their own tab (#624).
+  app.get(SYSTEM_STICKS_IMAGES_HREF, async (req, reply) =>
+    reply
+      .type('text/html; charset=utf-8')
+      .send(withCsrf(req, renderStickImages(deps.images?.status()))),
+  );
 
   // Add a stick (issue #138): a session with sudo makes a one-time code, shown once on the page
   // this answers with (never cached). A refusal is JSON for the form to show.
@@ -607,7 +635,11 @@ export function createApp(
         error: `${PUBLIC_URL_NEEDED} first: System, Server, Other machines (${PUBLIC_URL_PAGE})`,
         settings: PUBLIC_URL_PAGE,
       });
-    const body = (req.body ?? {}) as { name?: unknown; slots?: unknown; kind?: unknown };
+    const body = (req.body ?? {}) as {
+      name?: unknown;
+      slots?: unknown;
+      kind?: unknown;
+    };
     const request = {
       name: typeof body.name === 'string' ? body.name : '',
       slots: body.slots === 'auto' ? ('auto' as const) : Number(body.slots),
@@ -706,7 +738,10 @@ export function createApp(
           if (c.holdUntil) holds.set(`issue:${c.id}`, c.holdUntil);
         }
       }
-      const open = listBriefings(db, { state: 'open', ...(zone ? { zoneId: zone.id } : {}) });
+      const open = listBriefings(db, {
+        state: 'open',
+        ...(zone ? { zoneId: zone.id } : {}),
+      });
       const html = renderBriefings({
         open,
         ...briefingContext(db, config.dropZones, open),
@@ -843,7 +878,11 @@ export function createApp(
       const item = zone && typeof n === 'number' ? findWorkItem(db, zone.id, n) : undefined;
       if (!zone || !item) return reply.code(404).type('text/plain').send('not found');
       // SQLite's LIMIT -1 is no limit: the page shows every attempt.
-      const drops = listDrops(db, { zoneId: item.dropZoneId, workItemId: item.id, limit: -1 });
+      const drops = listDrops(db, {
+        zoneId: item.dropZoneId,
+        workItemId: item.id,
+        limit: -1,
+      });
       const detail = itemDetails(db, [item]).get(item.id);
       const html = renderWorkItem({
         item,
@@ -857,47 +896,51 @@ export function createApp(
     },
   );
 
-  app.get<{ Querystring: { zone?: string; state?: string; issue?: string; kind?: string } }>(
-    ACTIVITY_DROPS_HREF,
-    async (req, reply) => {
-      const { db } = deps;
-      const config = cfg(req);
-      const f = listFilter(req.query, config.dropZones, ['all', 'active', ...DROP_STATES] as const);
-      if ('refuse' in f) return reply.code(404).type('text/plain').send(f.refuse);
-      const issue = issueFilter(req.query.issue, f.zone);
-      if (typeof issue === 'object') return reply.code(404).type('text/plain').send(issue.refuse);
-      const kind = kindFilter(req.query.kind);
-      if (typeof kind === 'object') return reply.code(404).type('text/plain').send(kind.refuse);
-      const state = f.state ?? 'all';
-      const item =
-        issue === undefined || f.zone === undefined ? undefined : findWorkItem(db, f.zone, issue);
-      // An issue without a work item has no drops.
-      const found =
-        issue !== undefined && item === undefined
-          ? []
-          : listDrops(db, {
-              ...(f.zone !== undefined ? { zoneId: f.zone } : {}),
-              ...(item !== undefined ? { workItemId: item.id } : {}),
-              ...(kind === 'all' ? {} : { kind }),
-              ...(state === 'all'
-                ? {}
-                : { states: state === 'active' ? ACTIVE_DROP_STATES : [state] }),
-              limit: DROP_LIST_LIMIT + 1,
-            });
-      const html = renderDropList({
-        zones: config.dropZones,
-        ...(f.zone !== undefined ? { zone: f.zone } : {}),
-        ...(issue !== undefined ? { issue } : {}),
-        state,
-        kind,
-        drops: found.slice(0, DROP_LIST_LIMIT),
-        items: config.dropZones.flatMap((z) => listWorkItems(db, z.id)),
-        limited: found.length > DROP_LIST_LIMIT,
-        now: deps.now(),
-      });
-      return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
-    },
-  );
+  app.get<{
+    Querystring: {
+      zone?: string;
+      state?: string;
+      issue?: string;
+      kind?: string;
+    };
+  }>(ACTIVITY_DROPS_HREF, async (req, reply) => {
+    const { db } = deps;
+    const config = cfg(req);
+    const f = listFilter(req.query, config.dropZones, ['all', 'active', ...DROP_STATES] as const);
+    if ('refuse' in f) return reply.code(404).type('text/plain').send(f.refuse);
+    const issue = issueFilter(req.query.issue, f.zone);
+    if (typeof issue === 'object') return reply.code(404).type('text/plain').send(issue.refuse);
+    const kind = kindFilter(req.query.kind);
+    if (typeof kind === 'object') return reply.code(404).type('text/plain').send(kind.refuse);
+    const state = f.state ?? 'all';
+    const item =
+      issue === undefined || f.zone === undefined ? undefined : findWorkItem(db, f.zone, issue);
+    // An issue without a work item has no drops.
+    const found =
+      issue !== undefined && item === undefined
+        ? []
+        : listDrops(db, {
+            ...(f.zone !== undefined ? { zoneId: f.zone } : {}),
+            ...(item !== undefined ? { workItemId: item.id } : {}),
+            ...(kind === 'all' ? {} : { kind }),
+            ...(state === 'all'
+              ? {}
+              : { states: state === 'active' ? ACTIVE_DROP_STATES : [state] }),
+            limit: DROP_LIST_LIMIT + 1,
+          });
+    const html = renderDropList({
+      zones: config.dropZones,
+      ...(f.zone !== undefined ? { zone: f.zone } : {}),
+      ...(issue !== undefined ? { issue } : {}),
+      state,
+      kind,
+      drops: found.slice(0, DROP_LIST_LIMIT),
+      items: config.dropZones.flatMap((z) => listWorkItems(db, z.id)),
+      limited: found.length > DROP_LIST_LIMIT,
+      now: deps.now(),
+    });
+    return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
+  });
 
   app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/goals`, async (req, reply) => {
     const { db } = deps;
@@ -1051,20 +1094,22 @@ export function createApp(
     const drop = getDrop(deps.db, req.params.id);
     if (!drop) return reply.code(404).type('text/plain').send('not found');
     const item = drop.workItemId === null ? undefined : getWorkItem(deps.db, drop.workItemId);
-    return reply
-      .type('text/html; charset=utf-8')
-      .send(
-        withCsrf(
-          req,
-          renderDrop(
-            drop,
-            listEvents(deps.db, drop.id),
-            listArtifacts(deps.db, drop.id),
-            transcriptPruned(deps.db, drop.id),
-            { ...(item ? { item } : {}), zones: cfg(req).dropZones, now: deps.now() },
-          ),
+    return reply.type('text/html; charset=utf-8').send(
+      withCsrf(
+        req,
+        renderDrop(
+          drop,
+          listEvents(deps.db, drop.id),
+          listArtifacts(deps.db, drop.id),
+          transcriptPruned(deps.db, drop.id),
+          {
+            ...(item ? { item } : {}),
+            zones: cfg(req).dropZones,
+            now: deps.now(),
+          },
         ),
-      );
+      ),
+    );
   });
 
   return app;
