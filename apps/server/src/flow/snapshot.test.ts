@@ -9,6 +9,7 @@ import {
   setWorkItemState,
   type VerdictRow,
 } from '../db/repo.js';
+import type { ChecksFacts } from '../forge/github.js';
 import { zoneWorld } from '../test/fixtures.js';
 import { decide } from './decide.js';
 import { ADMINISTRATION_PROBLEM } from './guards.js';
@@ -861,5 +862,65 @@ describe('the open PR file list is stored on the item (issue #291)', () => {
     w.f.author.failNext('listPullFiles', '5xx');
     await snapshotOf();
     expect(getWorkItemPrFiles(w.db, itemId)).toEqual(['src/a.ts']);
+  });
+});
+
+describe('code-scanning alerts for a failed CodeQL check (#652)', () => {
+  const alert = {
+    path: 'apps/server/src/api/sticks.ts',
+    startLine: 460,
+    level: 'failure',
+    title: 'Missing rate limiting',
+    message: 'This route handler performs authorization, but is not rate-limited.',
+  };
+  const fail = (failed: ChecksFacts['failed']) =>
+    w.f.state.checks.set('sha1', { state: 'failure', names: failed.map((f) => f.name), failed });
+
+  test('a failed github-advanced-security run: its failure annotations are in codeScanning', async () => {
+    fail([
+      { name: 'CodeQL', conclusion: 'failure', checkRunId: 77, app: 'github-advanced-security' },
+    ]);
+    w.f.state.annotations.set(77, [{ ...alert, level: 'warning', title: 'w' }, alert]);
+    const s = await snapshotOf();
+    expect(s.codeScanning).toEqual([{ check: 'CodeQL', annotations: [alert] }]);
+    expect(s.forgeUnavailable).toBeNull();
+  });
+
+  test('a failed github-actions run, a status and an app-less check: no annotations call', async () => {
+    fail([
+      { name: 'ci', conclusion: 'failure', checkRunId: 78, app: 'github-actions' },
+      { name: 'ci/x', conclusion: 'error' },
+      { name: 'jobs', conclusion: 'failure', checkRunId: 79 },
+    ]);
+    const s = await snapshotOf();
+    expect(s.codeScanning).toEqual([]);
+    expect(w.f.author.calls.some((c) => c.method === 'checkAnnotations')).toBe(false);
+  });
+
+  test('checks not in failure are never read for annotations', async () => {
+    w.f.state.checks.set('sha1', {
+      state: 'pending',
+      names: ['CodeQL'],
+      failed: [
+        { name: 'CodeQL', conclusion: 'failure', checkRunId: 77, app: 'github-advanced-security' },
+      ],
+    });
+    const s = await snapshotOf();
+    expect(s.codeScanning).toEqual([]);
+    expect(w.f.author.calls.some((c) => c.method === 'checkAnnotations')).toBe(false);
+  });
+
+  test('an annotations call that errors: an empty list, and the snapshot stays available', async () => {
+    fail([
+      { name: 'CodeQL', conclusion: 'failure', checkRunId: 77, app: 'github-advanced-security' },
+    ]);
+    w.f.state.annotations.set(77, [alert]);
+    w.f.author.failNext('checkAnnotations', { status: 403 });
+    const s = await snapshotOf();
+    expect(s.codeScanning).toEqual([{ check: 'CodeQL', annotations: [] }]);
+    expect(s.forgeUnavailable).toBeNull();
+    expect(s.forgeDenied).toBeNull();
+    expect(s.missingSince).toBeNull();
+    expect(['wait', 'park']).not.toContain(decide(s).kind);
   });
 });

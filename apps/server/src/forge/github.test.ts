@@ -739,6 +739,41 @@ describe('GitHubForge', () => {
       });
     });
 
+    describe('checkAnnotations (#652)', () => {
+      const ann = (i: number, level: string) => ({
+        path: `src/f${i}.ts`,
+        start_line: i,
+        end_line: i,
+        annotation_level: level,
+        title: `t${i}`,
+        message: `m${i}`,
+        raw_details: null,
+      });
+
+      test('keeps only failure-level annotations, mapped', async () => {
+        nock(api)
+          .get('/repos/o/r/check-runs/77/annotations')
+          .query(true)
+          .reply(200, [ann(1, 'warning'), ann(2, 'failure'), ann(3, 'notice')]);
+        expect(await forge.checkAnnotations(77)).toEqual([
+          { path: 'src/f2.ts', startLine: 2, level: 'failure', title: 't2', message: 'm2' },
+        ]);
+      });
+
+      test('caps the list at 20', async () => {
+        const all = Array.from({ length: 30 }, (_, i) => ann(i + 1, 'failure'));
+        nock(api).get('/repos/o/r/check-runs/77/annotations').query(true).reply(200, all);
+        const got = await forge.checkAnnotations(77);
+        expect(got).toHaveLength(20);
+        expect(got[19]?.startLine).toBe(20);
+      });
+
+      test('an error rejects', async () => {
+        nock(api).get('/repos/o/r/check-runs/77/annotations').query(true).reply(500, {});
+        await expect(forge.checkAnnotations(77)).rejects.toMatchObject({ status: 500 });
+      });
+    });
+
     describe('checksFor', () => {
       const run = (name: string, status: string, conclusion: string | null) => ({
         name,
@@ -887,6 +922,50 @@ describe('GitHubForge', () => {
         ]);
         mock([run('a', 'completed', 'success'), run('b', 'completed', 'success')], []);
         expect((await forge.checksFor('sha1')).failed).toEqual([]);
+      });
+
+      test('failed check runs carry their id and app; statuses and passing runs do not (#652)', async () => {
+        mock(
+          [
+            {
+              id: 77,
+              app: { slug: 'github-advanced-security' },
+              ...run('CodeQL', 'completed', 'failure'),
+            },
+            { id: 78, app: { slug: 'github-actions' }, ...run('ci', 'completed', 'success') },
+          ],
+          [{ context: 'ci/x', state: 'failure' }],
+        );
+        const facts = await forge.checksFor('sha1');
+        expect(facts.failed).toEqual([
+          {
+            name: 'CodeQL',
+            conclusion: 'failure',
+            checkRunId: 77,
+            app: 'github-advanced-security',
+          },
+          { name: 'ci/x', conclusion: 'failure' },
+        ]);
+        expect(Object.keys(facts.failed[1] ?? {})).toEqual(['name', 'conclusion']);
+      });
+
+      test('the Actions-jobs fallback leaves checkRunId and app unset (#652)', async () => {
+        refuseCheckRuns();
+        nock(api)
+          .get('/repos/o/r/actions/runs')
+          .query(true)
+          .reply(200, { total_count: 1, workflow_runs: [{ id: 11 }] });
+        nock(api)
+          .get('/repos/o/r/actions/runs/11/jobs')
+          .query(true)
+          .reply(200, {
+            total_count: 1,
+            jobs: [{ id: 99, ...run('preflight', 'completed', 'failure') }],
+          });
+        statusesOnly([]);
+        const facts = await forge.checksFor('sha1');
+        expect(facts.failed).toEqual([{ name: 'preflight', conclusion: 'failure' }]);
+        expect(Object.keys(facts.failed[0] ?? {})).toEqual(['name', 'conclusion']);
       });
 
       test('failed is empty while the checks are not failing', async () => {

@@ -1,6 +1,7 @@
 import type {
   BranchRulesRead,
   ChangeDigest,
+  CheckAnnotation,
   ChecksFacts,
   CompareFacts,
   CompareFile,
@@ -14,7 +15,7 @@ import type {
   ReadProbe,
   RepoAccess,
 } from '../forge/github.js';
-import { digestCompareFiles, gitBlobSha } from '../forge/github.js';
+import { digestCompareFiles, gitBlobSha, MAX_CHECK_ANNOTATIONS } from '../forge/github.js';
 
 /** A fake's issue: `authorType` defaults to `User`. */
 export type FakeIssue = Omit<ForgeIssue, 'authorType'> & { authorType?: string };
@@ -114,6 +115,8 @@ export interface FakeForgeState {
   /** `failed` may be left out when a test doesn't care which checks failed: it reads as `[]`. */
   checks: Map<string, Omit<ChecksFacts, 'failed'> & { failed?: ChecksFacts['failed'] }>;
   compares: Map<string, CompareFacts>;
+  /** Each check run's annotations by check-run id, as GitHub lists them (all levels, uncapped). */
+  annotations: Map<number, CheckAnnotation[]>;
   /** Commits by SHA: their message and parents (first parent first), walked by `firstParentCommits`. */
   commitGraph: Map<string, { message: string; parents: string[] }>;
   /**
@@ -337,6 +340,7 @@ function createState(opts: {
     blockedByLinks: [],
     checks: new Map(),
     compares: new Map(),
+    annotations: new Map(),
     commitGraph: new Map(),
     commit(branch, message, o = {}) {
       const sha = o.sha ?? `c${state.commitGraph.size + 1}`.padEnd(40, '0');
@@ -607,6 +611,12 @@ function forgeFor(
         ? structuredClone({ failed: [], ...seeded })
         : { state: 'none', names: [], failed: [] };
     },
+    checkAnnotations: async (id) =>
+      structuredClone(
+        (state.annotations.get(id) ?? [])
+          .filter((a) => a.level === 'failure')
+          .slice(0, MAX_CHECK_ANNOTATIONS),
+      ),
     rerunFailedChecks: async (n, headSha, names) => {
       state.reruns.push({ number: n, headSha, names: [...names], identity });
       return { runIds: names.map((_, i) => i + 1) };
