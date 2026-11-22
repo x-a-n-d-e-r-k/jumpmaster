@@ -139,19 +139,57 @@ const CONFIRM_URL = /(?:https?:\/\/[^\s/<>()[\]`]+)?\/config\/confirm\/[A-Za-z0-
 const isSpace = (c: string | undefined): boolean => c !== undefined && /\s/.test(c);
 
 /**
- * The start of a Markdown link around the URL at `[s, e)`, and the end past its `)`:
- * `[text](<url> "title")`, with the target's angle brackets and the title optional.
- * Scans back no further than `floor`, so each character is scanned back over at most once.
+ * Where a Markdown link may open: the earliest `[` since the last `]` or newline, read left to
+ * right once over the whole text, so a link's text may hold URLs already replaced (#603).
  */
-function linkAround(t: string, s: number, e: number, floor: number): [number, number] | null {
+class LinkOpen {
+  /** How far the text has been read. */
+  private read = 0;
+  /** The earliest `[` read since the last `]` or newline, or -1. */
+  open = -1;
+  /** Where that `[` lands in the output. */
+  openOut = 0;
+
+  constructor(private readonly t: string) {}
+
+  /** Reads up to `to`, placing a `[` at `p >= last` at `outLen + p - last` in the output. */
+  readTo(to: number, last: number, outLen: number): void {
+    for (; this.read < to; this.read++) {
+      const c = this.t[this.read];
+      if (c === ']' || c === '\n') this.open = -1;
+      else if (c === '[' && this.open < 0 && this.read >= last) {
+        this.open = this.read;
+        this.openOut = outLen + this.read - last;
+      }
+    }
+  }
+
+  /** Skips the text up to `to`, consumed by a match. */
+  skipTo(to: number): void {
+    this.read = to;
+    this.open = -1;
+  }
+}
+
+/**
+ * The output position of a Markdown link's `[` around the URL at `[s, e)`, and the end past
+ * its `)`: `[text](<url> "title")`, with the target's angle brackets and the title optional.
+ * The `](` must lie at or past `floor`, the end of the previous replacement.
+ */
+function linkAround(
+  t: string,
+  s: number,
+  e: number,
+  floor: number,
+  outLen: number,
+  opens: LinkOpen,
+): [number, number] | null {
   let i = s;
   if (i > floor && t[i - 1] === '<') i--;
   while (i > floor && isSpace(t[i - 1])) i--;
   if (i - 2 < floor || t[i - 1] !== '(' || t[i - 2] !== ']') return null;
-  // The earliest `[` before the `]` with no `]` or newline between: where a left-to-right match starts.
-  let open = -1;
-  for (let j = i - 3; j >= floor && t[j] !== ']' && t[j] !== '\n'; j--) if (t[j] === '[') open = j;
-  if (open < 0) return null;
+  opens.readTo(i - 2, floor, outLen);
+  if (opens.open < 0) return null;
   let k = e;
   if (t[k] === '>') k++;
   let m = k;
@@ -163,7 +201,7 @@ function linkAround(t: string, s: number, e: number, floor: number): [number, nu
     if (t[n] === q) k = n + 1;
   }
   while (isSpace(t[k])) k++;
-  return t[k] === ')' ? [open, k + 1] : null;
+  return t[k] === ')' ? [opens.openOut, k + 1] : null;
 }
 
 /** The backticks around the URL at `[s, e)`, with spaces inside them, scanning back to `floor`. */
@@ -183,25 +221,48 @@ function backticksAround(t: string, s: number, e: number, floor: number): [numbe
  * Replaces each `/config/confirm/<id>` in assistant text, with or without an origin, in
  * backticks or as a Markdown link, by plain words: the id belongs on the card, not in prose.
  * Finds each URL first, then widens the match to its link, backticks, or autolink, so its
- * cost stays linear in the text however the text is shaped (#569).
+ * cost stays linear in the text however the text is shaped (#569). A link whose text holds
+ * confirm URLs too is replaced whole, as a left-to-right match would (#603).
  */
 export function stripConfirmPaths(t: string): string {
   const url = new RegExp(CONFIRM_URL);
-  let out = '';
+  const opens = new LinkOpen(t);
+  // The output in parts, so a link can take back the parts of its text in time linear in them.
+  const parts: string[] = [];
+  let outLen = 0;
+  const put = (p: string): void => {
+    parts.push(p);
+    outLen += p.length;
+  };
   let last = 0;
   for (let m = url.exec(t); m; m = url.exec(t)) {
     const s = m.index;
     const e = s + m[0].length;
-    const span =
-      linkAround(t, s, e, last) ??
-      backticksAround(t, s, e, last) ??
-      (s > last && t[s - 1] === '<' && t[e] === '>' ? [s - 1, e + 1] : [s, e]);
-    out += t.slice(last, span[0]) + CONFIRM_PATH_WORDS;
-    last = span[1];
+    const link = linkAround(t, s, e, last, outLen, opens);
+    if (link) {
+      // The link's text may hold URLs already replaced: the whole link becomes the words.
+      put(t.slice(last, s));
+      while (outLen > link[0]) {
+        const p = parts.pop() ?? '';
+        outLen -= p.length;
+        if (outLen < link[0]) put(p.slice(0, link[0] - outLen));
+      }
+      put(CONFIRM_PATH_WORDS);
+      last = link[1];
+      opens.skipTo(last);
+    } else {
+      const span =
+        backticksAround(t, s, e, last) ??
+        (s > last && t[s - 1] === '<' && t[e] === '>' ? [s - 1, e + 1] : [s, e]);
+      opens.readTo(span[0], last, outLen);
+      put(t.slice(last, span[0]));
+      put(CONFIRM_PATH_WORDS);
+      last = span[1];
+    }
     // A widened match may cover a later URL, as in a link's title: carry on past it.
     url.lastIndex = last;
   }
-  return out + t.slice(last);
+  return parts.join('') + t.slice(last);
 }
 
 /** The most lines of a tool result the server keeps (#502). */

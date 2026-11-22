@@ -775,6 +775,14 @@ describe('chat usage', () => {
       ['backticks then a confirm path', `${'`'.repeat(RUN)} /config/confirm/abc`],
       ['open brackets', '['.repeat(RUN)],
       ['open brackets then a confirm path', `${'['.repeat(RUN)} /config/confirm/abc`],
+      [
+        'confirm paths in one link text',
+        `[${'/config/confirm/abc '.repeat(RUN / 20)}](/config/confirm/abc)`,
+      ],
+      [
+        'links with confirm paths in their text',
+        '[/config/confirm/abc](/config/confirm/abc) '.repeat(RUN / 42),
+      ],
     ])('a long run of %s is stripped in linear time', (_name, input) => {
       const start = performance.now();
       const out = stripConfirmPaths(input);
@@ -804,6 +812,32 @@ describe('chat usage', () => {
       ['link broken by a newline', '[a\n](/config/confirm/a)', '[a\n](the card below)'],
       ['lone backtick', 'x `/config/confirm/a y', 'x `the card below y'],
       ['autolink', 'x <http://h/config/confirm/a> y', 'x the card below y'],
+      ['link text is the path', '[/config/confirm/b](/config/confirm/a)', 'the card below'],
+      [
+        'link text is the URL',
+        'x [see https://h.example/config/confirm/a](https://h.example/config/confirm/a) y',
+        'x the card below y',
+      ],
+      [
+        'link text is the URL, with a title',
+        '[/config/confirm/a](/config/confirm/a "Confirm")',
+        'the card below',
+      ],
+      [
+        'link text has a backticked path, angle target',
+        'a [`/config/confirm/b` and <h> /config/confirm/c](</config/confirm/a>) z',
+        'a the card below z',
+      ],
+      [
+        'link text with a confirm path and a newline',
+        '[/config/confirm/b\n](/config/confirm/a)',
+        '[the card below\n](the card below)',
+      ],
+      [
+        'link text with a path, ) after',
+        '[)/config/confirm/a["](/config/confirm/a)',
+        'the card below',
+      ],
     ])('stripConfirmPaths: %s', (_name, input, want) => {
       expect(stripConfirmPaths(input)).toBe(want);
     });
