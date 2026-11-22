@@ -75,18 +75,18 @@ describe('where each fail leads', () => {
     expect(actionFor(egress, { zone, pages: all })).toEqual({
       kind: 'app',
       label: 'Edit the egress of web',
-      href: '/zones/web#egress',
+      href: '/projects/web#egress',
     });
     expect(actionFor(egress, { zone, pages: PAGES_M45A })).toMatchObject({
       kind: 'docs',
       href: `${DOC}#egress`,
     });
-    expect(actionFor(fail('zone.mode'), { zone, pages: all })?.href).toBe('/zones');
+    expect(actionFor(fail('zone.mode'), { zone, pages: all })?.href).toBe('/projects');
     expect(actionFor(fail('zone.mode'), { zone, pages: PAGES_M45A })?.href).toBe('/');
     const odd = makeZone({ id: 'a b<c', repo: 'octo/x' });
     expect(actionFor(fail('zone.preset'), { zone: odd, pages: all })?.href).toBe(
       // The zone page's Stack section holds the preset (Task 11).
-      '/zones/a%20b%3Cc#stack',
+      '/projects/a%20b%3Cc#stack',
     );
   });
 
@@ -142,7 +142,7 @@ describe('where each fail leads', () => {
     expect(actionFor(fail('forge.branch-rules'), { zone, pages: PAGES_M45A })).toEqual({
       kind: 'app',
       label: 'Get the ruleset file for web',
-      href: '/zones/web/github',
+      href: '/projects/web/github',
     });
   });
 
@@ -212,7 +212,7 @@ test('install and history doctor checks now link to their tabs', async () => {
 
 test('pagesOf reads which pages are registered, so a later task cannot forget to flip a flag', async () => {
   const app = Fastify();
-  app.get('/zones', async () => '');
+  app.get('/projects', async () => '');
   app.get('/settings/credentials', async () => '');
   await app.ready();
   expect(pagesOf(app)).toEqual({ zones: true, settings: false, credentials: true });

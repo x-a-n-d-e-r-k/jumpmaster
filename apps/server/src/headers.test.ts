@@ -62,7 +62,7 @@ async function world() {
         ? String(artifact.id)
         : pattern.startsWith('/briefings/')
           ? String(briefing)
-          : pattern.startsWith('/zones/')
+          : pattern.startsWith('/projects/')
             ? 'main'
             : '1';
     return pattern.replace(/:[A-Za-z]+/g, id).replace(/\*$/, '');
@@ -96,7 +96,15 @@ describe('framing headers (issue #260)', () => {
     await walk((url) => h.view(url));
     await walk(anonymous);
     // The walk reached the pages, not only redirects and errors.
-    for (const page of ['/', '/login', '/setup', '/zones', '/zones/:id', '/drops/:id', '/sticks'])
+    for (const page of [
+      '/',
+      '/login',
+      '/setup',
+      '/projects',
+      '/projects/:id',
+      '/drops/:id',
+      '/sticks',
+    ])
       expect(htmlUrls, page).toContain(page);
   });
 

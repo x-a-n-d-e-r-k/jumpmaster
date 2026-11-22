@@ -504,7 +504,7 @@ document.getElementById('adopt').addEventListener('click', async () => {
 }
 
 /**
- * The add-a-project form, shared by the wizard's project step and the zones page's `/zones/new`:
+ * The add-a-project form, shared by the wizard's project step and the projects page's `/projects/new`:
  * detect, review, create through `POST /api/control/zones`. A guarded add goes to the confirmation
  * page (back to `returnTo`, or `cancelTo`); an id with history shows what Resume brings back.
  */

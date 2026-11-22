@@ -257,7 +257,7 @@ describe('/chat', () => {
         messageId: 1,
         kind: 'pause',
         zoneId: 'main',
-        link: '/zones/main',
+        link: '/projects/main',
         state: 'done',
         summary: 'Paused zone <main>',
       },
@@ -272,7 +272,7 @@ describe('/chat', () => {
     const res = await w.app.inject({ method: 'GET', url: `/chat/${th.id}`, headers: w.session });
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('Paused zone &lt;main&gt;');
-    expect(res.body).toContain('href="/zones/main"');
+    expect(res.body).toContain('href="/projects/main"');
     const owner = res.body.indexOf('pause main');
     const card = res.body.indexOf('Paused zone &lt;main&gt;');
     expect(owner).toBeLessThan(card);
@@ -1637,7 +1637,7 @@ describe('/chat Markdown (#490)', () => {
     test('a card whose link is not a confirm path has no button and opens no dialog; nor does message text naming one', async () => {
       const r = runScript({ now: T });
       r.emit('card', { card: pendingCard({ id: 8, link: '/config/confirm/../zones' }) });
-      r.emit('card', { card: pendingCard({ id: 9, link: '/zones/main' }) });
+      r.emit('card', { card: pendingCard({ id: 9, link: '/projects/main' }) });
       r.emit('card', { card: pendingCard({ id: 10, state: 'done', link: '/config/confirm/abc' }) });
       r.emit('message', {
         seq: 2,
