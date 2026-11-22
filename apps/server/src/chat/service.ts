@@ -1,4 +1,9 @@
-import { type ChatEvent, ChatEventSchema, type ChatTurnRequest } from '@jumpmaster/protocol';
+import {
+  type ChatEvent,
+  ChatEventSchema,
+  type ChatTurnRequest,
+  stripTrailingSlashes,
+} from '@jumpmaster/protocol';
 
 /** How the server reaches the `chat` compose service. */
 export interface ChatServiceClient {
@@ -33,7 +38,7 @@ export function httpChatService(
   baseUrl: string,
   fetchImpl: typeof globalThis.fetch = globalThis.fetch,
 ): ChatServiceClient {
-  const base = baseUrl.replace(/\/+$/, '');
+  const base = stripTrailingSlashes(baseUrl);
   return {
     async *runTurn(req, signal) {
       const res = await fetchImpl(`${base}/turns`, {

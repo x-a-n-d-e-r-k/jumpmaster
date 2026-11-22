@@ -73,6 +73,15 @@ describe('imageUrls', () => {
     ].join('\n');
     expect(imageUrls(body)).toEqual([GH('b'), GH('a'), CDN('c')]);
   });
+
+  test('decodes each entity in an <img src> exactly once (D4)', () => {
+    const base = 'https://github.com/user-attachments/assets/x';
+    expect(imageUrls(`<img src="${base}?a=&amp;quot;b">`)).toEqual([`${base}?a=&quot;b`]);
+    expect(imageUrls(`<img src="${base}?a=&amp;#39;b">`)).toEqual([`${base}?a=&#39;b`]);
+    expect(imageUrls(`<img src="${base}?a=1&amp;b=2">`)).toEqual([`${base}?a=1&b=2`]);
+    expect(imageUrls(`<img src="${base}?a=&#39;b">`)).toEqual([`${base}?a='b`]);
+    expect(imageUrls(`<img src='${base}?a=&quot;b'>`)).toEqual([`${base}?a="b`]);
+  });
 });
 
 describe('fetchIssueImages', () => {

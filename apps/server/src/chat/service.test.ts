@@ -19,6 +19,24 @@ async function serve(handler: Parameters<typeof createServer>[1]): Promise<strin
 const req = { protocol: 1 } as unknown as ChatTurnRequest;
 
 describe('httpChatService', () => {
+  test.each(['http://h:1', 'http://h:1/', 'http://h:1///'])(
+    'base URL %j posts to http://h:1/turns',
+    async (baseUrl) => {
+      const seen: string[] = [];
+      const fakeFetch = (async (url: string | URL | Request) => {
+        seen.push(String(url));
+        return new Response('{"type":"result","isError":false}\n', { status: 200 });
+      }) as typeof globalThis.fetch;
+      for await (const _ of httpChatService(baseUrl, fakeFetch).runTurn(
+        req,
+        new AbortController().signal,
+      )) {
+        // drain
+      }
+      expect(seen).toEqual(['http://h:1/turns']);
+    },
+  );
+
   test('it reads NDJSON and drops lines that are not valid events', async () => {
     let body = '';
     const base = await serve((r, res) => {
