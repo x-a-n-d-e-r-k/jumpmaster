@@ -25,7 +25,9 @@ import {
 } from '../db/repo.js';
 import {
   type ChangeDigest,
+  type CheckAnnotation,
   type ChecksFacts,
+  CODE_SCANNING_APP,
   type ForgeReview,
   isHeld,
   type PullFacts,
@@ -584,6 +586,32 @@ export function mergeHolder(db: Db, zone: DropZoneConfig, now: Date): MergeReser
 }
 
 /**
+ * The annotations of each failed code-scanning check run (#652): read only while the checks are
+ * in `failure`, and only for check runs of CODE_SCANNING_APP. A failed read gives that check an
+ * empty list and never marks the forge unavailable: the heal runs as it would without them.
+ */
+async function codeScanningAlerts(
+  forges: ForgePair,
+  checks: ChecksFacts,
+): Promise<Snapshot['codeScanning']> {
+  if (checks.state !== 'failure') return [];
+  const out: Snapshot['codeScanning'] = [];
+  for (const f of checks.failed) {
+    if (f.app !== CODE_SCANNING_APP || f.checkRunId === undefined) continue;
+    let annotations: CheckAnnotation[] = [];
+    try {
+      annotations = await forges.author.checkAnnotations(f.checkRunId);
+    } catch (err) {
+      log(
+        `check run ${f.checkRunId} (${f.name}): its annotations could not be read (${(err as { status?: number }).status ?? 'error'}); the heal goes without them`,
+      );
+    }
+    out.push({ check: f.name, annotations });
+  }
+  return out;
+}
+
+/**
  * Assembles everything `decide` reads for one pr_open item. Forge facts are read fresh; failed
  * reads fail closed (see `Snapshot` field docs). Upserts `pull_requests` and maintains
  * `work_items.waiting_since`.
@@ -633,6 +661,7 @@ export async function buildSnapshot(
   let checks: ChecksFacts = { state: 'none', names: [], failed: [] };
   let reviews: ForgeReview[] = [];
   let files: PullFiles = { files: [], complete: false };
+  let codeScanning: Snapshot['codeScanning'] = [];
   if (pr && headSha) {
     try {
       compare = await forges.author.compare(base, headSha);
@@ -648,6 +677,7 @@ export async function buildSnapshot(
         unavailable('checksFor', err);
       }
     }
+    codeScanning = await codeScanningAlerts(forges, checks);
     try {
       reviews = await forges.author.listReviews(pr.number);
     } catch (err) {
@@ -753,6 +783,7 @@ export async function buildSnapshot(
     branchSha,
     compare,
     checks,
+    codeScanning,
     forgeUnavailable,
     forgeDenied,
     requiredChecks: pass.requiredChecks,
