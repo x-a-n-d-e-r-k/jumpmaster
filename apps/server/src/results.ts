@@ -39,6 +39,7 @@ import {
   refundCharge,
 } from './flow/budgets.js';
 import { protectedPathHits } from './flow/guards.js';
+import { isMalformedRun, malformedRetryDue } from './flow/malformed.js';
 import { isHeld } from './forge/github.js';
 import { serverScrubSet } from './forge/scrub-set.js';
 import {
@@ -115,6 +116,14 @@ export function renderReviewBody(v: Verdict, gates: GateResult[], secrets: strin
 type Ctx = { db: Db; deps: ResultDeps; drop: Drop; item: WorkItem; now: Date };
 
 const finish = (c: Ctx, state: DropState) => updateDrop(c.db, c.drop.id, { state });
+
+/**
+ * A malformed agent run (#659) that gets its one retry: no other drop of this item, role and head
+ * ended malformed. The next pass enqueues the same drop again; no comment, no briefing.
+ */
+const malformedRetry = (c: Ctx, result: DropResult): boolean =>
+  isMalformedRun(result) &&
+  malformedRetryDue(c.db, c.drop.id, c.item.id, c.drop.role, c.drop.headSha);
 
 const park = (c: Ctx, reason: string, dropState: DropState) => {
   setWorkItemState(c.db, c.item.id, 'parked', reason, c.now);
@@ -281,6 +290,13 @@ async function implementResult(c: Ctx, result: DropResult): Promise<void> {
           finish(c, 'failed');
         })();
       }
+      if (c.drop.headSha === null && malformedRetry(c, result)) {
+        // A glitch of the run, not of the code: the item starts fresh once more.
+        return db.transaction(() => {
+          setWorkItemState(db, item.id, 'ready', undefined, c.now);
+          finish(c, 'failed');
+        })();
+      }
       return park(
         c,
         result.reason ?? result.status,
@@ -429,6 +445,8 @@ function pushResult(c: Ctx, result: DropResult): void {
         if (result.status === 'failed' && STALE_REASON.test(result.reason ?? '')) {
           return finish(c, 'failed');
         }
+        // Re-decided as a stale head is; the re-enqueue reuses this drop's charge.
+        if (malformedRetry(c, result)) return finish(c, 'failed');
         return park(
           c,
           result.reason ?? result.status,
