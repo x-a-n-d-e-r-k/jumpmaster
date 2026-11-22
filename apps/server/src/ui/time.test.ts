@@ -24,10 +24,19 @@ describe('relativeTime', () => {
     expect(phrase(relativeTime(ago(ms), now))).toBe(want);
   });
 
-  test('a time in the future reads "just now"', () => {
-    expect(phrase(relativeTime(new Date(now.getTime() + 5 * M).toISOString(), now))).toBe(
-      'just now',
-    );
+  const ahead = (ms: number) => new Date(now.getTime() + ms).toISOString();
+
+  test.each([
+    [59 * S, 'just now'],
+    [60 * S, 'in 1 min'],
+    [5 * M, 'in 5 min'],
+    [H, 'in 1 h'],
+    [23 * H + 59 * M, 'in 23 h'],
+    [D, 'in 1 d'],
+    [6 * D + 23 * H, 'in 6 d'],
+    [7 * D, '3 Dec 2026'],
+  ])('%i ms ahead reads "%s" (a next due, #620)', (ms, want) => {
+    expect(phrase(relativeTime(ahead(ms), now))).toBe(want);
   });
 
   test('the <time> element carries the full ISO in datetime and title', () => {

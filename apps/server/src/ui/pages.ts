@@ -427,7 +427,7 @@ function crewSection(lines: CrewLine[] | undefined, name: (id: string) => string
   const rows = lines
     .map(
       (c) =>
-        `<tr><td>${name(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="${projectHref(c.zoneId, 'goals')}">Goals</a> <a href="${projectHref(c.zoneId, 'issues/new')}">New issue</a> <a href="${projectHref(c.zoneId, 'intake')}">GOAL.md stub</a></td></tr>`,
+        `<tr><td>${name(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="${projectHref(c.zoneId, 'goals')}">Goals</a> <a href="${projectHref(c.zoneId, 'issues/new')}">New issue</a> <a href="${projectHref(c.zoneId, 'goals')}#goal-stub">GOAL.md stub</a></td></tr>`,
     )
     .join('');
   return card(
@@ -991,12 +991,18 @@ export function renderGoals(s: {
   mode?: string;
   /** The zone's open briefings, counted in the project header. */
   openBriefings?: number;
+  /** The zone's crew row (#620), as Floor shows it: at the top of the page. */
+  crew?: CrewLine;
+  /** Now, for the crew row's relative times. */
+  now?: Date;
 }): string {
   const path = s.zone.crew?.goalPath ?? 'GOAL.md';
   const missing = s.goals?.parse.ok === false && s.goals.parse.error === `${path} not found`;
+  // No goal file yet (or not read yet): the stub builder opens, above the empty ladder (#620).
+  const noGoal = missing || s.goals === undefined;
   // Until the goal can change in the app (#336), the owner edits it on GitHub: a protected path.
   const edit = missing
-    ? `<p>${escapeHtml(path)} isn't in the repository yet. <a href="${escapeHtml(zoneHref(s.zone.id))}/intake">Write one with the intake page</a>.</p>`
+    ? `<p>${escapeHtml(path)} isn't in the repository yet. <a href="#goal-stub">Draft one with the GOAL.md stub builder</a>.</p>`
     : `<p>The goals live in ${escapeHtml(path)} in ${escapeHtml(s.zone.repo)}. It is a protected path: agent pull requests never change it, and Jumpmaster merges a change to it only when you approve it here. Propose a change in the chat, or <a href="${escapeHtml(githubBlobHref(s.zone.repo, path))}">open ${escapeHtml(path)} on GitHub</a> and use the pencil to edit it. The crew reads the change at its next cycle.</p>`;
   let ladder: string;
   if (!s.goals) {
@@ -1057,6 +1063,7 @@ export function renderGoals(s: {
     s.skippedCrewUnpromoted.length === 0
       ? '<p>None.</p>'
       : `<ul>${s.skippedCrewUnpromoted.map((n) => `<li>${skippedLine(n)}</li>`).join('')}</ul>`;
+  const stub = goalStub(s.zone, noGoal);
   return page(
     projectHeader({
       zone: s.zone,
@@ -1066,10 +1073,24 @@ export function renderGoals(s: {
       current: 'goals',
       ask: { kind: 'goals', zoneId: s.zone.id, ref: s.zone.id },
     }) +
+      crewRow(s.crew, s.now ?? new Date()) +
+      (noGoal ? stub : '') +
       `<h2>Objectives (goal ladder)</h2>` +
       `${ladder}${edit}${goalChangesBlock(s.goalChanges ?? [])}` +
       `<h2>Crew issues</h2><table><tr><th>Objective</th><th>Key</th><th>Title</th><th>State</th><th>Issue</th><th>Work item</th><th>Findings</th></tr>${issues}</table>` +
-      `<h2>Crew issues not started (no recorded promotion)</h2>${skipped}`,
+      `<h2>Crew issues not started (no recorded promotion)</h2>${skipped}` +
+      (noGoal ? '' : stub),
+  );
+}
+
+/** The project's crew row on Goals (#620): on or off, the last cycle, the next due, Fable. */
+function crewRow(c: CrewLine | undefined, now: Date): string {
+  if (!c) return '';
+  const last = c.lastCycle ? relativeTime(c.lastCycle, now) : '-';
+  const next = !c.enabled ? '-' : c.nextDue ? relativeTime(c.nextDue, now) : 'now';
+  return (
+    `<section id="crew"><h2>Crew</h2><table><tr><th>Crew</th><th>Last cycle</th><th>Next due</th><th>Fable</th></tr>` +
+    `<tr><td>${c.enabled ? 'on' : 'off'}</td><td>${last}</td><td>${next}</td><td>${escapeHtml(c.fable)}</td></tr></table></section>`
   );
 }
 
@@ -2069,8 +2090,8 @@ async function call(path, body) {
   return { status: r.status, body: await r.json().catch(() => ({})) };
 }`;
 
-/** The GOAL.md stub page's script: render the stub, then copy it. */
-const STUB_SCRIPT = `<script>
+/** The GOAL.md stub builder's script: render the stub, then copy it. */
+export const STUB_SCRIPT = `<script>
 const root = document.getElementById('intake');
 ${FORM_HELPERS}
 document.getElementById('stub-form').addEventListener('submit', async (e) => {
@@ -2140,13 +2161,11 @@ const intakeArea = (id: string, rows: number, required = false) =>
   `<textarea id="${id}" rows="${rows}" cols="80"${required ? ' required' : ''}></textarea>`;
 const intakeBase = (zone: ZoneRef) => `/api/control/zones/${encodeURIComponent(zone.id)}/intake`;
 
-/** The GOAL.md stub builder: the stub, then how to commit it; issues are filed on New issue. */
-export function renderIntake(
-  zone: ZoneRef,
-  zones: readonly ZoneRef[] = [zone],
-  /** The project header and tab bar (#616). */
-  header = '',
-): string {
+/**
+ * The GOAL.md stub builder (#620), a section of Goals: the stub, then how to commit it; issues are
+ * filed on New issue. Collapsed unless the project has no goal file yet (`open`).
+ */
+export function goalStub(zone: ZoneRef, open: boolean): string {
   const field = intakeField;
   const area = intakeArea;
   const goal = `<h3>Step 1: the goal</h3><form id="stub-form">${field(
@@ -2162,9 +2181,7 @@ export function renderIntake(
   )}${field('stub-lighthouse', 'Lighthouse: what the project is for, in a few sentences', area('stub-lighthouse', 4, true))}${field('stub-objectives', 'Objectives, one per line, first first (at most 5)', area('stub-objectives', 5, true))}${field('stub-nongoals', 'Non-goals, one per line (optional)', area('stub-nongoals', 3))}${field('stub-constraints', 'Constraints, one per line (optional)', area('stub-constraints', 3))}<button>Render the stub</button> <span id="stub-status"></span></form>`;
   const commit = `<h3>Step 2: commit it by pull request</h3><p>GOAL.md is a protected path, so no agent may write it and Jumpmaster doesn't commit it either. Copy the stub, then on a branch of ${escapeHtml(zone.repo)}: save it as GOAL.md, commit, push, open a pull request, and merge it yourself. The crew reads it once it is on the default branch.</p><p><textarea id="stub-out" rows="16" cols="80" readonly></textarea><br><button type="button" id="stub-copy">Copy</button></p>`;
   const next = `<p>To file an issue, use <a href="${escapeHtml(zoneHref(zone.id))}/issues/new"><strong>New issue</strong></a>.</p>`;
-  return page(
-    `${header}<h2>GOAL.md stub: ${zoneName(zone, zones)}</h2><div id="intake" data-base="${escapeHtml(intakeBase(zone))}">${goal}${commit}</div>${next}${STUB_SCRIPT}`,
-  );
+  return `<details id="goal-stub"${open ? ' open' : ''}><summary>Draft a GOAL.md</summary><div id="intake" data-base="${escapeHtml(intakeBase(zone))}">${goal}${commit}</div>${next}${STUB_SCRIPT}</details>`;
 }
 
 /** The New issue page: one ready issue, filed under objective 1 as soon as it is submitted. */

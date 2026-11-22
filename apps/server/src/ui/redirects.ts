@@ -41,7 +41,9 @@ export const REDIRECTS: readonly Redirect[] = [
   { from: '/zones/:id/github', to: project('setup', 'github') },
   { from: `${PROJECTS_HREF}/:id/github`, to: project('setup', 'github') },
   { from: '/zones/:id/goals', to: project('goals') },
-  { from: '/zones/:id/intake', to: project('intake') },
+  // The GOAL.md stub builder is a section of Goals (#620).
+  { from: '/zones/:id/intake', to: project('goals', 'goal-stub') },
+  { from: `${PROJECTS_HREF}/:id/intake`, to: project('goals', 'goal-stub') },
   { from: '/zones/:id/issues/new', to: project('issues/new') },
   // A project's work and its items (#619). `/work` without `zone` stays: only `?zone=` moves.
   { from: '/work', query: 'zone', to: project('work') },

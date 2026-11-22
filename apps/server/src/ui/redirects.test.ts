@@ -21,7 +21,6 @@ const MOVED: [string, string][] = [
   ['/zones/new', '/projects/new'],
   ['/zones/jm', '/projects/jm'],
   ['/zones/jm/goals', '/projects/jm/goals'],
-  ['/zones/jm/intake', '/projects/jm/intake'],
   ['/zones/jm/issues/new', '/projects/jm/issues/new'],
   ['/zones/jm/flags', '/projects/jm/flags'],
   ['/work/jm/487', '/projects/jm/work/487'],
@@ -74,6 +73,27 @@ describe('the redirect table (issue #615)', () => {
       expect([post.statusCode, post.headers.location]).toEqual([
         308,
         '/projects/jm/setup?x=1#github',
+      ]);
+    },
+  );
+
+  test.each(['/zones/jm/intake', '/projects/jm/intake'])(
+    'the GOAL.md stub page %s is a 301 to the stub builder on Goals, the query kept before the hash (#620)',
+    async (from) => {
+      const app = bare();
+      const get = await app.inject({ method: 'GET', url: from });
+      expect([get.statusCode, get.headers.location]).toEqual([301, '/projects/jm/goals#goal-stub']);
+      const head = await app.inject({ method: 'HEAD', url: from });
+      expect([head.statusCode, head.headers.location]).toEqual([
+        301,
+        '/projects/jm/goals#goal-stub',
+      ]);
+      const q = await app.inject({ method: 'GET', url: `${from}?x=1` });
+      expect([q.statusCode, q.headers.location]).toEqual([301, '/projects/jm/goals?x=1#goal-stub']);
+      const post = await app.inject({ method: 'POST', url: `${from}?x=1` });
+      expect([post.statusCode, post.headers.location]).toEqual([
+        308,
+        '/projects/jm/goals?x=1#goal-stub',
       ]);
     },
   );
