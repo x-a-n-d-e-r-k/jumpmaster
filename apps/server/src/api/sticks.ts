@@ -1,5 +1,4 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import rateLimit from '@fastify/rate-limit';
 import {
   ArtifactUploadSchema,
   agentBranch,
@@ -204,10 +203,6 @@ const advertOf = (info: StickInfo) => ({
 const HeartbeatBody = z.object({ epoch: z.number() });
 /** The largest events batch: the stick posts any event over 1 MiB alone. */
 const EVENTS_BODY_LIMIT = 8 * 1024 * 1024;
-
-/** Unauthenticated stick requests (enroll) a client address may make per minute. */
-export const STICK_UNAUTH_RATE_MAX = 30;
-
 const EventsBody = z.object({ epoch: z.number(), events: z.array(TrooperEventSchema) });
 const ResultBody = z.object({ epoch: z.number(), result: DropResultSchema });
 const PushCallBody = z.object({ dropId: z.string().min(1), epoch: z.number() });
@@ -452,9 +447,6 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       return { branch: agentBranch(item.issueNumber), base: row.base };
     })();
 
-  /** Requests the bearer hook authenticated, so the rate limit skips them without a second lookup. */
-  const authenticated = new WeakSet<FastifyRequest>();
-
   app.register(async (scope) => {
     scope.addHook('onRequest', async (req, reply) => {
       if (req.headers['x-jumpmaster-protocol'] !== '1') {
@@ -468,16 +460,6 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
     scope.addHook('onRequest', async (req, reply) => {
       if (req.method === 'POST' && req.routeOptions.url === '/api/sticks/enroll') return;
       if (!authStick(req)) return reply.code(401).send({ error: 'unauthorized' });
-      authenticated.add(req);
-    });
-
-    // Unauthenticated requests (enroll, in practice: the hook above answers every other one) are
-    // limited per client address; a stick the hook let through is never limited, so authenticated
-    // behavior is unchanged. Its hook is per route, so it runs after the two above.
-    await scope.register(rateLimit, {
-      max: STICK_UNAUTH_RATE_MAX,
-      timeWindow: 60_000,
-      allowList: (req) => authenticated.has(req),
     });
 
     scope.post('/api/sticks/enroll', async (req, reply) => {

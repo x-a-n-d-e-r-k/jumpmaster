@@ -51,7 +51,7 @@ import { buildPayload, promptVersions } from '../payloads.js';
 import { type FakeImage, type FakeRegistry, startFakeRegistry } from '../test/fake-registry.js';
 import { fakeForge } from '../test/fakes.js';
 import { plus, t0, tmpDbFile, workItem } from '../test/helpers.js';
-import { registerStickRoutes, STICK_UNAUTH_RATE_MAX } from './sticks.js';
+import { registerStickRoutes } from './sticks.js';
 
 const config: Config = {
   listen: { host: '127.0.0.1', port: 7420 },
@@ -2296,32 +2296,5 @@ describe('stick auth before the body is read (issue #644)', () => {
     expect(own.json()).toMatchObject({ stale: true });
     expect(other.statusCode).toBe(409);
     expect(other.json()).toMatchObject({ stale: true });
-  });
-});
-
-describe('unauthenticated stick requests are rate limited (issue #644, CodeQL js/missing-rate-limiting)', () => {
-  const wrongEnroll = () =>
-    app.inject({
-      method: 'POST',
-      url: '/api/sticks/enroll',
-      headers: proto,
-      payload: { joinToken: 'nope', name: 's', slots: 1 },
-    });
-
-  test('enroll past the per-client limit is 429; under it, enroll answers as before', async () => {
-    setup();
-    for (let i = 0; i < STICK_UNAUTH_RATE_MAX; i++) {
-      expect((await wrongEnroll()).statusCode).toBe(401);
-    }
-    const res = await wrongEnroll();
-    expect(res.statusCode).toBe(429);
-  });
-
-  test('an enrolled stick is never rate limited, however many requests it makes', async () => {
-    setup({ queued: false, leaseWaitMs: 0 });
-    const { stickToken } = await enroll();
-    for (let i = 0; i < STICK_UNAUTH_RATE_MAX + 5; i++) {
-      expect((await lease(stickToken)).statusCode).toBe(204);
-    }
   });
 });
