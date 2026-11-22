@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import vm from 'node:vm';
 import { describe, expect, test } from 'vitest';
 import {
@@ -31,9 +33,13 @@ import {
   escapeHtml,
   FAVICON_HREF,
   goalStub,
+  type LogObservation,
   linkify,
+  logEntries,
   MARK,
   modelFamily,
+  OBSERVATION_ACTIONS,
+  observationWords,
   page,
   pageParams,
   renderBriefing,
@@ -43,8 +49,8 @@ import {
   renderDropList,
   renderGoals,
   renderHome,
+  renderLog,
   renderNewIssue,
-  renderObservations,
   renderWorkItem,
   renderWorkList,
   STUB_SCRIPT,
@@ -691,7 +697,7 @@ describe('briefings', () => {
   test('each open briefing shows decision, why, options, recommendation and what is on hold', () => {
     const html = renderBriefings({ open: [briefing()], rulings: [], zones: [z] });
     expect(html).toContain('Briefings (decisions waiting on you)');
-    expect(html).toContain('Rulings (0)');
+    expect(html).toContain('<a href="/projects/main/log?kind=rulings">Rulings for ');
     for (const text of [
       'Split the CLI objective?',
       'It is two drops of work.',
@@ -732,13 +738,15 @@ describe('briefings', () => {
     expect(html).toMatch(
       /<pre>heal budget exhausted<\/pre><\/td><\/tr><tr><th>Diagnosis<\/th><td><pre>The test is flaky\.<\/pre>/,
     );
-    const ruled = renderBriefings({
-      open: [],
-      rulings: [ruling({ diagnosis: 'Out of disk.' })],
+    // The ruling, with the diagnosis Command read, is on the project's Log (#621).
+    const ruled = renderLog({
       zones: [z],
+      kind: 'rulings',
+      observations: [],
+      rulings: [ruling({ diagnosis: 'Out of disk.' })],
+      now: new Date(),
     });
-    expect(ruled).toContain('<th>Diagnosis</th>');
-    expect(ruled).toContain('<td>Out of disk.</td>');
+    expect(ruled).toContain('diagnosis: Out of disk.');
   });
 
   test('a Promote ruling held while the crew is off says so; a Reject does not wait', () => {
@@ -748,12 +756,12 @@ describe('briefings', () => {
       ruling({ id: 1, choice: 'promote', effect: 'promote_issue' }),
       ruling({ id: 2, choice: 'reject', effect: 'reject_issue' }),
     ];
-    const html = renderBriefings({ open: [], rulings, zones: [off] });
-    expect(html).toMatch(/<td>promote<\/td>.*?<td>waiting: crew disabled<\/td>/s);
+    const log = (zones: DropZoneConfig[]) =>
+      renderLog({ zones, kind: 'rulings', observations: [], rulings, now: new Date() });
+    const html = log([off]);
+    expect(html).toMatch(/Ruling 1<\/a>.*?promote <small>waiting: crew disabled/s);
     expect(html.match(/waiting: crew disabled/g)).toHaveLength(1);
-    expect(renderBriefings({ open: [], rulings, zones: [on] })).not.toContain(
-      'waiting: crew disabled',
-    );
+    expect(log([on])).not.toContain('waiting: crew disabled');
   });
 
   test('a held refute promotion shows its Reject option and when it will promote', () => {
@@ -1496,8 +1504,8 @@ describe('zones are named by their repository (#99)', () => {
     });
     expect(html).toContain('<th>Zone</th><td>acme/widgets</td>');
     expect(html).toContain('<th>Zone</th><td>acme/shared <small>(zid-a)</small></td>');
-    expect(html).toContain('<td>acme/shared <small>(zid-b)</small></td>');
-    expectNoBareId(html);
+    expect(html).toContain('>Rulings for acme/shared <small>(zid-b)</small></a>');
+    expectNoBareId(html.replaceAll(/href="[^"]*"/g, ''));
   });
 
   test("one zone's briefings page names the zone by repository in its bulk dismiss", () => {
@@ -1552,9 +1560,12 @@ describe('zones are named by their repository (#99)', () => {
     expect(doctor).not.toMatch(/usage\.\s*<button/);
     expect(doctor).toContain('<td>acme/shared <small>(zid-b)</small></td>');
     expectNoBareId(doctor);
-    const obs = renderObservations(
-      [
+    const obs = renderLog({
+      zones,
+      kind: 'all',
+      observations: [
         {
+          id: 1,
           zoneId: 'zid-solo',
           itemId: null,
           action: 'x',
@@ -1562,10 +1573,11 @@ describe('zones are named by their repository (#99)', () => {
           count: 1,
           firstAt: 't',
           lastAt: 't',
-        } as never,
+        },
       ],
-      zones,
-    );
+      rulings: [],
+      now: new Date(),
+    });
     expect(obs).toContain('<td>acme/widgets</td>');
     expectNoBareId(obs);
   });
@@ -1666,13 +1678,13 @@ describe('briefings grouped by project and paged (#132)', () => {
     return html.slice(start, html.indexOf(`</${tag}><!--/project-->`, start));
   };
 
-  test('pageParams: per is 10, 20, 50 or 100, else 10; page and rpage are positive integers, else 1', () => {
+  test('pageParams: per is 10, 20, 50 or 100, else 10; page is a positive integer, else 1', () => {
     for (const per of ['10', '20', '50', '100']) expect(pageParams({ per }).per).toBe(Number(per));
     for (const per of [undefined, '0', '7', 'abc', '1000', '', ['20', '50'], '20.0'])
       expect(pageParams({ per }).per).toBe(10);
-    expect(pageParams({ page: '3', rpage: '2' })).toEqual({ per: 10, page: 3, rpage: 2 });
+    expect(pageParams({ page: '3' })).toEqual({ per: 10, page: 3 });
     for (const page of [undefined, '-1', '0', 'x', '1.5', ['2']])
-      expect(pageParams({ page, rpage: page })).toEqual({ per: 10, page: 1, rpage: 1 });
+      expect(pageParams({ page })).toEqual({ per: 10, page: 1 });
   });
 
   test('grouping: the busier project comes first with 10 blocks and Show all; no briefing crosses sections', () => {
@@ -1733,21 +1745,35 @@ describe('briefings grouped by project and paged (#132)', () => {
     expect(html).not.toContain('32 decisions');
   });
 
-  test('each section carries its newest rulings, collapsed, with a link when there are more', () => {
+  test("no ruling is rendered: each section links to its project's rulings on the Log (#621)", () => {
     const rulings = Array.from({ length: 12 }, (_, i) =>
       ruling({ id: i + 1, zoneId: 'za', note: `note-a-${i + 1}` }),
     ).concat([ruling({ id: 99, zoneId: 'zb', note: 'note-b' })]);
     const html = renderBriefings({ open: many('za', 1), rulings, zones: [za, zb] });
     const a = section(html, 'za');
-    expect(a).toContain('<details class="rulings"><summary>Rulings (12)</summary>');
-    expect(a).toContain('note-a-12');
-    expect(a).not.toContain('note-a-2<');
-    expect(a).toContain('href="/briefings?zone=za&amp;per=10#rulings"');
-    expect(a).not.toContain('note-b');
-    const b = section(html, 'zb');
-    expect(b).toContain('Rulings (1)');
-    expect(b).toContain('note-b');
-    expect(b).not.toContain('#rulings"');
+    expect(a).toContain(
+      '<p class="rulings"><a href="/projects/za/log?kind=rulings">Rulings for acme/alpha</a></p>',
+    );
+    expect(section(html, 'zb')).toContain(
+      '<a href="/projects/zb/log?kind=rulings">Rulings for acme/beta</a>',
+    );
+    for (const text of [
+      'note-a-12',
+      'note-b',
+      'id="ruling-',
+      'Rulings (',
+      '<details class="rulings"',
+    ])
+      expect(html).not.toContain(text);
+    const one = renderBriefings({
+      open: many('za', 1),
+      rulings,
+      zones: [za],
+      zone: { id: 'za', mode: 'active' },
+    });
+    expect(one).toContain('<a href="/projects/za/log?kind=rulings">Rulings for acme/alpha</a>');
+    for (const text of ['note-a-12', 'id="ruling-', 'Rulings (decisions recorded)'])
+      expect(one).not.toContain(text);
   });
 
   test.each([10, 20, 50, 100])('per=%i shows exactly that many blocks', (per) => {
@@ -1771,7 +1797,6 @@ describe('briefings grouped by project and paged (#132)', () => {
       zone: { id: 'za', mode: 'active' },
       per: 20,
       page: 2,
-      rpage: 2,
     });
     expect(html).toContain('<a href="/briefings?zone=za&amp;per=10">10</a>');
     expect(html).toContain('<a href="/briefings?zone=za&amp;per=20" aria-current="page">20</a>');
@@ -1800,31 +1825,6 @@ describe('briefings grouped by project and paged (#132)', () => {
     expect(last).not.toContain('>Next</a>');
     expect(last).toContain('Decide za#1?');
     expect(view(99)).toBe(last);
-  });
-
-  test('rulings page independently of briefings', () => {
-    const rulings = Array.from({ length: 15 }, (_, i) =>
-      ruling({ id: i + 1, zoneId: 'za', note: `note-${i + 1}` }),
-    );
-    const view = (rpage: number) =>
-      renderBriefings({
-        open: many('za', 15),
-        rulings,
-        zones: [za],
-        zone: { id: 'za', mode: 'active' },
-        rpage,
-      });
-    const one = view(1);
-    const two = view(2);
-    const briefingsOf = (html: string) => html.slice(0, html.indexOf('id="rulings"'));
-    expect(briefingsOf(two)).toBe(briefingsOf(one));
-    expect(two).toContain('<h2 id="rulings">');
-    expect(two).toContain('<td>note-5</td>');
-    expect(two).not.toContain('<td>note-6</td>');
-    expect(one).toContain('<td>note-15</td>');
-    expect(one).toContain('Page 1 of 2');
-    expect(one).toContain('href="/briefings?zone=za&amp;per=10&amp;rpage=2#rulings">Next</a>');
-    expect(two).toContain('href="/briefings?zone=za&amp;per=10&amp;rpage=1#rulings">Previous</a>');
   });
 
   test('the floor card shows one counted line per project, in the same order, and no decision', () => {
@@ -2513,11 +2513,12 @@ describe('every briefing stands on its own (#226)', () => {
       per: 10,
     });
     expect(list).toContain('id="briefing-8"');
-    expect(list).toContain('<tr id="ruling-1">');
+    // The list shows no ruling (#621): a reference leads to the ruling on its briefing's page.
+    expect(list).not.toContain('<tr id="ruling-1">');
     expect(list).toContain('<a href="#briefing-8">Briefing 8</a>');
     expect(list).toContain('<a href="/briefings/2">Briefing 2</a>');
-    expect(list).toContain('<a href="#ruling-1">Ruling 1</a>');
-    expect(list).toContain('<a href="#ruling-5">Ruling 5</a>');
+    expect(list).toContain('<a href="/briefings/2#ruling-1">Ruling 1</a>');
+    expect(list).toContain('<a href="/briefings/3#ruling-5">Ruling 5</a>');
     // Each briefing links to its own page.
     expect(list).toContain('<a href="/briefings/8">');
   });
@@ -2730,5 +2731,163 @@ describe('the drop page header and system-event groups (#499)', () => {
     for (const m of ['sys-1', 'sys-2', 'sys-3', 'txt-4', 'sys-5']) {
       expect(t.split(m)).toHaveLength(2);
     }
+  });
+});
+
+describe('the Log: observe decisions in words and rulings (#621)', () => {
+  const obs = (o: Partial<LogObservation> = {}): LogObservation => ({
+    id: 1,
+    zoneId: 'jm',
+    itemId: 7,
+    issueNumber: 4154,
+    action: 'would_enqueue:implement',
+    detail: 'issue #4154',
+    count: 1,
+    firstAt: '2026-01-01T00:00:00.000Z',
+    lastAt: '2026-01-01T00:00:00.000Z',
+    ...o,
+  });
+  /** The suffixes the server writes today, by base code. */
+  const SUFFIXES: Record<string, string[]> = {
+    would_enqueue: ['arbitrate', 'audit', 'crew', 'implement', 'resume', 'review'],
+    would_wait: ['blocked', 'overlap'],
+  };
+  const codes = OBSERVATION_ACTIONS.flatMap((base) => [
+    base,
+    ...(SUFFIXES[base] ?? []).map((x) => `${base}:${x}`),
+  ]);
+
+  test('the issue examples: implement and park, the item linked to its work item', () => {
+    expect(observationWords(obs())).toBe(
+      'Would start implementing <a href="/projects/jm/work/4154">#4154</a>',
+    );
+    expect(
+      observationWords(
+        obs({
+          action: 'would_park',
+          issueNumber: 4155,
+          detail: 'hand-opened PR on the agent branch',
+        }),
+      ),
+    ).toBe(
+      'Would park <a href="/projects/jm/work/4155">#4155</a> (hand-opened PR on the agent branch)',
+    );
+  });
+
+  test.each(codes)('%s maps to a sentence without the raw code', (action) => {
+    for (const row of [obs({ action }), obs({ action, itemId: null, issueNumber: null })]) {
+      const words = observationWords(row);
+      expect(words.startsWith('Would ')).toBe(true);
+      expect(words).not.toContain('would_');
+      expect(words).not.toContain(action);
+      // Not the fallback for an unknown code.
+      expect(words.startsWith(`Would ${action}`)).toBe(false);
+    }
+  });
+
+  test('every would_ code the server writes is in OBSERVATION_ACTIONS', () => {
+    const root = join(import.meta.dirname, '..');
+    const files = (readdirSync(root, { recursive: true }) as string[]).filter(
+      (f) => f.endsWith('.ts') && !f.endsWith('.test.ts'),
+    );
+    const found = new Set<string>();
+    for (const f of files)
+      for (const m of readFileSync(join(root, f), 'utf8').matchAll(/['"`](would_[a-z_]+)/g))
+        found.add(m[1] ?? '');
+    // Non-vacuous: the codes reconcile and the crew schedule write are found.
+    for (const code of ['would_park', 'would_enqueue', 'would_wait', 'would_merge'])
+      expect(found).toContain(code);
+    const known: readonly string[] = OBSERVATION_ACTIONS;
+    expect([...found].filter((code) => !known.includes(code))).toEqual([]);
+  });
+
+  test('an unknown code renders "Would " and the code, escaped, never dropped', () => {
+    expect(
+      observationWords(
+        obs({ action: 'would_<b>x</b>', itemId: null, issueNumber: null, detail: '' }),
+      ),
+    ).toBe('Would would_&lt;b&gt;x&lt;/b&gt;');
+    expect(
+      observationWords(
+        obs({ action: 'adopt_refused', itemId: null, issueNumber: null, detail: 'pr #9' }),
+      ),
+    ).toBe('Would adopt_refused (pr #9)');
+    // An item without a known issue is named by its id.
+    expect(observationWords(obs({ issueNumber: null }))).toBe('Would start implementing item 7');
+  });
+
+  test('the merged list orders by time across both kinds, newest first', () => {
+    const at = (n: number) => `2026-01-0${n}T00:00:00.000Z`;
+    const observations = [1, 3, 5].map((n) =>
+      obs({ id: n, lastAt: at(n), firstAt: at(1), detail: `o${n}`, action: 'would_merge' }),
+    );
+    const rulings = [2, 4, 6].map((n) =>
+      ruling({ id: n, zoneId: 'jm', choice: 'yes', createdAt: at(n), note: `r${n}` }),
+    );
+    const order = logEntries(observations, rulings, new Date(at(9))).map(
+      (e) => e.cells.match(/\b[or]\d\b/)?.[0],
+    );
+    expect(order).toEqual(['r6', 'o5', 'r4', 'o3', 'r2', 'o1']);
+    const html = renderLog({
+      zones: [{ id: 'jm', repo: 'acme/jm' }],
+      kind: 'all',
+      observations,
+      rulings,
+      now: new Date(at(9)),
+    });
+    const shown = [...html.matchAll(/<tr class="log-[a-z]+">.*?\b([or]\d)\b/g)].map((m) => m[1]);
+    expect(shown).toEqual(['r6', 'o5', 'r4', 'o3', 'r2', 'o1']);
+  });
+
+  test('a ruling row links its ruling and briefing and says what was decided, when', () => {
+    const html = renderLog({
+      zones: [{ id: 'jm', repo: 'acme/jm' }],
+      zone: 'jm',
+      header: '<nav>tabs</nav>',
+      kind: 'all',
+      observations: [obs({ count: 3, firstAt: '2025-12-31T00:00:00.000Z' })],
+      rulings: [
+        ruling({
+          id: 12,
+          briefingId: 7,
+          zoneId: 'jm',
+          label: 'Split it',
+          createdAt: '2026-01-01T00:00:00.000Z',
+        }),
+      ],
+      now: new Date('2026-01-02T00:00:00.000Z'),
+    });
+    expect(html).toContain(
+      '<a href="/briefings/7#ruling-12">Ruling 12</a> on <a href="/briefings/7">Briefing 7</a>: Split it',
+    );
+    expect(html).toContain('<td>3</td>');
+    expect(html).toContain('<time datetime="2025-12-31T00:00:00.000Z"');
+    // The project's tab: no Project column, and its filters stay on the tab.
+    expect(html).not.toContain('<th>Project</th>');
+    expect(html).toContain('<a href="/projects/jm/log" aria-current="page">All</a>');
+    expect(html).toContain('<a href="/projects/jm/log?kind=observed">Observed</a>');
+    expect(html).toContain('<a href="/projects/jm/log?kind=rulings">Rulings</a>');
+  });
+
+  test('the global log has a Project column and project filter links that keep the kind', () => {
+    const zones = [
+      { id: 'jm', repo: 'acme/jm' },
+      { id: 'b', repo: 'acme/b' },
+    ];
+    const html = renderLog({
+      zones,
+      kind: 'rulings',
+      observations: [obs()],
+      rulings: [ruling({ zoneId: 'b' })],
+      now: new Date(),
+    });
+    expect(html).toContain('<th>Project</th>');
+    expect(html).toContain('<td>acme/b</td>');
+    expect(html).not.toContain('start implementing');
+    expect(html).toContain(
+      '<a href="/activity/log?kind=rulings" aria-current="page">All projects</a>',
+    );
+    expect(html).toContain('<a href="/activity/log?project=jm&amp;kind=rulings">acme/jm</a>');
+    expect(html).toContain('<a href="/activity/log?project=b&amp;kind=rulings">acme/b</a>');
   });
 });

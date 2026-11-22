@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { PROJECTS_HREF, projectHref } from './links.js';
+import { ACTIVITY_LOG_HREF, PROJECTS_HREF, projectHref } from './links.js';
 
 /**
  * The pages that moved, and where each one went (issue #615 and the rest of epic #614). Every
@@ -52,6 +52,9 @@ export const REDIRECTS: readonly Redirect[] = [
     to: (p, q) =>
       `${projectHref(p.zone ?? '', `work/${encodeURIComponent(p.issue ?? '')}`)}${keep(q)}`,
   },
+  // The observations list is the Log (#621): a project's tab, or the install-wide log.
+  { from: '/observations', query: 'zone', to: project('log') },
+  { from: '/observations', to: (_p, q) => `${ACTIVITY_LOG_HREF}${keep(q)}` },
 ];
 
 /** The raw query string of a request, without the `?`. */

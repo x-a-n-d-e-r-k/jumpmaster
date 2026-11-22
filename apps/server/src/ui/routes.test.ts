@@ -13,6 +13,8 @@ import {
   insertDrop,
   insertOutbox,
   insertStick,
+  listWorkItems,
+  recordObservation,
   setStickDesiredSlots,
   setWorkItemState,
   setZoneMode,
@@ -149,7 +151,7 @@ describe('UI routes', () => {
     expect((await get(h, '/briefings/abc')).statusCode).toBe(404);
   });
 
-  test('/briefings lists open briefings and recorded rulings', async () => {
+  test('/briefings lists open briefings; recorded rulings are on the Log (#621)', async () => {
     const h = await crewHarness();
     const at = h.now();
     const open = raiseBriefing(
@@ -190,7 +192,13 @@ describe('UI routes', () => {
     expect(res.body).toContain('Open &lt;b&gt;question&lt;/b&gt;');
     expect(res.body).toContain(`data-briefing="${open}"`);
     expect(res.body).not.toContain(`data-briefing="${ruled}"`);
-    expect(res.body).toContain('not now');
+    expect(res.body).not.toContain('not now');
+    expect(res.body).toContain(
+      '<a href="/projects/main/log?kind=rulings">Rulings for octo/demo</a>',
+    );
+    const log = await get(h, '/projects/main/log?kind=rulings');
+    expect(log.statusCode).toBe(200);
+    expect(log.body).toContain('not now');
     const home = await get(h, '/');
     expect(home.body).toContain('Waiting on you');
     expect(home.body).toContain('<a href="/briefings?zone=main">octo/demo: 1 waiting</a>');
@@ -1255,21 +1263,6 @@ describe('/briefings grouped by project and paged (#132)', () => {
     }
   });
 
-  test('rulings page independently: rpage=2 leaves the briefings shown as they were', async () => {
-    const { h, raise } = await projects();
-    const ids = raise('main', 25);
-    for (const id of ids.slice(0, 12)) ruleBriefing(h.db, id, 'ok', `note ${id}`, h.now());
-    const shown = (html: string) => [...html.matchAll(/data-briefing="(\d+)"/g)].map((m) => m[1]);
-    const one = (await h.view('/briefings?zone=main')).body;
-    const two = (await h.view('/briefings?zone=main&rpage=2')).body;
-    expect(shown(two)).toEqual(shown(one));
-    expect(shown(one)).toHaveLength(10);
-    expect(one).toContain(`<td>note ${ids[11]}</td>`);
-    expect(one).not.toContain(`<td>note ${ids[0]}</td>`);
-    expect(two).toContain(`<td>note ${ids[0]}</td>`);
-    expect(two).not.toContain(`<td>note ${ids[11]}</td>`);
-  });
-
   test('the dismiss form on page 1 of 3 dismisses all 23 of the zone, and says so', async () => {
     const { h, raise } = await projects();
     raise('main', 23);
@@ -1806,5 +1799,92 @@ describe("a project's Work tab (#619)", () => {
     expect(body).toContain('<a href="/projects/jm/work/487">jm ready one</a>');
     expect(body).toContain('<a href="/projects/ref/work/487">ref ready one</a>');
     expect(body).toContain('href="/projects/ref/work">octo/ref</a>');
+  });
+});
+
+describe('the Log (#621)', () => {
+  /** A project with an observe decision on its issue 1 and a ruling, a minute apart. */
+  async function logged() {
+    const h = await harness({});
+    await h.sync();
+    const item = listWorkItems(h.db, 'main')[0];
+    if (!item) throw new Error('no item');
+    const at = h.now();
+    const before = new Date(at.getTime() - 60_000);
+    recordObservation(h.db, 'main', item.id, 'would_enqueue:implement', 'issue #1', before);
+    const b = raiseBriefing(
+      h.db,
+      {
+        zoneId: 'main',
+        kind: 'crew',
+        subject: 'crew:log',
+        decision: 'Log it?',
+        why: 'w',
+        options: [
+          { id: 'o1', label: 'Yes', effect: 'none' },
+          { id: 'o2', label: 'No', effect: 'none' },
+        ],
+        source: 'crew',
+      },
+      at,
+    );
+    const r = ruleBriefing(h.db, b, 'o2', 'ruled in the log', at);
+    if (!r.ok) throw new Error('not ruled');
+    return { h, b, rulingId: r.rulingId, item };
+  }
+  const rowsOf = (html: string) => html.match(/<tr class="log-[a-z]+">.*?<\/tr>/g) ?? [];
+
+  test('/projects/main/log shows both kinds newest first, with the Log tab current', async () => {
+    const { h, b } = await logged();
+    const res = await get(h, '/projects/main/log');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('href="/projects/main/log" aria-current="page">Log</a>');
+    const rows = rowsOf(res.body);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toContain(`<a href="/briefings/${b}">Briefing ${b}</a>`);
+    expect(rows[0]).toContain('ruled in the log');
+    expect(rows[1]).toContain('Would start implementing <a href="/projects/main/work/1">#1</a>');
+  });
+
+  test('/projects/main/log?kind=rulings shows only rulings', async () => {
+    const { h, rulingId } = await logged();
+    const res = await get(h, '/projects/main/log?kind=rulings');
+    expect(res.statusCode).toBe(200);
+    const rows = rowsOf(res.body);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatch(/^<tr class="log-ruling">/);
+    expect(rows[0]).toContain(`Ruling ${rulingId}</a>`);
+    expect(res.body).not.toContain('start implementing');
+    expect(res.body).toContain('aria-current="page">Rulings</a>');
+    const observed = rowsOf((await get(h, '/projects/main/log?kind=observed')).body);
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).toMatch(/^<tr class="log-observed">/);
+  });
+
+  test("/activity/log?project=main equals the project tab's rows", async () => {
+    const { h } = await logged();
+    for (const kind of ['', 'kind=rulings', 'kind=observed']) {
+      const tab = rowsOf((await get(h, `/projects/main/log${kind ? `?${kind}` : ''}`)).body);
+      const global = await get(h, `/activity/log?project=main${kind ? `&${kind}` : ''}`);
+      expect(global.statusCode).toBe(200);
+      expect(tab.length).toBeGreaterThan(0);
+      expect(rowsOf(global.body)).toEqual(tab);
+    }
+    // Unfiltered, the same entries carry a Project column.
+    const all = await get(h, '/activity/log');
+    expect(all.body).toContain('<th>Project</th>');
+    expect(rowsOf(all.body)).toHaveLength(2);
+    expect(rowsOf(all.body)[0]).toContain('<td>octo/demo</td>');
+  });
+
+  test('an unknown project or kind is a 404', async () => {
+    const { h } = await logged();
+    for (const url of [
+      '/activity/log?project=nope',
+      '/activity/log?kind=nope',
+      '/projects/nope/log',
+      '/projects/main/log?kind=nope',
+    ])
+      expect((await get(h, url)).statusCode, url).toBe(404);
   });
 });

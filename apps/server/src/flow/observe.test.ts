@@ -277,12 +277,12 @@ describe('observe mode', () => {
   });
 });
 
-describe('the observations page', () => {
+describe('the Log (#621)', () => {
   test('a detail containing markup is escaped', async () => {
     const h = await observing();
     await h.sync();
     recordObservation(h.db, h.zone.id, 1, 'would_park', '<script>x</script>', h.now());
-    const res = await h.view('/observations');
+    const res = await h.view('/activity/log');
     expect(res.body).toContain('&lt;script&gt;');
     expect(res.body).not.toContain('<script>x');
   });
