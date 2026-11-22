@@ -44,7 +44,7 @@ import {
   WAITING_ON_YOU_ID,
   zoneCards,
 } from './floor.js';
-import { linkTarget, projectHref } from './links.js';
+import { linkTarget, PROJECTS_HREF, projectHref } from './links.js';
 import { STYLE } from './theme.js';
 import { relativeTime } from './time.js';
 import { type ZoneRef, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
@@ -285,9 +285,10 @@ function usageSection(u: HomeState['usage']): string {
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-export { projectHref };
+/** A project's page and its sub-pages (defined in `links.ts`, which has no imports). */
+export { PROJECTS_HREF, projectHref };
 
-/** The older name of `projectHref`: a project's (zone's) page. */
+/** A zone's page: an alias of `projectHref` (zones are projects in the UI). */
 export const zoneHref = projectHref;
 
 /** A file on GitHub at the default branch, each segment of the repo and path URI-encoded. */
@@ -426,7 +427,7 @@ function crewSection(lines: CrewLine[] | undefined, name: (id: string) => string
   const rows = lines
     .map(
       (c) =>
-        `<tr><td>${name(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="${escapeHtml(projectHref(c.zoneId, 'goals'))}">Goals</a> <a href="${escapeHtml(projectHref(c.zoneId, 'issues/new'))}">New issue</a> <a href="${escapeHtml(projectHref(c.zoneId, 'intake'))}">GOAL.md stub</a></td></tr>`,
+        `<tr><td>${name(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="${projectHref(c.zoneId, 'goals')}">Goals</a> <a href="${projectHref(c.zoneId, 'issues/new')}">New issue</a> <a href="${projectHref(c.zoneId, 'intake')}">GOAL.md stub</a></td></tr>`,
     )
     .join('');
   return card(
@@ -1052,7 +1053,7 @@ const FAVICON_LINK = `<link rel="icon" type="image/svg+xml" href="${FAVICON_HREF
  * comment, and links nowhere that would 404.
  */
 export const STORE_NAV_SLOT = '<!--jm-store-nav-->';
-export const STORE_NAV = `<a href="/projects">Projects</a><a href="/settings">Settings</a>`;
+export const STORE_NAV = `<a href="${PROJECTS_HREF}">Projects</a><a href="/settings">Settings</a>`;
 
 /** The pages every install has, in the order the operator reaches for them. */
 const NAV = `<a href="/">Floor</a><a href="/work">Work</a><a href="/drops">Drops</a><a href="/briefings">Briefings</a><a href="/chat">Chat</a><a href="/sticks">Sticks</a>${STORE_NAV_SLOT}<a href="/doctor">Doctor</a><a href="/observations">Observations</a>`;
@@ -1531,7 +1532,7 @@ export function renderHome(state: HomeState): string {
     ? `<div class="warn setup-frame"><p><strong>Finish setting up Jumpmaster.</strong> <a href="/setup/next">Continue where you left off</a>: connect Claude and GitHub, check the runner, add a project and run the doctor.</p><form method="post" action="/setup/dismiss"><button>Dismiss</button></form></div>`
     : '';
   const addProject = state.setup?.addProject
-    ? '<p class="quick"><a href="/projects/new">Add a project</a></p>'
+    ? `<p class="quick"><a href="${PROJECTS_HREF}/new">Add a project</a></p>`
     : '';
   // The dashboard (#120): every number from floorCounts.
   const counts = floorCounts(state, now);
@@ -1908,7 +1909,7 @@ export function renderDoctor(
         `<li><button data-doctor="/api/control/doctor/drop" data-body="${escapeHtml(JSON.stringify({ zone: z.id }))}">Doctor drop: ${name(z.id)}</button></li>`,
     )
     .join('');
-  const controls = `<p><button data-doctor="/api/control/doctor">Run the doctor</button></p><p>A doctor drop proves the Claude token, the clone, services and gates on a stick; it spends one turn of usage.</p>${drops ? `<ul class="doctor-drops">${drops}</ul>` : ''}${zones.length > 0 ? `<p>GitHub setup (token links, the ruleset file, CODEOWNERS): ${zones.map((z) => `<a href="${escapeHtml(projectHref(z.id, 'github'))}">${name(z.id)}</a>`).join(', ')}</p>` : ''}`;
+  const controls = `<p><button data-doctor="/api/control/doctor">Run the doctor</button></p><p>A doctor drop proves the Claude token, the clone, services and gates on a stick; it spends one turn of usage.</p>${drops ? `<ul class="doctor-drops">${drops}</ul>` : ''}${zones.length > 0 ? `<p>GitHub setup (token links, the ruleset file, CODEOWNERS): ${zones.map((z) => `<a href="${projectHref(z.id, 'github')}">${name(z.id)}</a>`).join(', ')}</p>` : ''}`;
   if (!run)
     return page(
       `<h2>Doctor</h2><p>No doctor run has finished yet. Run one here or with <code>jumpmaster ctl doctor</code>.</p>${controls}${DOCTOR_SCRIPT}`,

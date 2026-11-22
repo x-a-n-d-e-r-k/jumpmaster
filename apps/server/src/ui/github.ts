@@ -22,8 +22,8 @@ import {
 } from '../github/guidance.js';
 import { MATRIX_AND_REUSABLE_NOTE } from '../github/workflows.js';
 import type { AppRole } from '../vault/github-app-entries.js';
-import { linkTarget, projectHref } from './links.js';
-import { escapeHtml, page } from './pages.js';
+import { linkTarget } from './links.js';
+import { escapeHtml, PROJECTS_HREF, page, projectHref } from './pages.js';
 import { type ZoneRef, zoneName } from './zone-name.js';
 
 /**
@@ -319,7 +319,7 @@ export function registerGithubPages(
 ): void {
   const { store, now } = deps;
   const forgeOf = deps.guidanceForge ?? githubGuidanceForge;
-  app.get<{ Params: { id: string } }>('/projects/:id/github', async (req, reply) => {
+  app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/github`, async (req, reply) => {
     const config = req.jmConfig ?? store.current();
     const zone = config.dropZones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');

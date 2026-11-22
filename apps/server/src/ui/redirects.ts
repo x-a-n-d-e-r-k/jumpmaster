@@ -1,54 +1,60 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { PROJECTS_HREF, projectHref } from './links.js';
 
 /**
- * Pages that moved (#614, #631): every old path answers with a redirect straight to its new one.
- * GET (and Fastify's automatic HEAD) gets 301, POST gets 308. Each redirect is an ordinary route,
- * so the guard (`auth/guard.ts`) runs first, as on every page.
+ * The pages that moved, and where each one went (issue #615 and the rest of epic #614). Every
+ * moved page answers its old path here, one hop straight to the final path: 301 for GET and HEAD,
+ * 308 for POST, the query string kept.
  *
- * `to` builds the target from the matched params, which `redirectTarget` has already passed
- * through `encodeURIComponent`: a param is one path segment, never a new one or a scheme.
+ * `to` builds the target only from this table's template and the matched params, each param
+ * URI-encoded (`projectHref` does it), so a param is always exactly one path segment: an encoded
+ * slash, a dot segment, a scheme or a backslash can't send the browser off-site.
  */
-export interface Redirect {
-  /** A Fastify path pattern. */
+export type Redirect = {
+  /** A fastify path pattern: the old path. */
   from: string;
-  /** The new path from the encoded params. */
-  to: (params: Record<string, string>) => string;
-}
+  /** The new path, without the query (`registerRedirects` keeps the request's). */
+  to: (params: Record<string, string>, query: string) => string;
+};
+
+/** The request's own query string, `?…` included, or `''`. */
+const keep = (query: string): string => (query ? `?${query}` : '');
+
+const project =
+  (sub?: string) =>
+  (p: Record<string, string>, q: string): string =>
+    `${projectHref(p.id ?? '', sub)}${keep(q)}`;
 
 export const REDIRECTS: readonly Redirect[] = [
-  { from: '/zones', to: () => '/projects' },
-  { from: '/zones/new', to: () => '/projects/new' },
-  { from: '/zones/:id', to: (p) => `/projects/${p.id}` },
-  { from: '/zones/:id/flags', to: (p) => `/projects/${p.id}/flags` },
-  { from: '/zones/:id/github', to: (p) => `/projects/${p.id}/github` },
-  { from: '/zones/:id/goals', to: (p) => `/projects/${p.id}/goals` },
-  { from: '/zones/:id/intake', to: (p) => `/projects/${p.id}/intake` },
-  { from: '/zones/:id/issues/new', to: (p) => `/projects/${p.id}/issues/new` },
+  { from: '/zones', to: (_p, q) => `${PROJECTS_HREF}${keep(q)}` },
+  { from: '/zones/new', to: (_p, q) => `${PROJECTS_HREF}/new${keep(q)}` },
+  { from: '/zones/:id', to: project() },
+  { from: '/zones/:id/flags', to: project('flags') },
+  { from: '/zones/:id/github', to: project('github') },
+  { from: '/zones/:id/goals', to: project('goals') },
+  { from: '/zones/:id/intake', to: project('intake') },
+  { from: '/zones/:id/issues/new', to: project('issues/new') },
 ];
 
-/** The redirect's `Location`: the entry's template over the encoded params, plus the raw query. */
-export function redirectTarget(
-  entry: Redirect,
-  params: Record<string, string | undefined>,
-  rawUrl: string,
-): string {
-  const encoded: Record<string, string> = {};
-  for (const [k, v] of Object.entries(params)) encoded[k] = encodeURIComponent(v ?? '');
-  const q = rawUrl.indexOf('?');
-  return entry.to(encoded) + (q === -1 ? '' : rawUrl.slice(q));
-}
+/** The raw query string of a request, without the `?`. */
+const queryOf = (url: string): string => {
+  const at = url.indexOf('?');
+  return at === -1 ? '' : url.slice(at + 1);
+};
 
-export function registerRedirects(app: FastifyInstance): void {
-  for (const entry of REDIRECTS) {
-    const send = (code: 301 | 308) => async (req: FastifyRequest, reply: FastifyReply) =>
-      reply.redirect(
-        redirectTarget(entry, (req.params ?? {}) as Record<string, string>, req.url),
-        code,
-      );
-    // HEAD comes from Fastify's automatic HEAD route for the GET.
-    app.get(entry.from, send(301));
-    const post = send(308);
-    // Answered before the body is parsed, so any content type gets the 308.
-    app.post(entry.from, { onRequest: post }, post);
+/** Registers every entry of `table`: GET and HEAD answer 301, POST answers 308. */
+export function registerRedirects(
+  app: FastifyInstance,
+  table: readonly Redirect[] = REDIRECTS,
+): void {
+  for (const r of table) {
+    const handler = (code: 301 | 308) => async (req: FastifyRequest, reply: FastifyReply) =>
+      reply
+        .code(code)
+        .header('location', r.to(req.params as Record<string, string>, queryOf(req.url)))
+        .send();
+    // Fastify answers HEAD from the GET route (exposeHeadRoutes), with the same 301.
+    app.get(r.from, handler(301));
+    app.post(r.from, handler(308));
   }
 }

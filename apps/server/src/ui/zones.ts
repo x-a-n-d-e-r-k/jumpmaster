@@ -13,7 +13,16 @@ import { PRESET_EGRESS } from '../presets.js';
 import { FORM_SCRIPT, zoneToForm } from '../zones/form.js';
 import { renderFlags } from './flags.js';
 import { listHref } from './floor.js';
-import { askButton, escapeHtml, MODE_LABELS, page, zoneBriefingsHref, zoneHref } from './pages.js';
+import {
+  askButton,
+  escapeHtml,
+  MODE_LABELS,
+  PROJECTS_HREF,
+  page,
+  projectHref,
+  zoneBriefingsHref,
+  zoneHref,
+} from './pages.js';
 import { getWizard, projectBody } from './setup.js';
 import { zoneName, zoneNameText } from './zone-name.js';
 
@@ -95,7 +104,7 @@ const STOP_SCRIPT = `for (const b of document.querySelectorAll('button.stop')) b
   const r = await jmFetch('/api/control/zones/' + encodeURIComponent(b.dataset.zone), {}, 'DELETE');
   const j = await r.json().catch(() => ({}));
   // 200: removed now; 202: stopping, removed by the server once drained.
-  if (r.status === 200) { location.href = '/projects'; return; }
+  if (r.status === 200) { location.href = ${scriptJson(PROJECTS_HREF)}; return; }
   if (r.status === 202) { location.reload(); return; }
   document.getElementById('stop-out').textContent = b.dataset.name + ': ' + (j.error || (j.issues || []).map((i) => i.message).join('; ') || ('refused (' + r.status + ')'));
 });`;
@@ -130,12 +139,12 @@ function listPage(store: ConfigStore, db: Db): string {
         mode === m
           ? ''
           : `<button class="mode" data-zone="${escapeHtml(z.id)}" data-name="${escapeHtml(name)}" data-mode="${m}">${label}</button> `;
-      return `<tr><td><a href="${zoneHref(z.id)}">${zoneName(z, config.dropZones)}</a></td><td>${escapeHtml(MODE_LABELS[mode] ?? mode)}${stopping ? `<br><strong>${escapeHtml(stopping)}</strong>` : ''}</td><td>${escapeHtml(z.preset ?? z.image)}</td><td>${escapeHtml(z.egress?.mode ?? 'off')}</td><td>${escapeHtml(z.identity)}</td><td>${last ? `<a href="/drops/${encodeURIComponent(last.id)}">${escapeHtml(last.role)}, ${escapeHtml(last.state)}</a>` : '-'}</td><td>${fails === undefined ? '-' : `<a href="/doctor">${fails}</a>`}</td><td>${problem}</td><td>${button('paused', 'Pause')}${button('active', 'Resume')}${button('observe', 'Observe')}${fileMode || stopping ? '' : stopButton(z.id, name)}<a href="${zoneHref(z.id)}/github">GitHub</a></td></tr>`;
+      return `<tr><td><a href="${zoneHref(z.id)}">${zoneName(z, config.dropZones)}</a></td><td>${escapeHtml(MODE_LABELS[mode] ?? mode)}${stopping ? `<br><strong>${escapeHtml(stopping)}</strong>` : ''}</td><td>${escapeHtml(z.preset ?? z.image)}</td><td>${escapeHtml(z.egress?.mode ?? 'off')}</td><td>${escapeHtml(z.identity)}</td><td>${last ? `<a href="/drops/${encodeURIComponent(last.id)}">${escapeHtml(last.role)}, ${escapeHtml(last.state)}</a>` : '-'}</td><td>${fails === undefined ? '-' : `<a href="/doctor">${fails}</a>`}</td><td>${problem}</td><td>${button('paused', 'Pause')}${button('active', 'Resume')}${button('observe', 'Observe')}${fileMode || stopping ? '' : stopButton(z.id, name)}<a href="${projectHref(z.id, 'github')}">GitHub</a></td></tr>`;
     })
     .join('');
   return page(
     `<p><a href="/">Home</a></p><h2>Projects</h2><p>A project is one repository Jumpmaster works on.</p>
-${fileMode ? ADOPT_BANNER : '<p><a href="/projects/new">Add a project</a></p>'}
+${fileMode ? ADOPT_BANNER : `<p><a href="${PROJECTS_HREF}/new">Add a project</a></p>`}
 <table><tr><th>Project</th><th>Mode</th><th>Stack</th><th>Egress</th><th>Accounts</th><th>Last drop</th><th>Doctor fails</th><th>Needs</th><th></th></tr>${rows || '<tr><td colspan="9">No zones yet.</td></tr>'}</table>
 <p id="mode-out" role="status"></p><p id="stop-out" role="status"></p>
 <script>
@@ -351,13 +360,13 @@ ${field('overrideApprovers', 'Override approvers (logins)', textarea(f, 'overrid
   const advanced = sectionForm(
     'advanced',
     'Advanced',
-    `<p>Zone id: <code>${escapeHtml(id)}</code> <small>(the zone's key in URLs, the API and <code>jumpmaster ctl</code>)</small></p><p>The zone as JSON: models, budgets, crew and every other setting. It is checked as the sections are.</p><p>All settings, one per row: <a href="${zoneHref(id)}/flags">advanced settings</a></p><div id="goals"></div><div id="crew"></div><textarea name="json" rows="24" cols="90">${escapeHtml(JSON.stringify(raw, null, 2))}</textarea><span class="issue" data-issues="advanced"></span>`,
+    `<p>Zone id: <code>${escapeHtml(id)}</code> <small>(the zone's key in URLs, the API and <code>jumpmaster ctl</code>)</small></p><p>The zone as JSON: models, budgets, crew and every other setting. It is checked as the sections are.</p><p>All settings, one per row: <a href="${projectHref(id, 'flags')}">advanced settings</a></p><div id="goals"></div><div id="crew"></div><textarea name="json" rows="24" cols="90">${escapeHtml(JSON.stringify(raw, null, 2))}</textarea><span class="issue" data-issues="advanced"></span>`,
     readOnly,
   );
   const base = zoneHref(id);
   const briefings = listBriefings(db, { zoneId: id, state: 'open' }).length;
   return page(
-    `<p><a href="/">Home</a> · <a href="/projects">Projects</a> · <a href="${base}/github">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${briefings} open)</a> · <a href="${base}/goals">Goals</a> · <a href="${base}/issues/new">New issue</a></p>
+    `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${base}/github">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${briefings} open)</a> · <a href="${base}/goals">Goals</a> · <a href="${base}/issues/new">New issue</a></p>
 <h2>${zoneName(resolved, all)}</h2><p>${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>
 ${askButton({ kind: 'zone', zoneId: id, ref: id })}
 ${stopping ? `<p><strong>${escapeHtml(stopping)}</strong> <small>Resume or Pause from the Zones list withdraws it.</small></p>` : ''}
@@ -449,33 +458,33 @@ export function registerZonesPages(
   deps: { db: Db; store: ConfigStore; now(): Date },
 ): void {
   const { db, store, now } = deps;
-  app.get('/projects', async (req, reply) => html(req, reply, listPage(store, db)));
-  app.get('/projects/new', async (req, reply) => {
+  app.get(PROJECTS_HREF, async (req, reply) => html(req, reply, listPage(store, db)));
+  app.get(`${PROJECTS_HREF}/new`, async (req, reply) => {
     if (store.mode() === 'file')
       return html(
         req,
         reply,
-        page(`<p><a href="/projects">Projects</a></p><h2>Add a project</h2>${ADOPT_BANNER}`),
+        page(`<p><a href="${PROJECTS_HREF}">Projects</a></p><h2>Add a project</h2>${ADOPT_BANNER}`),
       );
     return html(
       req,
       reply,
       page(
-        `<p><a href="/">Home</a> · <a href="/projects">Projects</a></p>${projectBody(
+        `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a></p>${projectBody(
           getWizard(db).starter ? 'starter' : 'two-bot',
-          { returnTo: '/projects', cancelTo: '/projects/new', done: '/projects' },
+          { returnTo: PROJECTS_HREF, cancelTo: `${PROJECTS_HREF}/new`, done: PROJECTS_HREF },
         )}`,
       ),
     );
   });
-  app.get<{ Params: { id: string } }>('/projects/:id', async (req, reply) => {
+  app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id`, async (req, reply) => {
     const body = zonePage(store, db, req.params.id, now());
     if (!body) return reply.code(404).type('text/plain').send('no such zone');
     return html(req, reply, body);
   });
   // A zone's advanced settings: every setting of the catalog, one per row (issue #322).
   app.get<{ Params: { id: string }; Querystring: { saved?: string } }>(
-    '/projects/:id/flags',
+    `${PROJECTS_HREF}/:id/flags`,
     async (req, reply) => {
       const saved = /^\d{1,9}$/.test(req.query.saved ?? '') ? Number(req.query.saved) : undefined;
       const body = renderFlags(store, req.params.id, {

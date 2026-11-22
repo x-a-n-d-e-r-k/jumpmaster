@@ -7,10 +7,12 @@ export function linkTarget(href: string): string {
   return /^https?:\/\//i.test(href) ? ' target="_blank" rel="noopener noreferrer"' : '';
 }
 
+/** The projects list page (issue #615: project pages moved from `/zones`). */
+export const PROJECTS_HREF = '/projects';
+
 /**
- * A project's page, or one of its sub-pages: `projectHref('jm', 'goals')` is `/projects/jm/goals`
- * (#631). The id is one encoded path segment. Pages re-export it (`ui/pages.ts`) with the older
- * name `zoneHref`; modules outside the UI import it from here.
+ * A project's page, or one of its sub-pages (`goals`, `github`, `issues/new`…). The id is
+ * URI-encoded, so it is always exactly one path segment.
  */
 export const projectHref = (id: string, sub?: string): string =>
-  `/projects/${encodeURIComponent(id)}${sub ? `/${sub}` : ''}`;
+  `${PROJECTS_HREF}/${encodeURIComponent(id)}${sub ? `/${sub}` : ''}`;

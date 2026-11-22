@@ -30,7 +30,7 @@ import { zoneGuidance } from '../github/guidance.js';
 import { recordObjectiveDone, zoneObjective } from '../goals.js';
 import { opMarker } from '../outbox.js';
 import { crewOn, GOAL } from '../test/crew.js';
-import { harness } from '../test/flowHarness.js';
+import { harness, toPrOpen } from '../test/flowHarness.js';
 import { operatorSession } from '../test/helpers.js';
 
 const get = async (h: Awaited<ReturnType<typeof harness>>, url: string) => h.view(url);
@@ -1564,99 +1564,97 @@ describe("this session's pending guarded changes under Waiting on you (#507)", (
   });
 });
 
-/** A GitHub that answers the zone's GitHub page reads. */
-const sweepForge = () => ({
-  repoAccess: async () => ({
-    private: false,
-    defaultBranch: 'main',
-    permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
-    scopes: null,
-    tokenExpiresAt: null,
-    ownerType: 'Organization' as const,
-  }),
-  ownerType: async () => 'Organization' as const,
-  viewerLogin: async () => 'jm-author',
-  listDir: async () => [],
-  getFileAt: async () => null,
-});
+describe('project pages live under /projects (issue #615)', () => {
+  /** A seeded store install: the zone `jm` with a drop in flight, and a second zone. */
+  async function seeded() {
+    const h = await harness({
+      live: true,
+      zone: { id: 'jm', protectedPaths: ['.github/**', 'CODEOWNERS', 'GOAL.md'] },
+      extraZones: [
+        { id: 'ref', repo: 'octo/ref', protectedPaths: ['.github/**', 'CODEOWNERS', 'GOAL.md'] },
+      ],
+      guidanceForge: () => ({
+        repoAccess: async () => ({
+          private: false,
+          defaultBranch: 'main',
+          permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+          scopes: null,
+          tokenExpiresAt: null,
+          ownerType: 'Organization',
+        }),
+        ownerType: async () => 'Organization',
+        viewerLogin: async () => 'jm-author',
+        listDir: async () => [],
+        getFileAt: async () => null,
+      }),
+    });
+    await toPrOpen(h, '7368613100000000000000000000000000000000');
+    await h.reconcile();
+    return h;
+  }
+  const PROJECT_PAGES = ['', '/github', '/goals', '/intake', '/issues/new', '/flags'];
 
-/** Every `href`, form `action` and quoted JS path in the HTML that starts with `/zones`. */
-export function zonesPagePaths(html: string): string[] {
-  const out: string[] = [];
-  for (const m of html.matchAll(/\b(?:href|action)\s*=\s*["']?(\/zones[^"'\s>]*)/gi))
-    out.push(m[1] ?? '');
-  for (const m of html.matchAll(/["'`](\/zones(?:[/?#][^"'`]*)?)["'`]/g)) out.push(m[1] ?? '');
-  return [...new Set(out)];
-}
-
-/** A store-mode install (the config in the database) with one seeded zone. */
-const storeHarness = (id = 'main') =>
-  harness({
-    live: true,
-    zone: { id, protectedPaths: [...DEFAULT_PROTECTED_PATHS] },
-    guidanceForge: sweepForge,
-  });
-
-describe('project pages live at /projects (#631)', () => {
-  test('/projects and /projects/new return 200', async () => {
-    const h = await storeHarness();
-    for (const url of ['/projects', '/projects/new']) {
-      const res = await h.view(url);
-      expect(res.statusCode, url).toBe(200);
-      expect(res.headers['content-type'], url).toMatch(/^text\/html/);
-    }
-  });
-
-  test.each(['', '/flags', '/github', '/goals', '/intake', '/issues/new'])(
-    '/projects/:id%s is 200 for a known zone and 404 for an unknown one',
+  test.each(PROJECT_PAGES)(
+    '/projects/<id>%s is 200 for a known zone and 404 for an unknown one',
     async (sub) => {
-      const h = await storeHarness();
-      expect((await h.view(`/projects/main${sub}`)).statusCode).toBe(200);
+      const h = await seeded();
+      expect((await h.view(`/projects/jm${sub}`)).statusCode).toBe(200);
       expect((await h.view(`/projects/nope${sub}`)).statusCode).toBe(404);
     },
   );
 
-  test('the top bar and the list say Projects', async () => {
-    const h = await storeHarness();
-    const body = (await h.view('/projects')).body;
-    expect(body).toContain('<a href="/projects">Projects</a>');
-    expect(body).toContain('<h2>Projects</h2>');
-    expect(body).toContain('<p>A project is one repository Jumpmaster works on.</p>');
-    expect(body).not.toContain('>Zones<');
+  test('/projects and /projects/new are 200', async () => {
+    const h = await seeded();
+    expect((await h.view('/projects')).statusCode).toBe(200);
+    expect((await h.view('/projects/new')).statusCode).toBe(200);
   });
 
-  test('the sweep helper finds a /zones link (it is not vacuous)', () => {
-    expect(zonesPagePaths('<p><a href="/zones/jm">x</a></p>')).toEqual(['/zones/jm']);
-    expect(zonesPagePaths(`<form action="/zones/jm/github">`)).toEqual(['/zones/jm/github']);
-    expect(zonesPagePaths(`location.href = '/zones'; x`)).toEqual(['/zones']);
-    expect(
-      zonesPagePaths(
-        `<a href="/projects/jm">p</a><button data-x="/api/control/zones/jm">b</button>'/api/control/zones/'`,
-      ),
-    ).toEqual([]);
+  test('the top bar and the list say Projects; a project is one repository', async () => {
+    const h = await seeded();
+    const list = (await h.view('/projects')).body;
+    expect(list).toContain('<a href="/projects">Projects</a>');
+    expect(list).not.toContain('>Zones</a>');
+    expect(list).toContain('<h2>Projects</h2>');
+    expect(list).toContain('<p>A project is one repository Jumpmaster works on.</p>');
+    expect(list).not.toContain('<h2>Zones</h2>');
   });
 
-  test('no swept page links a /zones page path, and each links /projects', async () => {
-    const h = await storeHarness('jm');
+  test('a sweep: no rendered page links to a /zones page path', async () => {
+    const h = await seeded();
+    const seen = new Set<string>();
     for (const url of [
       '/',
       '/projects',
-      '/projects/new',
       '/projects/jm',
-      '/projects/jm/flags',
-      '/projects/jm/github',
       '/projects/jm/goals',
       '/work',
       '/drops',
       '/doctor',
-      '/settings/history',
       '/settings/credentials',
+      '/settings/flags',
     ]) {
       const res = await h.view(url);
       expect(res.statusCode, url).toBe(200);
-      expect(res.headers['content-type'], url).toMatch(/^text\/html/);
-      expect(zonesPagePaths(res.body), url).toEqual([]);
-      expect(res.body, url).toMatch(/\b(?:href|action)="\/projects(?:[/"?#])/);
+      const hrefs = [...res.body.matchAll(/\bhref="([^"]*)"/g)].map((m) => m[1] ?? '');
+      expect(hrefs.length, url).toBeGreaterThan(0);
+      for (const href of hrefs) {
+        expect(href.startsWith('/zones'), `${url} links ${href}`).toBe(false);
+        seen.add(href.replace(/#.*$/, ''));
+      }
+      // Nor any page path in a script or a form target: only the API keeps /zones.
+      expect(res.body.replaceAll('/api/control/zones', ''), url).not.toMatch(/["'`]\/zones\b/);
     }
+    // Non-vacuous: the pages did render the hand-written project links the sweep guards.
+    for (const href of [
+      '/projects',
+      '/projects/jm',
+      '/projects/jm/github',
+      '/projects/jm/goals',
+      '/projects/jm/intake',
+      '/projects/jm/issues/new',
+      '/projects/jm/flags',
+      '/projects/ref/flags',
+    ])
+      expect(seen, href).toContain(href);
   });
 });

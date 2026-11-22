@@ -8,7 +8,7 @@ import { loadBoot } from './config/boot.js';
 import { ConfigStore } from './config/store.js';
 import { ctlRequest, runCtl } from './ctl.js';
 import { openDb } from './db/open.js';
-import { appendEvents, listEvents } from './db/repo.js';
+import { appendEvents, listEvents, setZoneMode } from './db/repo.js';
 import { zoneGuidance } from './github/guidance.js';
 import { plain } from './terminal.js';
 import { APP_ENTRIES, APP_SECRETS, guidanceAppsOf } from './test/app-guidance-fixture.js';
@@ -383,6 +383,26 @@ describe('ctl config', () => {
     }) as typeof fetch;
     return { db, store, dir, app, fetch: { calls, impl } };
   }
+
+  test('the page URLs ctl status prints are /projects pages, never /zones (issue #615)', async () => {
+    const s = server();
+    s.store.apply(
+      { dropZones: [zoneDoc(), zoneDoc('docs')] },
+      { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
+    );
+    // A paused zone is an "also" line that links its page.
+    setZoneMode(s.db, 'docs', 'paused', t0);
+    const r = await run(['status'], '', s.fetch);
+    expect(r.code).toBe(0);
+    const urls = r.out.flatMap((l) => [...l.matchAll(/(?:^|[\s(])(\/[^\s)]*)/g)].map((m) => m[1]));
+    // Non-vacuous: the status did print a project page.
+    expect(
+      urls.some((u) => u?.startsWith('/projects/')),
+      r.out.join('\n'),
+    ).toBe(true);
+    for (const u of urls) expect(u?.startsWith('/zones'), u).toBe(false);
+    await s.app.close();
+  });
 
   test('ctl config export writes only the JSON to stdout', async () => {
     const s = server();

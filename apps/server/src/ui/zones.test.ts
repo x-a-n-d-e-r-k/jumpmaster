@@ -120,7 +120,7 @@ const section = (html: string, id: string): string => {
 };
 
 describe('the zones page', () => {
-  test('/zones lists every zone with its plain-English mode, egress mode, identity and credential problem, links its page, and owns the home page add link', async () => {
+  test('/projects lists every zone with its plain-English mode, egress mode, identity and credential problem, links its page, and owns the home page add link', async () => {
     const w = await world();
     setZoneMode(w.db, 'img', 'observe', t0);
     const r = await w.get('/projects');

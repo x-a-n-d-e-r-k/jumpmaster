@@ -11,7 +11,7 @@ import {
   zoneStopping,
   zoneWaits,
 } from '../db/repo.js';
-import { projectHref } from '../ui/links.js';
+import { PROJECTS_HREF, projectHref } from '../ui/links.js';
 
 /**
  * Stop managing a zone in one action (issue #100). The zone goes to observe (no new work, no
@@ -53,7 +53,7 @@ export function removeZone(
       principal: meta.principal,
       ...(meta.expectRevision === undefined ? {} : { expectRevision: meta.expectRevision }),
       note: removalNote(id),
-      returnTo: '/projects',
+      returnTo: PROJECTS_HREF,
       cancelTo: projectHref(id),
     },
   );

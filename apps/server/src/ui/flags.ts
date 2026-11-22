@@ -1,8 +1,7 @@
 import { RESTART_PATHS } from '../config/boot.js';
 import { type FlagGroup, type FlagRow, type FlagScope, flagRows } from '../config/catalog.js';
 import type { ConfigStore } from '../config/store.js';
-import { projectHref } from './links.js';
-import { escapeHtml, page } from './pages.js';
+import { escapeHtml, PROJECTS_HREF, page, projectHref } from './pages.js';
 import { CONFIG_ANSWER_FN, RESTART_NOTE, settingControl, settingId } from './setting-controls.js';
 import { zoneName, zoneNameText } from './zone-name.js';
 
@@ -286,7 +285,7 @@ export function renderFlags(
     forbiddenNote: o.forbiddenNote,
   });
   return page(
-    `<p><a href="/">Home</a> · <a href="/projects">Projects</a> · <a href="${base}">${zoneName(resolved, all)}</a> · <a href="${base}#advanced">Edit the zone as JSON</a></p>
+    `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${base}">${zoneName(resolved, all)}</a> · <a href="${base}#advanced">Edit the zone as JSON</a></p>
 <h2>Advanced settings · ${zoneName(resolved, all)}</h2>
 <p>Every setting for this zone. Changes apply at the next pass; one that loosens a safeguard asks you to confirm first.</p>
 ${savedNote(o.saved)}${readOnly ? o.adoptBanner : ''}

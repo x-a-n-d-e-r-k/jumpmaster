@@ -394,7 +394,7 @@ describe('the setup wizard', () => {
     expect(add.json().guarded.map((g: { path: string }) => g.path)).toEqual(['dropZones[py].repo']);
   });
 
-  test('the wizard disappears once a zone exists or is dismissed, the Credentials tab holds its credential controls, and home links Add a project (now /projects/new)', async () => {
+  test('the wizard disappears once a zone exists or is dismissed, the Credentials tab holds its credential controls, and home links Add a project (now /projects/new, Task 11)', async () => {
     const w = await world();
     const home = await w.get('/');
     expect(home.body).toContain('Finish setting up');

@@ -6,7 +6,7 @@ import {
   repoOf,
   type ZoneGuidance,
 } from '../github/guidance.js';
-import { projectHref } from '../ui/links.js';
+import { PROJECTS_HREF, projectHref } from '../ui/links.js';
 import { DOC, type DoctorAction, type DoctorCheck } from './checks.js';
 
 /**
@@ -20,7 +20,7 @@ export type Action = DoctorAction;
 
 /** Which pages exist in this build: the doctor links to them once they do. */
 export type Pages = {
-  /** `/projects` and `/projects/:id` (Task 11). */
+  /** `/projects` and `/projects/:id` (Task 11; moved from `/zones` by issue #615). */
   zones: boolean;
   /** `/settings/install` and `/settings/history` (Task 13, with `/settings/mcp-tokens`). */
   settings: boolean;
@@ -38,7 +38,7 @@ export const PAGES_M45A: Pages = { zones: false, settings: false, credentials: f
 export function pagesOf(app: Pick<FastifyInstance, 'hasRoute'>): Pages {
   const has = (url: string) => app.hasRoute({ method: 'GET', url });
   return {
-    zones: has('/projects'),
+    zones: has(PROJECTS_HREF),
     settings: has('/settings/install') && has('/settings/history'),
     credentials: has('/settings/credentials'),
   };
@@ -179,7 +179,7 @@ const TABLE: Record<string, Rule> = {
         }
       : docs(check),
   'zone.mode': (_c, ctx) =>
-    ctx.pages.zones ? app('Open the zones', '/projects') : app('Open home (zone modes)', '/'),
+    ctx.pages.zones ? app('Open the zones', PROJECTS_HREF) : app('Open home (zone modes)', '/'),
   // The zone page's sections (Task 11): Stack, Egress, Merging, and Advanced for the rest.
   'zone.preset': zoneSection('stack', 'preset'),
   'zone.services': zoneSection('stack', 'services'),

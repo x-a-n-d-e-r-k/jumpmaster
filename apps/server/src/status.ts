@@ -25,7 +25,7 @@ import { isReservationReason } from './flow/decide.js';
 import { missingFor, zoneRequirements } from './leases.js';
 import { isBlocked, isOverlapReason, openPrCap } from './scheduler.js';
 import { redactionList } from './scrub.js';
-import { projectHref } from './ui/links.js';
+import { PROJECTS_HREF, projectHref } from './ui/links.js';
 import { wizardActive } from './ui/setup.js';
 import { dispatchGate, type Gate } from './usage.js';
 import { type CredentialProblem, credentialProblems } from './vault/problems.js';
@@ -466,7 +466,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
       headline: `Paused by you: ${zones.map((z) => `${name(z.id)} (${z.mode})`).join(', ')}`,
       detail: draining.join(' '),
       waitingOn: 'you',
-      action: { label: 'Open the zones', href: pages.zones ? '/projects' : '/' },
+      action: { label: 'Open the zones', href: pages.zones ? PROJECTS_HREF : '/' },
     });
   }
 
@@ -581,7 +581,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
     waitingOn: 'you',
     action: zoneOne
       ? { label: 'New issue', href: projectHref(zoneOne.id, 'issues/new') }
-      : { label: 'Add a project', href: pages.zones ? '/projects' : '/setup/project' },
+      : { label: 'Add a project', href: pages.zones ? PROJECTS_HREF : '/setup/project' },
   });
 }
 
