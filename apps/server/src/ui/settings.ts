@@ -14,7 +14,7 @@ import {
   planLabel,
 } from '../config.js';
 import type { Db } from '../db/open.js';
-import { FABLE_MAX_UTILIZATION } from '../fable.js';
+import { FABLE_MAX_UTILIZATION, FABLE_REVIEW_MAX_UTILIZATION } from '../fable.js';
 import { listMcpTokens, MAX_TOKEN_DAYS, type McpTokenInfo } from '../mcp/tokens.js';
 import {
   defaultTailscaleDeps,
@@ -625,7 +625,7 @@ function installSettings(config: Config): Setting[] {
     },
     {
       path: 'claude.fableModel',
-      label: 'the model the Fable reviewer runs on (empty: no Fable)',
+      label: 'the model Fable drops run on, reviews included (empty: no Fable)',
       kind: 'text',
       value: config.claude.fableModel ?? null,
     },
@@ -643,6 +643,20 @@ function installSettings(config: Config): Setting[] {
       kind: 'number',
       value: config.claude.fableMaxUtilization ?? FABLE_MAX_UTILIZATION,
       // Any value (review M2): a step of 0.05 would make a stored 0.82 block the whole form.
+      attrs: 'min="0" max="1" step="any"',
+    },
+    {
+      path: 'claude.fableReview',
+      label: 'run pull request reviews on Fable while its weekly budget has room',
+      kind: 'bool',
+      value: config.claude.fableReview !== false,
+    },
+    {
+      path: 'claude.fableReviewMaxUtilization',
+      label:
+        'reviews stop using Fable at this share of its weekly limit (audit, diagnose and arbitrate keep it)',
+      kind: 'number',
+      value: config.claude.fableReviewMaxUtilization ?? FABLE_REVIEW_MAX_UTILIZATION,
       attrs: 'min="0" max="1" step="any"',
     },
     {

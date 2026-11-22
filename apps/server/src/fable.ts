@@ -22,6 +22,12 @@ export const FABLE_PLANS: readonly ClaudePlan[] = ['max', 'ultra', 'team_premium
 export const FABLE_MAX_UTILIZATION = 0.8;
 
 /**
+ * The default share of Fable's weekly limit at which reviews stop using Fable
+ * (`claude.fableReviewMaxUtilization`), so the crew's Fable roles keep it (#605).
+ */
+export const FABLE_REVIEW_MAX_UTILIZATION = 0.5;
+
+/**
  * Windows that belong to one model the key does not name (#377): `seven_day_overage_included` is
  * Claude's "per-model bucket", labelled by the model of the drop that reported it.
  */
@@ -93,6 +99,39 @@ function fableDropsThisWeek(db: Db, cfg: Pick<Config, 'claude'>, now: Date): num
   return n;
 }
 
+/**
+ * Fable's weekly utilization while Claude has reported its window and it hasn't reset; null when
+ * unreported (no window, no figure, or past its reset); 'unreadable' on a read error.
+ */
+function fableWeek(db: Db, now: Date): { utilization: unknown } | 'unreadable' {
+  let window: UsageWindowRow | undefined;
+  try {
+    window = fableWindow(listUsageWindows(db));
+  } catch {
+    return 'unreadable';
+  }
+  const util = window?.utilization ?? null;
+  const reset = window?.resetsAt != null && !(Date.parse(window.resetsAt) > now.getTime());
+  return { utilization: reset ? null : util };
+}
+
+/**
+ * Review's own share of Fable (#605), checked on top of `fableStatus`: while the weekly window is
+ * reported, its utilization under `fableReviewMaxUtilization`; until then, no drop cap (0) or
+ * fewer than half the cap's Fable drops this week. A read error or invalid figure fails closed.
+ */
+function reviewBudgetAllows(db: Db, cfg: Pick<Config, 'claude'>, now: Date): boolean {
+  const week = fableWeek(db, now);
+  if (week === 'unreadable') return false;
+  const util = week.utilization;
+  if (util === null) {
+    const cap = cfg.claude.fableWeeklyDropCap;
+    return !(cap > 0) || fableDropsThisWeek(db, cfg, now) < cap / 2;
+  }
+  if (typeof util !== 'number' || !Number.isFinite(util) || util < 0) return false;
+  return util < (cfg.claude.fableReviewMaxUtilization ?? FABLE_REVIEW_MAX_UTILIZATION);
+}
+
 /** A whole percent: 0.85 reads `85%`. */
 const percent = (v: number): string => `${Math.round(v * 100)}%`;
 
@@ -118,16 +157,10 @@ export function fableStatus(
   if (state.pausedUntil !== null && now.getTime() < Date.parse(state.pausedUntil)) {
     return no(`paused until ${state.pausedUntil}`);
   }
-  let window: UsageWindowRow | undefined;
-  try {
-    window = fableWindow(listUsageWindows(db));
-  } catch {
-    return no('Fable usage could not be read');
-  }
-  const util = window?.utilization ?? null;
-  const unreported =
-    util === null || (window?.resetsAt != null && !(Date.parse(window.resetsAt) > now.getTime()));
-  if (unreported) {
+  const week = fableWeek(db, now);
+  if (week === 'unreadable') return no('Fable usage could not be read');
+  const util = week.utilization;
+  if (util === null) {
     if (fableWeeklyDropCap > 0 && fableDropsThisWeek(db, cfg, now) >= fableWeeklyDropCap) {
       return no(`weekly cap reached (${fableWeeklyDropCap} Fable drops in 7 days)`);
     }
@@ -146,7 +179,8 @@ export function fableStatus(
 /**
  * The model a drop runs on. A Fable role gets `fableModel` when Fable is available; otherwise the
  * role's configured model, unless that names Fable while Fable is unavailable, when the zone model
- * stands in. Fable never runs undeclared. `opts.fable` makes this drop a Fable role too (a refute
+ * stands in. A review gets Fable too while `claude.fableReview` is on and review's own budget
+ * allows (`reviewBudgetAllows`). Fable never runs undeclared. `opts.fable` makes this drop a Fable role too (a refute
  * of a security-touching crew issue); the doctor never runs on Fable.
  */
 export function resolveModel(
@@ -161,6 +195,15 @@ export function resolveModel(
   const fableRole =
     role !== 'doctor' && ((FABLE_ROLES as readonly string[]).includes(role) || opts.fable === true);
   if (fableRole && status.available && cfg.claude.fableModel) return cfg.claude.fableModel;
+  // A review runs on Fable while review's own share of the budget allows (#605), never waiting.
+  if (
+    role === 'review' &&
+    cfg.claude.fableReview !== false &&
+    status.available &&
+    cfg.claude.fableModel &&
+    reviewBudgetAllows(db, cfg, now)
+  )
+    return cfg.claude.fableModel;
   const configured = modelFor(zone, role);
   // The doctor's one-line probe never spends Fable: it runs on the zone's model whatever models says.
   if (role === 'doctor' && (FABLE.test(configured) || configured === cfg.claude.fableModel))

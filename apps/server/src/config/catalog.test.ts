@@ -271,6 +271,27 @@ describe('guards from the tables', () => {
   });
 });
 
+describe('reviews on Fable (#605)', () => {
+  test('claude.fableReview is a free switch in models; fableReviewMaxUtilization a share from 0 to 1', () => {
+    const on = row(installRows(), 'claude.fableReview');
+    expect(on.guard).toBe('free');
+    expect(on.entry.group).toBe('models');
+    expect(on.entry.kind).toBe('bool');
+    expect(on.entry.help).toBe(
+      "Run pull request reviews on Fable while its weekly budget has room. Reviews use the zone's model otherwise.",
+    );
+    const r = row(installRows(), 'claude.fableReviewMaxUtilization');
+    expect(r.guard).toBe('free');
+    expect(r.entry.group).toBe('models');
+    expect(r.entry.kind).toBe('number');
+    expect(r).toMatchObject({ min: 0, max: 1 });
+    expect(r.integer).toBeFalsy();
+    expect(r.entry.help).toBe(
+      'Reviews stop using Fable once its weekly usage reaches this share, so the audit, diagnose and arbitrate drops keep Fable.',
+    );
+  });
+});
+
 describe('words', () => {
   test('every label is plain words and every help says enough', () => {
     for (const e of FLAGS) {

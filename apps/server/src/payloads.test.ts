@@ -785,7 +785,9 @@ describe('prompts', () => {
   test('review.md checks every acceptance criterion against evidence', () => {
     const t = readFileSync(new URL('../../trooper/prompts/review.md', import.meta.url), 'utf8');
     const rules = t.split('\n').filter((l) => /^\d+\. /.test(l));
-    expect(rules[0]).toMatch(/^1\. Check that the change implements the issue/);
+    expect(rules[0]).toBe(
+      '1. Try to refute that this change is correct, meets every acceptance criterion and required test, and introduces no defect. Approve only when you looked and found no evidence against it. Read the diff and the surrounding code. Use only `git` and file reads: `gh` and the network are unavailable.',
+    );
     const ac = rules[1] ?? '';
     expect(ac).toMatch(/^2\. /);
     expect(ac).toMatch(
@@ -796,6 +798,22 @@ describe('prompts', () => {
     expect(ac).toMatch(/not met or not shown to be met is `major`/);
     expect(ac).toMatch(/`\(manual\)`[^.]*`minor`/);
     expect(ac).toMatch(/can't be met here is still `major`/);
+    // #605: evidence for every serious finding, and the checks the audit most often catches.
+    expect(rules[7]).toBe(
+      "8. Evidence: every `blocker` or `major` finding cites evidence: a `path:line` in the diff or the code around it, a gate result from your system prompt, or a test given as a patch and marked UNRUN. A suspicion without evidence is at most `minor`. Confident wording in the author's reports counts for nothing.",
+    );
+    expect(rules[8]).toBe(
+      "9. Checks: run each of these checks. Sibling paths: every other place that performs the same operation (another branch of the same function, another route or role, the trail and the result paths) gets the same guard or treatment, or the difference is justified. Docs and runbooks: search with `git grep` for each name or behavior the change renames or alters, under `docs/`, `README.md` and `SECURITY.md`; no line there is made false. Security edges: credentials never cross a redirect or reach a log; redaction comes before truncation; untrusted text is fenced or sanitized before it reaches a prompt, a comment or a page. State writes: repeats and races (a second pass, a second writer) don't write twice or leave half-applied state. Every branch: for each condition the change adds, read the tests and name the assertion that would fail if the branch were removed. Don't edit files or run mutated code. Name each check and what you found in your summary, one line per check.",
+    );
+    expect(rules).toHaveLength(9);
+    for (const check of [
+      'Sibling paths',
+      'Docs and runbooks',
+      'Security edges',
+      'State writes',
+      'Every branch',
+    ])
+      expect(rules[8], check).toContain(check);
   });
   test('every template keeps the shared rules', () => {
     for (const r of ['implement', 'review', 'heal', 'resolve']) {

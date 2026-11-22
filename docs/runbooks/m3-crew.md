@@ -233,6 +233,12 @@ item's **PR** (the label on the issue does nothing). Then open the diagnose drop
   whose model names Fable, until `fableWeeklyDropCap` drops across all zones have asked for it in
   the trailing seven days (drops that started and asked for Fable count, even if they failed or were cancelled). A Fable-only rate limit pauses Fable
   until it resets.
+- Diagnose, arbitrate and audit request Fable whenever it is available. Pull request reviews may
+  request Fable too, while `claude.fableReview` is on (the default) and review's own share allows:
+  Fable's reported weekly usage under `claude.fableReviewMaxUtilization` (default 0.5), or, until
+  Claude reports it, fewer than half of `fableWeeklyDropCap` Fable drops this week (any number
+  when the cap is 0). Otherwise a review runs on the zone's review model, without waiting, so the
+  audit, diagnose and arbitrate drops keep Fable. The doctor never runs on Fable.
 
 ## Kill, pause, observe and restart
 

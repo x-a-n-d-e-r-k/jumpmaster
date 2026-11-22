@@ -175,6 +175,18 @@ const WORDS: Words[] = [
     'number',
   ),
   w(
+    'claude.fableReview',
+    'Run pull request reviews on Fable',
+    "Run pull request reviews on Fable while its weekly budget has room. Reviews use the zone's model otherwise.",
+    'bool',
+  ),
+  w(
+    'claude.fableReviewMaxUtilization',
+    'Reviews stop using Fable at this weekly share',
+    'Reviews stop using Fable once its weekly usage reaches this share, so the audit, diagnose and arbitrate drops keep Fable.',
+    'number',
+  ),
+  w(
     'claude.tokenCreatedAt',
     'Date the Claude token was made',
     'When claude setup-token made the token (YYYY-MM-DD). Such tokens last a year, and the doctor warns from day 330.',
