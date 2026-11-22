@@ -140,6 +140,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     branchSha: 's',
     compare: cmp(),
     checks: pending,
+    codeScanning: [],
     forgeUnavailable: null,
     forgeDenied: null,
     requiredChecks: [],
@@ -659,6 +660,30 @@ describe('rules in order', () => {
       fingerprint: fingerprint(['s', 'ci']),
       feedback: { source: 'ci', text: 'CI failed on s; reproduce with the gates and fix.' },
     }));
+
+  test('24: a CodeQL failure heals with ci feedback and the code-scanning alerts (#652)', () => {
+    const codeScanning = [
+      {
+        check: 'CodeQL',
+        annotations: [{ path: 'a.ts', startLine: 1, level: 'failure', title: 'T', message: 'M' }],
+      },
+    ];
+    const failed = [
+      { name: 'CodeQL', conclusion: 'failure', checkRunId: 7, app: 'github-advanced-security' },
+    ];
+    expect(
+      decide(mergeable({ checks: { state: 'failure', names: ['CodeQL'], failed }, codeScanning })),
+    ).toEqual({
+      kind: 'enqueue',
+      role: 'heal',
+      fingerprint: fingerprint(['s', 'ci']),
+      feedback: {
+        source: 'ci',
+        text: 'CI failed on s; reproduce with the gates and fix.\n- CodeQL: failure',
+      },
+      codeScanning,
+    });
+  });
 
   describe('24: failed checks', () => {
     const head = 'c441a9cdeadbeef';

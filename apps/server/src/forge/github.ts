@@ -95,8 +95,27 @@ export type ForgeReview = {
 };
 
 export type ChecksState = 'success' | 'pending' | 'failure' | 'none';
-/** A failed check run (its conclusion) or commit status (its state, `failure` or `error`). */
-export type FailedCheck = { name: string; conclusion: string };
+/**
+ * A failed check run (its conclusion) or commit status (its state, `failure` or `error`).
+ * `checkRunId` and `app` (the run's `app.slug`) are set only for check runs read from the checks
+ * API: never for commit statuses or the Actions-jobs fallback a PAT forge takes.
+ */
+export type FailedCheck = { name: string; conclusion: string; checkRunId?: number; app?: string };
+
+/** A check run's annotation, as `checkAnnotations` returns it. */
+export type CheckAnnotation = {
+  path: string;
+  startLine: number;
+  level: string;
+  title: string;
+  message: string;
+};
+
+/** The app whose check runs are code scanning's (CodeQL default setup, #652). */
+export const CODE_SCANNING_APP = 'github-advanced-security';
+
+/** The most annotations `checkAnnotations` returns. */
+export const MAX_CHECK_ANNOTATIONS = 20;
 /**
  * `queued`: check runs that have not started (no runner has picked them up).
  * `failed`: the failed checks, sorted by name, without duplicates; empty unless `state` is
@@ -333,6 +352,11 @@ export interface Forge {
   changeDigest(base: string, head: string): Promise<ChangeDigest>;
   checksFor(sha: string): Promise<ChecksFacts>;
   /**
+   * The `failure`-level annotations of check run `checkRunId` (`GET …/check-runs/{id}/annotations`),
+   * in GitHub's order, at most MAX_CHECK_ANNOTATIONS of them. Any error rejects.
+   */
+  checkAnnotations(checkRunId: number): Promise<CheckAnnotation[]>;
+  /**
    * A write (#420): re-runs the failed jobs (`POST …/actions/runs/{run_id}/rerun-failed-jobs`) of
    * each GitHub Actions workflow run on `headSha`, PR `prNumber`'s head, that has a failed job
    * named in `names`; once per run. Returns the runs it re-ran. A refusal (403, 404) or any other
@@ -526,7 +550,14 @@ function toPullFacts(p: RawPull): PullFacts {
 /** The last non-empty line, trimmed of trailing whitespace. */
 const lastLine = (body: string): string => body.trimEnd().split('\n').pop() ?? '';
 
-type CheckRunFacts = { name: string; status: string; conclusion: string | null };
+/** `id` and `app` only for runs read from the checks API (not Actions jobs). */
+type CheckRunFacts = {
+  name: string;
+  status: string;
+  conclusion: string | null;
+  id?: number;
+  app?: string;
+};
 
 /**
  * Check-run and Actions job statuses that mean no runner has picked the work up. `waiting` and
@@ -1176,7 +1207,12 @@ export class GitHubForge implements Forge {
     for (const r of runs) {
       if (r.status !== 'completed') pending = true;
       else if (r.conclusion && FAILED_CONCLUSIONS.has(r.conclusion)) {
-        failures.push({ name: r.name, conclusion: r.conclusion });
+        failures.push({
+          name: r.name,
+          conclusion: r.conclusion,
+          ...(r.id !== undefined ? { checkRunId: r.id } : {}),
+          ...(r.app !== undefined ? { app: r.app } : {}),
+        });
       }
     }
     for (const s of statuses) {
@@ -1214,12 +1250,19 @@ export class GitHubForge implements Forge {
    */
   private async checkRunsFor(sha: string): Promise<CheckRunFacts[]> {
     try {
-      return await this.octokit.paginate(this.octokit.rest.checks.listForRef, {
+      const runs = await this.octokit.paginate(this.octokit.rest.checks.listForRef, {
         owner: this.owner,
         repo: this.repo,
         ref: sha,
         per_page: 100,
       });
+      return runs.map((r) => ({
+        name: r.name,
+        status: r.status,
+        conclusion: r.conclusion,
+        ...(typeof r.id === 'number' ? { id: r.id } : {}),
+        ...(typeof r.app?.slug === 'string' ? { app: r.app.slug } : {}),
+      }));
     } catch (e) {
       if ((e as { status?: number }).status !== 403) throw e;
       if (this.app) {
@@ -1234,16 +1277,42 @@ export class GitHubForge implements Forge {
     );
     const jobs: CheckRunFacts[] = [];
     for (const run of workflowRuns) {
-      jobs.push(
-        ...(await this.octokit.paginate(this.octokit.rest.actions.listJobsForWorkflowRun, {
-          owner: this.owner,
-          repo: this.repo,
-          run_id: run.id,
-          per_page: 100,
-        })),
-      );
+      const page = await this.octokit.paginate(this.octokit.rest.actions.listJobsForWorkflowRun, {
+        owner: this.owner,
+        repo: this.repo,
+        run_id: run.id,
+        per_page: 100,
+      });
+      // A job's id is not a check run's: the fallback's checks carry neither id nor app.
+      jobs.push(...page.map((j) => ({ name: j.name, status: j.status, conclusion: j.conclusion })));
     }
     return jobs;
+  }
+
+  async checkAnnotations(checkRunId: number): Promise<CheckAnnotation[]> {
+    const out: CheckAnnotation[] = [];
+    for (let page = 1; out.length < MAX_CHECK_ANNOTATIONS; page++) {
+      const { data } = await this.octokit.rest.checks.listAnnotations({
+        owner: this.owner,
+        repo: this.repo,
+        check_run_id: checkRunId,
+        per_page: 100,
+        page,
+      });
+      for (const a of data) {
+        if (a.annotation_level !== 'failure') continue;
+        out.push({
+          path: a.path,
+          startLine: a.start_line,
+          level: a.annotation_level,
+          title: a.title ?? '',
+          message: a.message ?? '',
+        });
+        if (out.length >= MAX_CHECK_ANNOTATIONS) break;
+      }
+      if (data.length < 100) break;
+    }
+    return out;
   }
 
   async rerunFailedChecks(

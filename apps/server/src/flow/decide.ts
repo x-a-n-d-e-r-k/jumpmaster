@@ -2,6 +2,7 @@ import type { DropZoneConfig } from '../config.js';
 import type { Drop, VerdictRow, WorkItem } from '../db/repo.js';
 import {
   type ChangeDigest,
+  type CheckAnnotation,
   type ChecksFacts,
   type CompareFacts,
   type ForgeReview,
@@ -28,6 +29,11 @@ export interface Snapshot {
   /** null = read failed. */
   compare: CompareFacts | null;
   checks: ChecksFacts;
+  /**
+   * The failure annotations of each failed code-scanning check run (#652), read only while
+   * `checks.state` is `failure`; a check whose read failed has an empty list. [] when none.
+   */
+  codeScanning: CodeScanning[];
   /** Name of the first fresh read that threw (other than getPull); null when all reads succeeded. */
   forgeUnavailable: string | null;
   /** The first read refused with 403: a token permission problem, not a transient one. */
@@ -122,6 +128,9 @@ export type CarryFacts = {
  */
 export type Feedback = { source: 'human' | 'review' | 'ci' | 'crew'; text: string };
 
+/** One failed code-scanning check and its alerts' annotations (#652). */
+export type CodeScanning = { check: string; annotations: CheckAnnotation[] };
+
 export type Action =
   | { kind: 'wait'; on: 'drop' | 'ci' | 'forge' | 'outbox' | 'merge-reservation' }
   | {
@@ -129,6 +138,8 @@ export type Action =
       role: 'review' | 'heal' | 'resolve';
       fingerprint: string;
       feedback?: Feedback;
+      /** A `ci` heal's code-scanning alerts, when any failed check had them (#652). */
+      codeScanning?: CodeScanning[];
     }
   | { kind: 'post_review'; verdictId: string }
   /** Copy verdict `fromVerdictId` to `headSha` (see `carriable`). */
@@ -406,6 +417,7 @@ export function decide(s: Snapshot): Action {
         source: 'ci',
         text: `CI failed on ${head}; reproduce with the gates and fix.${lines}`,
       },
+      ...(s.codeScanning.length > 0 ? { codeScanning: s.codeScanning } : {}),
     };
   }
   // 25: an older approved item waiting on CI reserves the next merge, so main stops moving under
