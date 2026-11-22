@@ -258,7 +258,11 @@ function enqueue(
           fingerprint: a.fingerprint,
           prNumber: s.pr?.number ?? null,
           headSha: s.pr?.headSha ?? null,
-          inputJson: JSON.stringify({ feedback: a.feedback ?? null }),
+          inputJson: JSON.stringify({
+            feedback: a.feedback ?? null,
+            // A `ci` heal's code-scanning alerts (#652), raw: the payload builder fences them.
+            ...(a.codeScanning ? { codeScanning: a.codeScanning } : {}),
+          }),
           promptVersion: versions[a.role],
           image: zone.image,
           chargedKey: charge.charged.join(',') || null,
