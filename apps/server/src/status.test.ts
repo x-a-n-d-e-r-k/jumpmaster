@@ -288,6 +288,20 @@ const STEPS: Step[] = [
 ];
 
 describe('statusOf', () => {
+  test('no next step or list line points at a /zones page path (#631)', () => {
+    const input = everything();
+    const hrefs: string[] = [];
+    for (const [, remove] of STEPS) {
+      const s = statusOf(input, NOW);
+      hrefs.push(s.action?.href ?? '', ...(s.also ?? []).map((a) => a.href ?? ''));
+      remove(input);
+    }
+    hrefs.push(statusOf({ ...base(), zones: [] }, NOW).action?.href ?? '');
+    expect(hrefs.filter((h) => h.startsWith('/zones'))).toEqual([]);
+    expect(hrefs).toContain('/projects');
+    expect(hrefs).toContain('/projects/main/issues/new');
+  });
+
   test('statusOf returns one headline per state, in priority order, over the fixture table', () => {
     const input = everything();
     const seen: [string, string, string, string | undefined][] = [];

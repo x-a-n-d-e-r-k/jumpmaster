@@ -218,3 +218,11 @@ test('pagesOf reads which pages are registered, so a later task cannot forget to
   expect(pagesOf(app)).toEqual({ zones: true, settings: false, credentials: true });
   await app.close();
 });
+
+test('no doctor action for a seeded zone points at a /zones page path (#631)', () => {
+  const pages: Pages = { zones: true, settings: true, credentials: true };
+  const hrefs = CHECK_IDS.map((id) => actionFor(fail(id), { zone, guidance, pages })?.href ?? '');
+  expect(hrefs.filter((h) => h.startsWith('/zones'))).toEqual([]);
+  expect(hrefs.some((h) => h.startsWith('/projects/web'))).toBe(true);
+  expect(hrefs).toContain('/projects');
+});
