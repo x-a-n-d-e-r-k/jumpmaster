@@ -1,4 +1,3 @@
-import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
   type GuidanceForge,
@@ -6,9 +5,9 @@ import {
   guidanceFor,
   type RecommendAnswer,
 } from '../api/github.js';
-import { withCsrf } from '../auth/guard.js';
 import type { ConfigStore } from '../config/store.js';
-import type { DropZoneConfig } from '../config.js';
+import type { Config, DropZoneConfig } from '../config.js';
+import type { DoctorCheck } from '../doctor/checks.js';
 import type { AppTokenSource } from '../forge/app-tokens.js';
 import {
   CODEOWNERS_PLACEHOLDER,
@@ -22,13 +21,12 @@ import {
 } from '../github/guidance.js';
 import { MATRIX_AND_REUSABLE_NOTE } from '../github/workflows.js';
 import type { AppRole } from '../vault/github-app-entries.js';
-import { linkTarget } from './links.js';
-import { escapeHtml, PROJECTS_HREF, page, projectHref } from './pages.js';
-import { type ZoneRef, zoneName } from './zone-name.js';
+import { githubSetupHref, linkTarget } from './links.js';
+import { escapeHtml } from './pages.js';
 
 /**
- * The GitHub half of setup, as a page per zone (`/projects/:id/github`) and as sections the setup
- * wizard reuses: links and generated text, never a forge write. Every piece of forge text is
+ * The GitHub half of setup, as the GitHub section of a project's Setup (`/projects/:id/setup#github`,
+ * #618) with each step's doctor status, and as sections the setup wizard reuses: links and generated text, never a forge write. Every piece of forge text is
  * escaped here, and an href is rendered only when it is under https://github.com/ (or the
  * generated file as a data URL to download).
  */
@@ -201,8 +199,8 @@ ${APP_OWNER_SCRIPT}</section>`;
 }
 
 /** The collaborator page and what to do there. */
-export function checklistSection(checklist: ZoneGuidance['checklist']): string {
-  return `<section id="checklist"><h3>Give the accounts access</h3>
+export function checklistSection(checklist: ZoneGuidance['checklist'], status = ''): string {
+  return `<section id="checklist"><h3>Give the accounts access</h3>${status}
 <p>On the repository's <a href="${gh(checklist.url)}"${linkTarget(gh(checklist.url))}>collaborators page</a>:</p>
 <ul>${checklist.items.map((i) => `<li>${escapeHtml(i)}</li>`).join('')}</ul></section>`;
 }
@@ -212,9 +210,10 @@ export function rulesetSection(
   ruleset: ZoneGuidance['ruleset'],
   rulesUrl: string,
   identity: 'two-bot' | 'starter',
+  status = '',
 ): string {
   const data = `data:application/json;charset=utf-8,${encodeURIComponent(ruleset.text)}`;
-  return `<section id="ruleset"><h3>The branch ruleset</h3>
+  return `<section id="ruleset"><h3>The branch ruleset</h3>${status}
 ${ruleset.note ? `<p class="warn">${escapeHtml(ruleset.note)}</p>` : ''}
 <p>Jumpmaster merges only under a ruleset that requires a pull request and your CI, with no bypass. This file is one, with the checks your workflows report${identity === 'starter' ? '' : ", and a code owner's review on the protected paths"}:</p>
 ${identity === 'starter' ? `<p>${escapeHtml(STARTER_CODEOWNERS_NOTE)}</p>` : ''}
@@ -246,14 +245,22 @@ export function mergeRulesetSection(
 /** CODEOWNERS: the reviewer's login, the text, and GitHub's new-file page for it. */
 export function codeownersSection(
   codeowners: ZoneGuidance['codeowners'],
-  /** The login form, or null where the page has its own (the wizard's project step). */
-  form: { action: string; reviewer: string } | null,
+  /**
+   * The login form, or null where the page has its own (the wizard's project step). With `formId`
+   * the controls belong to that form, drawn elsewhere (a form can't sit inside Setup's form).
+   */
+  form: { action: string; reviewer: string; formId?: string } | null,
   identity: 'two-bot' | 'starter',
+  status = '',
 ): string {
-  return `<section id="codeowners"><h3>Code owners for the protected paths</h3>
+  const owned = form?.formId ? ` form="${escapeHtml(form.formId)}"` : '';
+  const controls = form
+    ? `<label>Your GitHub login <input name="reviewer"${owned} value="${escapeHtml(form.reviewer)}" placeholder="${escapeHtml(CODEOWNERS_PLACEHOLDER.slice(1))}" pattern="[A-Za-z0-9@,._ \\/\\-]+"></label> <button${owned}>Show</button>`
+    : '';
+  return `<section id="codeowners"><h3>Code owners for the protected paths</h3>${status}
 <p>Changes to the protected paths need a person's review. Name yourself (and anyone else who may approve them) as code owners: each needs the Write role.</p>
 ${identity === 'starter' ? '' : '<p class="warn">The file starts with the reviewer bot on <code>*</code>, so its approval still merges ordinary pull requests. If your file already has a <code>*</code> line, add the reviewer bot to it, or nothing will merge.</p>'}
-${form ? `<form method="get" action="${escapeHtml(form.action)}"><label>Your GitHub login <input name="reviewer" value="${escapeHtml(form.reviewer)}" placeholder="${escapeHtml(CODEOWNERS_PLACEHOLDER.slice(1))}" pattern="[A-Za-z0-9@,._ \\/\\-]+"></label> <button>Show</button></form>` : ''}
+${form ? (form.formId ? `<p>${controls}</p>` : `<form method="get" action="${escapeHtml(form.action)}">${controls}</form>`) : ''}
 <p><a href="${gh(codeowners.newFileUrl)}"${linkTarget(gh(codeowners.newFileUrl))}>Create <code>${escapeHtml(codeowners.filename)}</code> on GitHub</a>, paste the text, and commit it. <button type="button" data-copy="codeowners-text">Copy</button></p>
 <pre id="codeowners-text">${escapeHtml(codeowners.text)}</pre></section>`;
 }
@@ -274,27 +281,106 @@ export const rolesOf = (zone: Pick<DropZoneConfig, 'identity' | 'reviewReadToken
   ...(zone.reviewReadToken ? (['read'] as const) : []),
 ];
 
-/** The zone's GitHub page body, from its guidance. */
-export function zonePage(
+/** The guide's steps the doctor checks (#618), each with the doctor checks that judge it, by id. */
+export const STEP_CHECKS = {
+  access: ['forge.private-clone'],
+  ruleset: ['forge.branch-rules', 'forge.ci'],
+  codeowners: ['forge.codeowners'],
+  labels: ['forge.labels'],
+} as const satisfies Record<string, readonly string[]>;
+export type GithubStep = keyof typeof STEP_CHECKS;
+
+/** What a step's chip says: done (pass), missing (fail), check (warn) or not checked. */
+export type StepState = 'done' | 'missing' | 'check' | 'not-checked';
+export type StepStatus = { state: StepState; findings: string[] };
+
+/**
+ * A step's status from the latest doctor run's checks for the zone (`null`: no run). It is done
+ * only when every one of its checks is there and passed: a check that is absent, or skipped, is
+ * not checked, never done. A fail is missing, with the doctor's finding; a warn (or info) is check.
+ */
+export function stepStatus(
+  checks: readonly DoctorCheck[] | null,
+  zoneId: string,
+  step: GithubStep,
+): StepStatus {
+  const ids: readonly string[] = STEP_CHECKS[step];
+  const mine = (checks ?? []).filter((c) => c.zoneId === zoneId && ids.includes(c.id));
+  const findings = (st: string[]) =>
+    mine.filter((c) => st.includes(c.status)).map((c) => c.summary);
+  if (mine.some((c) => c.status === 'fail'))
+    return { state: 'missing', findings: findings(['fail']) };
+  if (mine.some((c) => c.status === 'warn' || c.status === 'info'))
+    return { state: 'check', findings: findings(['warn', 'info']) };
+  const passed = ids.every((id) => mine.some((c) => c.id === id && c.status === 'pass'));
+  return passed ? { state: 'done', findings: [] } : { state: 'not-checked', findings: [] };
+}
+
+const CHIP_TEXT: Record<StepState, string> = {
+  done: 'done',
+  missing: 'missing',
+  check: 'check',
+  'not-checked': 'not checked',
+};
+
+/** A step's chip, and the doctor's findings for a missing or check step, escaped. */
+export function stepChip(step: GithubStep, s: StepStatus): string {
+  const findings = s.findings.length
+    ? ` <span class="step-finding">${s.findings.map(escapeHtml).join('; ')}</span>`
+    : '';
+  return `<p class="step-status" data-step="${step}"><span class="chip chip-${s.state}" data-status="${s.state}">${CHIP_TEXT[s.state]}</span>${findings}</p>`;
+}
+
+const STEP_STYLE =
+  '<style>.step-status .chip{display:inline-block;padding:0 .5rem;border-radius:999px;font-size:.85em;box-shadow:inset 0 0 0 1px var(--stroke-soft-200)}.step-status .chip-done{box-shadow:inset 0 0 0 1px var(--success-base)}.step-status .chip-missing{box-shadow:inset 0 0 0 1px var(--error-base)}.step-status .chip-check{box-shadow:inset 0 0 0 1px var(--warning-base)}</style>';
+
+const STEP_LABELS: Record<GithubStep, string> = {
+  access: 'Give the accounts access',
+  ruleset: 'The branch ruleset',
+  codeowners: 'Code owners for the protected paths',
+  labels: 'Labels',
+};
+
+/** The labels step: the doctor's labels check, and where it creates the missing ones. */
+const labelsSection = (zone: Pick<DropZoneConfig, 'readyLabel'>, status: string): string =>
+  `<section id="labels"><h3>Labels</h3>${status}<p>The labels Jumpmaster works with, the ready label <code>${escapeHtml(zone.readyLabel)}</code> among them, must exist on the repository. The doctor page's Create the missing labels makes them.</p></section>`;
+
+/** The id of the code owners form, drawn outside Setup's form (a form can't hold a form). */
+export const GITHUB_REVIEWER_FORM = 'github-reviewer-form';
+
+/**
+ * The GitHub section of a project's Setup (#618): the guide (accounts, tokens or apps, access, the
+ * ruleset, code owners), each checked step with its doctor status, then labels. Without guidance
+ * (GitHub could not be read) it says why, and still shows every step's status.
+ */
+export function githubSection(
   zone: DropZoneConfig,
-  zones: readonly ZoneRef[],
-  g: ZoneGuidance,
-  reviewer: string,
-  /** The project header and tab bar (#616). */
-  header = '',
+  guidance: { ok: true; guidance: ZoneGuidance; reviewer: string } | { ok: false; error: string },
+  checks: readonly DoctorCheck[] | null,
 ): string {
-  return page(
-    `${header}<h2>GitHub for ${zoneName(zone, zones)}</h2>
-<p>What Jumpmaster needs on GitHub, as links and files: nothing here changes GitHub; the clicks and the commit are yours. The doctor checks each part.</p>
+  const chip = (step: GithubStep) => stepChip(step, stepStatus(checks, zone.id, step));
+  const head = `<section id="github" class="setup-section"><h3>GitHub</h3>${STEP_STYLE}
+<p>What Jumpmaster needs on GitHub, as links and files: nothing here changes GitHub; the clicks and the commit are yours. The doctor checks each part; its last run's result is beside each step.</p>`;
+  if (!guidance.ok)
+    return `${head}
+<p class="warn">${escapeHtml(guidance.error)}</p><p>Set or replace the tokens in the <a href="/setup/forge">GitHub step</a>, then come back.</p>
+<ul id="github-steps">${(Object.keys(STEP_CHECKS) as GithubStep[]).map((s) => `<li>${escapeHtml(STEP_LABELS[s])} ${chip(s)}</li>`).join('')}</ul>
+</section>`;
+  const g = guidance.guidance;
+  return `${head}
 ${recommendationSection(g.recommendation)}
 <p>This zone runs as ${escapeHtml(zone.identity)}${zone.authorMayBeAdmin ? ' (the author account owns the repository, so it can merge)' : ''}${zone.identity === g.recommendation.identity ? '' : ': not the recommendation above. Changing it changes which tokens and rules it needs'}.</p>
 ${zone.identity === 'starter' ? tokensSection(g.pat, rolesOf(zone)) : useTokensInstead(tokensSection(g.pat, rolesOf(zone)))}
-${checklistSection(g.checklist)}
-${rulesetSection(g.ruleset, g.rulesUrl, zone.identity)}
-${g.mergeRuleset ? `${mergeRulesetSection(g.mergeRuleset, g.rulesUrl)}\n` : ''}${codeownersSection(g.codeowners, { action: projectHref(zone.id, 'github'), reviewer }, zone.identity)}
-${COPY_SCRIPT}`,
-  );
+${checklistSection(g.checklist, chip('access'))}
+${rulesetSection(g.ruleset, g.rulesUrl, zone.identity, chip('ruleset'))}
+${g.mergeRuleset ? `${mergeRulesetSection(g.mergeRuleset, g.rulesUrl)}\n` : ''}${codeownersSection(g.codeowners, { action: githubSetupHref(zone.id), reviewer: guidance.reviewer, formId: GITHUB_REVIEWER_FORM }, zone.identity, chip('codeowners'))}
+${labelsSection(zone, chip('labels'))}
+</section>`;
 }
+
+/** The code owners form, outside Setup's form: its controls name it with `form=`. */
+export const githubReviewerForm = (zoneId: string): string =>
+  `<form id="${GITHUB_REVIEWER_FORM}" method="get" action="${escapeHtml(githubSetupHref(zoneId))}"></form>`;
 
 const Query = z.object({ reviewer: z.string().max(400).optional() });
 const LOGINS = /^[A-Za-z0-9@,/._ -]*$/;
@@ -309,58 +395,51 @@ export const reviewersOf = (text: string | undefined): string[] | null => {
     .filter(Boolean);
 };
 
-export function registerGithubPages(
-  app: FastifyInstance,
-  deps: {
-    store: ConfigStore;
-    now(): Date;
-    /** The project header and tab bar (#616) for the zone's page. */
-    header?: (zone: DropZoneConfig, zones: readonly ZoneRef[]) => string;
-    guidanceForge?: (repo: string, token: string) => GuidanceForge;
-    /** The app token source: an app-author zone's guidance reads on its author app (§4.4). */
-    appTokens?: Pick<AppTokenSource, 'provider'>;
-  },
-): void {
-  const { store, now } = deps;
+/** What the GitHub section reads a zone's guidance with (the app's deps). */
+export type GithubSectionDeps = {
+  store: ConfigStore;
+  now(): Date;
+  guidanceForge?: (repo: string, token: string) => GuidanceForge;
+  /** The app token source: an app-author zone's guidance reads on its author app (§4.4). */
+  appTokens?: Pick<AppTokenSource, 'provider'>;
+};
+
+/**
+ * Renders a zone's GitHub section: its guidance read from GitHub (cached as the API's), with the
+ * code owners typed in `query.reviewer`, and each step's status from `checks`. Never throws: a
+ * refused read is said in the section.
+ */
+export function githubSectionRenderer(
+  deps: GithubSectionDeps,
+): (
+  config: Config,
+  zone: DropZoneConfig,
+  query: unknown,
+  checks: readonly DoctorCheck[] | null,
+) => Promise<string> {
   const forgeOf = deps.guidanceForge ?? githubGuidanceForge;
-  app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/github`, async (req, reply) => {
-    const config = req.jmConfig ?? store.current();
-    const zone = config.dropZones.find((z) => z.id === req.params.id);
-    if (!zone) return reply.code(404).type('text/plain').send('not found');
-    const header = deps.header?.(zone, config.dropZones) ?? '';
-    const q = Query.safeParse(req.query ?? {});
+  return async (config, zone, query, checks) => {
+    const q = Query.safeParse(query ?? {});
     const reviewers = q.success ? reviewersOf(q.data.reviewer) : null;
-    const send = (status: number, body: string) =>
-      reply.code(status).type('text/html; charset=utf-8').send(withCsrf(req, body));
-    let r: Awaited<ReturnType<typeof guidanceFor>> | { ok: false; status: 400; error: string };
+    let r: Awaited<ReturnType<typeof guidanceFor>> | { ok: false; error: string };
     try {
       r =
         reviewers === null
-          ? { ok: false, status: 400, error: 'a code owner is a GitHub login or an org/team name' }
-          : await guidanceFor(store, config, zone, forgeOf, {
+          ? { ok: false, error: 'a code owner is a GitHub login or an org/team name' }
+          : await guidanceFor(deps.store, config, zone, forgeOf, {
               reviewers,
-              now,
+              now: deps.now,
               ...(deps.appTokens ? { appTokens: deps.appTokens } : {}),
             });
     } catch (e) {
-      r = { ok: false, status: 400, error: (e as Error).message };
+      r = { ok: false, error: (e as Error).message };
     }
-    if (!r.ok)
-      return send(
-        r.status,
-        page(
-          `${header}<h2>GitHub for ${zoneName(zone, config.dropZones)}</h2><p class="warn">${escapeHtml(r.error)}</p><p>Set or replace the tokens in the <a href="/setup/forge">GitHub step</a>, then come back.</p>`,
-        ),
-      );
-    return send(
-      200,
-      zonePage(
-        zone,
-        config.dropZones,
-        r.guidance,
-        q.success ? (q.data.reviewer ?? '') : '',
-        header,
-      ),
+    return githubSection(
+      zone,
+      r.ok
+        ? { ok: true, guidance: r.guidance, reviewer: q.success ? (q.data.reviewer ?? '') : '' }
+        : { ok: false, error: r.error },
+      checks,
     );
-  });
+  };
 }

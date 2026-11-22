@@ -88,7 +88,7 @@ import { registerAuthPages } from './ui/auth-pages.js';
 import { renderChatList, renderThread } from './ui/chat.js';
 import { registerConfirmPages } from './ui/confirm.js';
 import type { FloorInputs, PendingLine } from './ui/floor.js';
-import { registerGithubPages } from './ui/github.js';
+import { githubSectionRenderer } from './ui/github.js';
 import { registerGoalConfirmPages } from './ui/goal-confirm.js';
 import {
   type CrewLine,
@@ -505,14 +505,6 @@ export function createApp(
       ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
       ...(deps.reach?.tailscale ? { tailscale: deps.reach.tailscale } : {}),
     });
-    // The GitHub half of setup for a zone: links and generated files, never a forge write.
-    registerGithubPages(app, {
-      store: deps.config,
-      header: (zone, zones) => projectHeaderFor(deps.db, zone, zones),
-      now: deps.now,
-      ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
-      ...(deps.appTokens ? { appTokens: deps.appTokens } : {}),
-    });
     // The zones page (Task 11): every zone, a page per zone, and the add page.
     const store = deps.config;
     registerZonesPages(app, {
@@ -520,6 +512,13 @@ export function createApp(
       store,
       now: deps.now,
       floor: (at) => floorInputs(deps.db, store.current(), at),
+      // The Setup tab's GitHub section (#618): the guide, read from GitHub, with each step's status.
+      github: githubSectionRenderer({
+        store,
+        now: deps.now,
+        ...(deps.guidanceForge ? { guidanceForge: deps.guidanceForge } : {}),
+        ...(deps.appTokens ? { appTokens: deps.appTokens } : {}),
+      }),
     });
   }
   // The pages that moved (issue #615): each old path answers 301/308 straight to its new one.

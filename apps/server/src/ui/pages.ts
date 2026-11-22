@@ -44,7 +44,7 @@ import {
   WAITING_ON_YOU_ID,
   zoneCards,
 } from './floor.js';
-import { linkTarget, PROJECTS_HREF, projectHref } from './links.js';
+import { githubSetupHref, linkTarget, PROJECTS_HREF, projectHref } from './links.js';
 import { STYLE } from './theme.js';
 import { relativeTime } from './time.js';
 import { type ZoneRef, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
@@ -878,7 +878,7 @@ export function projectHeader(p: {
   const [label, next] = mode === 'active' ? ['Pause', 'paused'] : ['Resume', 'active'];
   const control = `<button type="button" class="project-mode" data-zone="${escapeHtml(id)}" data-name="${escapeHtml(zoneNameText(zone, zones))}" data-mode="${next}">${label}</button>`;
   return (
-    `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${escapeHtml(projectHref(id, 'github'))}">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${escapeHtml(p.openBriefings)} open)</a></p>` +
+    `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${escapeHtml(githubSetupHref(id))}">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${escapeHtml(p.openBriefings)} open)</a></p>` +
     `<header class="project-header"><h2>${zoneName(zone, zones)} ${badge(mode)}</h2>` +
     `<p class="project-mode-label">${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>` +
     `<div class="project-actions">${askButton(p.ask ?? { kind: 'zone', zoneId: id, ref: id })} ${control} <a href="${escapeHtml(projectHref(id, 'issues/new'))}">New issue</a> <span id="project-mode-out" role="status"></span></div>` +
@@ -1978,7 +1978,7 @@ export function renderDoctor(
         `<li><button data-doctor="/api/control/doctor/drop" data-body="${escapeHtml(JSON.stringify({ zone: z.id }))}">Doctor drop: ${name(z.id)}</button></li>`,
     )
     .join('');
-  const controls = `<p><button data-doctor="/api/control/doctor">Run the doctor</button></p><p>A doctor drop proves the Claude token, the clone, services and gates on a stick; it spends one turn of usage.</p>${drops ? `<ul class="doctor-drops">${drops}</ul>` : ''}${zones.length > 0 ? `<p>GitHub setup (token links, the ruleset file, CODEOWNERS): ${zones.map((z) => `<a href="${projectHref(z.id, 'github')}">${name(z.id)}</a>`).join(', ')}</p>` : ''}`;
+  const controls = `<p><button data-doctor="/api/control/doctor">Run the doctor</button></p><p>A doctor drop proves the Claude token, the clone, services and gates on a stick; it spends one turn of usage.</p>${drops ? `<ul class="doctor-drops">${drops}</ul>` : ''}${zones.length > 0 ? `<p>GitHub setup (token links, the ruleset file, CODEOWNERS): ${zones.map((z) => `<a href="${escapeHtml(githubSetupHref(z.id))}">${name(z.id)}</a>`).join(', ')}</p>` : ''}`;
   if (!run)
     return page(
       `<h2>Doctor</h2><p>No doctor run has finished yet. Run one here or with <code>jumpmaster ctl doctor</code>.</p>${controls}${DOCTOR_SCRIPT}`,

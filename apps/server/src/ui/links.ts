@@ -16,3 +16,6 @@ export const PROJECTS_HREF = '/projects';
  */
 export const projectHref = (id: string, sub?: string): string =>
   `${PROJECTS_HREF}/${encodeURIComponent(id)}${sub ? `/${sub}` : ''}`;
+
+/** A project's GitHub setup: the GitHub section of its Setup tab (#618). */
+export const githubSetupHref = (id: string): string => `${projectHref(id, 'setup')}#github`;

@@ -1304,7 +1304,7 @@ describe('/briefings grouped by project and paged (#132)', () => {
 });
 
 describe('external links open in a new tab, in-app links do not (#133)', () => {
-  test('a sweep over /, /work, /drops, /briefings and /projects/<id>/github', async () => {
+  test('a sweep over /, /work, /drops, /briefings and /projects/<id>/setup', async () => {
     const h = await harness({
       issues: [],
       live: true,
@@ -1355,7 +1355,7 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
       createdAt: '2026-01-01T00:00:00.000Z',
     });
     const anchors: string[] = [];
-    for (const url of ['/', '/work', '/drops', '/briefings', '/projects/main/github']) {
+    for (const url of ['/', '/work', '/drops', '/briefings', '/projects/main/setup']) {
       const res = await h.view(url);
       expect(res.statusCode, url).toBe(200);
       anchors.push(...(res.body.match(/<a\b[^>]*>/g) ?? []).map((a) => `${url}: ${a}`));
@@ -1592,7 +1592,7 @@ describe('project pages live under /projects (issue #615)', () => {
     await h.reconcile();
     return h;
   }
-  const PROJECT_PAGES = ['', '/setup', '/github', '/goals', '/intake', '/issues/new', '/flags'];
+  const PROJECT_PAGES = ['', '/setup', '/goals', '/intake', '/issues/new', '/flags'];
 
   test.each(PROJECT_PAGES)(
     '/projects/<id>%s is 200 for a known zone and 404 for an unknown one',
@@ -1648,7 +1648,9 @@ describe('project pages live under /projects (issue #615)', () => {
       expect(hrefs.length, url).toBeGreaterThan(0);
       for (const href of hrefs) {
         expect(href.startsWith('/zones'), `${url} links ${href}`).toBe(false);
-        seen.add(href.replace(/#.*$/, ''));
+        // The GitHub guide moved into Setup (#618): links go to its section, not the old page.
+        expect(href, `${url} links ${href}`).not.toMatch(/^\/projects\/[^/]+\/github\b/);
+        seen.add(href.endsWith('#github') ? href : href.replace(/#.*$/, ''));
       }
       // Nor any page path in a script or a form target: only the API keeps /zones.
       expect(res.body.replaceAll('/api/control/zones', ''), url).not.toMatch(/["'`]\/zones\b/);
@@ -1657,7 +1659,7 @@ describe('project pages live under /projects (issue #615)', () => {
     for (const href of [
       '/projects',
       '/projects/jm',
-      '/projects/jm/github',
+      '/projects/jm/setup#github',
       '/projects/jm/goals',
       '/projects/jm/intake',
       '/projects/jm/issues/new',

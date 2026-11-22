@@ -3,10 +3,10 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { withCsrf } from '../auth/guard.js';
 import { listBriefings } from '../briefings.js';
 import type { ConfigStore } from '../config/store.js';
-import { type DropZoneConfig, STARTER_WARNING } from '../config.js';
+import { type Config, type DropZoneConfig, STARTER_WARNING } from '../config.js';
 import type { Db } from '../db/open.js';
 import { getZoneMode, type ZoneWaits, zoneStopping, zoneWaits } from '../db/repo.js';
-import { egressSeen } from '../doctor/checks.js';
+import { type DoctorCheck, egressSeen } from '../doctor/checks.js';
 import { latestDoctorRun } from '../doctor/run.js';
 import { getGoals, objectivesDone } from '../goals.js';
 import { BASE_EGRESS } from '../payloads.js';
@@ -14,6 +14,8 @@ import { PRESET_EGRESS } from '../presets.js';
 import { FORM_SCRIPT, zoneToForm } from '../zones/form.js';
 import { renderFlags } from './flags.js';
 import { type FloorInputs, floorCounts, listHref, stateSentence } from './floor.js';
+import { COPY_SCRIPT, githubReviewerForm } from './github.js';
+import { githubSetupHref } from './links.js';
 import {
   badge,
   escapeHtml,
@@ -162,7 +164,7 @@ function listPage(store: ConfigStore, db: Db): string {
         mode === m
           ? ''
           : `<button class="mode" data-zone="${escapeHtml(z.id)}" data-name="${escapeHtml(name)}" data-mode="${m}">${label}</button> `;
-      return `<tr><td><a href="${zoneHref(z.id)}">${zoneName(z, config.dropZones)}</a></td><td>${escapeHtml(MODE_LABELS[mode] ?? mode)}${stopping ? `<br><strong>${escapeHtml(stopping)}</strong>` : ''}</td><td>${escapeHtml(z.preset ?? z.image)}</td><td>${escapeHtml(z.egress?.mode ?? 'off')}</td><td>${escapeHtml(z.identity)}</td><td>${last ? `<a href="/drops/${encodeURIComponent(last.id)}">${escapeHtml(last.role)}, ${escapeHtml(last.state)}</a>` : '-'}</td><td>${fails === undefined ? '-' : `<a href="/doctor">${fails}</a>`}</td><td>${problem}</td><td>${button('paused', 'Pause')}${button('active', 'Resume')}${button('observe', 'Observe')}${fileMode || stopping ? '' : stopButton(z.id, name)}<a href="${projectHref(z.id, 'github')}">GitHub</a></td></tr>`;
+      return `<tr><td><a href="${zoneHref(z.id)}">${zoneName(z, config.dropZones)}</a></td><td>${escapeHtml(MODE_LABELS[mode] ?? mode)}${stopping ? `<br><strong>${escapeHtml(stopping)}</strong>` : ''}</td><td>${escapeHtml(z.preset ?? z.image)}</td><td>${escapeHtml(z.egress?.mode ?? 'off')}</td><td>${escapeHtml(z.identity)}</td><td>${last ? `<a href="/drops/${encodeURIComponent(last.id)}">${escapeHtml(last.role)}, ${escapeHtml(last.state)}</a>` : '-'}</td><td>${fails === undefined ? '-' : `<a href="/doctor">${fails}</a>`}</td><td>${problem}</td><td>${button('paused', 'Pause')}${button('active', 'Resume')}${button('observe', 'Observe')}${fileMode || stopping ? '' : stopButton(z.id, name)}<a href="${escapeHtml(githubSetupHref(z.id))}">GitHub</a></td></tr>`;
     })
     .join('');
   return page(
@@ -216,6 +218,7 @@ const IDENTITY_SCRIPT = `<script id="identity-script">
 /** The Setup page's sections, in order: each one's anchor and nav label. */
 const SETUP_SECTIONS = [
   ['project', 'Repository &amp; labels'],
+  ['github', 'GitHub'],
   ['stack', 'Stack &amp; checks'],
   ['egress', 'Egress'],
   ['merging', 'Merging'],
@@ -559,7 +562,14 @@ function overviewPage(
 }
 
 /** A project's Setup tab (#617): the Backlog, then one settings form with a section list and a Danger zone. */
-function setupPage(store: ConfigStore, db: Db, id: string, now: Date): string | undefined {
+function setupPage(
+  store: ConfigStore,
+  db: Db,
+  id: string,
+  now: Date,
+  /** The GitHub section (#618), rendered by the caller: it reads GitHub. */
+  github = '',
+): string | undefined {
   const doc = store.document();
   const zones = (Array.isArray(doc.dropZones) ? doc.dropZones : []) as Record<string, unknown>[];
   const index = zones.findIndex((z) => z.id === id);
@@ -690,8 +700,11 @@ ${backlogSection(id, repo)}
 ${SETUP_STYLE}${jump}
 <div class="setup-layout">${nav}<div class="setup-body">
 <form id="setup-form"><fieldset${readOnly ? ' disabled' : ''}><input type="hidden" name="id" value="${escapeHtml(id)}">
-${project}${stack}${egress}${merging}${advanced}
+${project}
+</fieldset>${github}<fieldset${readOnly ? ' disabled' : ''}>
+${stack}${egress}${merging}${advanced}
 </fieldset>${saveBar}</form>
+${github ? githubReviewerForm(id) : ''}${github ? COPY_SCRIPT : ''}
 ${danger}
 </div></div>
 ${JUMP_SCRIPT}
@@ -708,6 +721,13 @@ export function registerZonesPages(
     now(): Date;
     /** The floor's inputs, for the Overview's State sentence (its floor card's words). */
     floor?: (at: Date) => FloorInputs;
+    /** Renders the Setup tab's GitHub section (#618) from the latest doctor run's checks. */
+    github?: (
+      config: Config,
+      zone: DropZoneConfig,
+      query: unknown,
+      checks: readonly DoctorCheck[] | null,
+    ) => Promise<string>;
   },
 ): void {
   const { db, store, now } = deps;
@@ -737,7 +757,14 @@ export function registerZonesPages(
     return html(req, reply, body);
   });
   app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/setup`, async (req, reply) => {
-    const body = setupPage(store, db, req.params.id, now());
+    const config = req.jmConfig ?? store.current();
+    const zone = config.dropZones.find((z) => z.id === req.params.id);
+    const run = zone && deps.github ? latestDoctorRun(db) : null;
+    const github =
+      zone && deps.github
+        ? await deps.github(config, zone, req.query, run ? run.checks : null)
+        : '';
+    const body = setupPage(store, db, req.params.id, now(), github);
     if (!body) return reply.code(404).type('text/plain').send('no such zone');
     return html(req, reply, body);
   });
