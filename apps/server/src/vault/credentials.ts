@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
-import { readSecret, readSecretFile } from '@jumpmaster/protocol';
+import { readSecret, readSecretFile, stripTrailingSlashes } from '@jumpmaster/protocol';
 import { appJwt } from '../forge/github-app.js';
 import { type ScrubSet, serverScrubSet } from '../forge/scrub-set.js';
 import {
@@ -499,7 +499,7 @@ export async function testAppEntry(
   } = {},
 ): Promise<TestResult> {
   const scrub = deps.scrub ?? serverScrubSet;
-  const apiBase = (deps.apiBase ?? 'https://api.github.com').replace(/\/+$/, '');
+  const apiBase = stripTrailingSlashes(deps.apiBase ?? 'https://api.github.com');
   const now = deps.now ?? Date.now;
   scrub.addPem(entry.pem);
   let jwt: string;
