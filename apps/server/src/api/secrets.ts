@@ -510,8 +510,9 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
 
   /**
    * Removes the vault copy of an app entry that a file also sets (issue #599): the way to keep the
-   * file and clear `credential.shadowed`. Refused while no file sets the entry (the role would lose
-   * its entry) and while the vault holds no copy. Answers and audits names and fingerprints only.
+   * file and clear `credential.shadowed`. Refused while no file on disk sets the entry (read at the
+   * request, not from the last reload, #611: the role would lose its entry) and while the vault
+   * holds no copy. Answers and audits names and fingerprints only.
    */
   scope.delete<{ Params: { owner: string; role: string } }>(
     '/api/control/secrets/github-app/:owner/:role',
@@ -532,20 +533,18 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
         if (vault === 'disabled') return reply.code(409).send({ error: VAULT_DISABLED });
         const entry = vault.meta(name);
         if (!entry) return reply.code(409).send({ error: 'the vault holds no such app entry' });
-        const r = store.resolvedApps().get(owner)?.[role];
-        const file =
-          r?.source === 'file'
-            ? r.path
-            : r?.source === 'vault'
-              ? r.overriding?.find((o) => o.source === 'file')?.path
-              : undefined;
-        if (!file)
-          return reply.code(409).send({
-            error: `no file sets ${name}: the vault entry is its only copy, so it stays (replace its key on Settings → Credentials instead)`,
-          });
+        // Read from disk, not the cached resolution: a file deleted or broken since the last
+        // reload must not let the only copy go (issue #611).
+        const noFile = {
+          error: `no file sets ${name}: the vault entry is its only copy, so it stays (replace its key on Settings → Credentials instead)`,
+        };
+        const file = store.appFileOnDisk(owner, role);
+        if (!file) return reply.code(409).send(noFile);
         const done = store.deleteAppEntry(owner, role);
         if (!done.ok) {
           audit(req, 'secret.remove', { name, fingerprint: entry.fingerprint, result: 'refused' });
+          // The file went between the read and the remove: the entry was put back.
+          if (!store.appFileOnDisk(owner, role)) return reply.code(409).send(noFile);
           return reply.code(400).send({ issues: done.issues });
         }
         audit(req, 'secret.remove', { name, fingerprint: entry.fingerprint, result: 'removed' });

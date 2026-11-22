@@ -1608,6 +1608,35 @@ describe('GitHub App entries in the store (§4.4)', () => {
     for (const l of PEM_LINES) expect(msg).not.toContain(l);
   });
 
+  test('deleteAppEntry puts the vault entry back and is not ok when the role would resolve missing (issue #611)', () => {
+    const { vault, open } = withVault({ dropZones: [zone('main', { repo: 'Acme/main' })] });
+    const name = appEntryName('acme', 'author');
+    vault.put(name, appEntry, { now: t0 });
+    const store = open();
+    const before = vault.snapshot(name);
+    const r = store.deleteAppEntry('acme', 'author');
+    expect(r.ok).toBe(false);
+    expect(vault.snapshot(name)).toEqual(before);
+    expect(store.resolvedApps().get('acme')?.author).toMatchObject({ source: 'vault' });
+    const msg = JSON.stringify(r);
+    expect(msg).toContain(name);
+    for (const l of PEM_LINES) expect(msg).not.toContain(l);
+  });
+
+  test('deleteAppEntry with the file present removes the vault copy and the file is in use', () => {
+    const { vault, open, secrets } = withVault({
+      dropZones: [zone('main', { repo: 'Acme/main' })],
+    });
+    const name = appEntryName('acme', 'author');
+    vault.put(name, appEntry, { now: t0 });
+    mkdirSync(join(secrets, 'github-app', 'acme'), { recursive: true });
+    writeFileSync(join(secrets, 'github-app', 'acme', 'author.json'), appEntry, { mode: 0o600 });
+    const store = open();
+    expect(store.deleteAppEntry('acme', 'author')).toEqual({ ok: true, deleted: true });
+    expect(vault.meta(name)).toBeUndefined();
+    expect(store.resolvedApps().get('acme')?.author).toMatchObject({ source: 'file' });
+  });
+
   describe('appSlugs (#374): only the slug of each role, for the UI', () => {
     test('a vault entry gives { slug } only: no PEM, no client id', () => {
       const { vault, open } = withVault();
