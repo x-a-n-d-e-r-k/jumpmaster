@@ -298,7 +298,7 @@ one is missing, and its **Create the missing labels** button creates them as the
 On `/system` press **Run the doctor** (or
 `docker compose exec jumpmaster jumpmaster ctl doctor`). Each check shows `PASS`, `WARN`,
 `FAIL` or `SKIP`; every one that isn't a pass shows its fix and an action: a link to the page that
-fixes it (Settings, the zone page, the GitHub page), a GitHub page (with the generated file to
+fixes it (System, the zone page, the GitHub page), a GitHub page (with the generated file to
 bring there, as a download), or a button for the two writes (**Create the missing labels**,
 **Run a doctor drop for &lt;zone&gt;**). [Troubleshooting by check id](#troubleshooting-by-check-id)
 lists each check with its action. Fix each `FAIL` and run it again until it shows `0 fail`.
@@ -858,7 +858,7 @@ Paste it in the wizard's Claude step (or System, Credentials: `claudeToken`), or
 `put claude_token`. It lasts a year. A token entered in the browser is dated the day it is entered
 (or the **Made on** date you give); in file mode `init` records the date of the file as
 `claude.tokenCreatedAt` in the config (correct it if you made the token on another day). The
-doctor's `claude.token-age` warns from day 330, and so does a banner on home and on Settings,
+doctor's `claude.token-age` warns from day 330, and so does a banner on home and on System,
 Credentials. To renew, run `claude setup-token` again and replace the token the same way.
 
 The agent inside each drop runs Claude Code with this token, so the agent can read it. Egress
@@ -1239,8 +1239,8 @@ doesn't advertise `push-v1`), only review, crew and doctor drops. With Compose, 
 ## Image trust
 
 The config written by `init` sets `requireSignedImages: true` (dispatch only to a stick that
-verifies signatures); a browser install starts with it off, and you can turn it on under Settings,
-Install. Either way, the release's stick runs the `signed` policy: before it creates anything for a drop it verifies the trooper and proxy images
+verifies signatures); a browser install starts with it off, and you can turn it on under System,
+Server. Either way, the release's stick runs the `signed` policy: before it creates anything for a drop it verifies the trooper and proxy images
 with cosign against this repository's release workflow, then pulls them by digest. A verified
 digest is cached for 7 days, so a short Sigstore outage doesn't stop known images. A tag never
 runs. Doctor check: `stick.image-policy`.
@@ -1309,7 +1309,7 @@ Before you start:
 
 - Set the address other machines reach this server at
   ([Reaching the server from other machines](#reaching-the-server-from-other-machines)). Until it is
-  set, **Add a stick** is refused with a link to Settings.
+  set, **Add a stick** is refused with a link to System, Server, Other machines.
 - The server runs a release image, so it has an image lock, and the mirror shows the stick image
   as complete under **Images** on `/system/sticks`.
 
@@ -1593,7 +1593,7 @@ zone exists, each zone's `credential.missing` reports them instead, so this pass
 
 A zone needs a credential nobody has set: the Claude token, the author token, a two-bot zone's
 reviewer token, the read token when `reviewReadToken` is on, or a gate secret it declares. The zone
-is parked until it arrives (its queue reason says `credentials: …`). Enter it under Settings,
+is parked until it arrives (its queue reason says `credentials: …`). Enter it under System,
 Credentials, or `jumpmaster ctl secrets set <name>` (the value on stdin), or write its file under
 `secrets/` and run `jumpmaster ctl secrets reload`.
 
@@ -1633,7 +1633,7 @@ file and both fingerprints, and says which one is in use (the file, or the vault
 the vault" is on). Keep the one you mean, whichever is in use: delete the file (then `jumpmaster
 ctl secrets reload`), or remove the vault copy with `jumpmaster ctl secrets remove
 github-app/<owner>/<role>` to keep the file. Either one clears the warning. Replace key does not:
-it stores a new entry, which still differs from the file, and Settings → Credentials offers it only
+it stores a new entry, which still differs from the file, and System → Credentials offers it only
 while the vault entry is in use. The remove is refused while no file sets the entry, so it never
 leaves a role without one.
 
@@ -1937,7 +1937,7 @@ The egress mode and the hosts seen; in monitor, the hosts to add before enforcin
 **Action:** Edit the identity of <zone> (the zone page's **Merging** section).
 
 `two-bot` passes. Starter mode always warns with its cost ([Starter mode](#starter-mode)). To add
-a reviewer: give a second account Write, enter its token as `githubReviewerToken` under Settings,
+a reviewer: give a second account Write, enter its token as `githubReviewerToken` under System,
 Credentials (or write `secrets/github_reviewer_token` and run `ctl secrets reload`), set
 **Accounts** to `two-bot` in the zone page's **Merging** section (in file mode, `"identity":
 "two-bot"` in the file and `ctl config reload`), and import the zone's two-bot ruleset from its

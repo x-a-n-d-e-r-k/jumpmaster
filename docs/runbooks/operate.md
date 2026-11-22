@@ -269,7 +269,7 @@ author app is not installed on the repository. So the pair and the installations
    **GitHub App entries**: use the install link on the saved page after **Finish**, or the
    **Install it on the repository** link beside each created app on `/setup/forge`.
 3. Add the zone for the new owner's repository ([Add a project](#add-a-project)), with two-bot
-   accounts. The owner's rows appear under Settings → Credentials, **GitHub App entries**, once
+   accounts. The owner's rows appear under System → Credentials, **GitHub App entries**, once
    this zone exists.
 4. Run discovery as above: `/setup/github-app/installed`, **Find the installations**, confirm with
    your passphrase.
@@ -292,7 +292,7 @@ this, so the new key is made on GitHub and pasted into Jumpmaster:
 
 1. Open the app's page on GitHub (the row's **App** slug links to it) and go to **Private keys** →
    **Generate a private key**. GitHub downloads a `.pem` file.
-2. On Settings → Credentials, under **GitHub App entries**, press **Replace key** on that owner and
+2. On System → Credentials, under **GitHub App entries**, press **Replace key** on that owner and
    role's row, paste the whole `.pem` file, and enter your passphrase when asked.
 3. Jumpmaster tests the key with GitHub before storing it. A key for another app, or a key GitHub
    rejects, is refused and nothing changes: the old key stays in use.

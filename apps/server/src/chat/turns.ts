@@ -114,7 +114,7 @@ const deadlineWords = (minutes: number): string =>
 const CLAUDE_UNFINISHED = 'Claude could not finish this answer.';
 const NOT_STARTED = 'The chat could not start this turn.';
 const NO_SESSION = 'This message has no browser session to act for.';
-const NO_CLAUDE = 'Claude is not set up yet: add the Claude token in Settings.';
+const NO_CLAUDE = 'Claude is not set up yet: add the Claude token in System, Credentials.';
 const NO_READ_CREDENTIAL = 'no read credential for this zone';
 
 /** The most model turns one chat turn may take. */

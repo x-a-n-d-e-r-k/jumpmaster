@@ -536,7 +536,7 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
         // Read from disk, not the cached resolution: a file deleted or broken since the last
         // reload must not let the only copy go (issue #611).
         const noFile = {
-          error: `no file sets ${name}: the vault entry is its only copy, so it stays (replace its key on Settings → Credentials instead)`,
+          error: `no file sets ${name}: the vault entry is its only copy, so it stays (replace its key on System, Credentials instead)`,
         };
         const file = store.appFileOnDisk(owner, role);
         if (!file) return reply.code(409).send(noFile);
