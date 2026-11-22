@@ -2166,6 +2166,10 @@ describe('the System area (#623)', () => {
     expect(install).toBeGreaterThan(-1);
     expect(other).toBeGreaterThan(install);
     expect(body).toContain('<form id="public-url-form"');
+    // The install script finds its form by id: no other element may carry it.
+    expect(body.split('id="install"').length - 1).toBe(1);
+    const ids = [...body.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]);
+    expect(ids.filter((id, i) => ids.indexOf(id) !== i)).toEqual([]);
   });
 
   test('a form on /system/sticks posts to /system/sticks/add', async () => {

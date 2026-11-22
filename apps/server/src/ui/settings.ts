@@ -845,7 +845,7 @@ function installSection(o: { store: ConfigStore; config: Config; saved?: number 
   const save = fileMode
     ? ''
     : '<p><button>Save</button> <span id="install-out" role="status"></span></p>';
-  return `<h3 id="install">Install</h3>
+  return `<h3 id="install-settings">Install</h3>
 ${saved}${restart}${warnings}${banner}
 <form id="install" data-revision="${store.revision()}" data-readonly="${fileMode ? '1' : '0'}"><fieldset${fileMode ? ' disabled' : ''}>
 <table><tr><th>Setting</th><th>Value</th><th></th></tr>${rows}</table>

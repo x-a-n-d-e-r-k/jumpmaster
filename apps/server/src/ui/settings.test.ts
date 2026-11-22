@@ -1247,6 +1247,38 @@ describe('the Other machines tab (issue #254)', () => {
     ).toBe('refused');
     expect(out2.textContent).toBe('must be a plain https origin');
   });
+
+  test('jmGo redraws this page when only the hash differs, and navigates otherwise', () => {
+    const at = (href: string) => {
+      const u = new URL(href);
+      const loc = {
+        href,
+        pathname: u.pathname,
+        search: u.search,
+        hash: u.hash,
+        reloads: 0,
+        reload() {
+          loc.reloads += 1;
+        },
+      };
+      const s = pageScript(OTHER_MACHINES_SCRIPT, () => ({ ok: true, status: 200, json: {} }), {
+        location: loc,
+        URL,
+      });
+      (s.ctx.jmGo as (to: string) => void)('/system/server#other-machines');
+      return loc;
+    };
+    const same = at('http://h/system/server');
+    expect(same.reloads).toBe(1);
+    expect(same.hash).toBe('#other-machines');
+    expect(same.href).toBe('http://h/system/server');
+    const other = at('http://h/config/confirm/abc');
+    expect(other.reloads).toBe(0);
+    expect(other.href).toBe('/system/server#other-machines');
+    const query = at('http://h/system/server?saved=3');
+    expect(query.reloads).toBe(0);
+    expect(query.href).toBe('/system/server#other-machines');
+  });
 });
 
 /** One revision's row on the History tab. */
