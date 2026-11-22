@@ -112,11 +112,11 @@ async function world(o: { file?: boolean } = {}) {
   return { db, store, app: a, get, api, session: s };
 }
 
-/** The `<form id=…>` element's HTML, for section assertions. */
+/** The Setup form's `<section id=…>` HTML, for section assertions. */
 const section = (html: string, id: string): string => {
-  const at = html.indexOf(`<form id="${id}"`);
+  const at = html.indexOf(`<section id="${id}" class="setup-section`);
   expect(at, id).toBeGreaterThanOrEqual(0);
-  return html.slice(at, html.indexOf('</form>', at));
+  return html.slice(at, html.indexOf('</section>', at));
 };
 
 describe('the zones page', () => {
@@ -248,8 +248,8 @@ describe('the zones page', () => {
     const w = await world();
     const page = (await w.get('/projects/main/setup')).body;
     expect(page).toContain('j.needsConfirmation');
-    expect(page).toContain('returnTo: "/projects/main/setup#" + section');
-    expect(page).toContain('cancelTo: "/projects/main/setup"');
+    expect(page).toContain('const BASE = "/projects/main/setup";');
+    expect(page).toContain('returnTo: BASE, cancelTo: BASE');
     const patch = { dropZones: [{ id: 'main', ciRequired: false }] };
     const s = await w.api('PATCH', '/api/control/config', {
       patch,
@@ -299,10 +299,11 @@ describe('the zones page', () => {
     expect(r.statusCode).toBe(200);
     expect(r.body).toContain('Your config file holds these zones');
     expect(r.body).toContain("'/api/control/config/adopt'");
-    for (const id of ['project', 'stack', 'egress', 'merging', 'advanced']) {
-      expect(section(r.body, id)).toContain('<fieldset disabled>');
-      expect(section(r.body, id)).not.toContain('<button>Save');
-    }
+    for (const id of ['project', 'stack', 'egress', 'merging', 'advanced']) section(r.body, id);
+    const form = r.body.slice(r.body.indexOf('<form id="setup-form"'));
+    expect(form.slice(0, form.indexOf('<section'))).toContain('<fieldset disabled>');
+    expect(r.body).not.toContain('id="save-bar"');
+    expect(r.body).not.toContain('id="setup-script"');
     expect((await w.get('/projects')).body).not.toContain('href="/projects/new"');
   });
 
@@ -566,12 +567,17 @@ describe('the zones page', () => {
     expect(script.slice(0, script.indexOf('});'))).not.toContain('needsConfirmation');
   });
 
-  test('the zone page offers Stop managing near its top, and none at the bottom any more', async () => {
+  test('the setup page offers Stop managing only in its Danger zone, after the settings (#617)', async () => {
     const page = (await (await world()).get('/projects/main/setup')).body;
-    const stop = page.indexOf('<button class="stop" data-zone="main"');
-    expect(stop).toBeGreaterThanOrEqual(0);
-    expect(stop).toBeLessThan(page.indexOf('<form id="project"'));
-    expect(page).toContain("querySelectorAll('button.stop')");
+    const danger = page.slice(page.indexOf('<section id="danger"'));
+    expect(page.indexOf('<section id="danger"')).toBeGreaterThan(
+      page.indexOf('</form>', page.indexOf('<form id="setup-form"')),
+    );
+    expect(danger).toContain('<h3>Danger zone</h3>');
+    expect(danger).toContain('Type <code>octo/main</code> to confirm');
+    expect(danger).toContain('id="stop-managing" disabled>Stop managing this project</button>');
+    expect(danger).toContain('Open pull requests are left as they are');
+    expect(page.match(/class="stop/g)).toHaveLength(1);
     expect(page).not.toContain('<h3>Remove</h3>');
   });
 
@@ -949,8 +955,9 @@ describe('a project: tabs, header and Overview (#616)', () => {
     for (const id of ['project', 'stack', 'egress', 'merging', 'advanced']) section(setup, id);
     expect(setup).toContain('<section id="backlog">');
     const overview = (await w.get('/projects/main')).body;
-    expect(overview).not.toContain('<form id="egress"');
-    expect(overview).not.toContain('<form id="merging"');
+    expect(overview).not.toContain('<section id="egress"');
+    expect(overview).not.toContain('<section id="merging"');
+    expect(overview).not.toContain('<form id="setup-form"');
     expect(overview).not.toContain('<section id="backlog">');
     expect(overview).not.toContain('const REVISION');
   });
@@ -1048,5 +1055,415 @@ describe('a project: tabs, header and Overview (#616)', () => {
     const w = await world();
     expect((await w.get('/projects/nope/setup')).statusCode).toBe(404);
     expect((await w.get('/projects/nope')).statusCode).toBe(404);
+  });
+});
+
+const unescape = (s: string) =>
+  s
+    .replaceAll('&quot;', '"')
+    .replaceAll('&#39;', "'")
+    .replaceAll('&lt;', '<')
+    .replaceAll('&gt;', '>')
+    .replaceAll('&amp;', '&');
+
+type Listeners = Record<string, ((e: unknown) => void)[]>;
+type FakeEl = {
+  id?: string;
+  tagName: string;
+  name: string;
+  type: string;
+  value: string;
+  checked: boolean;
+  disabled: boolean;
+  hidden: boolean;
+  textContent: string;
+  listeners: Listeners;
+  addEventListener(ev: string, fn: (e: unknown) => void): void;
+  fire(ev: string, e?: unknown): unknown;
+  closest(): null;
+};
+
+const attr = (tag: string, name: string): string | undefined => {
+  const m = new RegExp(`\\s${name}="([^"]*)"`).exec(tag);
+  return m ? unescape(m[1] ?? '') : undefined;
+};
+
+function fakeEl(o: Partial<FakeEl> & { tagName: string }): FakeEl {
+  const el: FakeEl = {
+    name: '',
+    type: '',
+    value: '',
+    checked: false,
+    disabled: false,
+    hidden: false,
+    textContent: '',
+    listeners: {},
+    addEventListener(ev, fn) {
+      (el.listeners[ev] ??= []).push(fn);
+    },
+    fire(ev, e = {}) {
+      let last: unknown;
+      for (const fn of el.listeners[ev] ?? []) last = fn(e);
+      return last;
+    },
+    closest: () => null,
+    ...o,
+  };
+  return el;
+}
+
+/** The form's controls, in document order, as the browser would hold them. */
+function controlsOf(formHtml: string): FakeEl[] {
+  const re =
+    /<input\b[^>]*>|<textarea\b([^>]*)>([\s\S]*?)<\/textarea>|<select\b([^>]*)>([\s\S]*?)<\/select>/g;
+  return [...formHtml.matchAll(re)].map((m) => {
+    const tag = m[0];
+    if (tag.startsWith('<input'))
+      return fakeEl({
+        tagName: 'INPUT',
+        name: attr(tag, 'name') ?? '',
+        type: attr(tag, 'type') ?? 'text',
+        value: attr(tag, 'value') ?? '',
+        checked: /\schecked[\s>]/.test(tag),
+      });
+    if (tag.startsWith('<textarea'))
+      return fakeEl({
+        tagName: 'TEXTAREA',
+        name: attr(m[1] ?? '', 'name') ?? '',
+        type: 'textarea',
+        value: unescape(m[2] ?? ''),
+      });
+    const options = [...(m[4] ?? '').matchAll(/<option value="([^"]*)"([^>]*)>/g)];
+    const chosen = options.find((o) => /selected/.test(o[2] ?? '')) ?? options[0];
+    return fakeEl({
+      tagName: 'SELECT',
+      name: attr(m[3] ?? '', 'name') ?? '',
+      type: 'select-one',
+      value: unescape(chosen?.[1] ?? ''),
+    });
+  });
+}
+
+/**
+ * Runs the Setup page's script (#617) against a fake DOM built from the page's own HTML. `jmFetch`
+ * forwards to the real API with the operator's session, so every answer is the server's.
+ */
+async function setupPageRun(w: Awaited<ReturnType<typeof world>>, id = 'main') {
+  const html = (await w.get(`/projects/${id}/setup`)).body;
+  const at = html.indexOf('<form id="setup-form"');
+  expect(at).toBeGreaterThanOrEqual(0);
+  const formHtml = html.slice(at, html.indexOf('</form>', at));
+  const elements = controlsOf(formHtml);
+  const form = Object.assign(fakeEl({ tagName: 'FORM' }), {
+    elements,
+    querySelector: (sel: string) =>
+      sel === 'select[name=identity]'
+        ? elements.find((e) => e.tagName === 'SELECT' && e.name === 'identity')
+        : null,
+  });
+  const byId = new Map<string, FakeEl>();
+  for (const m of html.matchAll(/\sid="([^"]+)"/g)) {
+    const key = m[1] ?? '';
+    if (key === 'setup-form' || byId.has(key)) continue;
+    const tag = html.slice(html.lastIndexOf('<', m.index), html.indexOf('>', m.index) + 1);
+    byId.set(
+      key,
+      fakeEl({
+        id: key,
+        tagName: 'X',
+        disabled: /\sdisabled[\s>]/.test(tag),
+        hidden: /\shidden[\s>]/.test(tag),
+      }),
+    );
+  }
+  const issues = new Map(
+    [...html.matchAll(/data-issues="([^"]+)"/g)].map((m) => [
+      m[1] ?? '',
+      fakeEl({ tagName: 'SPAN' }),
+    ]),
+  );
+  const document = {
+    getElementById: (key: string) => (key === 'setup-form' ? form : (byId.get(key) ?? null)),
+    querySelector: (sel: string) => {
+      const m = /^\[data-issues="(.+)"\]$/.exec(sel);
+      return m ? (issues.get(m[1] ?? '') ?? null) : null;
+    },
+    querySelectorAll: (sel: string) => (sel === '.issue' ? [...issues.values()] : []),
+  };
+  const windowListeners: Listeners = {};
+  const location = { href: `/projects/${id}/setup`, hash: '', reloads: 0, reload: () => {} };
+  location.reload = () => {
+    location.reloads++;
+  };
+  const calls: { url: string; body: Record<string, unknown>; method: string }[] = [];
+  const pending: Promise<unknown>[] = [];
+  const jmFetch = (url: string, body: Record<string, unknown>, method = 'POST') => {
+    calls.push({ url, body, method });
+    const p = w.api(method as 'POST' | 'PATCH' | 'DELETE', url, body).then((r) => ({
+      ok: r.statusCode >= 200 && r.statusCode < 300,
+      status: r.statusCode,
+      json: async () => r.json(),
+    }));
+    pending.push(p);
+    return p;
+  };
+  const script = html.slice(
+    html.indexOf('<script id="setup-script">') + '<script id="setup-script">'.length,
+    html.indexOf('</script>', html.indexOf('<script id="setup-script">')),
+  );
+  vm.runInContext(
+    script,
+    vm.createContext({
+      document,
+      location,
+      jmFetch,
+      window: {
+        addEventListener: (ev: string, fn: (e: unknown) => void) => {
+          (windowListeners[ev] ??= []).push(fn);
+        },
+      },
+    }),
+  );
+  const settle = async () => {
+    for (let i = 0; i < 5; i++) {
+      await Promise.all(pending);
+      await new Promise((r) => setImmediate(r));
+    }
+  };
+  const control = (name: string) => {
+    const el = elements.find((e) => e.name === name && e.type !== 'hidden');
+    expect(el, name).toBeDefined();
+    return el as FakeEl;
+  };
+  const el = (key: string) => {
+    const e = byId.get(key);
+    expect(e, key).toBeDefined();
+    return e as FakeEl;
+  };
+  return {
+    html,
+    elements,
+    calls,
+    location,
+    issues,
+    control,
+    el,
+    /** Types into a field, as the browser's `input` event bubbles to the form. */
+    set(name: string, value: string) {
+      control(name).value = value;
+      form.fire('input', {});
+    },
+    tick(name: string, on: boolean) {
+      control(name).checked = on;
+      form.fire('change', {});
+    },
+    async save() {
+      form.fire('submit', { preventDefault: () => {} });
+      await settle();
+    },
+    discard: () => el('discard').fire('click'),
+    count: () => el('save-count').textContent,
+    leaving() {
+      let prevented = false;
+      for (const fn of windowListeners.beforeunload ?? [])
+        fn({
+          preventDefault: () => {
+            prevented = true;
+          },
+        });
+      return prevented;
+    },
+    settle,
+  };
+}
+
+describe('Setup is one form with one save bar (#617)', () => {
+  test('the page has a section list for wide screens, a select for narrow ones, and the six sections', async () => {
+    const w = await world();
+    const html = (await w.get('/projects/main/setup')).body;
+    const labels = [
+      ['project', 'Repository &amp; labels'],
+      ['stack', 'Stack &amp; checks'],
+      ['egress', 'Egress'],
+      ['merging', 'Merging'],
+      ['advanced', 'Advanced'],
+      ['danger', 'Danger zone'],
+    ];
+    const nav = html.slice(
+      html.indexOf('<nav class="setup-nav"'),
+      html.indexOf('</nav>', html.indexOf('<nav class="setup-nav"')),
+    );
+    expect([...nav.matchAll(/<a href="#([^"]+)">([^<]+)<\/a>/g)].map((m) => [m[1], m[2]])).toEqual(
+      labels,
+    );
+    const jump = html.slice(
+      html.indexOf('<select id="setup-jump"'),
+      html.indexOf('</select>', html.indexOf('<select id="setup-jump"')),
+    );
+    expect(
+      [...jump.matchAll(/<option value="([^"]+)">([^<]+)<\/option>/g)].map((m) => [m[1], m[2]]),
+    ).toEqual(labels);
+    for (const [id] of labels) expect(html).toContain(`<section id="${id}" class="setup-section`);
+    expect(html).toContain('.setup-nav{position:sticky');
+    expect(html).toContain(
+      '@media (max-width:899.98px){.setup-layout{display:block}.setup-nav{display:none}.setup-jump{display:block',
+    );
+    // One form, one Save.
+    expect(html.match(/<form id="setup-form"/g)).toHaveLength(1);
+    expect(html.match(/>Save<\/button>/g)).toHaveLength(1);
+    expect(html).not.toContain('data-section=');
+  });
+
+  test('one change in Egress and one in Merging send one request whose patch holds exactly those two', async () => {
+    const w = await world();
+    const p = await setupPageRun(w);
+    expect(p.count()).toBe('0 unsaved changes');
+    expect(p.el('save').disabled).toBe(true);
+    expect(p.control('egress.mode').value).toBe('monitor');
+    expect(p.control('ciDeadlineMinutes').value).not.toBe('90');
+    p.set('egress.mode', 'enforce');
+    p.set('ciDeadlineMinutes', '90');
+    expect(p.count()).toBe('2 unsaved changes');
+    expect(p.el('save').disabled).toBe(false);
+    await p.save();
+    expect(p.calls).toHaveLength(1);
+    const call = p.calls[0];
+    expect(call?.method).toBe('PATCH');
+    expect(call?.url).toBe('/api/control/config');
+    expect(call?.body.patch).toEqual({
+      dropZones: [{ id: 'main', egress: { mode: 'enforce' }, ciDeadlineMinutes: 90 }],
+    });
+    expect(call?.body.expectRevision).toBeTypeOf('number');
+    // The server took both, and nothing else changed.
+    const main = w.store.current().dropZones[0];
+    expect(main?.egress).toEqual({ mode: 'enforce', allow: ['known.example.com'] });
+    expect(main?.ciDeadlineMinutes).toBe(90);
+    expect(main?.readyLabel).toBe('drop-ready');
+  });
+
+  test('the unsaved count is 0 after a successful save, and the page reloads without asking', async () => {
+    const w = await world();
+    const p = await setupPageRun(w);
+    p.set('readyLabel', 'go');
+    expect(p.count()).toBe('1 unsaved change');
+    expect(p.leaving()).toBe(true);
+    await p.save();
+    expect(w.store.current().dropZones[0]?.readyLabel).toBe('go');
+    expect(p.count()).toBe('0 unsaved changes');
+    expect(p.location.reloads).toBe(1);
+    expect(p.leaving()).toBe(false);
+  });
+
+  test('a server reply with a field issue renders the message beside that field, and the bar counts it', async () => {
+    const w = await world();
+    const p = await setupPageRun(w);
+    p.set('ciDeadlineMinutes', 'soon');
+    await p.save();
+    expect(p.calls).toHaveLength(1);
+    const message = p.issues.get('ciDeadlineMinutes')?.textContent ?? '';
+    expect(message).not.toBe('');
+    for (const [name, span] of p.issues)
+      if (name !== 'ciDeadlineMinutes') expect(span.textContent, name).toBe('');
+    expect(p.el('save-out').textContent).toBe('1 field error');
+    // Still unsaved, still the typed value.
+    expect(p.count()).toBe('1 unsaved change');
+    expect(p.control('ciDeadlineMinutes').value).toBe('soon');
+    expect(p.location.reloads).toBe(0);
+  });
+
+  test('Discard restores the original values', async () => {
+    const w = await world();
+    const p = await setupPageRun(w);
+    const before = p.elements.map((e) => [e.name, e.value, e.checked]);
+    p.set('egress.allow', 'other.example.com');
+    p.set('readyLabel', 'go');
+    p.tick('ciRequired', false);
+    p.set('identity', 'starter');
+    expect(p.count()).toBe('4 unsaved changes');
+    p.discard();
+    expect(p.elements.map((e) => [e.name, e.value, e.checked])).toEqual(before);
+    expect(p.count()).toBe('0 unsaved changes');
+    expect(p.el('starter-warning').hidden).toBe(true);
+    expect(p.leaving()).toBe(false);
+    expect(p.calls).toHaveLength(0);
+  });
+
+  test('leaving the page with unsaved changes asks first', async () => {
+    const w = await world();
+    const p = await setupPageRun(w);
+    expect(p.leaving()).toBe(false);
+    p.set('retryLabel', 'again');
+    expect(p.leaving()).toBe(true);
+  });
+
+  test('a guarded change goes to the confirmation page and leaves the form as it was typed', async () => {
+    const w = await world();
+    const p = await setupPageRun(w);
+    p.tick('ciRequired', false);
+    await p.save();
+    expect(p.calls).toHaveLength(1);
+    expect(p.calls[0]?.body).toMatchObject({
+      patch: { dropZones: [{ id: 'main', ciRequired: false }] },
+      returnTo: '/projects/main/setup',
+      cancelTo: '/projects/main/setup',
+    });
+    expect(p.location.href).toMatch(/^\/config\/confirm\//);
+    const confirm = await w.get(p.location.href);
+    expect(confirm.body).toContain('Agent PRs in main will merge without CI');
+    // Not applied, and the form still holds the change: unsaved until confirmed.
+    expect(w.store.current().dropZones[0]?.ciRequired).toBe(true);
+    expect(p.control('ciRequired').checked).toBe(false);
+    expect(p.count()).toBe('1 unsaved change');
+    expect(p.location.reloads).toBe(0);
+  });
+
+  test('Stop managing stays disabled until the exact repository name is typed, then removes the project', async () => {
+    const w = await world();
+    const p = await setupPageRun(w);
+    const typed = p.el('stop-confirm');
+    const stop = p.el('stop-managing');
+    expect(stop.disabled).toBe(true);
+    for (const v of ['', 'octo/mai', 'OCTO/MAIN', 'Octo/Main', 'octo/main ', 'main']) {
+      typed.value = v;
+      typed.fire('input');
+      expect(stop.disabled, v).toBe(true);
+      stop.fire('click');
+    }
+    await p.settle();
+    expect(p.calls).toHaveLength(0);
+    typed.value = 'octo/main';
+    typed.fire('input');
+    expect(stop.disabled).toBe(false);
+    stop.fire('click');
+    await p.settle();
+    expect(p.calls).toEqual([{ url: '/api/control/zones/main', body: {}, method: 'DELETE' }]);
+    expect(p.location.href).toBe('/projects');
+    expect(w.store.current().dropZones.map((z) => z.id)).toEqual(['img']);
+  });
+
+  test('the Advanced JSON is a read-only view with a link to advanced settings, and is never sent', async () => {
+    const w = await world();
+    const adv = section((await w.get('/projects/main/setup')).body, 'advanced');
+    expect(adv).toMatch(/<textarea id="zone-json" readonly[^>]*>/);
+    expect(adv).not.toMatch(/<textarea[^>]*\sname=/);
+    expect(adv).toContain('<a href="/projects/main/flags">advanced settings</a>');
+    expect(adv).toContain('&quot;repo&quot;: &quot;octo/main&quot;');
+  });
+
+  test('with readOnly every field is disabled and there is no save bar or Stop managing', async () => {
+    const w = await world({ file: true });
+    const html = (await w.get('/projects/main/setup')).body;
+    const at = html.indexOf('<form id="setup-form">');
+    const form = html.slice(at, html.indexOf('</form>', at));
+    expect(form.startsWith('<form id="setup-form"><fieldset disabled>')).toBe(true);
+    const fieldset = form.slice(0, form.indexOf('</fieldset>'));
+    const controls = (s: string) => s.match(/<(input|textarea|select|button)\b/g)?.length ?? 0;
+    expect(controls(fieldset)).toBeGreaterThan(10);
+    expect(controls(form)).toBe(controls(fieldset));
+    expect(html).not.toContain('id="save-bar"');
+    expect(html).not.toContain('unsaved change');
+    expect(html).not.toContain('id="setup-script"');
+    expect(html).not.toContain('id="stop-confirm"');
+    expect(section(html, 'danger')).toContain('removing it from the config file');
   });
 });
