@@ -1,5 +1,5 @@
 import { generateKeyPairSync, randomBytes } from 'node:crypto';
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
@@ -1271,16 +1271,35 @@ describe('the project step on GitHub Apps with no author token (#549)', () => {
       /** Vault entries for another owner than octo, or holding other text than an entry. */
       vaultFor?: { owner: string; role: Role; text?: string }[];
       noVault?: boolean;
+      /** octo's owner directory is a symlink to a directory outside the secrets directory (#609). */
+      linkOwner?: boolean;
+      /** `github-app/octo` is a dangling symlink or a regular file (#609). */
+      strayOwner?: 'dangling' | 'file';
     } = {},
   ) {
     const { broker, calls } = fakeBroker(o.installed ?? true);
-    const secretsDir = o.files ? mkdtempSync(join(tmpdir(), 'jm-wizard-secrets-')) : undefined;
-    if (secretsDir) chmodSync(secretsDir, 0o700);
+    const secretsDir =
+      o.files || o.strayOwner ? mkdtempSync(join(tmpdir(), 'jm-wizard-secrets-')) : undefined;
+    if (secretsDir) {
+      chmodSync(secretsDir, 0o700);
+      mkdirSync(join(secretsDir, 'github-app'), { recursive: true, mode: 0o700 });
+      chmodSync(join(secretsDir, 'github-app'), 0o700);
+    }
+    if (secretsDir && o.linkOwner) {
+      const real = mkdtempSync(join(tmpdir(), 'jm-wizard-owner-'));
+      chmodSync(real, 0o700);
+      symlinkSync(real, join(secretsDir, 'github-app', 'octo'));
+    }
+    if (secretsDir && o.strayOwner === 'dangling')
+      symlinkSync(join(secretsDir, 'no-such-owner'), join(secretsDir, 'github-app', 'octo'));
+    if (secretsDir && o.strayOwner === 'file')
+      writeFileSync(join(secretsDir, 'github-app', 'octo'), entryText('reviewer'), { mode: 0o600 });
     for (const f of o.files ?? []) {
       const dir = join(secretsDir as string, 'github-app', f.owner ?? 'octo');
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      chmodSync(dir, 0o700);
-      chmodSync(join(secretsDir as string, 'github-app'), 0o700);
+      if (!(o.linkOwner && (f.owner ?? 'octo') === 'octo')) {
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        chmodSync(dir, 0o700);
+      }
       writeFileSync(join(dir, `${f.role}.json`), f.text ?? entryText(f.role), { mode: 0o600 });
     }
     // With no vault to hold it, the Claude token is a secrets-directory file.
@@ -1473,6 +1492,35 @@ describe('the project step on GitHub Apps with no author token (#549)', () => {
       expect(
         await next({ files: [{ role: 'author' }, { owner: 'other', role: 'reviewer' }] }),
       ).toBe('/setup/forge');
+    });
+
+    // Issue #609: an owner directory reached through a symlink is read by appEntry(), so it counts.
+    test('entries under a symlinked owner directory pass the GitHub step', async () => {
+      expect(
+        await next({ linkOwner: true, files: [{ role: 'author' }, { role: 'reviewer' }] }),
+      ).toBe('/setup/stick');
+    });
+
+    test('with the vault disabled, entries under a symlinked owner directory pass', async () => {
+      expect(
+        await next({
+          noVault: true,
+          linkOwner: true,
+          files: [{ role: 'author' }, { role: 'reviewer' }],
+        }),
+      ).toBe('/setup/stick');
+    });
+
+    test('a symlinked owner directory holding the author alone leaves the step unfinished', async () => {
+      expect(await next({ linkOwner: true, files: [{ role: 'author' }] })).toBe('/setup/forge');
+    });
+
+    test('a dangling symlink as the owner directory leaves the step unfinished', async () => {
+      expect(await next({ roles: ['author'], strayOwner: 'dangling' })).toBe('/setup/forge');
+    });
+
+    test('a regular file named like an owner leaves the step unfinished', async () => {
+      expect(await next({ roles: ['author'], strayOwner: 'file' })).toBe('/setup/forge');
     });
   });
 });

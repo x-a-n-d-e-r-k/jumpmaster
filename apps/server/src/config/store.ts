@@ -659,8 +659,8 @@ export class ConfigStore implements ConfigSource {
   /**
    * Whether some owner has both an author and a reviewer app entry that `appEntry()` reads (#549,
    * #597): a vault entry or a `github-app/<owner>/<role>.json` file in the secrets directory, as
-   * detection resolves it. Candidate owners are the vault's app entry names and the owner
-   * directories under the secrets directory. An unreadable or undecryptable entry counts as none,
+   * detection resolves it. Candidate owners are the vault's app entry names and every name under
+   * the secrets directory's `github-app/`, a symlinked owner directory included (#609). An unreadable or undecryptable entry counts as none,
    * and nothing is logged.
    */
   hasAppPair(): boolean {
@@ -674,8 +674,9 @@ export class ConfigStore implements ConfigSource {
     const dir = this.o.boot.secretsDir;
     if (dir) {
       try {
-        for (const d of readdirSync(join(dir, APP_ENTRY_DIR), { withFileTypes: true }))
-          if (d.isDirectory()) owners.add(d.name);
+        // Every name is a candidate, whatever its entry type (#609): a symlinked owner directory is
+        // read by appEntry(), and a plain file, a dangling link or an invalid name reads as none.
+        for (const name of readdirSync(join(dir, APP_ENTRY_DIR))) owners.add(name);
       } catch {
         // No app entry directory: no file-sourced owner.
       }
