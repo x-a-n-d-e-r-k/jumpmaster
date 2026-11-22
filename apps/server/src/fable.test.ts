@@ -12,6 +12,7 @@ import { applyCrewActions } from './crew/actions.js';
 import { enqueueCrew } from './crew/schedule.js';
 import { setCrewIssue } from './crew/store.js';
 import {
+  activeDropFor,
   getDrop,
   getUsageState,
   insertDrop,
@@ -156,10 +157,13 @@ describe('which model a drop gets', () => {
     expect(getDrop(w.db, id)?.requestedModel).toBe(FABLE);
   });
 
-  test('refute and crew-lead never get Fable by default', () => {
-    for (const role of ['refute', 'crew-lead', 'implement', 'review'] as const) {
+  test('refute, crew-lead, implement, heal and resolve never get Fable by default', () => {
+    for (const role of ['refute', 'crew-lead', 'implement', 'heal', 'resolve'] as const) {
       expect(resolveModel(w.db, maxPlan, w.zone, role, t0)).toBe(w.zone.model);
     }
+    // Review is a Fable role only while claude.fableReview is on (#605).
+    const off = cfg({ plan: 'max', fableModel: FABLE, fableReview: false });
+    expect(resolveModel(w.db, off, w.zone, 'review', t0)).toBe(w.zone.model);
   });
 
   test('a Fable id typed into models.diagnose is replaced by the zone model when Fable is unavailable', () => {
@@ -655,5 +659,148 @@ describe('claude.fableWeeklyDropCap: 0 means no drop cap, and is the default (#3
       available: false,
       reason: 'no fableModel is configured',
     });
+  });
+});
+
+describe('reviews run on Fable while its budget allows (#605)', () => {
+  const R_MODEL = 'r-model';
+  const zone = () => ({ ...w.zone, models: { review: R_MODEL } });
+  const tomorrow = plus(t0, DAY).toISOString();
+  const report = (utilization: number) =>
+    recordUsageWindows(
+      w.db,
+      { seven_day_overage_included: { utilization, resetsAt: tomorrow } },
+      plus(t0, -1000),
+      'claude-fable-5-2',
+    );
+  /** A queued review drop for an open pull request. */
+  const reviewDrop = (id = 'rv'): string => {
+    const item = w.prItem(1, 'h1');
+    insertDrop(
+      w.db,
+      {
+        id,
+        dropZoneId: 'main',
+        workItemId: item,
+        role: 'review',
+        state: 'queued',
+        prNumber: 1,
+        headSha: 'h1',
+        createdAt: t0.toISOString(),
+      },
+      t0,
+    );
+    return id;
+  };
+  const build = (id: string, claude: ClaudeConfig, z = zone()) =>
+    buildPayload(w.db, z, getDrop(w.db, id) as never, secrets, { claude, now: t0 });
+
+  test('utilization 0.3, Fable available: the review gets fableModel, recorded as requested_model', () => {
+    report(0.3);
+    const id = reviewDrop();
+    const p = build(id, maxPlan.claude);
+    expect(p.role).toBe('review');
+    expect(p.model).toBe(FABLE);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(FABLE);
+  });
+
+  test("utilization 0.6: the review gets the zone's review model, an audit at the same moment Fable", () => {
+    report(0.6);
+    const id = reviewDrop();
+    expect(build(id, maxPlan.claude).model).toBe(R_MODEL);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(R_MODEL);
+    expect(resolveModel(w.db, maxPlan, zone(), 'audit', t0)).toBe(FABLE);
+    // The threshold follows claude.fableReviewMaxUtilization.
+    const looser = cfg({ ...maxPlan.claude, fableReviewMaxUtilization: 0.7 });
+    expect(resolveModel(w.db, looser, zone(), 'review', t0)).toBe(FABLE);
+    // Inclusive: at the threshold, the zone model.
+    const at = cfg({ ...maxPlan.claude, fableReviewMaxUtilization: 0.6 });
+    expect(resolveModel(w.db, at, zone(), 'review', t0)).toBe(R_MODEL);
+  });
+
+  test('window not reported, cap 10: 6 Fable drops this week gives the zone model; 4 gives Fable', () => {
+    const capped = cfg({ plan: 'max', fableModel: FABLE, fableWeeklyDropCap: 10 });
+    for (let i = 0; i < 4; i++) pastDrop(`f${i}`, FABLE, plus(t0, -(i + 1) * 60_000));
+    expect(resolveModel(w.db, capped, zone(), 'review', t0)).toBe(FABLE);
+    for (let i = 4; i < 6; i++) pastDrop(`f${i}`, FABLE, plus(t0, -(i + 1) * 60_000));
+    expect(fableStatus(w.db, capped, t0).available).toBe(true);
+    expect(resolveModel(w.db, capped, zone(), 'review', t0)).toBe(R_MODEL);
+    expect(resolveModel(w.db, capped, zone(), 'diagnose', t0)).toBe(FABLE);
+    // A cap of 0 sets no count limit for reviews either.
+    const uncapped = cfg({ plan: 'max', fableModel: FABLE, fableWeeklyDropCap: 0 });
+    expect(resolveModel(w.db, uncapped, zone(), 'review', t0)).toBe(FABLE);
+  });
+
+  test("each unavailable cause gives the zone's review model", () => {
+    expect(resolveModel(w.db, cfg({ plan: 'max' }), zone(), 'review', t0)).toBe(R_MODEL);
+    expect(resolveModel(w.db, cfg({ plan: 'pro', fableModel: FABLE }), zone(), 'review', t0)).toBe(
+      R_MODEL,
+    );
+    report(0.1);
+    const atLimit = cfg({
+      ...maxPlan.claude,
+      fableMaxUtilization: 0.1,
+      fableReviewMaxUtilization: 1,
+    });
+    expect(fableStatus(w.db, atLimit, t0).available).toBe(false);
+    expect(resolveModel(w.db, atLimit, zone(), 'review', t0)).toBe(R_MODEL);
+  });
+
+  test('fableReview false: the zone model even at utilization 0', () => {
+    report(0);
+    const off = cfg({ ...maxPlan.claude, fableReview: false });
+    expect(resolveModel(w.db, off, zone(), 'review', t0)).toBe(R_MODEL);
+    expect(resolveModel(w.db, maxPlan, zone(), 'review', t0)).toBe(FABLE);
+    // A models.review naming Fable behaves as before: Fable while available.
+    const named = { ...w.zone, models: { review: FABLE } };
+    expect(resolveModel(w.db, off, named, 'review', t0)).toBe(FABLE);
+  });
+
+  test('crew roles, implement, heal, resolve and the doctor are unchanged by any review threshold', () => {
+    report(0.3);
+    const statusOf = (r: number | undefined, on: boolean) =>
+      fableStatus(
+        w.db,
+        cfg({ ...maxPlan.claude, fableReview: on, fableReviewMaxUtilization: r }),
+        t0,
+      );
+    const base = fableStatus(w.db, maxPlan, t0);
+    for (const r of [0, 0.2, 0.5, 1, undefined])
+      for (const on of [true, false]) expect(statusOf(r, on)).toEqual(base);
+    expect(FABLE_ROLES).toEqual(['diagnose', 'arbitrate', 'audit']);
+    for (const r of [0, 0.5, 1]) {
+      const c = cfg({ ...maxPlan.claude, fableReviewMaxUtilization: r });
+      for (const role of ['diagnose', 'arbitrate', 'audit'] as const)
+        expect(resolveModel(w.db, c, zone(), role, t0)).toBe(FABLE);
+      for (const role of ['implement', 'heal', 'resolve', 'refute', 'crew-lead'] as const)
+        expect(resolveModel(w.db, c, zone(), role, t0)).toBe(w.zone.model);
+      const doc = { ...w.zone, models: { doctor: FABLE, review: R_MODEL } };
+      expect(resolveModel(w.db, c, doc, 'doctor', t0)).toBe(w.zone.model);
+      expect(resolveModel(w.db, c, doc, 'doctor', t0, { fable: true })).toBe(w.zone.model);
+    }
+  });
+
+  test("a review that hits a Fable-only rate limit is replaced on the zone's review model", async () => {
+    report(0.3);
+    const id = reviewDrop();
+    expect(build(id, maxPlan.claude).model).toBe(FABLE);
+    updateDrop(w.db, id, { state: 'running' });
+    await applyResult(
+      w.db,
+      { forges: w.forges, zone: zone(), secrets: [], usageCfg, claude: maxPlan.claude },
+      id,
+      {
+        status: 'rate_limited',
+        gates: [],
+        rateLimit: { status: 'rejected', rateLimitType: 'seven_day_fable', resetsAt: tomorrow },
+      },
+      t0,
+    );
+    expect(getDrop(w.db, id)?.state).toBe('cancelled');
+    const next = activeDropFor(w.db, getDrop(w.db, id)?.workItemId ?? -1);
+    expect(next).toMatchObject({ role: 'review', state: 'queued' });
+    const p = build(next?.id ?? '', maxPlan.claude);
+    expect(p.model).toBe(R_MODEL);
+    expect(getDrop(w.db, next?.id ?? '')?.requestedModel).toBe(R_MODEL);
   });
 });

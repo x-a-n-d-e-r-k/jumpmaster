@@ -370,6 +370,8 @@ export const NOT_GUARDED: FreePath[] = [
   ),
   free('claude.fableWeeklyDropCap', PACE),
   free('claude.fableMaxUtilization', PACE),
+  free('claude.fableReview', PACE),
+  free('claude.fableReviewMaxUtilization', PACE),
   free('claude.tokenCreatedAt', 'a date the doctor reads for the expiry warning'),
   free('mcp.maxBodyBytes', MCP_LIMIT),
   free('mcp.writesPerHour', MCP_LIMIT),

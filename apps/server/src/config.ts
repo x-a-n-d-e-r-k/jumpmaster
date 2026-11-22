@@ -538,6 +538,10 @@ export const EditableSchema = z.object({
        * it, a positive `fableWeeklyDropCap` applies instead.
        */
       fableMaxUtilization: z.number().min(0).max(1).default(0.8),
+      /** Pull request reviews run on Fable while its weekly budget has room (#605). */
+      fableReview: z.boolean().default(true),
+      /** Reviews stop using Fable once its reported weekly usage reaches this share. */
+      fableReviewMaxUtilization: z.number().min(0).max(1).default(0.5),
       /**
        * When `claude setup-token` made the token (YYYY-MM-DD): such tokens last a year, and the
        * doctor warns from day 330. Not a secret.
@@ -549,7 +553,13 @@ export const EditableSchema = z.object({
         })
         .optional(),
     })
-    .default({ plan: 'pro', fableWeeklyDropCap: 0, fableMaxUtilization: 0.8 }),
+    .default({
+      plan: 'pro',
+      fableWeeklyDropCap: 0,
+      fableMaxUtilization: 0.8,
+      fableReview: true,
+      fableReviewMaxUtilization: 0.5,
+    }),
   /**
    * Run trooper images only from a stick that verifies signatures (`image-verify-v1`) under the
    * `signed` policy. Off by default; the generated install turns it on.
@@ -674,6 +684,9 @@ export type ClaudeConfig = {
   fableModel?: string;
   fableWeeklyDropCap: number;
   fableMaxUtilization?: number;
+  /** Absent reads as true (`!== false`). */
+  fableReview?: boolean;
+  fableReviewMaxUtilization?: number;
   tokenCreatedAt?: string;
 };
 

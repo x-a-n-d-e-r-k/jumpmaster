@@ -338,8 +338,12 @@ stored.
 
 **Install** (`/settings/install`) holds the install-wide settings: `pollSeconds`,
 `usage.throttleUtilization`, `usage.stopOnOverage`, `claude.plan`, `claude.fableModel`,
-`claude.fableWeeklyDropCap`, `requireSignedImages` and `mcp.*`. **Save** applies them at the next
-pass and says the revision it saved. Turning `usage.stopOnOverage` off or `mcp.enabled` on asks
+`claude.fableWeeklyDropCap`, `claude.fableMaxUtilization`, `claude.fableReview`,
+`claude.fableReviewMaxUtilization`, `requireSignedImages` and `mcp.*`. **Save** applies them at the
+next pass and says the revision it saved. Reviews may request Fable: with `claude.fableReview` on
+(the default), a pull request review runs on Fable while Fable's weekly usage is under
+`claude.fableReviewMaxUtilization` (default 0.5), and on the zone's review model otherwise, so the
+audit, diagnose and arbitrate drops keep Fable up to `claude.fableMaxUtilization`. Turning `usage.stopOnOverage` off or `mcp.enabled` on asks
 for confirmation; turning `requireSignedImages` off is not offered (set it with `ctl` or in the
 file). `mcp.enabled` and `mcp.maxBodyBytes` take effect at the next restart: the tab shows
 **Restart pending** until you run `docker compose restart jumpmaster`. The boot settings

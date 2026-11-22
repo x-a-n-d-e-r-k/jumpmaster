@@ -621,6 +621,10 @@ describe('settings, part two (Task 13)', () => {
     expect(settingRow(html, 'mcp.maxBodyBytes')).toContain('takes effect at the next restart');
     expect(settingRow(html, 'pollSeconds')).not.toContain('restart');
     expect(settingRow(html, 'claude.fableWeeklyDropCap')).toContain('0 = no limit');
+    // #605: the Fable model is for every Fable role, reviews included; the review controls sit beside it.
+    expect(settingRow(html, 'claude.fableModel')).not.toContain('the Fable reviewer');
+    expect(settingRow(html, 'claude.fableReview')).toContain('checked');
+    expect(settingRow(html, 'claude.fableReviewMaxUtilization')).toContain('value="0.5"');
     for (const path of [
       'pollSeconds',
       'usage.throttleUtilization',
@@ -629,6 +633,8 @@ describe('settings, part two (Task 13)', () => {
       'claude.fableModel',
       'claude.fableWeeklyDropCap',
       'claude.fableMaxUtilization',
+      'claude.fableReview',
+      'claude.fableReviewMaxUtilization',
       'requireSignedImages',
       'mcp.writesPerHour',
       'mcp.callsPerHour',
@@ -1186,7 +1192,7 @@ describe('settings, part two: browser findings (Task 13, fix round 1)', () => {
     const w = await world({ dbMode: true, doc: { mcp: { enabled: true }, dropZones: [ZONE] } });
     const html = (await w.get('/settings/install')).body;
     const controls = [...html.matchAll(/<(input|select)[^>]*data-path="([^"]+)"[^>]*>/g)];
-    expect(controls.length).toBe(13);
+    expect(controls.length).toBe(15);
     for (const [tag, , path] of controls) {
       const id = /id="([^"]+)"/.exec(tag as string)?.[1];
       expect([path, id]).toEqual([path, expect.any(String)]);

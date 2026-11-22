@@ -51,6 +51,13 @@ describe('the schema walk', () => {
     expect(NOT_GUARDED.map((n) => n.path)).toContain('claude.fableMaxUtilization');
   });
 
+  test('claude.fableReview and fableReviewMaxUtilization only pick the review model, so they are free (#605)', () => {
+    for (const path of ['claude.fableReview', 'claude.fableReviewMaxUtilization']) {
+      const n = NOT_GUARDED.find((g) => g.path === path);
+      expect(n?.reason, path).toBe('a pace or cap on work that still passes every guard');
+    }
+  });
+
   test('a setting no table names is guarded with a consequence that says why (fail closed)', () => {
     // A field added to the schema without a rule: the parse seam lets it through as the schema
     // would, and classify meets a path no table names.

@@ -638,12 +638,16 @@ describe('crew config', () => {
       plan: 'ultra',
       fableWeeklyDropCap: 0,
       fableMaxUtilization: 0.8,
+      fableReview: true,
+      fableReviewMaxUtilization: 0.5,
     });
     expect(() => loadConfig(withPlan('bogus'), fullEnv)).toThrow(/claude.plan/);
     expect(loadConfig(withPlan('max'), fullEnv).claude).toEqual({
       plan: 'max',
       fableWeeklyDropCap: 0,
       fableMaxUtilization: 0.8,
+      fableReview: true,
+      fableReviewMaxUtilization: 0.5,
     });
   });
 
@@ -653,6 +657,8 @@ describe('crew config', () => {
       plan: 'pro',
       fableWeeklyDropCap: 0,
       fableMaxUtilization: 0.8,
+      fableReview: true,
+      fableReviewMaxUtilization: 0.5,
     });
     const c = loadConfig(
       fixture({
@@ -667,6 +673,8 @@ describe('crew config', () => {
       fableModel: 'claude-fable-1',
       fableWeeklyDropCap: 3,
       fableMaxUtilization: 0.8,
+      fableReview: true,
+      fableReviewMaxUtilization: 0.5,
     });
     expect(() =>
       loadConfig(
@@ -674,6 +682,15 @@ describe('crew config', () => {
         fullEnv,
       ),
     ).toThrow(/claude.plan/);
+    // Reviews on Fable (#605): on by default at 0.5; a stored value is kept.
+    const review = (claude: Record<string, unknown>) =>
+      loadConfig(fixture({ dataDir: './data', dropZones: [baseZone], claude }), fullEnv).claude;
+    expect(review({ fableReview: false, fableReviewMaxUtilization: 0.2 })).toMatchObject({
+      fableReview: false,
+      fableReviewMaxUtilization: 0.2,
+    });
+    expect(() => review({ fableReviewMaxUtilization: 1.5 })).toThrow(/fableReviewMaxUtilization/);
+    expect(() => review({ fableReview: 'yes' })).toThrow(/fableReview/);
     // The token's creation date, for the doctor's age check: a date, never a secret.
     const dated = (tokenCreatedAt: string) =>
       fixture({ dataDir: './data', dropZones: [baseZone], claude: { tokenCreatedAt } });
