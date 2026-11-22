@@ -32,9 +32,9 @@ import { type ZoneRef, zoneName, zoneNameText } from './zone-name.js';
 
 /**
  * The zones page (§10.3): every zone with its mode, egress, identity, last drop, doctor fails and
- * credential problem; a page per zone whose five sections each post one merge patch for that
- * zone (`PATCH /api/control/config`, zones matched by id) conditional on the revision drawn; and
- * the add page. Every write goes through the store's apply, so a change from a browser that
+ * credential problem; a Setup page per zone, one form whose sections share one save bar that
+ * posts one merge patch of every changed field (`PATCH /api/control/config`, zones matched by id)
+ * conditional on the revision drawn, and a Danger zone; and the add page. Every write goes through the store's apply, so a change from a browser that
  * weakens a guard lands on the confirmation page, and one a session may never make is answered
  * with where to make it. In file mode every section is read-only under the adopt banner. All text
  * from the config, the forge and the drops is escaped; the page holds no secret.
@@ -195,7 +195,6 @@ const textarea = (fields: Record<string, string | string[]>, name: string, rows 
 const checkbox = (fields: Record<string, string | string[]>, name: string) =>
   `<input type="hidden" name="bool" value="${name}"><input type="checkbox" name="${name}" value="1"${fields[name] === '1' ? ' checked' : ''}>`;
 
-/** A section: one form, one Save, or a disabled fieldset in file mode. */
 /** STARTER_WARNING without its own "starter mode: " lead, which the page prints in bold. */
 const STARTER_WARNING_BODY = STARTER_WARNING.replace(/^starter mode:\s*/i, '');
 
@@ -214,8 +213,186 @@ const IDENTITY_SCRIPT = `<script id="identity-script">
 })();
 </script>`;
 
-const sectionForm = (id: string, title: string, body: string, readOnly: boolean) =>
-  `<h3>${title}</h3><form id="${id}" data-section="${id}"><fieldset${readOnly ? ' disabled' : ''}>${body}${readOnly ? '' : `<p><button>Save</button> <span class="out" role="status"></span></p>`}</fieldset></form>`;
+/** The Setup page's sections, in order: each one's anchor and nav label. */
+const SETUP_SECTIONS = [
+  ['project', 'Repository &amp; labels'],
+  ['stack', 'Stack &amp; checks'],
+  ['egress', 'Egress'],
+  ['merging', 'Merging'],
+  ['advanced', 'Advanced'],
+  ['danger', 'Danger zone'],
+] as const;
+
+const SETUP_STYLE = `<style>.setup-layout{display:grid;grid-template-columns:13rem minmax(0,1fr);gap:2rem;align-items:start}.setup-nav{position:sticky;top:4.5rem}.setup-nav ul{list-style:none;padding:0;margin:0}.setup-nav a{display:block;padding:.25rem .5rem}.setup-jump{display:none}.setup-section{scroll-margin-top:4.5rem}#setup-form>fieldset{border:0;padding:0;margin:0;min-width:0}.save-bar{position:sticky;bottom:0;z-index:1;display:flex;flex-wrap:wrap;gap:.75rem;align-items:center;padding:.75rem 0;background:var(--bg-white-0);border-top:1px solid var(--stroke-soft-200)}.save-bar #save-out{flex:1}.danger-zone{margin-top:2rem;padding:0 1rem 1rem;border-radius:12px;box-shadow:inset 0 0 0 1px var(--error-base)}@media (max-width:899.98px){.setup-layout{display:block}.setup-nav{display:none}.setup-jump{display:block;position:sticky;top:4.5rem;z-index:1;margin:0 0 1rem}}</style>`;
+
+/** A section of the Setup form: its anchor, its title and its fields. */
+const setupSection = (id: string, title: string, body: string) =>
+  `<section id="${id}" class="setup-section"><h3>${title}</h3>${body}</section>`;
+
+/** Jumps to a section from the narrow screen's select. */
+const JUMP_SCRIPT = `<script>
+document.getElementById('setup-jump').addEventListener('change', (e) => { location.hash = e.target.value; });
+</script>`;
+
+/**
+ * The Setup form's script (#617): one patch for every changed field across the sections, the
+ * merge-patch difference between the fields as drawn and as they are now (so a section that was
+ * not touched sends nothing); the save bar's count, Discard and the leave-page question; the
+ * schema's issues beside their fields; and the Danger zone's typed-name guard. A guarded change
+ * goes to the confirmation page with the form untouched.
+ */
+function setupScript(o: {
+  revision: number;
+  index: number;
+  id: string;
+  repo: string;
+  base: string;
+}): string {
+  return `<script id="setup-script">
+${FORM_SCRIPT}
+(() => {
+const REVISION = ${o.revision};
+const ZONE_INDEX = ${o.index};
+const ZONE_ID = ${scriptJson(o.id)};
+const REPO = ${scriptJson(o.repo)};
+const BASE = ${scriptJson(o.base)};
+const form = document.getElementById('setup-form');
+const countEl = document.getElementById('save-count');
+const out = document.getElementById('save-out');
+const saveBtn = document.getElementById('save');
+const discardBtn = document.getElementById('discard');
+function fieldsOf(form) {
+  const res = {};
+  const add = (k, v) => { if (k in res) res[k] = [].concat(res[k], v); else res[k] = v; };
+  for (const el of form.elements) {
+    if (!el.name || el.name === 'adopt' || el.type === 'button' || el.type === 'submit') continue;
+    if (el.type === 'checkbox') { if (el.checked) add(el.name, el.value); continue; }
+    add(el.name, el.value);
+  }
+  for (const k of ['gate.name', 'gate.run', 'gate.timeout', 'bool']) if (k in res && !Array.isArray(res[k])) res[k] = [res[k]];
+  return res;
+}
+const snap = () => [...form.elements].map((el) => ({ el, value: el.value, checked: el.checked }));
+let original = fieldsOf(form);
+let drawn = snap();
+let leaving = false;
+// The fields that differ from the drawn ones; the gate rows count as one field, Checks.
+function changed() {
+  const now = fieldsOf(form);
+  const keys = new Set();
+  for (const k of new Set([...Object.keys(original), ...Object.keys(now)])) {
+    if (k === 'id' || k === 'bool' || k.startsWith('gate.')) continue;
+    if (JSON.stringify(original[k]) !== JSON.stringify(now[k])) keys.add(k);
+  }
+  if (JSON.stringify(formToZone(original).gates) !== JSON.stringify(formToZone(now).gates)) keys.add('gates');
+  return [...keys];
+}
+function refresh() {
+  const n = changed().length;
+  countEl.textContent = n + (n === 1 ? ' unsaved change' : ' unsaved changes');
+  saveBtn.disabled = n === 0;
+  discardBtn.disabled = n === 0;
+}
+function clearIssues() {
+  for (const s of document.querySelectorAll('.issue')) s.textContent = '';
+  out.textContent = '';
+}
+function markClean() {
+  original = fieldsOf(form);
+  drawn = snap();
+  refresh();
+}
+function syncStarter() {
+  const select = form.querySelector('select[name=identity]');
+  const warning = document.getElementById('starter-warning');
+  if (select && warning) warning.hidden = select.value !== 'starter';
+}
+function discard() {
+  const kept = new Set(drawn.map((d) => d.el));
+  for (const el of [...form.elements]) if (!kept.has(el)) { const row = el.closest && el.closest('p.gate'); if (row) row.remove(); }
+  for (const d of drawn) { d.el.value = d.value; d.el.checked = d.checked; }
+  clearIssues();
+  syncStarter();
+  refresh();
+}
+function showIssues(issues) {
+  let placed = 0;
+  let rest = '';
+  for (const i of issues) {
+    const f = issueField(i.path, ZONE_INDEX);
+    const at = f && document.querySelector('[data-issues="' + f + '"]');
+    if (at) { at.textContent = i.message; placed++; } else rest += (i.path ? i.path + ': ' : '') + i.message + ' ';
+  }
+  out.textContent = (placed ? placed + (placed === 1 ? ' field error' : ' field errors') + (rest ? '. ' : '') : '') + rest;
+}
+async function save() {
+  clearIssues();
+  const patch = toMergePatch(formToZone(original), formToZone(fieldsOf(form)));
+  if (Object.keys(patch).filter((k) => k !== 'id').length === 0) { markClean(); return; }
+  saveBtn.disabled = true;
+  const r = await jmFetch('/api/control/config', { patch: { dropZones: [patch] }, expectRevision: REVISION, returnTo: BASE, cancelTo: BASE }, 'PATCH');
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) { markClean(); leaving = true; location.reload(); return; }
+  refresh();
+  // A change that weakens a guard: the confirmation page, then back here. The form is left as is.
+  if (r.status === 409 && j.needsConfirmation) { leaving = true; location.href = j.confirm; return; }
+  if (r.status === 409 && j.conflict) { out.textContent = 'The config changed since this page was drawn: reload it and make the change again.'; return; }
+  if (r.status === 403 && j.sessionForbidden) { out.innerHTML = 'Not from the browser: ${FORBIDDEN_NOTE.replaceAll("'", "\\'")}. '; const c = document.createElement('code'); c.textContent = j.sessionForbidden.join(', '); out.append(c); return; }
+  if (j.issues) { showIssues(j.issues); return; }
+  out.textContent = j.error || ('Refused (' + r.status + ')');
+}
+form.addEventListener('input', refresh);
+form.addEventListener('change', refresh);
+form.addEventListener('submit', (e) => { e.preventDefault(); save(); });
+discardBtn.addEventListener('click', discard);
+window.addEventListener('beforeunload', (e) => {
+  if (leaving || changed().length === 0) return;
+  e.preventDefault();
+  e.returnValue = '';
+});
+const addGate = document.getElementById('add-gate');
+if (addGate) addGate.addEventListener('click', () => {
+  const p = document.createElement('p'); p.className = 'gate';
+  for (const [name, size, ph] of [['gate.name', 20, 'name'], ['gate.run', 40, 'command'], ['gate.timeout', 4, 'min']]) {
+    const i = document.createElement('input'); i.name = name; i.size = size; i.placeholder = ph; p.append(i, ' ');
+  }
+  document.getElementById('gate-rows').append(p);
+  refresh();
+});
+const adopt = document.getElementById('adopt-ticked');
+if (adopt) adopt.addEventListener('click', async () => {
+  const hosts = [...document.querySelectorAll('input[name=adopt]:checked')].map((i) => i.value);
+  const said = document.getElementById('adopt-out');
+  if (hosts.length === 0) { said.textContent = 'Tick a host first.'; return; }
+  const r = await jmFetch('/api/control/zones/' + encodeURIComponent(ZONE_ID) + '/egress/adopt', { hosts, returnTo: BASE + '#egress', cancelTo: BASE });
+  const j = await r.json().catch(() => ({}));
+  if (r.ok) { location.reload(); return; }
+  if (r.status === 409 && j.needsConfirmation) { location.href = j.confirm; return; }
+  said.textContent = j.error || (j.issues || []).map((i) => i.message).join('; ') || ('Refused (' + r.status + ')');
+});
+// Danger zone: Stop managing waits for the repository's exact name.
+const typed = document.getElementById('stop-confirm');
+const stop = document.getElementById('stop-managing');
+if (typed && stop) {
+  const sync = () => { stop.disabled = typed.value !== REPO; };
+  typed.addEventListener('input', sync);
+  sync();
+  stop.addEventListener('click', async () => {
+    if (typed.value !== REPO) return;
+    stop.disabled = true;
+    const r = await jmFetch('/api/control/zones/' + encodeURIComponent(ZONE_ID), {}, 'DELETE');
+    const j = await r.json().catch(() => ({}));
+    // 200: removed now; 202: stopping, removed by the server once drained.
+    if (r.status === 200) { location.href = ${scriptJson(PROJECTS_HREF)}; return; }
+    if (r.status === 202) { location.reload(); return; }
+    sync();
+    document.getElementById('stop-out').textContent = REPO + ': ' + (j.error || (j.issues || []).map((i) => i.message).join('; ') || ('refused (' + r.status + ')'));
+  });
+}
+refresh();
+})();
+</script>`;
+}
 
 /**
  * The Backlog section: open issues with no Jumpmaster label, loaded from the backlog route when the
@@ -381,7 +558,7 @@ function overviewPage(
   );
 }
 
-/** A project's Setup tab: the settings forms and the Backlog (the project page before #616). */
+/** A project's Setup tab (#617): the Backlog, then one settings form with a section list and a Danger zone. */
 function setupPage(store: ConfigStore, db: Db, id: string, now: Date): string | undefined {
   const doc = store.document();
   const zones = (Array.isArray(doc.dropZones) ? doc.dropZones : []) as Record<string, unknown>[];
@@ -447,37 +624,34 @@ function setupPage(store: ConfigStore, db: Db, id: string, now: Date): string | 
     .join('');
   const hidden = `<input type="hidden" name="id" value="${escapeHtml(id)}">`;
 
-  const project = sectionForm(
+  const project = setupSection(
     'project',
-    'Project',
-    `${hidden}<p>Repository: <strong>${escapeHtml(raw.repo)}</strong> <small>(remove and re-add to change)</small></p>
+    'Repository &amp; labels',
+    `<p>Repository: <strong>${escapeHtml(raw.repo)}</strong> <small>(remove and re-add to change)</small></p>
 ${field('readyLabel', 'Ready label', input(f, 'readyLabel'), 'renaming to a label already on many issues dispatches them all')}
 ${field('retryLabel', 'Retry label', input(f, 'retryLabel'))}
 ${field('adoptPulls', 'Open PRs to take over (numbers)', input(f, 'adoptPulls'))}`,
-    readOnly,
   );
-  const stack = sectionForm(
+  const stack = setupSection(
     'stack',
-    'Stack',
-    `${hidden}<div id="preset">${field('preset', 'Preset', `<select name="preset">${presetOptions}</select>`)}${image}</div>
+    'Stack &amp; checks',
+    `<div id="preset">${field('preset', 'Preset', `<select name="preset">${presetOptions}</select>`)}${image}</div>
 <h4>Checks (gates)</h4><div id="gate-rows">${gates.map(gateRow).join('')}</div>${readOnly ? '' : '<p><button type="button" id="add-gate">Add a check</button></p>'}<span class="issue" data-issues="gates"></span>
 ${field('verification', 'Verification (JSON)', textarea(f, 'verification'))}
 <div id="services">${field('services', 'Services (JSON)', textarea(f, 'services'), 'each service runs beside every drop')}</div>
 ${field('limits', 'Limits (JSON)', textarea(f, 'limits', 3))}`,
-    readOnly,
   );
-  const egress = sectionForm(
+  const egress = setupSection(
     'egress',
     'Egress',
-    `${hidden}${field('egress.mode', 'Mode', `<select name="egress.mode">${egressOptions}</select>`, 'off: no control; monitor: record what drops reach; enforce: only the lists')}
+    `${field('egress.mode', 'Mode', `<select name="egress.mode">${egressOptions}</select>`, 'off: no control; monitor: record what drops reach; enforce: only the lists')}
 ${field('egress.allow', 'Allow list (one host or *.name per line)', textarea(f, 'egress.allow'))}
-<h4>Observed in the last 14 days</h4>${observed}`,
-    readOnly,
+<h4>Observed in the last 14 days</h4>${observed}<p id="adopt-out" role="status"></p>`,
   );
-  const merging = sectionForm(
+  const merging = setupSection(
     'merging',
     'Merging',
-    `${hidden}<div id="identity">${field('identity', 'Accounts', `<select name="identity">${identityOptions}</select>`)}<p class="warn" id="starter-warning"${f.identity === 'starter' ? '' : ' hidden'}><strong>Starter mode:</strong> ${escapeHtml(STARTER_WARNING_BODY)}</p></div>${readOnly ? '' : IDENTITY_SCRIPT}
+    `<div id="identity">${field('identity', 'Accounts', `<select name="identity">${identityOptions}</select>`)}<p class="warn" id="starter-warning"${f.identity === 'starter' ? '' : ' hidden'}><strong>Starter mode:</strong> ${escapeHtml(STARTER_WARNING_BODY)}</p></div>${readOnly ? '' : IDENTITY_SCRIPT}
 ${field('ciRequired', 'CI must pass', checkbox(f, 'ciRequired'))}
 ${field('ciDeadlineMinutes', 'CI deadline (minutes)', input(f, 'ciDeadlineMinutes', 6))}
 ${field('requireBranchProtection', 'Branch rules required', checkbox(f, 'requireBranchProtection'))}
@@ -485,99 +659,44 @@ ${field('authorMayBeAdmin', 'The author account may be an admin (a personal repo
 ${field('reviewReadToken', 'Review drops get the read token (a private repository)', checkbox(f, 'reviewReadToken'))}
 ${field('protectedPaths', 'Protected paths (a person reviews these)', textarea(f, 'protectedPaths', 6))}
 ${field('overrideApprovers', 'Override approvers (logins)', textarea(f, 'overrideApprovers', 3))}`,
-    readOnly,
   );
-  const advanced = sectionForm(
+  // Read-only: the JSON has no name, so it is never part of the patch. Edit it on the flags page.
+  const advanced = setupSection(
     'advanced',
     'Advanced',
-    `<p>Zone id: <code>${escapeHtml(id)}</code> <small>(the zone's key in URLs, the API and <code>jumpmaster ctl</code>)</small></p><p>The zone as JSON: models, budgets, crew and every other setting. It is checked as the sections are.</p><p>All settings, one per row: <a href="${projectHref(id, 'flags')}">advanced settings</a></p><div id="goals"></div><div id="crew"></div><textarea name="json" rows="24" cols="90">${escapeHtml(JSON.stringify(raw, null, 2))}</textarea><span class="issue" data-issues="advanced"></span>`,
-    readOnly,
+    `<p>Zone id: <code>${escapeHtml(id)}</code> <small>(the zone's key in URLs, the API and <code>jumpmaster ctl</code>)</small></p><p>The zone as stored, as JSON: models, budgets, crew and every other setting. It is read-only here.</p><p>All settings, one per row: <a href="${projectHref(id, 'flags')}">advanced settings</a> <small>(edit them there)</small></p><div id="goals"></div><div id="crew"></div><textarea id="zone-json" readonly rows="24" cols="90" aria-label="The zone as JSON">${escapeHtml(JSON.stringify(raw, null, 2))}</textarea><span class="issue" data-issues="advanced"></span>`,
   );
+  const repo = String(raw.repo);
+  const name = zoneNameText(resolved, all);
+  const confirmText = `Jumpmaster takes no new work for ${escapeHtml(name)} and sets it to observe, then removes it as soon as its running drops, pending pushes and outbox writes have finished. Open pull requests are left as they are. Its history is kept, for a later Resume.`;
+  const danger = `<section id="danger" class="setup-section danger-zone"><h3>Danger zone</h3>${
+    stopping
+      ? `<p><strong>${escapeHtml(stopping)}</strong> <small>Resume or Pause from the Projects list withdraws it.</small></p>`
+      : readOnly
+        ? '<p>In file mode, stop managing this project by removing it from the config file and running <code>jumpmaster ctl config reload</code>.</p>'
+        : `<h4>Stop managing this project</h4><p>${confirmText}</p><p><label>Type <code>${escapeHtml(repo)}</code> to confirm <input id="stop-confirm" autocomplete="off" spellcheck="false" size="30"></label></p><p><button type="button" class="stop danger" id="stop-managing" disabled>Stop managing this project</button> <span id="stop-out" role="status"></span></p>`
+  }</section>`;
+  const nav = `<nav class="setup-nav" aria-label="Setup sections"><ul>${SETUP_SECTIONS.map(([s, label]) => `<li><a href="#${s}">${label}</a></li>`).join('')}</ul></nav>`;
+  const jump = `<select id="setup-jump" class="setup-jump" aria-label="Go to a section">${SETUP_SECTIONS.map(([s, label]) => `<option value="${s}">${label}</option>`).join('')}</select>`;
+  const saveBar = readOnly
+    ? ''
+    : '<div class="save-bar" id="save-bar"><span id="save-count">0 unsaved changes</span> <span id="save-out" role="status"></span> <button type="button" id="discard" disabled>Discard</button> <button id="save" class="primary" disabled>Save</button></div>';
   const base = projectHref(id, 'setup');
   const briefings = listBriefings(db, { zoneId: id, state: 'open' }).length;
   return page(
     `${projectHeader({ zone: resolved, zones: all, mode, openBriefings: briefings, current: 'setup' })}
-${stopping ? `<p><strong>${escapeHtml(stopping)}</strong> <small>Resume or Pause from the Zones list withdraws it.</small></p>` : ''}
-${readOnly || stopping ? '' : `<p>${stopButton(id, zoneNameText(resolved, all))}<small>No new work, then removed once drained; open pull requests and history stay.</small> <span id="stop-out" role="status"></span></p>`}
 ${readOnly ? ADOPT_BANNER : ''}
-${backlogSection(id, String(raw.repo))}
-<p id="form-out" role="status"></p>
+${backlogSection(id, repo)}
+${SETUP_STYLE}${jump}
+<div class="setup-layout">${nav}<div class="setup-body">
+<form id="setup-form"><fieldset${readOnly ? ' disabled' : ''}><input type="hidden" name="id" value="${escapeHtml(id)}">
 ${project}${stack}${egress}${merging}${advanced}
-${
-  readOnly
-    ? ''
-    : `<script>
-${STOP_SCRIPT}
-${FORM_SCRIPT}
-const REVISION = ${store.revision()};
-const ZONE_INDEX = ${index};
-const ZONE_ID = ${scriptJson(id)};
-const ORIGINAL = ${scriptJson(raw)};
-function fieldsOf(form) {
-  const out = {};
-  const add = (k, v) => { if (k in out) out[k] = [].concat(out[k], v); else out[k] = v; };
-  for (const el of form.elements) {
-    if (!el.name || el.name === 'adopt' || el.type === 'button' || el.type === 'submit') continue;
-    if (el.type === 'checkbox') { if (el.checked) add(el.name, el.value); continue; }
-    add(el.name, el.value);
-  }
-  for (const k of ['gate.name', 'gate.run', 'gate.timeout', 'bool']) if (k in out && !Array.isArray(out[k])) out[k] = [out[k]];
-  return out;
-}
-function showIssues(form, issues) {
-  for (const i of issues) {
-    const f = issueField(i.path, ZONE_INDEX);
-    const at = f && document.querySelector('[data-issues="' + f + '"]');
-    if (at) at.textContent = i.message; else form.querySelector('.out').textContent += (i.path ? i.path + ': ' : '') + i.message + ' ';
-  }
-}
-async function save(form, section, patch) {
-  for (const s of document.querySelectorAll('.issue')) s.textContent = '';
-  const out = form.querySelector('.out'); out.textContent = '';
-  const r = await jmFetch('/api/control/config', { patch: { dropZones: [patch] }, expectRevision: REVISION, returnTo: ${scriptJson(`${base}#`)} + section, cancelTo: ${scriptJson(base)} }, 'PATCH');
-  const j = await r.json().catch(() => ({}));
-  if (r.ok) { location.hash = section; location.reload(); return; }
-  // A change that weakens a guard: the confirmation page, then back to this section.
-  if (r.status === 409 && j.needsConfirmation) { location.href = j.confirm; return; }
-  if (r.status === 409 && j.conflict) { out.textContent = 'The config changed since this page was drawn: reload it and make the change again.'; return; }
-  if (r.status === 403 && j.sessionForbidden) { out.innerHTML = 'Not from the browser: ${FORBIDDEN_NOTE.replaceAll("'", "\\'")}. '; const c = document.createElement('code'); c.textContent = j.sessionForbidden.join(', '); out.append(c); return; }
-  if (j.issues) { showIssues(form, j.issues); return; }
-  out.textContent = j.error || ('Refused (' + r.status + ')');
-}
-for (const form of document.querySelectorAll('form[data-section]')) form.addEventListener('submit', (e) => {
-  e.preventDefault();
-  const section = form.dataset.section;
-  if (section === 'advanced') {
-    let edited;
-    try { edited = JSON.parse(form.json.value); } catch (err) { form.querySelector('.issue').textContent = 'Not JSON: ' + err.message; return; }
-    if (!edited || edited.id !== ZONE_ID) { form.querySelector('.issue').textContent = 'Keep "id": ' + JSON.stringify(ZONE_ID) + ' (a zone is renamed by removing it and adding it again).'; return; }
-    save(form, section, toMergePatch(ORIGINAL, edited));
-    return;
-  }
-  save(form, section, formToZone(fieldsOf(form)));
-});
-const addGate = document.getElementById('add-gate');
-if (addGate) addGate.addEventListener('click', () => {
-  const p = document.createElement('p'); p.className = 'gate';
-  for (const [name, size, ph] of [['gate.name', 20, 'name'], ['gate.run', 40, 'command'], ['gate.timeout', 4, 'min']]) {
-    const i = document.createElement('input'); i.name = name; i.size = size; i.placeholder = ph; p.append(i, ' ');
-  }
-  document.getElementById('gate-rows').append(p);
-});
-const adopt = document.getElementById('adopt-ticked');
-if (adopt) adopt.addEventListener('click', async () => {
-  const hosts = [...document.querySelectorAll('input[name=adopt]:checked')].map((i) => i.value);
-  const out = document.querySelector('#egress .out');
-  if (hosts.length === 0) { out.textContent = 'Tick a host first.'; return; }
-  const r = await jmFetch('/api/control/zones/' + encodeURIComponent(ZONE_ID) + '/egress/adopt', { hosts, returnTo: ${scriptJson(`${base}#egress`)}, cancelTo: ${scriptJson(base)} });
-  const j = await r.json().catch(() => ({}));
-  if (r.ok) { location.reload(); return; }
-  if (r.status === 409 && j.needsConfirmation) { location.href = j.confirm; return; }
-  out.textContent = j.error || (j.issues || []).map((i) => i.message).join('; ') || ('Refused (' + r.status + ')');
-});
-</script>`
-}`,
-    { title: zoneNameText(resolved, all) },
+</fieldset>${saveBar}</form>
+${danger}
+</div></div>
+${JUMP_SCRIPT}
+${readOnly ? '' : setupScript({ revision: store.revision(), index, id, repo, base })}`,
+    { title: name },
   );
 }
 
