@@ -331,8 +331,8 @@ the issue**. It is filed on GitHub as a ready issue (`drop-ready`) at once, and 
 it up. Submitting twice never files twice. After a filing the page shows the issue's link and a
 **File another** button that clears the form for the next one.
 
-The goal is separate: the GOAL.md stub page, `/zones/<zone>/intake`, is where you fill in what the
-project is for and its objectives, and **Render the stub**. Jumpmaster doesn't commit it: `GOAL.md`
+The goal is separate: **Draft a GOAL.md** on the project's Goals tab, `/projects/<zone>/goals`, is
+where you fill in what the project is for and its objectives, and **Render the stub**. Jumpmaster doesn't commit it: `GOAL.md`
 is a protected path no agent may write. Commit it yourself by pull request when you're ready; the
 first issue doesn't wait for it.
 

@@ -1,3 +1,4 @@
+import vm from 'node:vm';
 import { describe, expect, test } from 'vitest';
 import {
   type Briefing,
@@ -24,10 +25,12 @@ import { makeZone, zoneWorld } from '../test/fixtures.js';
 import { harness } from '../test/flowHarness.js';
 import {
   askButton,
+  type CrewLine,
   DROP_HEAD,
   dropRows,
   escapeHtml,
   FAVICON_HREF,
+  goalStub,
   linkify,
   MARK,
   modelFamily,
@@ -40,11 +43,11 @@ import {
   renderDropList,
   renderGoals,
   renderHome,
-  renderIntake,
   renderNewIssue,
   renderObservations,
   renderWorkItem,
   renderWorkList,
+  STUB_SCRIPT,
   statusBanner,
   waitingOnYou,
   workItemRows,
@@ -150,7 +153,8 @@ describe('renderHome', () => {
     });
     const enc = encodeURIComponent(id);
     expect(html).toContain(`<a href="/projects/${enc}/issues/new">New issue</a>`);
-    expect(html).toContain(`<a href="/projects/${enc}/intake">GOAL.md stub</a>`);
+    expect(html).toContain(`<a href="/projects/${enc}/goals#goal-stub">GOAL.md stub</a>`);
+    expect(html).not.toContain('/intake"');
     expect(html).not.toContain(`/intake">Intake</a>`);
     expect(html).not.toContain(id);
   });
@@ -1010,13 +1014,13 @@ describe('goal ladder', () => {
     expect(html).toContain('href="https://github.com/o/%3Cscript%3E/blob/HEAD/%3Cscript%3E/g.md"');
   });
 
-  test('a missing goal file links the intake page instead of GitHub (#365)', () => {
+  test('a missing goal file links the stub builder instead of GitHub (#365, #620)', () => {
     const html = ladder(
       withPath('a b/goals.md'),
       goals({ ok: false, error: 'a b/goals.md not found' }),
     );
     expect(html).toContain(
-      `a b/goals.md isn't in the repository yet. <a href="/projects/jm/intake">Write one with the intake page</a>.`,
+      `a b/goals.md isn't in the repository yet. <a href="#goal-stub">Draft one with the GOAL.md stub builder</a>.`,
     );
     expect(html).not.toContain('github.com');
   });
@@ -1083,28 +1087,182 @@ describe('starter banner', () => {
   });
 });
 
-describe('renderIntake', () => {
+describe('the GOAL.md stub builder on Goals (#620)', () => {
   const zone = {
     id: 'main"><script>x</script>',
     repo: 'octo/<script>x</script>',
   } as DropZoneConfig;
 
   test('two steps, every value escaped, no secret, and a link to New issue instead of step 3', () => {
-    const html = renderIntake(zone);
+    const html = goalStub(zone, false);
     expect(html).not.toContain('<script>x</script>');
-    expect(html).toContain('GOAL.md stub: octo/&lt;script&gt;x&lt;/script&gt;');
+    expect(html).toMatch(/^<details id="goal-stub"><summary>Draft a GOAL\.md<\/summary>/);
     for (const t of ['existing', 'idea', 'partial']) expect(html).toContain(`value="${t}"`);
+    for (const id of [
+      'stub-template',
+      'stub-lighthouse',
+      'stub-objectives',
+      'stub-nongoals',
+      'stub-constraints',
+      'stub-out',
+      'stub-copy',
+    ])
+      expect(html).toContain(`id="${id}"`);
     expect(html).toMatch(/Step 1/);
     expect(html).toMatch(/Step 2/);
     expect(html).not.toMatch(/Step 3/);
     expect(html).not.toContain('issue-form');
     expect(html).toContain(
+      'data-base="/api/control/zones/main%22%3E%3Cscript%3Ex%3C%2Fscript%3E/intake"',
+    );
+    expect(html).toContain(
       'To file an issue, use <a href="/projects/main%22%3E%3Cscript%3Ex%3C%2Fscript%3E/issues/new"><strong>New issue</strong></a>',
     );
+    expect(html).toContain(STUB_SCRIPT);
     expect(html).not.toContain('type="password"');
     expect(html).toContain('const r = await jmFetch(base + path, body);');
     expect(html).not.toMatch(/github_pat_|ghp_|sk-ant-/);
     expect(html).not.toContain('innerHTML');
+    expect(goalStub(zone, true)).toMatch(/^<details id="goal-stub" open>/);
+  });
+
+  const zone2 = makeZone({ id: 'jm', repo: 'octo/jm' });
+  const goalsPage = (g: GoalRow | undefined, crew?: CrewLine, now?: Date) =>
+    renderGoals({
+      zone: zone2,
+      zones: [zone2],
+      goals: g,
+      crewIssues: [crewIssue()],
+      items: [],
+      skippedCrewUnpromoted: [],
+      doneByRuling: new Map(),
+      ...(crew ? { crew } : {}),
+      ...(now ? { now } : {}),
+    });
+  const withGoals = goals({
+    ok: true,
+    lighthouse: 'L',
+    sections: {},
+    objectives: [{ key: 'a', title: 'A', done: false, body: '' }],
+  });
+  const opening = (html: string) => html.match(/<details id="goal-stub"[^>]*>/)?.[0];
+
+  test('with goals, the builder is closed and comes after the ladder and the crew issues', () => {
+    const html = goalsPage(withGoals);
+    expect(opening(html)).toBe('<details id="goal-stub">');
+    const at = html.indexOf('id="goal-stub"');
+    expect(html.indexOf('<h2>Objectives (goal ladder)</h2>')).toBeGreaterThan(-1);
+    expect(at).toBeGreaterThan(html.indexOf('<h2>Objectives (goal ladder)</h2>'));
+    expect(at).toBeGreaterThan(html.indexOf('<h2>Crew issues</h2>'));
+    expect(html.match(/id="goal-stub"/g)).toHaveLength(1);
+  });
+
+  test.each([
+    ['missing', goals({ ok: false, error: 'GOAL.md not found' })],
+    ['not read yet', undefined],
+  ])('without goals (%s), the builder is open and comes before the ladder', (_name, g) => {
+    const html = goalsPage(g);
+    expect(opening(html)).toBe('<details id="goal-stub" open>');
+    expect(html.indexOf('id="goal-stub"')).toBeLessThan(
+      html.indexOf('<h2>Objectives (goal ladder)</h2>'),
+    );
+    expect(html.match(/id="goal-stub"/g)).toHaveLength(1);
+  });
+
+  test('a GOAL.md that does not parse is still a goal file: the builder stays closed, below', () => {
+    const html = goalsPage(goals({ ok: false, error: 'no ## Objectives section' }));
+    expect(opening(html)).toBe('<details id="goal-stub">');
+  });
+
+  test('the crew row sits at the top, its times relative, next due ahead', () => {
+    const now = new Date('2026-11-22T12:00:00.000Z');
+    const html = goalsPage(
+      withGoals,
+      {
+        zoneId: 'jm',
+        enabled: true,
+        lastCycle: '2026-11-22T11:30:00.000Z',
+        nextDue: '2026-11-22T14:30:00.000Z',
+        fable: 'plan pro does not include Fable',
+      },
+      now,
+    );
+    const row = html.match(/<section id="crew">.*?<\/section>/)?.[0] ?? '';
+    expect(row).toContain('<h2>Crew</h2>');
+    expect(row).toContain(
+      '<td>on</td><td><time datetime="2026-11-22T11:30:00.000Z" title="2026-11-22T11:30:00.000Z">30 min ago</time></td>' +
+        '<td><time datetime="2026-11-22T14:30:00.000Z" title="2026-11-22T14:30:00.000Z">in 2 h</time></td>' +
+        '<td>plan pro does not include Fable</td>',
+    );
+    expect(html.indexOf('<section id="crew">')).toBeLessThan(
+      html.indexOf('<h2>Objectives (goal ladder)</h2>'),
+    );
+    expect(html.indexOf('<section id="crew">')).toBeGreaterThan(
+      html.indexOf('<header class="project-header">'),
+    );
+  });
+
+  test('the crew row says now when due, and - for times when the crew is off or never ran', () => {
+    const line = { zoneId: 'jm', lastCycle: null, nextDue: null, fable: 'available' };
+    expect(goalsPage(withGoals, { ...line, enabled: true })).toContain(
+      '<td>on</td><td>-</td><td>now</td><td>available</td>',
+    );
+    expect(goalsPage(withGoals, { ...line, enabled: false })).toContain(
+      '<td>off</td><td>-</td><td>-</td><td>available</td>',
+    );
+  });
+
+  test('a vm run of the stub script posts the same body to /api/control/zones/jm/intake/goal-stub', async () => {
+    const values: Record<string, string> = {
+      'stub-template': 'idea',
+      'stub-lighthouse': '  A tool.  ',
+      'stub-objectives': 'First\n\n Second \n',
+      'stub-nongoals': 'Not this',
+      'stub-constraints': '',
+    };
+    const elements = new Map<string, Record<string, unknown>>();
+    const el = (id: string) => {
+      let e = elements.get(id);
+      if (!e) {
+        const listeners: Record<string, (ev: unknown) => unknown> = {};
+        e = {
+          value: values[id] ?? '',
+          textContent: '',
+          dataset: id === 'intake' ? { base: '/api/control/zones/jm/intake' } : {},
+          listeners,
+          addEventListener: (type: string, fn: (ev: unknown) => unknown) => {
+            listeners[type] = fn;
+          },
+        };
+        elements.set(id, e);
+      }
+      return e;
+    };
+    const calls: { path: string; body: unknown }[] = [];
+    const ctx = vm.createContext({
+      document: { getElementById: el },
+      navigator: { clipboard: { writeText: async () => {} } },
+      jmFetch: async (path: string, body: unknown) => {
+        calls.push({ path, body });
+        return { status: 200, json: async () => ({ markdown: '# Goal' }) };
+      },
+    });
+    // The page embeds the script; run that copy.
+    const html = goalStub(zone2, true);
+    const script = html.slice(html.indexOf('<script>'), html.lastIndexOf('</script>') + 9);
+    expect(script).toBe(STUB_SCRIPT);
+    vm.runInContext(script.slice('<script>'.length, -'</script>'.length), ctx);
+    const listeners = el('stub-form').listeners as Record<string, (ev: unknown) => Promise<void>>;
+    await listeners.submit?.({ preventDefault: () => {} });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.path).toBe('/api/control/zones/jm/intake/goal-stub');
+    expect(calls[0]?.body).toEqual({
+      template: 'idea',
+      lighthouse: 'A tool.',
+      objectives: ['First', 'Second'],
+      nonGoals: ['Not this'],
+    });
+    expect(el('stub-out').value).toBe('# Goal');
   });
 });
 
@@ -1141,7 +1299,15 @@ describe('the page shell and its forms', () => {
       killed: renderHome({ zones: [z], items: [], drops: [], sticks: [], killed: true }),
       rule: renderBriefings({ open: [briefing()], rulings: [], zones: [z] }),
       doctor: renderDoctor(null, [z]),
-      intake: renderIntake(z),
+      goals: renderGoals({
+        zone: z,
+        zones: [z],
+        goals: undefined,
+        crewIssues: [],
+        items: [],
+        skippedCrewUnpromoted: [],
+        doneByRuling: new Map(),
+      }),
       newIssue: renderNewIssue(z),
     };
     for (const [name, html] of Object.entries(pages)) {
@@ -1367,9 +1533,6 @@ describe('zones are named by their repository (#99)', () => {
     });
     expect(goals).toContain('acme/widgets');
     expectNoBareId(goals);
-    const intake = renderIntake(a, zones);
-    expect(intake).toContain('GOAL.md stub: acme/shared <small>(zid-a)</small>');
-    expectNoBareId(intake);
     const newIssue = renderNewIssue(a, zones);
     expect(newIssue).toContain('New issue: acme/shared <small>(zid-a)</small>');
     expectNoBareId(newIssue);

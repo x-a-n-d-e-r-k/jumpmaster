@@ -107,7 +107,6 @@ import {
   renderDropList,
   renderGoals,
   renderHome,
-  renderIntake,
   renderNewIssue,
   renderObservations,
   renderWorkItem,
@@ -222,6 +221,29 @@ function floorMerges(db: Db, at: Date): { merges24h?: Array<{ zoneId: string; at
   } catch {
     return {};
   }
+}
+
+/**
+ * A zone's crew line, on Floor and on its Goals tab (#620): on or off, when its last lead cycle's
+ * drop was created, when the next is due by time (null once due), and Fable's status.
+ */
+function crewLine(db: Db, config: Config, z: Config['dropZones'][number], at: Date): CrewLine {
+  const last = db
+    .prepare(
+      `SELECT created_at AS at FROM drops WHERE drop_zone_id = ? AND role = 'crew-lead'
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(z.id) as { at: string } | undefined;
+  const next = last
+    ? new Date(Date.parse(last.at) + z.crew.cycleMinutes * 60_000).toISOString()
+    : null;
+  return {
+    zoneId: z.id,
+    enabled: z.crew.enabled,
+    lastCycle: last?.at ?? null,
+    nextDue: next !== null && Date.parse(next) > at.getTime() ? next : null,
+    fable: fableStatus(db, config, at).reason,
+  };
 }
 
 /** Fastify instance with stick and UI routes registered; the caller listens. Logger stays off: payloads carry tokens. */
@@ -649,24 +671,7 @@ export function createApp(
       now: at,
       usage: usageView(db, config, at),
       pending,
-      crew: config.dropZones.map((z): CrewLine => {
-        const last = db
-          .prepare(
-            `SELECT created_at AS at FROM drops WHERE drop_zone_id = ? AND role = 'crew-lead'
-             ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-          )
-          .get(z.id) as { at: string } | undefined;
-        const next = last
-          ? new Date(Date.parse(last.at) + z.crew.cycleMinutes * 60_000).toISOString()
-          : null;
-        return {
-          zoneId: z.id,
-          enabled: z.crew.enabled,
-          lastCycle: last?.at ?? null,
-          nextDue: next !== null && Date.parse(next) > at.getTime() ? next : null,
-          fable: fableStatus(db, config, at).reason,
-        };
-      }),
+      crew: config.dropZones.map((z) => crewLine(db, config, z, at)),
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
@@ -851,6 +856,7 @@ export function createApp(
     const config = cfg(req);
     const zone = config.dropZones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
+    const now = deps.now();
     const html = renderGoals({
       zone,
       zones: config.dropZones,
@@ -862,17 +868,10 @@ export function createApp(
       goalChanges: listGoalChanges(db, zone.id),
       mode: getZoneMode(db, zone.id, zone.mode),
       openBriefings: listBriefings(db, { zoneId: zone.id, state: 'open' }).length,
+      crew: crewLine(db, config, zone, now),
+      now,
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
-  });
-
-  app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/intake`, async (req, reply) => {
-    const zones = cfg(req).dropZones;
-    const zone = zones.find((z) => z.id === req.params.id);
-    if (!zone) return reply.code(404).type('text/plain').send('not found');
-    return reply
-      .type('text/html; charset=utf-8')
-      .send(withCsrf(req, renderIntake(zone, zones, projectHeaderFor(deps.db, zone, zones))));
   });
 
   app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/issues/new`, async (req, reply) => {

@@ -138,7 +138,7 @@ describe('setup mode', () => {
   test('with no operator every page redirects to /setup, and /setup accepts only the printed code', async () => {
     const w = await world();
     expect(w.printed).toHaveLength(1);
-    for (const url of ['/', '/doctor', '/briefings', '/projects/main/intake', '/login']) {
+    for (const url of ['/', '/doctor', '/briefings', '/projects/main/goals', '/login']) {
       const res = await w.get(url);
       expect([url, res.statusCode, res.headers.location]).toEqual([url, 302, '/setup']);
     }
