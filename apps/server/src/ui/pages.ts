@@ -1709,7 +1709,7 @@ function pipelineSection(state: HomeState, now: Date): string {
 const CHECK_ID_WORD = new RegExp(
   `(?<![\\w.-])(${[...CHECK_IDS]
     .sort((a, b) => b.length - a.length)
-    .map((id) => id.replace(/[.-]/g, '\\$&'))
+    .map((id) => id.replace(/[\\^$.*+?()[\]{}|-]/g, '\\$&'))
     .join('|')})(?![\\w-]|\\.\\w)`,
   'g',
 );
