@@ -125,6 +125,9 @@ describe('renderChatMarkdown', () => {
       '**a** **/'.repeat(n / 9),
       '**/a b/** '.repeat(n / 10),
       '*.a b/** '.repeat(n / 9),
+      '**a/** '.repeat(n / 7),
+      '**a b/** '.repeat(n / 9),
+      '*a b/* '.repeat(n / 7),
       '*a '.repeat(n / 3),
       ' _a'.repeat(n / 3),
       '`a '.repeat(n / 3),
@@ -160,6 +163,19 @@ describe('renderChatMarkdown', () => {
     );
     expect(md('*.ts or src/**')).toBe('<p>*.ts or src/**</p>');
     expect(md('*a b** c')).toBe('<p>*a b** c</p>');
+  });
+
+  test('bold and italic directory names ending in / still render', () => {
+    expect(md('**docs/**: the documentation')).toBe(
+      '<p><strong>docs/</strong>: the documentation</p>',
+    );
+    expect(md('- **apps/server/** holds the server')).toBe(
+      '<ul><li><strong>apps/server/</strong> holds the server</li></ul>',
+    );
+    expect(md('**a/** and **b**')).toBe('<p><strong>a/</strong> and <strong>b</strong></p>');
+    expect(md('*src/* is italic')).toBe('<p><em>src/</em> is italic</p>');
+    expect(md('_docs/_ x')).toBe('<p><em>docs/</em> x</p>');
+    expect(md('**a b/** c')).toBe('<p>**a b/** c</p>');
   });
 
   test('bold still renders in ordinary positions', () => {

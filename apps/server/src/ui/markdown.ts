@@ -77,6 +77,14 @@ function forwardFinder(text: string): (needle: string, from: number) => number {
   };
 }
 
+/** For each index, how many whitespace characters come before it. */
+function spaceCounts(text: string): Uint32Array {
+  const counts = new Uint32Array(text.length + 1);
+  for (let i = 0; i < text.length; i++)
+    counts[i + 1] = (counts[i] ?? 0) + (/\s/.test(text[i] ?? '') ? 1 : 0);
+  return counts;
+}
+
 /** For each index, whether it sits in a whitespace-free run holding `://` (a bare URL). */
 function bareUrlMask(text: string): Uint8Array {
   const mask = new Uint8Array(text.length);
@@ -93,8 +101,11 @@ function bareUrlMask(text: string): Uint8Array {
  * a link `[text](url)`, `**bold**`, `*italic*`, `_italic_`. Every closing delimiter is the
  * first one after the opener, found through `forwardFinder`, so the scan is linear.
  * `**`, `*` and `_` emphasis opens only after a non-word character (letters, digits, `_` and
- * `/` count as word) and never inside a bare URL; it closes only before a non-word character and
- * never right after a `/`. So globs (`apps/**` paths, `**.ts`, `docs/**` at the end of a glob),
+ * `/` count as word) and never inside a bare URL; it closes only before a non-word character.
+ * Right after a `/` it closes only when the content opens on neither `/`, `.` nor `*` and holds
+ * no whitespace: `**docs/**` and `*src/*` are emphasis, but a span from a glob's leading `**`
+ * to a `docs/**` later in the line is not; a prefix count of whitespace keeps that check
+ * constant-time. So globs (`apps/**` paths, `**.ts`, `docs/**` at the end of a glob),
  * `2*3*4`, `2**3**4`, snake_case and URLs stay text. A `**` that cannot be bold is text as a
  * pair: its second `*` never opens single emphasis and its first never closes it.
  */
@@ -104,9 +115,16 @@ function inline(text: string, refs: LinkRefs, inLink = false): string {
   const url = bareUrlMask(text);
   const opensAt = (i: number) =>
     url[i] !== 1 && !WORD_BEFORE.test(text.slice(Math.max(0, i - 2), i));
-  /** Whether the delimiter whose last character is at `j`, starting at `start`, may close. */
-  const closesAt = (start: number, j: number) =>
-    text[start - 1] !== '/' && !WORD_AFTER.test(text.slice(j + 1, j + 3));
+  const spaces = spaceCounts(text);
+  /**
+   * Whether the delimiter starting at `start` and ending at `j` may close a span whose content
+   * starts at `open`. Right after a `/` it closes only a glob-free directory name: content that
+   * opens on neither `/`, `.` nor `*` and holds no whitespace.
+   */
+  const closesAt = (open: number, start: number, j: number) =>
+    (text[start - 1] !== '/' ||
+      (!/[/.*]/.test(text[open] ?? '') && spaces[start] === spaces[open])) &&
+    !WORD_AFTER.test(text.slice(j + 1, j + 3));
   const nonSpace = (c: string | undefined) => c !== undefined && !/\s/.test(c);
 
   let out = '';
@@ -143,7 +161,7 @@ function inline(text: string, refs: LinkRefs, inLink = false): string {
       if (text[i + 1] === '*') {
         if (nonSpace(text[i + 2]) && opensAt(i)) {
           const j = next('**', i + 3);
-          if (j !== -1 && closesAt(j, j + 1)) {
+          if (j !== -1 && closesAt(i + 2, j, j + 1)) {
             i = emit(i, j + 2, `<strong>${inline(text.slice(i + 2, j), refs, inLink)}</strong>`);
             continue;
           }
@@ -171,7 +189,7 @@ function inline(text: string, refs: LinkRefs, inLink = false): string {
   function emphasis(i: number, mark: '*' | '_'): number | undefined {
     if (!nonSpace(text[i + 1]) || text[i + 1] === mark || !opensAt(i)) return undefined;
     const j = next(mark, i + 1);
-    if (j === -1 || !nonSpace(text[j - 1]) || text[j + 1] === mark || !closesAt(j, j))
+    if (j === -1 || !nonSpace(text[j - 1]) || text[j + 1] === mark || !closesAt(i + 1, j, j))
       return undefined;
     return emit(i, j + 1, `<em>${inline(text.slice(i + 1, j), refs, inLink)}</em>`);
   }
