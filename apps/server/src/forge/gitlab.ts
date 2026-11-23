@@ -32,6 +32,38 @@
 // - `firstParentCommits` maps `repository/compare`'s commits (`id`, `message`, `parent_ids`) into
 //   `walkFirstParents`; a 404 (unknown base) gives `complete: false`, as does a base that is not a
 //   first-parent ancestor of head. GitLab's compare is not capped at 250 commits like GitHub's.
+// - Merge requests (third slice, #690) stand in for pull requests. A PR's `number` is the MR's
+//   project-scoped `iid` (refused unsent unless a positive integer); `title` is `title`, `body` is
+//   `description` (null gives ''), `labels` is the MR's `labels`, `author` is `author.username`.
+//   `state` maps `opened` to `open` and `closed`/`merged` to `closed`; `merged` is true only for
+//   `merged`. `headSha` is `sha` (null when absent), `headRef` is `source_branch`, `baseRef` is
+//   `target_branch`. `headRepo` is this project's path when `source_project_id` equals
+//   `target_project_id`, and null for an MR from a fork.
+// - An MR is "ours" only when `source_project_id` equals `target_project_id`: like GitHub's match
+//   on `head.repo.full_name`, `findOrCreatePullRequest`, `findOpenPullByHead` and
+//   `listOpenAgentPulls` ignore fork MRs. `getPull` returns them, with `headRepo` null.
+// - `findOrCreatePullRequest` first reads `GET merge_requests?state=opened&source_branch=` and
+//   reuses an open same-project MR for the branch, whatever its target (`created: false`), as
+//   GitHub's lookup by `head` does. Otherwise it `POST`s `merge_requests` (`created: true`). A 409
+//   (another open MR with the same source and target appeared in a race) re-reads by source
+//   branch and returns that MR with `created: false`; a re-read that finds nothing throws. `url` is
+//   `web_url`.
+// - `findOpenPullByHead` is the first open same-project MR from `source_branch=`, or null.
+//   `listOpenAgentPulls(prefix)` pages the open MRs and keeps the same-project ones whose source
+//   branch starts with `prefix`.
+// - `listPullFiles` pages `GET merge_requests/:iid/diffs`: `{ path: new_path }`, plus
+//   `previousPath: old_path` for a rename. GitLab cuts an MR's diff short at the instance's diff
+//   limits (files, lines or bytes), and then its `changes_count` (a string) reads like "1000+".
+//   So it also reads `GET merge_requests/:iid`, and the list is `complete` only when
+//   `changes_count` is a plain decimal, equals the number of files paged, and that number is below
+//   3000 (GitHub's cap). Anything else, a missing or unparseable `changes_count` included, is
+//   incomplete: callers treat that as unknown, so it fails closed.
+// - `changeDigest(base, head)` digests `GET repository/compare?from=base&to=head` (not straight:
+//   from the merge base, like GitHub's three dots) with `digestCompareFiles`. Each diff maps to
+//   `filename` (`new_path`), `status` (`added` for `new_file`, `removed` for `deleted_file`,
+//   `renamed` for `renamed_file`, else `modified`), `previous_filename` (`old_path`, renames only)
+//   and `patch` (`diff`). An empty, `too_large` or `collapsed` diff is no patch, so the digest is
+//   incomplete (conservative: a pure rename is incomplete too); `compare_timeout` is incomplete.
 // - Every path segment (branch, file path, ref) is URL-encoded; refs otherwise go in the query.
 // Every other `Forge` method throws GitLabUnsupportedError, naming the method, until a later slice.
 //
@@ -46,6 +78,8 @@ import {
   type CheckAnnotation,
   type ChecksFacts,
   type CompareFacts,
+  type CompareFile,
+  digestCompareFiles,
   type Forge,
   type ForgeIssue,
   type ForgeReview,
@@ -80,6 +114,9 @@ export class GitLabForgeError extends Error {
   }
 }
 
+/** GitHub's `PULLS_FILES_CAP`: a list this long or longer is not trusted to be whole. */
+const PULL_FILES_CAP = 3000;
+
 /** The most pages a list follows: 1,000 pages of 100 is far past any project this serves. */
 const MAX_PAGES = 1000;
 
@@ -95,6 +132,31 @@ type RawIssue = {
   labels?: string[];
   author?: RawUser;
   created_at: string;
+};
+type RawMergeRequest = {
+  iid: number;
+  title: string;
+  description: string | null;
+  state: string;
+  sha?: string | null;
+  source_branch: string;
+  target_branch: string;
+  source_project_id?: number;
+  target_project_id?: number;
+  author?: RawUser;
+  labels?: string[];
+  web_url?: string;
+  changes_count?: unknown;
+};
+type RawDiff = {
+  old_path?: string;
+  new_path?: string;
+  new_file?: boolean;
+  renamed_file?: boolean;
+  deleted_file?: boolean;
+  diff?: string | null;
+  too_large?: boolean;
+  collapsed?: boolean;
 };
 type RawCommit = { id: string; parent_ids?: string[]; message?: string };
 type RawFile = {
@@ -121,6 +183,7 @@ export type GitLabForgeOptions = {
 export class GitLabForge implements Forge {
   private readonly api: string;
   private readonly project: string;
+  private readonly projectPath: string;
   private readonly provider: TokenProvider;
   private readonly fetch: typeof fetch;
   private readonly timeoutMs: number | undefined;
@@ -138,6 +201,7 @@ export class GitLabForge implements Forge {
     if (!isGitLabProjectPath(projectPath))
       throw new Error('GitLabForge: the project path is not a valid group/project path');
     this.api = `${stripTrailingSlashes(baseUrl)}/api/v4`;
+    this.projectPath = projectPath;
     this.project = `${this.api}/projects/${encodeURIComponent(projectPath)}`;
     this.provider = typeof token === 'string' ? staticTokenProvider(token) : token;
     this.fetch = opts.fetch ?? fetch;
@@ -581,6 +645,149 @@ export class GitLabForge implements Forge {
     );
   }
 
+  // --- Merge requests ------------------------------------------------------------------------
+
+  /** Whether `mr` comes from this project, not a fork. */
+  private static ours(mr: RawMergeRequest): boolean {
+    return mr.source_project_id !== undefined && mr.source_project_id === mr.target_project_id;
+  }
+
+  private toPullFacts(mr: RawMergeRequest): PullFacts {
+    return {
+      number: mr.iid,
+      title: mr.title,
+      state: mr.state === 'opened' ? 'open' : 'closed',
+      merged: mr.state === 'merged',
+      headSha: mr.sha ?? null,
+      headRef: mr.source_branch,
+      headRepo: GitLabForge.ours(mr) ? this.projectPath : null,
+      baseRef: mr.target_branch,
+      author: mr.author?.username ?? '',
+      body: mr.description ?? '',
+      labels: mr.labels ?? [],
+    };
+  }
+
+  /** The open same-project MRs from `branch` (one page: GitLab allows one per target branch). */
+  private async openFrom(branch: string): Promise<RawMergeRequest[]> {
+    const q = new URLSearchParams({ state: 'opened', source_branch: branch, per_page: '100' });
+    const list = await this.request<unknown>(
+      'listing merge requests',
+      'GET',
+      `/merge_requests?${q}`,
+    );
+    if (!Array.isArray(list))
+      throw new GitLabForgeError(
+        'GitLabForge: listing merge requests failed: response is not a list',
+      );
+    return (list as RawMergeRequest[]).filter((mr) => GitLabForge.ours(mr));
+  }
+
+  async findOrCreatePullRequest(input: {
+    head: string;
+    base: string;
+    title: string;
+    body: string;
+  }): Promise<{ number: number; url: string; created: boolean }> {
+    const found = (mr: RawMergeRequest) => ({
+      number: mr.iid,
+      url: mr.web_url ?? '',
+      created: false,
+    });
+    const [existing] = await this.openFrom(input.head);
+    if (existing) return found(existing);
+    try {
+      const mr = await this.request<RawMergeRequest>(
+        'creating a merge request',
+        'POST',
+        '/merge_requests',
+        {
+          source_branch: input.head,
+          target_branch: input.base,
+          title: input.title,
+          description: input.body,
+        },
+      );
+      return { number: mr.iid, url: mr.web_url ?? '', created: true };
+    } catch (err) {
+      if ((err as GitLabForgeError).status !== 409) throw err;
+      // Another open MR for the same branches appeared since the lookup: return it.
+      const [raced] = await this.openFrom(input.head);
+      if (raced) return found(raced);
+      throw new GitLabForgeError(
+        'GitLabForge: creating a merge request failed: HTTP 409, and no open merge request was found',
+        409,
+      );
+    }
+  }
+
+  private async readMergeRequest(number: number): Promise<RawMergeRequest | null> {
+    const n = mrIid(number);
+    try {
+      return await this.request<RawMergeRequest>(
+        `reading merge request ${n}`,
+        'GET',
+        `/merge_requests/${n}`,
+      );
+    } catch (err) {
+      if ((err as GitLabForgeError).status === 404) return null;
+      throw err;
+    }
+  }
+
+  async getPull(number: number): Promise<PullFacts | null> {
+    const mr = await this.readMergeRequest(number);
+    return mr ? this.toPullFacts(mr) : null;
+  }
+
+  async findOpenPullByHead(branch: string): Promise<PullFacts | null> {
+    const [mr] = await this.openFrom(branch);
+    return mr ? this.toPullFacts(mr) : null;
+  }
+
+  async listOpenAgentPulls(prefix: string): Promise<PullFacts[]> {
+    const all = await this.list<RawMergeRequest>('listing merge requests', '/merge_requests', {
+      state: 'opened',
+    });
+    return all
+      .filter((mr) => GitLabForge.ours(mr) && mr.source_branch.startsWith(prefix))
+      .map((mr) => this.toPullFacts(mr));
+  }
+
+  /** Complete only when the MR's `changes_count` is a plain number equal to the files paged. */
+  async listPullFiles(number: number): Promise<PullFiles> {
+    const n = mrIid(number);
+    const [diffs, mr] = await Promise.all([
+      this.list<RawDiff>(`listing the files of merge request ${n}`, `/merge_requests/${n}/diffs`),
+      this.request<RawMergeRequest>(`reading merge request ${n}`, 'GET', `/merge_requests/${n}`),
+    ]);
+    const files = diffs.map((d) => {
+      const path = d.new_path ?? '';
+      return d.renamed_file && d.old_path !== undefined
+        ? { path, previousPath: d.old_path }
+        : { path };
+    });
+    const count = mr?.changes_count;
+    const complete =
+      typeof count === 'string' &&
+      /^\d+$/.test(count) &&
+      Number(count) === files.length &&
+      files.length < PULL_FILES_CAP;
+    return { files, complete };
+  }
+
+  /** `base...head` from GitLab's (merge-base) compare; any diff GitLab did not show is incomplete. */
+  async changeDigest(base: string, head: string): Promise<ChangeDigest> {
+    const c = await this.request<{ diffs?: unknown; compare_timeout?: unknown }>(
+      'comparing commits',
+      'GET',
+      `/repository/compare?${new URLSearchParams({ from: base, to: head })}`,
+    );
+    if (c?.compare_timeout === true || !Array.isArray(c?.diffs))
+      return { digest: '', complete: false };
+    return digestCompareFiles((c.diffs as RawDiff[]).map(toCompareFile));
+  }
+
   // --- Blocked-by: a no-op and a refusal -----------------------------------------------------
 
   /** GitLab Free has no "blocked by" links: none, nothing unreadable, and no request. */
@@ -599,29 +806,6 @@ export class GitLabForge implements Forge {
   }
   async isMaintainer(_login: string): Promise<boolean> {
     throw new GitLabUnsupportedError('isMaintainer');
-  }
-  async findOrCreatePullRequest(_input: {
-    head: string;
-    base: string;
-    title: string;
-    body: string;
-  }): Promise<{ number: number; url: string; created: boolean }> {
-    throw new GitLabUnsupportedError('findOrCreatePullRequest');
-  }
-  async getPull(_number: number): Promise<PullFacts | null> {
-    throw new GitLabUnsupportedError('getPull');
-  }
-  async findOpenPullByHead(_branch: string): Promise<PullFacts | null> {
-    throw new GitLabUnsupportedError('findOpenPullByHead');
-  }
-  async listOpenAgentPulls(_prefix: string): Promise<PullFacts[]> {
-    throw new GitLabUnsupportedError('listOpenAgentPulls');
-  }
-  async listPullFiles(_number: number): Promise<PullFiles> {
-    throw new GitLabUnsupportedError('listPullFiles');
-  }
-  async changeDigest(_base: string, _head: string): Promise<ChangeDigest> {
-    throw new GitLabUnsupportedError('changeDigest');
   }
   async checksFor(_sha: string): Promise<ChecksFacts> {
     throw new GitLabUnsupportedError('checksFor');
@@ -679,6 +863,31 @@ function iid(number: number): string {
   if (!Number.isSafeInteger(number) || number <= 0)
     throw new GitLabForgeError('GitLabForge: an issue number must be a positive integer');
   return String(number);
+}
+
+/** A merge request's iid as a path segment; anything but a positive integer is refused unsent. */
+function mrIid(number: number): string {
+  if (!Number.isSafeInteger(number) || number <= 0)
+    throw new GitLabForgeError('GitLabForge: a merge request number must be a positive integer');
+  return String(number);
+}
+
+/** One GitLab diff as GitHub's compare file. A diff GitLab did not show carries no patch. */
+function toCompareFile(d: RawDiff): CompareFile {
+  const status = d.new_file
+    ? 'added'
+    : d.deleted_file
+      ? 'removed'
+      : d.renamed_file
+        ? 'renamed'
+        : 'modified';
+  const shown = typeof d.diff === 'string' && d.diff !== '' && !d.too_large && !d.collapsed;
+  return {
+    filename: d.new_path ?? '',
+    status,
+    ...(d.renamed_file && d.old_path !== undefined ? { previous_filename: d.old_path } : {}),
+    ...(shown ? { patch: d.diff as string } : {}),
+  };
 }
 
 /** Whether note `a` is newer than `b`: later `created_at`, then the higher id. */

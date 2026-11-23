@@ -1154,6 +1154,19 @@ describe('merge requests', () => {
     expect((await call('GET', `${P}/merge_requests/5/diffs`)).status).toBe(404);
   });
 
+  test('a single MR reports changes_count as its diff file count, unless a test sets it', async () => {
+    const { gl, call } = setup();
+    branchesFor(gl);
+    await create(call);
+    expect((await call('GET', `${P}/merge_requests/1`)).body.changes_count).toBe('4');
+    const mr = gl.mergeRequest(1);
+    if (!mr) throw new Error('no MR');
+    mr.changes_count = '1000+';
+    expect((await call('GET', `${P}/merge_requests/1`)).body.changes_count).toBe('1000+');
+    mr.changes_count = null;
+    expect((await call('GET', `${P}/merge_requests/1`)).body).not.toHaveProperty('changes_count');
+  });
+
   test('MR iid 1 and issue iid 1 coexist', async () => {
     const { gl, call } = setup();
     branchesFor(gl);
