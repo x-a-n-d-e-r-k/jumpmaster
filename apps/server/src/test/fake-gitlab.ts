@@ -70,6 +70,29 @@ export type GitLabIssue = {
   updated_at: string;
   closed_at: string | null;
 };
+export type GitLabDiffRefs = { base_sha: string; start_sha: string; head_sha: string };
+export type GitLabMergeRequest = {
+  id: number;
+  iid: number;
+  project_id: number;
+  title: string;
+  description: string | null;
+  state: 'opened' | 'closed' | 'merged';
+  source_branch: string;
+  target_branch: string;
+  /** The source branch's head, kept current while the MR is open. */
+  sha: string;
+  source_project_id: number;
+  target_project_id: number;
+  author: GitLabUser;
+  labels: string[];
+  web_url: string;
+  created_at: string;
+  updated_at: string;
+  merged_at: string | null;
+  closed_at: string | null;
+  diff_refs: GitLabDiffRefs;
+};
 export type GitLabLabel = { id: number; name: string; color: string; description: string | null };
 export type GitLabNote = {
   id: number;
@@ -760,6 +783,186 @@ export function fakeGitLab(opts: { baseUrl: string; project: FakeGitLabProject }
     ];
   });
 
+  // --- Merge requests -------------------------------------------------------------------------
+
+  /** Merge requests, numbered apart from issues as on GitLab. Open ones track their branches;
+   *  a closed or merged one keeps the `sha` and `diff_refs` it had when it stopped. */
+  const mergeRequests: GitLabMergeRequest[] = [];
+  const webRoot = opts.baseUrl.replace(/\/+$/, '');
+
+  /** The diff refs of `source` into `target` now, or `undefined` if either branch is gone. */
+  function diffRefs(source: string, target: string): GitLabDiffRefs | undefined {
+    const head = branches.get(source);
+    const start = branches.get(target);
+    if (!head || !start) return undefined;
+    return { base_sha: mergeBase(start, head) ?? start, start_sha: start, head_sha: head };
+  }
+  /** `mr` with `sha` and `diff_refs` brought up to date when it is open. */
+  function refreshed(mr: GitLabMergeRequest): GitLabMergeRequest {
+    if (mr.state === 'opened') {
+      const refs = diffRefs(mr.source_branch, mr.target_branch);
+      if (refs) {
+        mr.diff_refs = refs;
+        mr.sha = refs.head_sha;
+      }
+    }
+    return mr;
+  }
+  const findMr = (iid: string | number | undefined) => {
+    const mr = mergeRequests.find((x) => String(x.iid) === String(iid));
+    return mr && refreshed(mr);
+  };
+  const openDuplicate = (source: string, target: string) =>
+    mergeRequests.find(
+      (x) => x.state === 'opened' && x.source_branch === source && x.target_branch === target,
+    );
+
+  function addMergeRequest(m: {
+    sourceBranch: string;
+    targetBranch: string;
+    title: string;
+    description?: string | null;
+    labels?: string[];
+    author?: string;
+    iid?: number;
+    createdAt?: string;
+  }): GitLabMergeRequest {
+    const refs = diffRefs(m.sourceBranch, m.targetBranch);
+    if (!refs) throw new Error(`unknown branch ${m.sourceBranch} or ${m.targetBranch}`);
+    const at = m.createdAt ?? now();
+    const iid = m.iid ?? Math.max(0, ...mergeRequests.map((x) => x.iid)) + 1;
+    const mr: GitLabMergeRequest = {
+      id: newId(),
+      iid,
+      project_id: project.id,
+      title: m.title,
+      description: m.description ?? null,
+      state: 'opened',
+      source_branch: m.sourceBranch,
+      target_branch: m.targetBranch,
+      sha: refs.head_sha,
+      source_project_id: project.id,
+      target_project_id: project.id,
+      author: publicUser(ensureUser(m.author ?? 'root')),
+      labels: labelList(m.labels ?? []).sort(byPath),
+      web_url: `${webRoot}/${project.path}/-/merge_requests/${iid}`,
+      created_at: at,
+      updated_at: at,
+      merged_at: null,
+      closed_at: null,
+      diff_refs: refs,
+    };
+    for (const l of mr.labels) ensureLabel(l);
+    mergeRequests.push(mr);
+    return mr;
+  }
+
+  /** Stop the open MR `iid` as merged or closed, freezing its `sha` and `diff_refs`. */
+  function finish(iid: number, state: 'merged' | 'closed', at?: string): GitLabMergeRequest {
+    const mr = findMr(iid);
+    if (!mr) throw new Error(`unknown merge request ${iid}`);
+    const when = at ?? now();
+    mr.state = state;
+    mr.updated_at = when;
+    if (state === 'merged') mr.merged_at = when;
+    else mr.closed_at = when;
+    return mr;
+  }
+
+  route('GET', /^\/merge_requests$/, (c) => {
+    const state = c.query.get('state') ?? 'all';
+    const source = c.query.get('source_branch');
+    const target = c.query.get('target_branch');
+    const wanted = labelList(c.query.get('labels') ?? '');
+    const list = mergeRequests
+      .map(refreshed)
+      .filter((x) => state === 'all' || x.state === state)
+      .filter((x) => source === null || x.source_branch === source)
+      .filter((x) => target === null || x.target_branch === target)
+      .filter((x) => wanted.every((l) => x.labels.includes(l)))
+      .sort(byNewest);
+    return paged(list, c.query);
+  });
+  route('GET', /^\/merge_requests\/(\d+)$/, (_c, m) => {
+    const mr = findMr(m[1]);
+    return mr ? [200, mr] : err(404, '404 Not found');
+  });
+  route('POST', /^\/merge_requests$/, (c) => {
+    if (c.level < ACCESS.developer) return FORBIDDEN;
+    const source = str(c.params.source_branch);
+    const target = str(c.params.target_branch);
+    const title = str(c.params.title);
+    if (!source) return [400, { error: 'source_branch is missing' }];
+    if (!target) return [400, { error: 'target_branch is missing' }];
+    if (!title) return [400, { error: 'title is missing' }];
+    if (!branches.has(source))
+      return [400, { message: [`Source branch "${source}" does not exist`] }];
+    if (!branches.has(target))
+      return [400, { message: [`Target branch "${target}" does not exist`] }];
+    if (source === target)
+      return [400, { message: ["You can't use same project/branch for source and target"] }];
+    const dup = openDuplicate(source, target);
+    if (dup)
+      return [
+        409,
+        {
+          message: [
+            `Another open merge request already exists for this source branch: !${dup.iid}`,
+          ],
+        },
+      ];
+    const mr = addMergeRequest({
+      sourceBranch: source,
+      targetBranch: target,
+      title,
+      description: str(c.params.description) ?? null,
+      labels: labelList(c.params.labels),
+      author: c.user.username,
+    });
+    return [201, mr];
+  });
+  route('PUT', /^\/merge_requests\/(\d+)$/, (c, m) => {
+    const mr = findMr(m[1]);
+    if (!mr) return err(404, '404 Not found');
+    if (c.level < ACCESS.developer) return FORBIDDEN;
+    const p = c.params;
+    if (p.state_event === 'reopen' && mr.state === 'closed') {
+      const dup = openDuplicate(mr.source_branch, mr.target_branch);
+      if (dup)
+        return [
+          409,
+          {
+            message: [
+              `Another open merge request already exists for this source branch: !${dup.iid}`,
+            ],
+          },
+        ];
+    }
+    if (p.title !== undefined) mr.title = String(p.title);
+    if (p.description !== undefined) mr.description = str(p.description) ?? null;
+    if (p.labels !== undefined) mr.labels = labelList(p.labels);
+    for (const l of labelList(p.add_labels)) if (!mr.labels.includes(l)) mr.labels.push(l);
+    const remove = labelList(p.remove_labels);
+    mr.labels = mr.labels.filter((l) => !remove.includes(l)).sort(byPath);
+    for (const l of mr.labels) ensureLabel(l);
+    const at = now();
+    if (p.state_event === 'close' && mr.state === 'opened') {
+      mr.state = 'closed';
+      mr.closed_at = at;
+    } else if (p.state_event === 'reopen' && mr.state === 'closed') {
+      mr.state = 'opened';
+      mr.closed_at = null;
+    }
+    mr.updated_at = at;
+    return [200, refreshed(mr)];
+  });
+  route('GET', /^\/merge_requests\/(\d+)\/diffs$/, (c, m) => {
+    const mr = findMr(m[1]);
+    if (!mr) return err(404, '404 Not found');
+    const { base_sha, head_sha } = mr.diff_refs;
+    return paged(snapshotDiffs(commitOf(base_sha).files, commitOf(head_sha).files), c.query);
+  });
+
   // --- Dispatch -----------------------------------------------------------------------------
 
   /** The project route for `rest` (the path after `/projects/:id`), if the fake knows it. */
@@ -923,6 +1126,17 @@ export function fakeGitLab(opts: { baseUrl: string; project: FakeGitLabProject }
     },
     /** A stored commit. */
     commit: (sha: string) => commits.get(sha),
+    /** Open a merge request from `sourceBranch` into `targetBranch` (both must exist). */
+    seedMergeRequest: addMergeRequest,
+    /** Mark open merge request `iid` merged, at `mergedAt` (now by default). */
+    markMergeRequestMerged: (iid: number, o: { mergedAt?: string } = {}) =>
+      finish(iid, 'merged', o.mergedAt),
+    /** Mark open merge request `iid` closed, at `closedAt` (now by default). */
+    closeMergeRequest: (iid: number, o: { closedAt?: string } = {}) =>
+      finish(iid, 'closed', o.closedAt),
+    /** The stored merge request, as the fake holds it now. */
+    mergeRequest: (iid: number) => findMr(iid),
+    mergeRequests,
     /** The stored issue, as the fake holds it now. */
     issue: (iid: number) => issues.find((i) => i.iid === iid),
     issues,
