@@ -311,7 +311,7 @@ describe('no-op and refusals', () => {
     expect(err).toBeInstanceOf(GitLabUnsupportedError);
     expect((err as Error).message).toContain('merge');
     await expect(forge.checksFor('abc')).rejects.toBeInstanceOf(GitLabUnsupportedError);
-    await expect(forge.listReviews(1)).rejects.toBeInstanceOf(GitLabUnsupportedError);
+    await expect(forge.getBranchRules('trunk')).rejects.toBeInstanceOf(GitLabUnsupportedError);
     await expect(forge.repoAccess()).rejects.toBeInstanceOf(GitLabUnsupportedError);
     expect(gl.requests).toEqual([]);
   });
@@ -1424,5 +1424,359 @@ describe('constructor', () => {
     const forge = new GitLabForge(`${GITLAB}/`, PROJECT.path, AGENT);
     expect(await forge.getDefaultBranch()).toBe('trunk');
     expect(gl.requests[0]?.path).toBe(API);
+  });
+});
+
+// --- Approvals as reviews -------------------------------------------------------------------
+
+const MARKER = '<!-- jm:op:review:7:k -->';
+const header = (event: string, sha: string) => `<!-- jm-review: ${event} ${sha} -->`;
+const NOTES = (n: number) => `${MRS}/${n}/notes`;
+
+/** An open MR 1 from agent/one (authored by `author`, default root), and its head SHA. */
+function reviewRepo(gl: FakeGitLab, author = 'root') {
+  const { head, base } = mrRepo(gl);
+  gl.seedMergeRequest({ sourceBranch: 'agent/one', targetBranch: 'trunk', title: 'w', author });
+  return { head, base };
+}
+
+/** A forge acting as `other` (a developer in `setup`). */
+const otherForge = () => new GitLabForge(GITLAB, PROJECT.path, OTHER);
+const mrNotes = (gl: FakeGitLab) => gl.notes.filter((n) => n.noteable_type === 'MergeRequest');
+
+describe('reviews: createReview', () => {
+  test('APPROVE on the head approves at that SHA, posts one header note and returns its id', async () => {
+    const { gl, forge } = setup();
+    const { head } = reviewRepo(gl);
+    const r = await forge.createReview(1, {
+      event: 'APPROVE',
+      body: `LGTM\n\n${MARKER}`,
+      commitId: head,
+    });
+    expect(gl.approvals(1)).toEqual([{ username: 'agent', sha: head }]);
+    const approve = gl.requests.find((q) => q.path === `${MRS}/1/approve`);
+    expect(approve?.body).toEqual({ sha: head });
+    const notes = mrNotes(gl);
+    expect(notes).toHaveLength(1);
+    expect(notes[0]?.body).toBe(`${header('APPROVE', head)}\nLGTM\n\n${MARKER}`);
+    expect(notes[0]?.author.username).toBe('agent');
+    expect(r).toEqual({ id: notes[0]?.id });
+  });
+
+  test('APPROVE against a moved head rejects with 409 and posts no note', async () => {
+    const { gl, forge } = setup();
+    const { base } = reviewRepo(gl);
+    const err = await forge
+      .createReview(1, { event: 'APPROVE', body: 'secret body', commitId: base })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GitLabForgeError);
+    expect((err as GitLabForgeError).status).toBe(409);
+    expect((err as Error).message).not.toContain('secret body');
+    expect(gl.approvals(1)).toEqual([]);
+    expect(mrNotes(gl)).toEqual([]);
+    expect(gl.requests.some((q) => q.method === 'POST' && q.path === NOTES(1))).toBe(false);
+  });
+
+  test('a retried APPROVE after the approval landed posts the note and does not throw', async () => {
+    const { gl } = setup();
+    const { head } = reviewRepo(gl);
+    let failed = false;
+    // The first note POST fails at the network, after the approval landed.
+    const flaky = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (!failed && init?.method === 'POST' && String(input).endsWith('/notes')) {
+        failed = true;
+        throw new Error('connection reset');
+      }
+      return fetch(input, init);
+    }) as typeof fetch;
+    const forge = new GitLabForge(GITLAB, PROJECT.path, AGENT, { fetch: flaky });
+    const input = { event: 'APPROVE' as const, body: `ok\n${MARKER}`, commitId: head };
+    await expect(forge.createReview(1, input)).rejects.toBeInstanceOf(GitLabForgeError);
+    expect(gl.approvals(1)).toEqual([{ username: 'agent', sha: head }]);
+    expect(mrNotes(gl)).toEqual([]);
+    const r = await forge.createReview(1, input);
+    const notes = mrNotes(gl);
+    expect(notes).toHaveLength(1);
+    expect(r).toEqual({ id: notes[0]?.id });
+    expect(gl.approvals(1)).toEqual([{ username: 'agent', sha: head }]);
+  });
+
+  test("an APPROVE refused for another reason (the MR's author) rejects with 401 and posts no note", async () => {
+    const { gl, forge } = setup();
+    const { head } = reviewRepo(gl, 'agent');
+    const err = await forge
+      .createReview(1, { event: 'APPROVE', body: 'b', commitId: head })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GitLabForgeError);
+    expect((err as GitLabForgeError).status).toBe(401);
+    expect(gl.approvals(1)).toEqual([]);
+    expect(mrNotes(gl)).toEqual([]);
+  });
+
+  test("REQUEST_CHANGES withdraws the viewer's approval, and works with none", async () => {
+    const { gl, forge } = setup();
+    const { head } = reviewRepo(gl);
+    await otherForge().createReview(1, { event: 'APPROVE', body: 'other ok', commitId: head });
+    await forge.createReview(1, { event: 'APPROVE', body: 'ok', commitId: head });
+    expect(gl.approvals(1).map((a) => a.username)).toEqual(['other', 'agent']);
+
+    const r = await forge.createReview(1, { event: 'REQUEST_CHANGES', body: 'no', commitId: head });
+    expect(gl.approvals(1).map((a) => a.username)).toEqual(['other']);
+    const last = mrNotes(gl).find((n) => n.id === r.id);
+    expect(last?.body).toBe(`${header('REQUEST_CHANGES', head)}\nno`);
+
+    // No approval left to withdraw: unapprove answers 404, and the note still goes.
+    const again = await forge.createReview(1, {
+      event: 'REQUEST_CHANGES',
+      body: 'still no',
+      commitId: head,
+    });
+    expect(mrNotes(gl).some((n) => n.id === again.id)).toBe(true);
+    expect(gl.approvals(1).map((a) => a.username)).toEqual(['other']);
+  });
+
+  test('a malformed commitId, an unknown event or a bad iid is refused unsent', async () => {
+    const { gl, forge } = setup();
+    const { head } = reviewRepo(gl);
+    gl.requests.length = 0;
+    const bad: [number, { event: string; body: string; commitId: string }][] = [
+      [1, { event: 'APPROVE', body: 'b', commitId: head.slice(0, 39) }],
+      [1, { event: 'APPROVE', body: 'b', commitId: head.toUpperCase() }],
+      [1, { event: 'APPROVE', body: 'b', commitId: `${head} ` }],
+      [1, { event: 'APPROVE', body: 'b', commitId: '' }],
+      [1, { event: 'COMMENT', body: 'b', commitId: head }],
+      [1, { event: 'approve', body: 'b', commitId: head }],
+      [0, { event: 'APPROVE', body: 'b', commitId: head }],
+      [-1, { event: 'APPROVE', body: 'b', commitId: head }],
+      [1.5, { event: 'APPROVE', body: 'b', commitId: head }],
+      [Number.NaN, { event: 'REQUEST_CHANGES', body: 'b', commitId: head }],
+    ];
+    for (const [n, input] of bad) {
+      const err = await forge
+        .createReview(n, input as Parameters<GitLabForge['createReview']>[1])
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(GitLabForgeError);
+    }
+    expect(gl.requests).toEqual([]);
+  });
+});
+
+describe('reviews: listReviews', () => {
+  test('maps header notes to APPROVED and CHANGES_REQUESTED, skipping the rest', async () => {
+    const { gl, forge } = setup();
+    const { head, base } = reviewRepo(gl);
+    const at = (s: number) => `2026-11-0${s}T10:00:00.000Z`;
+    const changes = gl.seedNote({
+      mergeRequestIid: 1,
+      author: 'other',
+      body: `${header('REQUEST_CHANGES', base)}\nfix it\nplease`,
+      createdAt: at(1),
+    });
+    gl.seedNote({ mergeRequestIid: 1, author: 'other', body: 'plain comment', createdAt: at(2) });
+    for (const body of [
+      `${header('COMMENT', head)}\nx`,
+      `${header('APPROVE', head.slice(1))}\nx`,
+      `${header('APPROVE', head.toUpperCase())}\nx`,
+      ` ${header('APPROVE', head)}\nx`,
+      `${header('APPROVE', head)} trailing\nx`,
+      `<!-- jm-review: APPROVE  ${head} -->\nx`,
+      `text first\n${header('APPROVE', head)}`,
+    ])
+      gl.seedNote({ mergeRequestIid: 1, author: 'agent', body, createdAt: at(3) });
+    gl.seedNote({
+      mergeRequestIid: 1,
+      author: 'agent',
+      body: header('APPROVE', head),
+      system: true,
+      createdAt: at(3),
+    });
+    await forge.createReview(1, { event: 'APPROVE', body: 'looks good', commitId: head });
+    const approveNote = mrNotes(gl).at(-1);
+
+    const reviews = await forge.listReviews(1);
+    expect(reviews).toEqual([
+      {
+        id: changes.id,
+        author: 'other',
+        state: 'CHANGES_REQUESTED',
+        commitId: base,
+        body: 'fix it\nplease',
+        submittedAt: at(1),
+      },
+      {
+        id: approveNote?.id,
+        author: 'agent',
+        state: 'APPROVED',
+        commitId: head,
+        body: 'looks good',
+        submittedAt: approveNote?.created_at,
+      },
+    ]);
+  });
+
+  test('pages past 100 notes', async () => {
+    const { gl, forge } = setup();
+    const { head } = reviewRepo(gl);
+    for (let i = 0; i < 120; i++)
+      gl.seedNote({
+        mergeRequestIid: 1,
+        author: 'other',
+        body: `${header('REQUEST_CHANGES', head)}\n${i}`,
+      });
+    expect(await forge.listReviews(1)).toHaveLength(120);
+  });
+
+  test('after a push resets approvals, an earlier APPROVED review reads as DISMISSED', async () => {
+    const { gl, forge } = setup();
+    const { head } = reviewRepo(gl);
+    await forge.createReview(1, { event: 'APPROVE', body: 'ok', commitId: head });
+    expect((await forge.listReviews(1)).map((r) => r.state)).toEqual(['APPROVED']);
+    gl.seedCommit({ branch: 'agent/one', files: { a: '3\n' }, message: 'push' });
+    const [r] = await forge.listReviews(1);
+    expect(r).toMatchObject({ author: 'agent', state: 'DISMISSED', commitId: head, body: 'ok' });
+  });
+
+  test('a UI approval with no note reads as APPROVED with no commitId, id 0 and no body', async () => {
+    const { gl, forge } = setup();
+    reviewRepo(gl);
+    const sha = gl.mergeRequest(1)?.sha ?? '';
+    // `other` approves in the UI: an approve with no review note.
+    await fetch(`${GITLAB}${MRS}/1/approve`, {
+      method: 'POST',
+      headers: { 'PRIVATE-TOKEN': OTHER, 'content-type': 'application/json' },
+      body: JSON.stringify({ sha }),
+    });
+    expect(await forge.listReviews(1)).toEqual([
+      { id: 0, author: 'other', state: 'APPROVED', commitId: '', body: '', submittedAt: '' },
+    ]);
+    // With a plain note by them, submittedAt is that note's time.
+    const note = gl.seedNote({
+      mergeRequestIid: 1,
+      author: 'other',
+      body: 'hi',
+      createdAt: '2026-11-05T00:00:00.000Z',
+    });
+    gl.seedNote({
+      mergeRequestIid: 1,
+      author: 'other',
+      body: 'older',
+      createdAt: '2026-11-04T00:00:00.000Z',
+    });
+    expect(await forge.listReviews(1)).toEqual([
+      {
+        id: 0,
+        author: 'other',
+        state: 'APPROVED',
+        commitId: '',
+        body: '',
+        submittedAt: note.created_at,
+      },
+    ]);
+  });
+
+  test("a header in another user's note is that user's review", async () => {
+    const { gl, forge } = setup();
+    const { head } = reviewRepo(gl);
+    gl.seedNote({ mergeRequestIid: 1, author: 'mallory', body: `${header('APPROVE', head)}\nok` });
+    const [r] = await forge.listReviews(1);
+    expect(r).toMatchObject({ author: 'mallory', commitId: head, state: 'DISMISSED' });
+  });
+
+  test('a bad iid is refused unsent', async () => {
+    const { gl, forge } = setup();
+    await expect(forge.listReviews(0)).rejects.toBeInstanceOf(GitLabForgeError);
+    await expect(forge.findReviewByMarker(-2, MARKER)).rejects.toBeInstanceOf(GitLabForgeError);
+    expect(gl.requests).toEqual([]);
+  });
+});
+
+describe('reviews: findReviewByMarker', () => {
+  test("finds the viewer's review by its last line, ignoring another user's", async () => {
+    const { gl, forge } = setup();
+    const { head } = reviewRepo(gl);
+    const theirs = gl.seedNote({
+      mergeRequestIid: 1,
+      author: 'other',
+      body: `${header('APPROVE', head)}\nok\n${MARKER}`,
+    });
+    expect(await forge.findReviewByMarker(1, MARKER)).toBeNull();
+    const mine = gl.seedNote({
+      mergeRequestIid: 1,
+      author: 'agent',
+      body: `${header('REQUEST_CHANGES', head)}\nno\n\n${MARKER}\n  \n`,
+    });
+    expect(await forge.findReviewByMarker(1, MARKER)).toEqual({ id: mine.id });
+    expect(theirs.id).not.toBe(mine.id);
+    // A marker that is not the last line does not count.
+    gl.seedNote({
+      mergeRequestIid: 1,
+      author: 'agent',
+      body: `${header('REQUEST_CHANGES', head)}\n<!-- jm:op:other -->\nmore`,
+    });
+    expect(await forge.findReviewByMarker(1, '<!-- jm:op:other -->')).toBeNull();
+  });
+
+  test('never returns a synthetic (id 0) review, and is null when nothing matches', async () => {
+    const { gl, forge } = setup();
+    reviewRepo(gl);
+    const sha = gl.mergeRequest(1)?.sha ?? '';
+    await fetch(`${GITLAB}${MRS}/1/approve`, {
+      method: 'POST',
+      headers: { 'PRIVATE-TOKEN': AGENT, 'content-type': 'application/json' },
+      body: JSON.stringify({ sha }),
+    });
+    expect((await forge.listReviews(1)).map((r) => r.id)).toEqual([0]);
+    expect(await forge.findReviewByMarker(1, '')).toBeNull();
+    expect(await forge.findReviewByMarker(1, MARKER)).toBeNull();
+  });
+
+  test('a note posted by createReview is found with the outbox marker (round trip)', async () => {
+    const { gl, forge } = setup();
+    const { head } = reviewRepo(gl);
+    expect(await forge.findReviewByMarker(1, MARKER)).toBeNull();
+    const r = await forge.createReview(1, {
+      event: 'APPROVE',
+      body: `All checks pass.\n\n${MARKER}`,
+      commitId: head,
+    });
+    expect(await forge.findReviewByMarker(1, MARKER)).toEqual(r);
+  });
+});
+
+describe('reviews: secrets', () => {
+  test('no recorded request carries the token, and a thrown error does not either', async () => {
+    const { gl, forge } = setup();
+    const { head, base } = reviewRepo(gl);
+    await forge.createReview(1, { event: 'APPROVE', body: 'b', commitId: head });
+    await forge.createReview(1, { event: 'REQUEST_CHANGES', body: 'b', commitId: head });
+    await forge.listReviews(1);
+    await forge.findReviewByMarker(1, MARKER);
+    const moved = await forge
+      .createReview(1, { event: 'APPROVE', body: 'hidden body', commitId: base })
+      .catch((e: unknown) => e);
+    for (const r of gl.requests) {
+      expect(r.path).not.toContain(AGENT);
+      expect(JSON.stringify(r.query)).not.toContain(AGENT);
+      expect(JSON.stringify(r.body ?? null)).not.toContain(AGENT);
+    }
+    const wrong = new GitLabForge(GITLAB, PROJECT.path, WRONG);
+    const errors = await Promise.all([
+      wrong.listReviews(1).catch((e: unknown) => e),
+      wrong.findReviewByMarker(1, MARKER).catch((e: unknown) => e),
+      wrong
+        .createReview(1, { event: 'APPROVE', body: 'hidden body', commitId: head })
+        .catch((e: unknown) => e),
+      wrong
+        .createReview(1, { event: 'REQUEST_CHANGES', body: 'hidden body', commitId: head })
+        .catch((e: unknown) => e),
+    ]);
+    for (const e of [moved, ...errors]) {
+      expect(e).toBeInstanceOf(GitLabForgeError);
+      expect((e as Error).message).not.toContain(AGENT);
+      expect((e as Error).message).not.toContain(WRONG);
+      expect((e as Error).message).not.toContain('hidden body');
+      expect((e as Error).message).not.toMatch(/SHA does not match|Unauthorized/);
+    }
+    for (const e of errors) expect((e as GitLabForgeError).status).toBe(401);
   });
 });
