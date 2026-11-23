@@ -102,7 +102,8 @@ describe('renderChatMarkdown', () => {
     expect(renderChatMarkdown('see `#12`', refs)).toBe('<p>see <code>#12</code></p>');
     expect(renderChatMarkdown('[about #12](/x)', refs)).toBe('<p><a href="/x">about #12</a></p>');
     expect(md('Ruling 3 and Briefing 4')).toBe(
-      '<p><a href="/briefings#ruling-3">Ruling 3</a> and <a href="/briefings/4">Briefing 4</a></p>',
+      // A ruling whose briefing is unknown has no page to land on (#625): it stays text.
+      '<p>Ruling 3 and <a href="/briefings/4">Briefing 4</a></p>',
     );
   });
 

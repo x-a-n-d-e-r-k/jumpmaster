@@ -692,6 +692,27 @@ describe('Home (#625)', () => {
     }
   });
 
+  test('only a parked work item is a Needs you row; ready, running, in review and done ones are not', () => {
+    const html = renderHome(
+      home({
+        zones: [zone('A')],
+        items: [
+          wi('A', 'ready'),
+          wi('A', 'in_flight'),
+          wi('A', 'pr_open'),
+          wi('A', 'done'),
+          wi('A', 'parked'),
+        ],
+      }),
+    );
+    expect(kinds(html)).toEqual(['parked']);
+    const none = renderHome(
+      home({ zones: [zone('A')], items: [wi('A', 'ready'), wi('A', 'pr_open')] }),
+    );
+    expect(kinds(none)).toEqual([]);
+    expect(needsOf(none)).toContain('Nothing needs you');
+  });
+
   test('a pending change row: the first guarded item, "and N more", expiry, and the chat it came from; never the patch', () => {
     const one = renderHome(home({ zones: [zone('A')], pending: [{ change: pending() }] }));
     expect(one).toContain('Turns on the MCP server');

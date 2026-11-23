@@ -535,6 +535,33 @@ describe('renderHome loop state', () => {
     expect(capacity).not.toContain('d-cause');
   });
 
+  test('a closed gate is paused until the later of its pause and its probe time, either alone (#625)', () => {
+    const capacity = (state: typeof usageState) => {
+      const html = renderHome({
+        zones: [z],
+        items: [],
+        drops: [],
+        now: new Date('2026-01-01T00:00:00.000Z'),
+        usage: { gate: 'closed', state, plan: 'pro', windows: [] },
+      });
+      return html.slice(html.indexOf('id="capacity"'), html.indexOf('id="pipeline"'));
+    };
+    const later = '2026-01-01T07:00:00.000Z';
+    // The probe time is later than the pause: it is the one shown.
+    const probeLater = capacity({ ...usageState, probeNotBefore: later });
+    expect(probeLater).toContain(`datetime="${later}"`);
+    expect(probeLater).not.toContain('datetime="2026-01-01T05:00:00.000Z"');
+    // The probe time alone, with no pause.
+    const probeOnly = capacity({ ...usageState, pausedUntil: null, probeNotBefore: later });
+    expect(probeOnly).toContain(
+      `Dispatch paused until <span data-live-ignore><time datetime="${later}"`,
+    );
+    // The pause is later than the probe time: the pause is shown.
+    const pauseLater = capacity({ ...usageState, probeNotBefore: '2026-01-01T02:00:00.000Z' });
+    expect(pauseLater).toContain('datetime="2026-01-01T05:00:00.000Z"');
+    expect(pauseLater).not.toContain('datetime="2026-01-01T02:00:00.000Z"');
+  });
+
   test.each([
     ['open', 'Dispatch open'],
     ['finishing_only', 'Dispatch open to finishing work only'],
@@ -2146,9 +2173,8 @@ describe('every briefing stands on its own (#226)', () => {
     expect(linkify('see #12.', refs)).toBe(
       'see <a href="https://github.com/octo/demo/issues/12" target="_blank" rel="noopener noreferrer">#12</a>.',
     );
-    expect(linkify('after Ruling 42', refs)).toBe(
-      'after <a href="/briefings#ruling-42">Ruling 42</a>',
-    );
+    // No briefing page to land on: the removed /briefings list is not a fallback (#625).
+    expect(linkify('after Ruling 42', refs)).toBe('after Ruling 42');
     expect(
       linkify('after Ruling 42 and Briefing 125', {
         ...refs,
@@ -2171,7 +2197,7 @@ describe('every briefing stands on its own (#226)', () => {
 
   test('a script beside #12 is escaped, and the #12 link is the only markup (D4)', () => {
     const evil = '<script>alert(1)</script><a href="javascript:x">#13</a> "Ruling 1" #12';
-    const html = linkify(evil, refs);
+    const html = linkify(evil, { ...refs, rulingHref: (n) => `#ruling-${n}` });
     expect(html).not.toContain('<script');
     expect(html).toContain(
       '&lt;script&gt;alert(1)&lt;/script&gt;&lt;a href=&quot;javascript:x&quot;&gt;',
@@ -2360,6 +2386,14 @@ describe('every briefing stands on its own (#226)', () => {
     expect(list).toContain('<a href="/briefings/2">Briefing 2</a>');
     expect(list).toContain('<a href="/briefings/2#ruling-1">Ruling 1</a>');
     expect(list).toContain('<a href="/briefings/3#ruling-5">Ruling 5</a>');
+    // A ruling of no known briefing stays text, not a link to the removed /briefings list.
+    const unknown = renderBriefing({
+      briefing: briefing({ id: 8, why: 'see Ruling 77' }),
+      rulings: [],
+      zones: [z],
+    });
+    expect(unknown).toContain('see Ruling 77');
+    expect(unknown).not.toContain('#ruling-77');
     // Each briefing links to its own page.
     expect(list).toContain('<a href="/briefings/8">');
   });

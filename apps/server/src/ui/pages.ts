@@ -371,8 +371,8 @@ export type LinkRefs = {
   crewKeys?: ReadonlyMap<string, number>;
   /** Where `Briefing n` links; else its own page. */
   briefingHref?: (n: number) => string;
-  /** Where `Ruling n` links; else its row on /briefings. */
-  rulingHref?: (n: number) => string;
+  /** Where `Ruling n` links; unset, or `undefined` for it, leaves it text (no page shows it). */
+  rulingHref?: (n: number) => string | undefined;
 };
 
 /**
@@ -402,10 +402,8 @@ export function linkify(text: string, refs: LinkRefs): string {
     else if (word !== undefined) {
       const n = Number(wordN);
       const href =
-        word === 'Ruling'
-          ? (refs.rulingHref?.(n) ?? `/briefings#ruling-${n}`)
-          : (refs.briefingHref?.(n) ?? `/briefings/${n}`);
-      out += anchor(href, all);
+        word === 'Ruling' ? refs.rulingHref?.(n) : (refs.briefingHref?.(n) ?? `/briefings/${n}`);
+      out += href === undefined ? escapeHtml(all) : anchor(href, all);
     } else if (dropId !== undefined) out += anchor(`/drops/${dropId}`, 'full text');
     else {
       const n = key !== undefined && /[a-z]/.test(key) ? refs.crewKeys?.get(key) : undefined;
@@ -500,7 +498,7 @@ function briefingRefs(
   const rulingHref = (n: number) => {
     if (shown.rulings.has(n)) return `#ruling-${n}`;
     const b = briefingOf.get(n);
-    return b === undefined ? `/briefings#ruling-${n}` : `/briefings/${b}#ruling-${n}`;
+    return b === undefined ? undefined : `/briefings/${b}#ruling-${n}`;
   };
   return (zoneId) => {
     const repo = repos.get(zoneId);
