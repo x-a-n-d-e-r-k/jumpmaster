@@ -1,9 +1,12 @@
+import { createHash } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { canonicalJson } from './config/revisions.js';
 import {
   DEFAULT_PROTECTED_PATHS,
+  DropZoneObject,
   gateSecretsOf,
   loadConfig,
   MCP_DEFAULTS,
@@ -16,6 +19,7 @@ import {
   startupWarnings,
   zoneSecrets,
 } from './config.js';
+import { forgeKind } from './forge/kind.js';
 import { resolveCredentials } from './vault/credentials.js';
 import { credentialProblems } from './vault/problems.js';
 
@@ -1501,5 +1505,175 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
     });
     // The loaded file of an existing install, too.
     expect(loadConfig(minimal, fullEnv).dropZones[0]).not.toHaveProperty('githubApp');
+  });
+});
+
+describe('zone forge kind (issue #667)', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json'), strict: true };
+  const gitlabZone = {
+    ...baseZone,
+    repo: 'group/sub/project',
+    forge: 'gitlab',
+    gitlab: { baseUrl: 'https://gitlab.example.com' },
+  };
+  /** Both schemas: the full document's and the zone object's own (the forge-free parses). */
+  const both = (zone: Record<string, unknown>) => {
+    const full = parseEditable({ dropZones: [zone] }, noLock);
+    const object = DropZoneObject.safeParse(zone);
+    return {
+      full,
+      object,
+      fullIssues: full.ok ? [] : full.issues,
+      objectIssues: object.success
+        ? []
+        : object.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+    };
+  };
+  // Built at runtime so no token-shaped literal sits in the tracked file.
+  const TOKEN = ['ghp', 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij'].join('_');
+
+  test('a zone without forge parses and stores byte-identically to before, with no forge key', () => {
+    const r = parseEditable({ dropZones: [baseZone] }, noLock);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const zone = r.config.dropZones[0] as Record<string, unknown>;
+    expect(Object.hasOwn(zone, 'forge')).toBe(false);
+    expect(Object.hasOwn(zone, 'gitlab')).toBe(false);
+    expect(forgeKind(r.config.dropZones[0] ?? {})).toBe('github');
+    // The parsed zone, as stored canonically, is the bytes it was before #667 (sha256 and length
+    // pinned then). A new zone default changes it: re-pin, after checking forge is still absent.
+    const stored = canonicalJson(zone);
+    expect(stored).not.toMatch(/"forge"|"gitlab"/);
+    expect(`${createHash('sha256').update(stored).digest('hex')} ${stored.length}`).toBe(
+      'aac304e153b92403e0f35693120faeba4e5eb75672654e5673387e96abee8278 2287',
+    );
+    // And it round-trips: parsing the stored document again gives the same bytes.
+    const again = parseEditable({ dropZones: [JSON.parse(stored)] }, noLock);
+    expect(again.ok && canonicalJson(again.config.dropZones[0])).toBe(stored);
+  });
+
+  test('forge: gitlab with a base URL and a nested project path parses through both schemas', () => {
+    for (const baseUrl of [
+      'https://gitlab.example.com',
+      'https://gitlab.com/',
+      'https://g.x:8443',
+    ]) {
+      const r = both({ ...gitlabZone, gitlab: { baseUrl } });
+      expect(r.fullIssues, baseUrl).toEqual([]);
+      expect(r.objectIssues, baseUrl).toEqual([]);
+      if (r.full.ok) {
+        const zone = r.full.config.dropZones[0];
+        expect(zone?.forge).toBe('gitlab');
+        expect(zone?.gitlab).toEqual({ baseUrl });
+        expect(zone?.repo).toBe('group/sub/project');
+        expect(forgeKind(zone ?? {})).toBe('gitlab');
+      }
+    }
+    // An explicit github is a GitHub zone.
+    const gh = both({ ...baseZone, forge: 'github' });
+    expect(gh.fullIssues).toEqual([]);
+    expect(gh.objectIssues).toEqual([]);
+  });
+
+  const refused: [string, Record<string, unknown>, string, string[]][] = [
+    ['gitlab without gitlab', { ...gitlabZone, gitlab: undefined }, 'gitlab', []],
+    [
+      'gitlab on a GitHub zone',
+      { ...baseZone, gitlab: { baseUrl: 'https://gitlab.example.com' } },
+      'gitlab',
+      [],
+    ],
+    [
+      'gitlab on an explicit GitHub zone',
+      { ...baseZone, forge: 'github', gitlab: { baseUrl: 'https://gitlab.example.com' } },
+      'gitlab',
+      [],
+    ],
+    [
+      'an http:// base URL',
+      { ...gitlabZone, gitlab: { baseUrl: 'http://gitlab.example.com' } },
+      'gitlab.baseUrl',
+      ['http://gitlab.example.com'],
+    ],
+    [
+      'a base URL with credentials',
+      { ...gitlabZone, gitlab: { baseUrl: 'https://user:s3cretpass@gitlab.example.com' } },
+      'gitlab.baseUrl',
+      ['s3cretpass', 'gitlab.example.com'],
+    ],
+    [
+      'a base URL with a path',
+      { ...gitlabZone, gitlab: { baseUrl: 'https://gitlab.example.com/gitlab' } },
+      'gitlab.baseUrl',
+      ['gitlab.example.com'],
+    ],
+    [
+      'a base URL with a query',
+      { ...gitlabZone, gitlab: { baseUrl: 'https://gitlab.example.com/?x=1' } },
+      'gitlab.baseUrl',
+      ['gitlab.example.com'],
+    ],
+    [
+      'a base URL with a fragment',
+      { ...gitlabZone, gitlab: { baseUrl: 'https://gitlab.example.com#x' } },
+      'gitlab.baseUrl',
+      ['gitlab.example.com'],
+    ],
+    ['a one-segment project path', { ...gitlabZone, repo: 'lonelyproject' }, 'repo', ['lonely']],
+    ['a .. segment', { ...gitlabZone, repo: 'group/../project' }, 'repo', ['group/..']],
+    ['a path ending in .git', { ...gitlabZone, repo: 'group/project.git' }, 'repo', ['.git']],
+    [
+      'a token-shaped segment',
+      { ...gitlabZone, repo: `group/${TOKEN}` },
+      'repo',
+      [TOKEN, TOKEN.slice(4, 20)],
+    ],
+    [
+      'githubApp on a GitLab zone',
+      { ...gitlabZone, githubApp: { repositoryId: 1, installations: {} } },
+      'githubApp',
+      [],
+    ],
+    ['a nested path on a GitHub zone', { ...baseZone, repo: 'group/sub/project' }, 'repo', ['sub']],
+    [
+      'a nested path on an explicit GitHub zone',
+      { ...baseZone, forge: 'github', repo: 'group/sub/project' },
+      'repo',
+      ['sub'],
+    ],
+  ];
+
+  test.each(refused)(
+    '%s is refused through both schemas, without echoing the value',
+    (_n, zone, path, values) => {
+      const r = both(zone);
+      expect(r.full.ok).toBe(false);
+      expect(r.object.success).toBe(false);
+      expect(r.fullIssues.map((i) => i.path)).toContain(`dropZones.0.${path}`);
+      expect(r.objectIssues.map((i) => i.path)).toContain(path);
+      const text = JSON.stringify([r.fullIssues, r.objectIssues]);
+      for (const v of values) expect(text).not.toContain(v);
+    },
+  );
+
+  test('a GitHub zone keeps the repo message it had', () => {
+    const r = both({ ...baseZone, repo: 'group/sub/project' });
+    expect(r.objectIssues).toEqual([
+      {
+        path: 'repo',
+        message: 'repo must be "owner/name" with a valid GitHub owner and repository name',
+      },
+    ]);
+  });
+
+  test('an unknown forge is refused on its path', () => {
+    const r = both({ ...baseZone, forge: 'bitbucket' });
+    expect(r.objectIssues.map((i) => i.path)).toEqual(['forge']);
+    expect(r.fullIssues.map((i) => i.path)).toEqual(['dropZones.0.forge']);
+  });
+
+  test('starter mode keeps its rules on a GitLab zone', () => {
+    const r = both({ ...gitlabZone, identity: 'starter', ciRequired: false });
+    expect(r.fullIssues.map((i) => i.path)).toEqual(['dropZones.0.ciRequired']);
   });
 });

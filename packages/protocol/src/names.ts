@@ -38,3 +38,30 @@ export function splitRepoFullName(full: string): { owner: string; name: string }
 export function isRepoFullName(full: string): boolean {
   return splitRepoFullName(full) !== null;
 }
+
+/**
+ * A GitLab project path segment (a group, a subgroup or the project): letters, digits, `_`, `-`
+ * and `.`, starting and ending with a letter or digit (so never `.` or `..`), and never ending in
+ * `.git` or `.atom`, which GitLab reserves.
+ */
+const GITLAB_SEGMENT = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,253}[A-Za-z0-9])?$/;
+
+function isGitLabSegment(segment: string): boolean {
+  return GITLAB_SEGMENT.test(segment) && !/\.(?:git|atom)$/i.test(segment);
+}
+
+/**
+ * Whether `path` is a GitLab project path (`group/project`, `group/sub/project`): two or more
+ * segments, each passing the segment rule. Like a repository name, a token's characters are legal
+ * here, so a token-shaped path or segment is refused by shape.
+ */
+export function isGitLabProjectPath(path: string): boolean {
+  if (typeof path !== 'string') return false;
+  const segments = path.split('/');
+  return (
+    segments.length >= 2 &&
+    segments.every(isGitLabSegment) &&
+    !containsSecret(path, []) &&
+    !segments.some((s) => containsSecret(s, []))
+  );
+}

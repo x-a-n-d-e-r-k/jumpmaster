@@ -246,3 +246,27 @@ describe('the doctor with makeReadForgeFor', () => {
     expect(appCalls()).toEqual([]);
   });
 });
+
+describe('a GitLab zone (issue #667)', () => {
+  test('gets no read forge, even with the read token set, and nothing is sent', () => {
+    const gitlab = makeZone({
+      repo: 'acme/app',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    });
+    const l = live({ zone: gitlab, readToken: true, apps: reviewerApp() });
+    expect(makeReadForgeFor(l, source(l))('main')).toBeUndefined();
+    expect(makeReadForgeFor(l)('main')).toBeUndefined();
+    expect(seen).toEqual([]);
+  });
+
+  test("a GitHub zone's read forge is unchanged, forge absent or github", () => {
+    for (const zone of [
+      makeZone({ repo: 'octo/demo' }),
+      makeZone({ repo: 'octo/demo', forge: 'github' }),
+    ]) {
+      const l = live({ zone, readToken: true });
+      expect(makeReadForgeFor(l)('main')).toBeInstanceOf(GitHubForge);
+    }
+  });
+});

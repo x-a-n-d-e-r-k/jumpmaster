@@ -333,6 +333,23 @@ describe('the callers', () => {
     expect(w.logs.join('\n')).not.toContain(minted(1));
   });
 
+  test('the API route answers a GitLab zone 400 with a fixed message and reads nothing (issue #667)', async () => {
+    const gitlab = makeZone({
+      id: 'demo',
+      repo: 'acme/app',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    });
+    const w = routeWorld(baseEnv, new Map(), gitlab);
+    const r = await w.get('/api/control/zones/demo/github?reviewer=alice');
+    expect(r.statusCode).toBe(400);
+    expect(r.json()).toEqual({ error: 'GitLab zones are not supported yet' });
+    expect(r.body).not.toContain('acme');
+    expect(r.body).not.toContain('gitlab.example.com');
+    expect(w.f.calls).toEqual([]);
+    expect(w.f.tokens).toEqual([]);
+  });
+
   test('the API route answers a mint failure 502 without the error text', async () => {
     const s = fakeSource(() => Promise.reject(new Error(`token ${SENTINEL}`)));
     const w = routeWorld(baseEnv, appsOf(authorApp), authorZone, s.source);

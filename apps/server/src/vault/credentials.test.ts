@@ -330,6 +330,42 @@ describe('testing a credential on entry', () => {
     expect(g.calls).toEqual(['login octo/web']);
   });
 
+  test('a GitLab zone is neither queried nor failing: only GitHub zones are tested (issue #667)', async () => {
+    const mixed = [
+      { id: 'lab', repo: 'acme/app', forge: 'gitlab' as const },
+      { id: 'hub', repo: 'octo/web' },
+    ];
+    // The GitLab project's repository would fail if asked.
+    const f = forgeFake({ 'acme/app': async () => Promise.reject({ status: 404 }) });
+    expect(
+      await testCredential('githubAuthorToken', AUTHOR, { zones: mixed, forge: f.forge }),
+    ).toEqual({
+      ok: true,
+      result: 'ok',
+      login: 'author-bot',
+      live: true,
+    });
+    expect(f.calls).toEqual(['login octo/web', 'access octo/web']);
+    const r = forgeFake({});
+    expect(
+      await testCredential('githubReviewerToken', AUTHOR, { zones: mixed, forge: r.forge }),
+    ).toMatchObject({ ok: true });
+    expect(r.calls).toEqual(['login octo/web', 'access octo/web']);
+    const g = forgeFake({});
+    expect(
+      await testCredential('githubReadToken', READ, { zones: mixed, forge: g.forge }),
+    ).toMatchObject({
+      ok: true,
+    });
+    expect(g.calls).toEqual(['login octo/web']);
+    // Only GitLab zones: the login is read on the default repository, and no zone is asked.
+    const only = forgeFake({});
+    expect(
+      await testCredential('githubAuthorToken', AUTHOR, { zones: [mixed[0]!], forge: only.forge }),
+    ).toMatchObject({ ok: true });
+    expect(only.calls).toEqual(['login octocat/Hello-World']);
+  });
+
   test('the registry read token is not a forge token: no GitHub call, the image mirror is its proof', async () => {
     const f = forgeFake({});
     expect(

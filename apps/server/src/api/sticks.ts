@@ -78,6 +78,7 @@ import {
   InstallationCheckError,
   type VerifiedInstallation,
 } from '../forge/installation-verifier.js';
+import { forgeKind } from '../forge/kind.js';
 import type { StickFetches } from '../images/fetches.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { layoutFor } from '../images/serve.js';
@@ -431,6 +432,9 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         .prepare('SELECT repo, default_branch AS base FROM drop_zones WHERE id = ?')
         .get(drop.dropZoneId) as { repo: string; base: string } | undefined;
       if (!row || row.repo !== zone.repo) return { refused: 'repo mismatch', retryable: false };
+      // Issue #667: a GitLab zone has no push grant until GitLabForge lands; its project path
+      // is never made a GitHub remote, whatever its shape.
+      if (forgeKind(zone) === 'gitlab') return { refused: 'forge', retryable: false };
       // The grant's owner and name become a git remote: the one name rule (issue #265).
       if (!isRepoFullName(zone.repo)) return { refused: 'repo name', retryable: false };
       if (!pushKindValid(drop)) return { refused: 'kind', retryable: false };

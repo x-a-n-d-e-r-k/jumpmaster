@@ -4,6 +4,7 @@ import type { ConfigStore } from '../config/store.js';
 import { type Config, DEFAULT_PROTECTED_PATHS, type DropZoneConfig } from '../config.js';
 import type { AppTokenSource } from '../forge/app-tokens.js';
 import { type Forge, GitHubForge } from '../forge/github.js';
+import { forgeKind, GITLAB_UNSUPPORTED } from '../forge/kind.js';
 import {
   collaboratorChecklist,
   type GuidanceApps,
@@ -481,6 +482,9 @@ export function registerGuidanceRoutes(
     const config = req.jmConfig ?? store.current();
     const zone = config.dropZones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).send({ error: 'unknown zone' });
+    // Issue #667: GitHub guidance for a GitLab project would read a GitHub repository that is not
+    // the zone's. Fixed words: never the base URL or the project path.
+    if (forgeKind(zone) === 'gitlab') return reply.code(400).send({ error: GITLAB_UNSUPPORTED });
     const q = GuideQuery.safeParse(req.query ?? {});
     const reviewers = q.success
       ? Reviewers.safeParse(

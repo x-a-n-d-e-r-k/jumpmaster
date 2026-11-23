@@ -3,6 +3,7 @@ import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { readSecret, readSecretFile, stripTrailingSlashes } from '@jumpmaster/protocol';
 import { appJwt } from '../forge/github-app.js';
+import { type ForgeKind, forgeKind } from '../forge/kind.js';
 import { type ScrubSet, serverScrubSet } from '../forge/scrub-set.js';
 import {
   APP_ROLES,
@@ -378,7 +379,8 @@ export type TestResult =
   | { ok: false; status: number | null; permission?: string; problem?: string };
 
 export type TestDeps = {
-  zones: readonly { id: string; repo: string }[];
+  /** The configured zones; only GitHub ones (`forge` absent or `github`) are tested against. */
+  zones: readonly { id: string; repo: string; forge?: ForgeKind | undefined }[];
   /** A forge on `token` for `repo`: its account's login and its access to the repository. */
   forge(
     token: string,
@@ -463,12 +465,15 @@ export async function testCredential(
     return value.length >= MIN_GATE_SECRET
       ? { ok: true, result: 'stored: the image mirror is the live proof (Sticks, Images)' }
       : { ok: false, status: null, problem: 'a registry token is at least 8 characters' };
-  const first = deps.zones[0];
+  // A GitHub token is tested on GitHub zones only: a GitLab zone's project path is never sent to
+  // GitHub, and it fails no test (issue #667).
+  const zones = deps.zones.filter((z) => forgeKind(z) === 'github');
+  const first = zones[0];
   const repo = first?.repo ?? 'octocat/Hello-World';
   try {
     const login = await deps.forge(value, repo).viewerLogin();
     if (name === 'githubAuthorToken' || name === 'githubReviewerToken')
-      for (const z of deps.zones) await deps.forge(value, z.repo).repoAccess();
+      for (const z of zones) await deps.forge(value, z.repo).repoAccess();
     return { ok: true, result: 'ok', login, live: true };
   } catch (e) {
     return refusalOf(e);

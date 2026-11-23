@@ -11,6 +11,7 @@ import type { Config } from '../config.js';
 import { isAppReviewerZone, type ResolvedApps } from '../vault/resolution.js';
 import type { AppTokenSource } from './app-tokens.js';
 import { type Forge, GitHubForge } from './github.js';
+import { forgeKind } from './kind.js';
 
 /** How long one request on the timed forges (doctor reads, intake writes) may take. */
 export const TIMED_REQUEST_MS = 30_000;
@@ -26,6 +27,8 @@ export function makeReadForgeFor(
     const config = live.current();
     const zone = config.dropZones.find((z) => z.id === zoneId);
     if (!zone) return undefined;
+    // Issue #667: no GitLab forge yet, and never a GitHub one for a GitLab zone.
+    if (forgeKind(zone) === 'gitlab') return undefined;
     const [owner = '', name = ''] = zone.repo.split('/');
     const opts = { requestTimeoutMs: TIMED_REQUEST_MS };
     if (appTokens && isAppReviewerZone(zone, live.resolvedApps()))
