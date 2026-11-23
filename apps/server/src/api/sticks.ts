@@ -88,7 +88,12 @@ import { log as serverLog } from '../log.js';
 import type { ForgePair } from '../outbox.js';
 import { buildPayload, egressFor, ownZoneSecrets } from '../payloads.js';
 import { applyResult, applyUsage, type ResultDeps } from '../results.js';
-import { dispatchGate, ingestRateLimit, rateLimitFromEvent } from '../usage.js';
+import {
+  dispatchGate,
+  ingestRateLimit,
+  rateLimitFromEvent,
+  refundOverrideStart,
+} from '../usage.js';
 import {
   appInstallationFor,
   credentialFor,
@@ -613,6 +618,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           if (!zone) {
             // Release the drop so a misconfigured zone does not strand a lease.
             updateDrop(db, drop.id, { state: 'queued', stickId: null, leaseExpiresAt: null });
+            refundOverrideStart(db, leased.overrideUntil, now());
             return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
           }
           let readToken: string | undefined;
@@ -620,10 +626,16 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
             readToken = await dropReadToken(zone, drop);
           } catch (e) {
             // Back to the queue as an unknown zone's drop goes, unless it moved on meanwhile.
-            db.prepare(
-              `UPDATE drops SET state = 'queued', stick_id = NULL, lease_expires_at = NULL
-               WHERE id = ? AND epoch = ? AND state = 'leased'`,
-            ).run(drop.id, drop.epoch);
+            db.transaction(() => {
+              const back = db
+                .prepare(
+                  `UPDATE drops SET state = 'queued', stick_id = NULL, lease_expires_at = NULL
+                   WHERE id = ? AND epoch = ? AND state = 'leased'`,
+                )
+                .run(drop.id, drop.epoch);
+              // The drop never left the server, so neither did its start (#728).
+              if (back.changes === 1) refundOverrideStart(db, leased.overrideUntil, now());
+            })();
             log(`minting the read token of drop ${drop.id} failed (${failureOf(e)})`);
             return reply.code(503).send({ refused: 'mint failed', retryable: true });
           }

@@ -1621,6 +1621,17 @@ const V58_SQL = `
 ALTER TABLE briefings ADD COLUMN diagnose_stale_reruns INTEGER NOT NULL DEFAULT 0;
 `;
 
+/**
+ * v59 (#728): Command's override of the usage throttle: until when, the starts granted and left,
+ * and whether a session or the operator token set it. All null: none.
+ */
+const V59_SQL = `
+ALTER TABLE usage_state ADD COLUMN override_until TEXT;
+ALTER TABLE usage_state ADD COLUMN override_starts INTEGER;
+ALTER TABLE usage_state ADD COLUMN override_starts_left INTEGER;
+ALTER TABLE usage_state ADD COLUMN override_by TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1680,6 +1691,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 56, sql: V56_SQL },
   { version: 57, sql: V57_SQL, foreignKeysOff: true },
   { version: 58, sql: V58_SQL },
+  { version: 59, sql: V59_SQL },
 ];
 
 /**

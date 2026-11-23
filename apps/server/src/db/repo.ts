@@ -1273,8 +1273,23 @@ export interface UsageStateRow {
   overageResumedAt: string | null;
   /** Set when a stop or a Resume horizon ended: one drop probes until a live in-plan report. */
   overageProbeSince: string | null;
+  /** Command's override of the usage throttle (#728): until when; null for none. */
+  overrideUntil: string | null;
+  /** The starts granted, and those left. */
+  overrideStarts: number | null;
+  overrideStartsLeft: number | null;
+  /** `session` or `token`: who set it. */
+  overrideBy: string | null;
   updatedAt: string | null;
 }
+
+/** No override of the usage throttle, as a patch of the usage row (#728). */
+export const NO_OVERRIDE = {
+  overrideUntil: null,
+  overrideStarts: null,
+  overrideStartsLeft: null,
+  overrideBy: null,
+} satisfies Partial<UsageStateRow>;
 
 const USAGE_COLUMN: Record<keyof UsageStateRow, string> = {
   status: 'status',
@@ -1299,6 +1314,10 @@ const USAGE_COLUMN: Record<keyof UsageStateRow, string> = {
   overageResumeWorkItemId: 'overage_resume_work_item_id',
   overageResumedAt: 'overage_resumed_at',
   overageProbeSince: 'overage_probe_since',
+  overrideUntil: 'override_until',
+  overrideStarts: 'override_starts',
+  overrideStartsLeft: 'override_starts_left',
+  overrideBy: 'override_by',
   updatedAt: 'updated_at',
 };
 

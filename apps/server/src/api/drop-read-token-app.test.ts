@@ -15,7 +15,9 @@ import { type Db, openDb } from '../db/open.js';
 import {
   type Drop,
   getDrop,
+  getUsageState,
   insertDrop,
+  setUsageState,
   updateDrop,
   upsertDropZone,
   upsertWorkItem,
@@ -28,6 +30,7 @@ import { buildPayload } from '../payloads.js';
 import { scrub } from '../scrub.js';
 import { fakeForge } from '../test/fakes.js';
 import { plus, t0, tmpDbFile } from '../test/helpers.js';
+import { setUsageOverride } from '../usage.js';
 import type { AppEntryRead } from '../vault/github-app-entries.js';
 import type { ResolvedApps } from '../vault/resolution.js';
 import { registerControlRoutes } from './control.js';
@@ -664,6 +667,22 @@ describe('a mint failure', () => {
     const again = await lease(stickToken);
     expect(again.statusCode).toBe(200);
     expect(cloneToken(again.json() as DropPayload)).toBe(gh.minted[0]);
+  });
+
+  test('gives back the override start its lease took: an outage spends none (#728)', async () => {
+    const { db } = setup({ apps: withAuthorApp });
+    const { stickToken } = await enroll();
+    queue(db, 'd1', 'implement');
+    setUsageState(db, { status: 'allowed_warning', observedAt: t0.toISOString() }, t0);
+    setUsageOverride(db, { starts: 2, hours: 3, by: 'token' }, t0);
+    gh.state.mint = 500;
+    for (let i = 0; i < 3; i++) {
+      expect((await lease(stickToken)).statusCode).toBe(503);
+      expect(getUsageState(db).overrideStartsLeft).toBe(2);
+    }
+    gh.state.mint = 201;
+    expect((await lease(stickToken)).statusCode).toBe(200);
+    expect(getUsageState(db).overrideStartsLeft).toBe(1);
   });
 });
 

@@ -18,7 +18,13 @@ import {
   updateDrop,
 } from './db/repo.js';
 import { refundCharge } from './flow/budgets.js';
-import { DEFAULT_USAGE_CONFIG, type Gate, releaseProbe, unreachable } from './usage.js';
+import {
+  DEFAULT_USAGE_CONFIG,
+  type Gate,
+  releaseProbe,
+  takeOverrideStart,
+  unreachable,
+} from './usage.js';
 
 const LEASE_TTL_MS = 60_000;
 const LOST_GRACE_MS = 120_000;
@@ -26,6 +32,9 @@ const LOST_GRACE_MS = 120_000;
 const iso = (d: Date, offsetMs = 0): string => new Date(d.getTime() + offsetMs).toISOString();
 
 const FINISHING = "('review','heal','resolve')";
+
+/** The roles the throttle never holds (FINISHING, and doctor drops). */
+const UNTHROTTLED: ReadonlySet<string> = new Set(['review', 'heal', 'resolve', 'doctor']);
 
 /**
  * Finishing roles first, then implement, then crew roles (§5.3), then doctor drops; age within a
@@ -41,7 +50,7 @@ const ROLE_CLASS = `CASE WHEN role IN ${FINISHING} THEN 0 WHEN role = 'implement
  * with the doctor's account of why a queued one waits (doctorDropWait).
  */
 export function doctorMayLease(gate: Gate): boolean {
-  return gate === 'open' || gate === 'finishing_only';
+  return gate === 'open' || gate === 'finishing_only' || gate === 'override';
 }
 
 /** Queued drops wait while their zone is paused or observing. */
@@ -101,7 +110,7 @@ export function leaseNextDrop(
   gate: Gate,
   exclude: readonly string[] = [],
   excludeRoles: readonly Role[] = [],
-): { dropId: string; epoch: number } | null {
+): { dropId: string; epoch: number; overrideUntil?: string } | null {
   const ex = JSON.stringify(exclude);
   const exRoles = JSON.stringify(excludeRoles);
   return db.transaction(() => {
@@ -112,6 +121,8 @@ export function leaseNextDrop(
     if (!live) return null;
     let next: { id: string } | undefined;
     let probe = false;
+    /** The override grant this lease took a start of, if any. */
+    let start: string | null = null;
     const probeNext = (): { id: string } | undefined => {
       const u = getUsageState(db);
       if (u.probeDropId !== null) return undefined;
@@ -149,20 +160,29 @@ export function leaseNextDrop(
         break;
       }
       case 'open':
-      case 'finishing_only': {
+      case 'finishing_only':
+      case 'override': {
+        const pick = (filter: string) =>
+          db
+            .prepare(
+              `SELECT id, role FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} ${NOT_EXCLUDED}${filter}
+               ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
+            )
+            .get({ exclude: ex, excludeRoles: exRoles }) as
+            | { id: string; role: string }
+            | undefined;
         // Above the throttle only finishing work starts, and doctor drops (doctorMayLease): an
         // operator-asked readiness check, still last by ROLE_CLASS.
         const doctor = doctorMayLease(gate) ? '' : " AND role <> 'doctor'";
-        const roleFilter =
-          gate === 'finishing_only'
-            ? ` AND (role IN ${FINISHING} OR role = 'doctor')${doctor}`
-            : doctor;
-        next = db
-          .prepare(
-            `SELECT id FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} ${NOT_EXCLUDED}${roleFilter}
-             ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
-          )
-          .get({ exclude: ex, excludeRoles: exRoles }) as { id: string } | undefined;
+        const held = ` AND (role IN ${FINISHING} OR role = 'doctor')${doctor}`;
+        const found = pick(gate === 'finishing_only' ? held : doctor);
+        // Under Command's override each drop the throttle would hold takes one start, here in the
+        // lease's transaction: a gate read before the last start was taken leases no more (#728).
+        next = found;
+        if (gate === 'override' && found && !UNTHROTTLED.has(found.role)) {
+          start = takeOverrideStart(db, now);
+          if (start === null) next = pick(held);
+        }
         break;
       }
       default:
@@ -180,7 +200,11 @@ export function leaseNextDrop(
       | undefined;
     if (!row) return null;
     if (probe) setUsageState(db, { probeDropId: next.id }, now);
-    return { dropId: next.id, epoch: row.epoch };
+    return {
+      dropId: next.id,
+      epoch: row.epoch,
+      ...(start === null ? {} : { overrideUntil: start }),
+    };
   })();
 }
 

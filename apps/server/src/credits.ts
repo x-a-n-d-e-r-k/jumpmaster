@@ -13,6 +13,7 @@ import {
   getDrop,
   getUsageState,
   isKilled,
+  NO_OVERRIDE,
   setUsageState,
   type UsageStateRow,
 } from './db/repo.js';
@@ -297,6 +298,8 @@ export function noteOverage(
       db,
       {
         ...CLEAR_RESUME,
+        // Command's override of the throttle never outlives a stop (#728).
+        ...NO_OVERRIDE,
         overageStoppedAt: at,
         overageDropId: drop.id,
         overageUntil: until,

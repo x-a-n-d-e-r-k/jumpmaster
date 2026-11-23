@@ -271,6 +271,28 @@ describe('global checks', () => {
     });
   });
 
+  test('usage.gate warns while Command overrides the throttle, with what is left (#728)', async () => {
+    const w = world();
+    const until = new Date(NOW.getTime() + 3_600_000).toISOString();
+    setUsageState(
+      w.db,
+      {
+        status: 'allowed_warning',
+        observedAt: NOW.toISOString(),
+        overrideUntil: until,
+        overrideStarts: 5,
+        overrideStartsLeft: 3,
+        overrideBy: 'token',
+      },
+      NOW,
+    );
+    expect(one(await w.run(), 'usage.gate')).toMatchObject({
+      status: 'warn',
+      summary: expect.stringContaining(`3 of 5 starts left, until ${until}`),
+      fix: expect.stringContaining('ctl usage override --clear'),
+    });
+  });
+
   test('the kill switch fails control.kill, and a paused zone warns zone.mode', async () => {
     const w = world();
     setKilled(w.db, true, NOW);

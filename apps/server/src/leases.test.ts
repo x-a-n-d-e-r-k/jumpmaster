@@ -359,16 +359,17 @@ describe('doctor drops', () => {
     expect(getDrop(db, 'c1')?.state).toBe('queued');
   });
 
-  test('doctorMayLease: open and finishing_only only', () => {
+  test('doctorMayLease: open, finishing_only and override only', () => {
     const gates = [
       'open',
       'finishing_only',
+      'override',
       'closed',
       'stopped',
       'probe',
       'credits_resume',
     ] as const;
-    expect(gates.filter(doctorMayLease)).toEqual(['open', 'finishing_only']);
+    expect(gates.filter(doctorMayLease)).toEqual(['open', 'finishing_only', 'override']);
   });
 
   test('the usage probe never selects a doctor drop', () => {

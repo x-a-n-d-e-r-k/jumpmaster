@@ -230,6 +230,9 @@ export const CONTROL_ROUTES: ControlRoute[] = [
     path: '/api/control/sticks/invites/:id/cancel',
     ctl: 'ctl sticks cancel vps-1',
   },
+  // Usage
+  { method: 'POST', path: '/api/control/usage/override', ctl: 'ctl usage override' },
+  { method: 'DELETE', path: '/api/control/usage/override', ctl: 'ctl usage override --clear' },
   // Kill
   { method: 'POST', path: '/api/control/kill', ctl: 'ctl kill', also: ['ctl unkill'] },
 ];
@@ -398,6 +401,11 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
       'ctl sticks upgrade --all',
       'ctl sticks cancel <invite-name-or-id>',
     ],
+  },
+  {
+    verb: 'usage',
+    page: 'Status',
+    forms: ['ctl usage override [--starts N] [--hours N]', 'ctl usage override --clear'],
   },
   { verb: 'kill', page: 'Kill', forms: ['ctl kill'] },
   { verb: 'unkill', page: 'Kill', forms: ['ctl unkill'] },

@@ -661,7 +661,7 @@ export const liveSticks = (sticks: Stick[], now: Date): Stick[] =>
 /**
  * Why a queued doctor drop in `zone` has not started, from what the lease route goes by: the kill
  * switch, the zone's mode, the usage gate (dispatchGate) and the live sticks' capabilities. A doctor
- * drop leases under `open` and `finishing_only`, never as the usage probe.
+ * drop leases under `open`, `finishing_only` and `override`, never as the usage probe.
  */
 export function doctorDropWait(db: Db, config: Config, zone: DropZoneConfig, now: Date): string {
   if (isKilled(db)) return 'held: the kill switch is engaged (jumpmaster ctl unkill)';
@@ -855,6 +855,13 @@ function usageCheck(d: DoctorDeps): DoctorCheck {
         status: 'warn',
         summary: `usage is above the throttle (${Math.round(d.config.usage.throttleUtilization * 100)}%): only finishing work (review, heal, resolve) dispatches`,
         fix: 'Nothing to do: new work resumes when usage falls or the window resets.',
+      };
+    case 'override':
+      return {
+        ...base,
+        status: 'warn',
+        summary: `usage is near its limit and Command overrode the throttle: ${u.overrideStartsLeft} of ${u.overrideStarts} starts left, until ${u.overrideUntil}`,
+        fix: 'Nothing to do: it ends by itself. End it now with jumpmaster ctl usage override --clear.',
       };
     case 'credits_resume':
       return {

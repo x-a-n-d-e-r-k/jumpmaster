@@ -15,6 +15,7 @@ import type { Db } from './db/open.js';
 import {
   getDrop,
   getUsageState,
+  NO_OVERRIDE,
   recordUsageWindows,
   setUsageState,
   type UsageStateRow,
@@ -24,9 +25,17 @@ import { isFableRateLimit, pauseFableFor } from './fable.js';
 /**
  * `stopped`: a drop ran on usage credits (credits.ts); nothing leases, of any role.
  * `credits_resume`: Command resumed on credits; the bound work item's drops lease first and alone,
- * else one probe.
+ * else one probe. `override`: the throttle holds, and Command's override lets a bounded number of
+ * drops start (#728); leaseNextDrop counts each one.
  */
-export type Gate = 'open' | 'finishing_only' | 'probe' | 'closed' | 'stopped' | 'credits_resume';
+export type Gate =
+  | 'open'
+  | 'finishing_only'
+  | 'override'
+  | 'probe'
+  | 'closed'
+  | 'stopped'
+  | 'credits_resume';
 
 /** For an exhaustive `switch` on a union: a new member fails to compile. */
 export function unreachable(x: never): never {
@@ -37,6 +46,7 @@ export function unreachable(x: never): never {
 export function gateQueuesImplement(gate: Gate): boolean {
   switch (gate) {
     case 'open':
+    case 'override':
     case 'probe':
       return true;
     // During a Resume only the bound item's follow-on drops (queued by the reconciler) run.
@@ -50,10 +60,11 @@ export function gateQueuesImplement(gate: Gate): boolean {
   }
 }
 
-/** Whether crew work may be queued under `gate`: only with the gate open. */
+/** Whether crew work may be queued under `gate`: only with the gate open, or overridden. */
 export function gateQueuesCrew(gate: Gate): boolean {
   switch (gate) {
     case 'open':
+    case 'override':
       return true;
     case 'probe':
     case 'credits_resume':
@@ -154,6 +165,10 @@ export function ingestRateLimit(
     const d = getDrop(db, src.dropId);
     recordUsageWindows(db, windows, now, d ? (d.servedModel ?? d.requestedModel) : null);
   }
+  // Command's override ends at the ceiling (#728), by the account's windows in any report, a
+  // Fable-typed one's too: only a Fable-only refusal leaves it.
+  if (reachesCeiling(data, now) && getUsageState(db).overrideUntil !== null)
+    clearUsageOverride(db, now);
   // A Fable-only limit pauses Fable, never dispatch (best-effort, pending rehearsal).
   if (isFableRateLimit(data)) return pauseFableFor(db, data, now);
   db.transaction(() => {
@@ -170,6 +185,8 @@ export function ingestRateLimit(
       patch.sevenDayResetsAt = normalizeResetsAt(sd.resetsAt) ?? null;
     }
     if (fh || sd) patch.observedAt = now.toISOString();
+    // Command's override ends at once on a refusal (#728), whoever reports it.
+    if (data.status === 'rejected') Object.assign(patch, NO_OVERRIDE);
 
     const t = now.getTime();
     if (data.status === 'rejected') {
@@ -232,12 +249,17 @@ export function ingestRateLimit(
   })();
 }
 
+/** Whether a window's last reported figure still counts: its reset has not passed. */
+function windowLive(u: UsageStateRow, resetsAt: string | null, fallback: number, t: number) {
+  const observed = ms(u.observedAt);
+  const end = ms(resetsAt) ?? (observed === null ? null : observed + fallback);
+  return end !== null && t < end;
+}
+
 function throttled(u: UsageStateRow, cfg: UsageConfig, t: number): boolean {
   const observed = ms(u.observedAt);
-  const live = (resetsAt: string | null, fallback: number): boolean => {
-    const end = ms(resetsAt) ?? (observed === null ? null : observed + fallback);
-    return end !== null && t < end;
-  };
+  const live = (resetsAt: string | null, fallback: number): boolean =>
+    windowLive(u, resetsAt, fallback, t);
   if (u.status === 'allowed_warning' && observed !== null && t < observed + FIVE_HOURS) {
     return true;
   }
@@ -255,9 +277,111 @@ function throttled(u: UsageStateRow, cfg: UsageConfig, t: number): boolean {
   );
 }
 
+/**
+ * The usage share at which an override ends by itself. A constant, and never the throttle's own
+ * setting: chat can change that one without a confirmation, so nothing but a release raises this.
+ */
+export const OVERRIDE_CEILING = 0.95;
+export const OVERRIDE_DEFAULTS = { starts: 5, hours: 3 } as const;
+
+/** Whether a report shows an account window, one that has not reset, at the override's ceiling. */
+function reachesCeiling(data: RateLimitEventData, now: Date): boolean {
+  return [data.unifiedWindows?.five_hour, data.unifiedWindows?.seven_day].some((w) => {
+    if (!w || w.utilization < OVERRIDE_CEILING) return false;
+    const reset = ms(normalizeResetsAt(w.resetsAt));
+    return reset === null || now.getTime() < reset;
+  });
+}
+
+export type UsageOverride = { startsLeft: number; starts: number; until: string };
+
+/** The override in `u`, when it is in force at `t`: in time, with a start left, under the ceiling. */
+function overrideIn(u: UsageStateRow, t: number): UsageOverride | null {
+  const until = ms(u.overrideUntil);
+  if (until === null || t >= until) return null;
+  if (u.overrideStartsLeft === null || u.overrideStartsLeft <= 0) return null;
+  if (
+    (u.fiveHourUtil !== null &&
+      u.fiveHourUtil >= OVERRIDE_CEILING &&
+      windowLive(u, u.fiveHourResetsAt, FIVE_HOURS, t)) ||
+    (u.sevenDayUtil !== null &&
+      u.sevenDayUtil >= OVERRIDE_CEILING &&
+      windowLive(u, u.sevenDayResetsAt, SEVEN_DAYS, t))
+  )
+    return null;
+  return {
+    startsLeft: u.overrideStartsLeft,
+    starts: u.overrideStarts ?? u.overrideStartsLeft,
+    until: iso(until),
+  };
+}
+
+/** Command's override of the usage throttle, while it is in force (#728). */
+export function usageOverride(db: Db, now: Date): UsageOverride | null {
+  return overrideIn(getUsageState(db), now.getTime());
+}
+
+/** Sets Command's override, replacing any. Only the control route calls this: no chat or MCP path. */
+export function setUsageOverride(
+  db: Db,
+  o: { starts: number; hours: number; by: 'session' | 'token' },
+  now: Date,
+): void {
+  setUsageState(
+    db,
+    {
+      overrideUntil: iso(now.getTime() + o.hours * HOUR),
+      overrideStarts: o.starts,
+      overrideStartsLeft: o.starts,
+      overrideBy: o.by,
+    },
+    now,
+  );
+}
+
+export function clearUsageOverride(db: Db, now: Date): void {
+  setUsageState(db, NO_OVERRIDE, now);
+}
+
+/**
+ * Takes one start of the override, inside the caller's transaction: the grant it came from, by its
+ * end, or null when none is left.
+ */
+export function takeOverrideStart(db: Db, now: Date): string | null {
+  const r = db
+    .prepare(
+      `UPDATE usage_state SET override_starts_left = override_starts_left - 1
+       WHERE id = 1 AND override_starts_left > 0 AND override_until > @now
+       RETURNING override_until AS until`,
+    )
+    .get({ now: now.toISOString() }) as { until: string } | undefined;
+  return r?.until ?? null;
+}
+
+/** Gives back a start whose drop never left the server, while its own grant still stands. */
+export function refundOverrideStart(db: Db, until: string | undefined, now: Date): void {
+  if (until === undefined) return;
+  db.prepare(
+    `UPDATE usage_state SET override_starts_left = override_starts_left + 1, updated_at = @now
+     WHERE id = 1 AND override_until = @until AND override_starts_left < override_starts`,
+  ).run({ until, now: now.toISOString() });
+}
+
+/** Whether the throttle holds new work now, override or not: what an override would lift. */
+export function throttleHolds(db: Db, cfg: UsageConfig, now: Date): boolean {
+  return baseGate(getUsageState(db), cfg, now) === 'finishing_only';
+}
+
 /** What the scheduler and the lease route may start right now. A credits stop wins over all. */
 export function dispatchGate(db: Db, cfg: UsageConfig, now: Date): Gate {
   const u = getUsageState(db);
+  const gate = baseGate(u, cfg, now);
+  // An override lifts the throttle alone: a stop, a pause and a probe win over it.
+  return gate === 'finishing_only' && overrideIn(u, now.getTime()) ? 'override' : gate;
+}
+
+/** The gate without Command's override. */
+function baseGate(u: UsageStateRow, cfg: UsageConfig, now: Date): Exclude<Gate, 'override'> {
   // The credits stop and what follows it apply only while configured (stopOnOverage).
   const credits = stopsOnOverage(cfg);
   if (credits && creditsStopInForce(u, now)) return 'stopped';

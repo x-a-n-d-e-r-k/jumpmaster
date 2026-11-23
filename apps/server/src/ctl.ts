@@ -563,8 +563,26 @@ export function briefingsLines(body: { briefings?: BriefingView[] }, base: strin
   return out;
 }
 
+/** `usage override [--starts N] [--hours N]` or `usage override --clear` (#728). */
+function usageRequest(args: string[]): Raw | null {
+  const [, verb, ...rest] = args;
+  if (verb !== 'override') return null;
+  const path = '/api/control/usage/override';
+  if (rest.length === 1 && rest[0] === '--clear') return { path, method: 'DELETE' };
+  const body: { starts?: number; hours?: number } = {};
+  for (let i = 0; i < rest.length; i += 2) {
+    const key = rest[i] === '--starts' ? 'starts' : rest[i] === '--hours' ? 'hours' : null;
+    const value = rest[i + 1];
+    if (key === null || body[key] !== undefined || !value || !/^[1-9][0-9]?$/.test(value))
+      return null;
+    body[key] = Number(value);
+  }
+  return { path, body };
+}
+
 function rawRequest(args: string[]): Raw | null {
   const [command, zone] = args;
+  if (command === 'usage') return usageRequest(args);
   if (command === 'sticks') return sticksRequest(args);
   if (command === 'public-url') return publicUrlRequest(args);
   if (command === 'config') return configRequest(args);

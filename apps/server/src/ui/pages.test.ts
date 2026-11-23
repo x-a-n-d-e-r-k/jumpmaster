@@ -585,6 +585,7 @@ describe('renderHome loop state', () => {
   test.each([
     ['open', 'Dispatch open'],
     ['finishing_only', 'Dispatch open to finishing work only'],
+    ['override', 'Dispatch open on your usage override: 3 of 5 starts left'],
     ['probe', 'Dispatch probing'],
     ['stopped', 'Dispatch paused'],
     ['credits_resume', 'Dispatch open on credits'],
@@ -593,7 +594,12 @@ describe('renderHome loop state', () => {
       zones: [z],
       items: [],
       drops: [],
-      usage: { gate, state: usageState, plan: 'pro', windows: [] },
+      usage: {
+        gate,
+        state: { ...usageState, overrideStarts: 5, overrideStartsLeft: 3 },
+        plan: 'pro',
+        windows: [],
+      },
     });
     expect(html).toContain(words);
   });
