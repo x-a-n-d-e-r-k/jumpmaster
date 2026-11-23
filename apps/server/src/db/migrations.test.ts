@@ -1537,7 +1537,10 @@ test('v43 keeps every briefing and ruling (the rebuild ships as v46: v43 to v45 
   const db = openDb(f);
   expect(MIGRATIONS.some((m) => m.version === 46 && m.foreignKeysOff)).toBe(true);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
-  expect(db.prepare('SELECT * FROM briefings ORDER BY id').all()).toEqual(briefings);
+  // v58 adds `diagnose_stale_reruns`, 0 on every older briefing.
+  expect(db.prepare('SELECT * FROM briefings ORDER BY id').all()).toEqual(
+    briefings.map((b) => ({ ...(b as object), diagnose_stale_reruns: 0 })),
+  );
   // v55 adds `via`, null on every older ruling.
   expect(db.prepare('SELECT * FROM rulings ORDER BY id').all()).toEqual(
     rulings.map((r) => ({ ...(r as object), via: null })),
@@ -1818,5 +1821,35 @@ test('v57 widens chat_threads.focus_kind to drop and doctor and adds owner_sessi
   expect(
     db.prepare("SELECT name FROM sqlite_master WHERE name = 'chat_threads_updated'").all(),
   ).toHaveLength(1);
+  db.close();
+});
+
+test('v58 adds diagnose_stale_reruns to briefings, default 0, keeping every row', () => {
+  const f = dbAt(57, (raw) => {
+    raw.exec(
+      `INSERT INTO briefings (id, zone_id, kind, subject, decision, why, options_json,
+         recommendation, on_hold, source, state, diagnose_attempts, created_at, updated_at)
+       VALUES (1, 'z', 'parked', 'item:1', 'd', 'w', '[]', 'r', 'h', 'server', 'open', 1, 't', 'u')`,
+    );
+  });
+  const before = { id: 1, kind: 'parked', subject: 'item:1', why: 'w', state: 'open', a: 1 };
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(
+    db
+      .prepare(
+        `SELECT id, kind, subject, why, state, diagnose_attempts AS a,
+           diagnose_stale_reruns AS r FROM briefings`,
+      )
+      .all(),
+  ).toEqual([{ ...before, r: 0 }]);
+  db.exec(
+    `INSERT INTO briefings (id, zone_id, kind, subject, decision, why, options_json,
+       recommendation, on_hold, source, state, created_at, updated_at)
+     VALUES (2, 'z', 'parked', 'item:2', 'd', 'w', '[]', '', '', 'server', 'open', 't', 't')`,
+  );
+  expect(db.prepare('SELECT diagnose_stale_reruns AS r FROM briefings WHERE id = 2').get()).toEqual(
+    { r: 0 },
+  );
   db.close();
 });

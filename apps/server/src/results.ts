@@ -385,7 +385,8 @@ async function reviewResult(c: Ctx, result: DropResult): Promise<void> {
   finish(c, 'succeeded');
 }
 
-const STALE_REASON = /^(head moved|stale info)/;
+/** A drop's failure reason when it failed only because its basis (the head, the PR) moved. */
+export const STALE_REASON = /^(head moved|stale info)/;
 
 /** A heal on bot review findings that changed nothing but reported its evidence. */
 function answersReviewWithEvidence(drop: Drop, result: DropResult): boolean {
