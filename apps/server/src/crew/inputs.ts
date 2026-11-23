@@ -513,13 +513,15 @@ type VerdictLine = { headSha: string; decision: string; summary: string; finding
 
 /**
  * The diagnose input: the issue as data, and everything an agent wrote (the park reason, drop
- * reasons, verdicts) fenced as untrusted data.
+ * reasons, verdicts) fenced as untrusted data. `secrets` are the configured secrets
+ * (`secretList`): the CI failures section is redacted with them as the heal's is (#720).
  */
 export function diagnoseInput(
   db: Db,
   zone: DropZoneConfig,
   itemId: number,
   dropId: string,
+  secrets: string[] = [],
 ): string {
   const item = getWorkItem(db, itemId);
   if (!item || item.dropZoneId !== zone.id) throw new Error(`unknown work item ${itemId}`);
@@ -580,30 +582,42 @@ export function diagnoseInput(
       kind: 'untrusted',
       text: lastFailureText(db, itemId),
     },
-    ...ciFailuresSection(db, itemId),
+    ...ciFailuresSection(db, itemId, pr?.headSha ?? null, secrets),
   ]);
 }
 
 /**
  * The `ci-failures` section of a diagnose input (#720): the GitHub Actions failure annotations the
- * item's newest heal stored, when that heal was a `ci` heal, redacted here as `lastFailureText`
- * is, and neutralised and fenced by `assemble`. None for any other heal, or no annotations.
+ * item's newest heal stored, when that heal was a `ci` heal on the PR's current head, redacted
+ * here with the configured secrets and the scrub set (as the heal's `redactionList` does), and
+ * neutralised and fenced by `assemble`. None for any other heal, a heal on an earlier head (its
+ * failures are stale), or no annotations.
  */
-function ciFailuresSection(db: Db, itemId: number): Section[] {
+function ciFailuresSection(
+  db: Db,
+  itemId: number,
+  headSha: string | null,
+  secrets: string[],
+): Section[] {
   const row = db
     .prepare(
-      `SELECT input_json AS inputJson FROM drops WHERE work_item_id = ? AND role = 'heal'
+      `SELECT input_json AS inputJson, head_sha AS headSha FROM drops
+       WHERE work_item_id = ? AND role = 'heal'
        ORDER BY created_at DESC, rowid DESC LIMIT 1`,
     )
-    .get(itemId) as { inputJson: string | null } | undefined;
+    .get(itemId) as { inputJson: string | null; headSha: string | null } | undefined;
+  if (!row || headSha === null || row.headSha !== headSha) return [];
   let input: { feedback?: Feedback | null; ciAnnotations?: unknown } | null;
   try {
-    input = JSON.parse(row?.inputJson ?? 'null');
+    input = JSON.parse(row.inputJson ?? 'null');
   } catch {
     return [];
   }
   if (input?.feedback?.source !== 'ci') return [];
-  const text = ciFailureLines(ciAnnotationsOf(input.ciAnnotations), [...serverScrubSet.values()]);
+  const text = ciFailureLines(ciAnnotationsOf(input.ciAnnotations), [
+    ...secrets,
+    ...serverScrubSet.values(),
+  ]);
   return text === '' ? [] : [{ title: 'CI failures', name: 'ci-failures', kind: 'data', text }];
 }
 

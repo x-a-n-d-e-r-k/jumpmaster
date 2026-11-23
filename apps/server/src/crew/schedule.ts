@@ -490,7 +490,7 @@ export async function enqueueCrew(
   usageCfg: UsageConfig,
   now: Date,
   images?: ImageFetchOpts,
-  opts: { claude?: ClaudeConfig } = {},
+  opts: { claude?: ClaudeConfig; secrets?: string[] } = {},
 ): Promise<string | null> {
   if (!zone.crew?.enabled || isKilled(db)) return null;
   const mode = getZoneMode(db, zone.id, zone.mode);
@@ -561,7 +561,7 @@ export async function enqueueCrew(
                 : arbitrateIssueInput(db, zone, work, id)
               : work.role === 'triage'
                 ? triageInput(db, zone, work.requestId, id)
-                : diagnoseInput(db, zone, work.itemId, id);
+                : diagnoseInput(db, zone, work.itemId, id, opts.secrets ?? []);
   } catch (err) {
     // A forge read failed while gathering input: try again next pass.
     log(`zone ${zone.id}: crew ${next.role} input failed: ${String(err)}`);
