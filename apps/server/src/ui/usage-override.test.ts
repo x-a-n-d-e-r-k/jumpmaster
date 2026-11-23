@@ -10,6 +10,26 @@ const H = 3_600_000;
 const HOST = 'localhost:80';
 const URL_ = '/api/control/usage/override';
 
+/** The text of an HTML fragment: every character outside a `<...>` tag, in order. */
+function textOf(html: string): string {
+  let out = '';
+  let inTag = false;
+  for (const ch of html) {
+    if (ch === '<') inTag = true;
+    else if (ch === '>' && inTag) inTag = false;
+    else if (!inTag) out += ch;
+  }
+  return out;
+}
+
+/** The body of a `<script>...</script>` string, for running in a VM context. */
+function scriptBody(script: string): string {
+  const open = '<script>';
+  const close = '</script>';
+  expect(script.startsWith(open) && script.endsWith(close)).toBe(true);
+  return script.slice(open.length, script.length - close.length);
+}
+
 /** A real app and session; `throttle` puts weekly usage over the throttle, resetting in 36 h. */
 async function world(o: { throttle?: boolean; override?: boolean } = {}) {
   const h = await harness();
@@ -44,7 +64,7 @@ describe('Home: Run the next cycle anyway (#729)', () => {
     expect(html).toContain('id="usage-override-dialog"');
     expect(html).not.toContain('id="usage-override-stop"');
     const text = /<p id="usage-override-what">([\s\S]*?)<\/p>/.exec(html)?.[1] ?? '';
-    const plain = text.replace(/<[^>]+>/g, '');
+    const plain = textOf(text);
     expect(plain).toBe(
       "Jumpmaster will start up to 5 new drops in the next 3 hours despite Claude's usage warning. It stops early if usage reaches 95% or Claude refuses a request. Weekly usage is 81%, resetting at 2 Jan 12:30 UTC.",
     );
@@ -54,9 +74,7 @@ describe('Home: Run the next cycle anyway (#729)', () => {
   test('an override in force: the starts left and the stop button, and no run button', async () => {
     const { home } = await world({ override: true });
     const html = await home();
-    expect(html.replace(/<[^>]+>/g, '')).toContain(
-      'Usage override: 5 of 5 starts left, until 03:00 UTC',
-    );
+    expect(textOf(html)).toContain('Usage override: 5 of 5 starts left, until 03:00 UTC');
     expect(html).toContain('id="usage-override-stop"');
     expect(html).toContain('Stop the override');
     expect(html).not.toContain('id="usage-override-open"');
@@ -84,7 +102,7 @@ describe('Home: Run the next cycle anyway (#729)', () => {
       payload: '{}',
     });
     expect(set.statusCode, set.body).toBe(200);
-    expect((await home()).replace(/<[^>]+>/g, '')).toContain('5 of 5 starts left');
+    expect(textOf(await home())).toContain('5 of 5 starts left');
     const stop = await h.app.inject({
       method: 'DELETE',
       url: URL_,
@@ -164,7 +182,7 @@ describe('the usage override script (#729)', () => {
         };
       },
     });
-    vm.runInContext(USAGE_OVERRIDE_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+    vm.runInContext(scriptBody(USAGE_OVERRIDE_SCRIPT), ctx);
     const n = (id: string) => ids[id] as Node;
     return { n, calls, reloads: () => reloads };
   }
