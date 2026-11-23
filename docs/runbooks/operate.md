@@ -11,16 +11,16 @@ directory (`exec -T` when you redirect or pipe). In file mode (a config file at
 `config/jumpmaster.config.json`) the config sections below are read-only: edit the file and run
 `jumpmaster ctl config reload`, or adopt it ([Config as code](install.md#config-as-code)).
 
-## Zones
+## Projects
 
-A zone is one project: one repository Jumpmaster works on. `/zones` lists them with their mode,
+A zone is one project: one repository Jumpmaster works on. Projects, `/projects`, lists them with their mode,
 stack, egress, accounts, last drop, doctor fails and anything a zone needs, with **Pause**,
 **Resume** and **Observe** buttons and a **GitHub** link for each. `ctl zones list` prints the
 same.
 
 ### Add a project
 
-**Add a project** (`/zones/new`, also on home) is the wizard's project step: name the repository,
+**Add a project** (`/projects/new`, also on home) is the wizard's project step: name the repository,
 press **Detect**, review the proposed **Stack** and **Checks (gates) every change must pass**,
 pick the **Accounts**, and **Create the project**. Detection reads only the default branch's root
 and `.github/workflows/`, and writes nothing. A new project is a guarded change: its code will run
@@ -35,7 +35,7 @@ goals). Adding the same id again is refused until you choose to resume it: the p
 
 ### Edit a zone
 
-The zone page, `/zones/<zone>`, has a section per concern, each with its own **Save**:
+The zone page, `/projects/<zone>`, has a section per concern, each with its own **Save**:
 
 - **Project**: the ready and retry labels and the open pull requests to take over. The repository
   can't change: remove the zone and add a new one. Renaming the ready label to one already on many
@@ -106,7 +106,7 @@ raised again until the item parks again.
 
 ### Stop managing a zone
 
-**Stop managing** on the zone's row in the Zones list, or near the top of its page
+**Stop managing** on the zone's row in the Projects list, or near the top of its page
 (`ctl zones remove <zone>`), after one confirmation naming the repository. The zone takes no new
 work and goes to observe at once; it is removed as soon as it is drained, with no further visit
 (the server checks every few seconds, and after a restart too). Until then it shows as
@@ -380,7 +380,7 @@ revert that would set a zone's `image` is refused from the browser: use
 
 ## The GitHub page
 
-Each zone has a GitHub page, `/zones/<zone>/github`. It never writes to GitHub: it reads the
+Each zone has a GitHub guide, the GitHub section of its Setup page, `/projects/<zone>/setup#github`. It never writes to GitHub: it reads the
 repository with the author token and gives you links and generated files.
 
 - **Which accounts**: two-bot or starter, recommended from the repository's owner and visibility.
@@ -676,9 +676,9 @@ collaborator invitations accepted and their tokens, and your own Claude token fr
    its account recommendation; add the first repository; import the ruleset file and commit the
    CODEOWNERS text from the GitHub page; create the labels from the doctor; run the doctor until it
    shows no fail.
-3. **First issue.** File the first issue from the zone's New issue page (`/zones/<zone>/issues/new`), and wait for its pull request
+3. **First issue.** File the first issue from the zone's New issue page (`/projects/<zone>/issues/new`), and wait for its pull request
    to merge.
-4. **Change a running zone.** Pause the zone on Zones; on its page, change a gate's timeout in
+4. **Change a running zone.** Pause the zone on Projects; on its page, change a gate's timeout in
    **Stack** and save; resume it. The next drop uses the new timeout, with no restart.
 5. **Rotate a token.** Under System, Credentials, replace the author token with a new one; revoke
    the old one on GitHub once the page no longer says a running drop carries it.

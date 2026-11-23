@@ -188,7 +188,7 @@ const TABLE: Record<string, Rule> = {
         }
       : docs(check),
   'zone.mode': (_c, ctx) =>
-    ctx.pages.zones ? app('Open the zones', PROJECTS_HREF) : app('Open home (zone modes)', '/'),
+    ctx.pages.zones ? app('Open Projects', PROJECTS_HREF) : app('Open home (zone modes)', '/'),
   // The zone page's sections (Task 11): Stack, Egress, Merging, and Advanced for the rest.
   'zone.preset': zoneSection('stack', 'preset'),
   'zone.services': zoneSection('stack', 'services'),
