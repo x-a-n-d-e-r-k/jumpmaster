@@ -13,7 +13,7 @@
 //
 // Secrets: the token goes only in the PRIVATE-TOKEN header, a redirect is never followed, and no
 // error carries the token, a redirect's Location, the request headers or a fetch failure's cause.
-import { stripTrailingSlashes } from '@jumpmaster/protocol';
+import { isGitLabProjectPath, stripTrailingSlashes } from '@jumpmaster/protocol';
 import {
   type BlockedByList,
   type BranchRulesRead,
@@ -53,27 +53,6 @@ export class GitLabForgeError extends Error {
     this.name = 'GitLabForgeError';
     this.status = status;
   }
-}
-
-/** One path segment of a GitLab namespace or project. */
-const PATH_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/;
-/** A token's well-known prefix: a token in the path slot would end up in every request URL. */
-const TOKEN_PREFIX = /^(gl[a-z]{1,10}-|gh[spuor]_|github_pat_)/i;
-
-/** `group[/sub...]/project`, with no token-looking segment. */
-export function isGitLabProjectPath(s: string): boolean {
-  if (typeof s !== 'string') return false;
-  const parts = s.split('/');
-  return (
-    parts.length >= 2 &&
-    parts.every(
-      (p) =>
-        PATH_SEGMENT.test(p) &&
-        !/\.(git|atom)$/i.test(p) &&
-        !p.endsWith('.') &&
-        !TOKEN_PREFIX.test(p),
-    )
-  );
 }
 
 /** The most pages a list follows: 1,000 pages of 100 is far past any project this serves. */
@@ -292,7 +271,7 @@ export class GitLabForge implements Forge {
     return hit ? { number: hit.iid } : null;
   }
 
-  /** `stateReason` has no GitLab counterpart and is dropped. */
+  /** `stateReason` has no GitLab counterpart and is dropped; a patch with nothing else sends nothing. */
   async updateIssue(
     number: number,
     patch: { title?: string; body?: string; state?: 'closed' | 'open'; stateReason?: 'completed' },
@@ -301,6 +280,8 @@ export class GitLabForge implements Forge {
     if (patch.title !== undefined) body.title = patch.title;
     if (patch.body !== undefined) body.description = patch.body;
     if (patch.state !== undefined) body.state_event = patch.state === 'closed' ? 'close' : 'reopen';
+    // Nothing to change (an empty patch, or only `stateReason`): GitLab would refuse an empty PUT.
+    if (Object.keys(body).length === 0) return;
     await this.request(`updating issue ${number}`, 'PUT', `/issues/${iid(number)}`, body);
   }
 

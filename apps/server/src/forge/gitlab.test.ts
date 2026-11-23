@@ -183,6 +183,15 @@ describe('writes', () => {
     expect(gl.requests.at(-1)?.body).toEqual({ title: 'new', description: 'new body' });
   });
 
+  test('updateIssue with nothing GitLab can apply sends no request', async () => {
+    const { gl, forge } = setup();
+    gl.seedIssue({ iid: 3, title: 'old', description: 'old body' });
+    await forge.updateIssue(3, {});
+    await forge.updateIssue(3, { stateReason: 'completed' });
+    expect(gl.requests).toEqual([]);
+    expect(gl.issue(3)).toMatchObject({ title: 'old', description: 'old body', state: 'opened' });
+  });
+
   test('setLabels adds and removes in one request', async () => {
     const { gl, forge } = setup();
     gl.seedIssue({ iid: 4, title: 'x', labels: ['keep', 'drop'] });
@@ -391,6 +400,132 @@ describe('secrets', () => {
   });
 });
 
+describe('edges, through an injected fetch', () => {
+  type Reply = { status?: number; body?: string; headers?: Record<string, string> };
+  const stubbed = (replies: Reply[] | ((url: string) => Reply), opts = {}) => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    const stub = (async (url: string | URL | Request, init: RequestInit = {}) => {
+      calls.push({ url: String(url), init });
+      const r = typeof replies === 'function' ? replies(String(url)) : replies.shift();
+      if (!r) throw new Error('no more replies');
+      return new Response(r.body ?? '', { status: r.status ?? 200, headers: r.headers });
+    }) as typeof fetch;
+    const forge = new GitLabForge(GITLAB, PROJECT.path, AGENT, { fetch: stub, ...opts });
+    return { forge, calls };
+  };
+  const issue = (n: number) => ({
+    iid: n,
+    title: `t${n}`,
+    description: '',
+    state: 'opened',
+    created_at: '2026-01-01T00:00:00Z',
+  });
+
+  test('requestTimeoutMs passes an abort signal; without it there is none', async () => {
+    const reply = () => ({ body: JSON.stringify({ default_branch: 'main' }) });
+    const timed = stubbed(reply, { requestTimeoutMs: 5000 });
+    await timed.forge.getDefaultBranch();
+    expect(timed.calls[0]?.init.signal).toBeInstanceOf(AbortSignal);
+    const untimed = stubbed(reply);
+    await untimed.forge.getDefaultBranch();
+    expect(untimed.calls[0]?.init.signal).toBeUndefined();
+  });
+
+  test('a request that outlives requestTimeoutMs fails without the token', async () => {
+    const stub = ((_url: string | URL | Request, init: RequestInit = {}) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(init.signal?.reason));
+      })) as typeof fetch;
+    const forge = new GitLabForge(GITLAB, PROJECT.path, AGENT, {
+      fetch: stub,
+      requestTimeoutMs: 10,
+    });
+    const err = (await forge.getDefaultBranch().catch((e: unknown) => e)) as Error;
+    expect(err.message).toMatch(/network error/);
+    expect(err.message).not.toContain(AGENT);
+  });
+
+  test('a response that is not JSON is an error', async () => {
+    const { forge } = stubbed([{ body: '<html>' }]);
+    await expect(forge.getDefaultBranch()).rejects.toThrow(/not JSON/);
+  });
+
+  test('a list response that is not an array is an error', async () => {
+    const { forge } = stubbed([{ body: '{}' }]);
+    await expect(forge.listLabels()).rejects.toThrow(/not a list/);
+  });
+
+  test('a non-numeric or non-increasing x-next-page ends the list', async () => {
+    for (const next of ['abc', '1', '-2']) {
+      const { forge, calls } = stubbed([
+        { body: JSON.stringify([issue(1)]), headers: { 'x-next-page': next } },
+      ]);
+      expect(await forge.listOpenIssues()).toHaveLength(1);
+      expect(calls).toHaveLength(1);
+    }
+  });
+
+  test('a list that never ends stops at the page cap', async () => {
+    const { forge, calls } = stubbed((url) => {
+      const page = Number(new URL(url).searchParams.get('page'));
+      return { body: '[]', headers: { 'x-next-page': String(page + 1) } };
+    });
+    await expect(forge.listLabels()).rejects.toThrow(/more than 1000 pages/);
+    expect(calls).toHaveLength(1000);
+  });
+
+  test('a project with no default branch is an error', async () => {
+    const { forge } = stubbed([{ body: '{}' }, { body: JSON.stringify({ default_branch: '' }) }]);
+    await expect(forge.getDefaultBranch()).rejects.toThrow(/no default branch/);
+    await expect(forge.getDefaultBranch()).rejects.toThrow(/no default branch/);
+  });
+
+  test('a user with no username is an error, and a failed viewerLogin is not cached', async () => {
+    const { forge, calls } = stubbed([
+      { body: '{}' },
+      { status: 500 },
+      { body: JSON.stringify({ username: 'agent' }) },
+    ]);
+    await expect(forge.viewerLogin()).rejects.toThrow(/no username/);
+    await expect(forge.viewerLogin()).rejects.toThrow(/HTTP 500/);
+    expect(await forge.viewerLogin()).toBe('agent');
+    expect(await forge.viewerLogin()).toBe('agent');
+    expect(calls).toHaveLength(3);
+  });
+
+  test('an issue number that is not a positive integer is refused with no request', async () => {
+    const { forge, calls } = stubbed([]);
+    for (const n of [0, -1, 1.5, Number.NaN])
+      await expect(forge.getIssue(n)).rejects.toThrow(/positive integer/);
+    expect(calls).toEqual([]);
+  });
+
+  test('the newest note wins by created_at, then by the higher id', async () => {
+    const note = (id: number, created_at: string) => ({
+      id,
+      body: 'x <!-- m -->',
+      system: false,
+      author: { username: 'agent' },
+      created_at,
+    });
+    const user = { body: JSON.stringify({ username: 'agent' }) };
+    const byTime = stubbed([
+      user,
+      {
+        body: JSON.stringify([note(9, '2026-01-01T00:00:00Z'), note(2, '2026-02-01T00:00:00Z')]),
+      },
+    ]);
+    expect(await byTime.forge.findIssueCommentByMarker(1, '<!-- m -->')).toEqual({ id: 2 });
+    const byId = stubbed([
+      user,
+      {
+        body: JSON.stringify([note(2, '2026-01-01T00:00:00Z'), note(9, '2026-01-01T00:00:00Z')]),
+      },
+    ]);
+    expect(await byId.forge.findIssueCommentByMarker(1, '<!-- m -->')).toEqual({ id: 9 });
+  });
+});
+
 describe('constructor', () => {
   const refused = (base: string, path: string, secret: string) => {
     let err: unknown;
@@ -421,6 +556,20 @@ describe('constructor', () => {
   test('refuses a token passed as the path', () => {
     refused(GITLAB, OTHER, OTHER);
     refused(GITLAB, `group/${OTHER}`, OTHER);
+  });
+
+  test('refuses the path shapes the zone config refuses', () => {
+    refused(GITLAB, 'group/project.git', 'project.git');
+    refused(GITLAB, 'group/project.atom', 'project.atom');
+    refused(GITLAB, '_acme/app', '_acme');
+    refused(GITLAB, 'acme/app-', 'app-');
+  });
+
+  test('accepts a path whose segment merely starts like a token prefix', () => {
+    expect(() => new GitLabForge(GITLAB, 'global-infra/app', AGENT)).not.toThrow();
+    expect(() => new GitLabForge(GITLAB, 'acme/glue-service', AGENT)).not.toThrow();
+    expect(() => new GitLabForge(GITLAB, 'glue-team/svc', AGENT)).not.toThrow();
+    expect(() => new GitLabForge(GITLAB, 'acme/glass-ui', AGENT)).not.toThrow();
   });
 
   test('accepts a trailing slash on the base URL', async () => {
