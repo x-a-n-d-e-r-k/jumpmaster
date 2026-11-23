@@ -23,6 +23,7 @@ import {
 } from './links.js';
 import {
   badge,
+  dismissAllForm,
   escapeHtml,
   MODE_LABELS,
   PROJECTS_HREF,
@@ -510,7 +511,7 @@ function overviewPage(
   ];
   const needsYou = `<section id="needs-you"><h3>Needs you</h3>${
     needs.length ? `<ul>${needs.join('')}</ul>` : '<p class="empty">Nothing needs you.</p>'
-  }</section>`;
+  }${briefings.length > 0 ? dismissAllForm(id, briefings, all) : ''}</section>`;
 
   const recent = db
     .prepare(

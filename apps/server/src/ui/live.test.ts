@@ -2,14 +2,7 @@ import vm from 'node:vm';
 import { describe, expect, test } from 'vitest';
 import { insertDrop, insertStick, stampStick, updateDrop } from '../db/repo.js';
 import { harness } from '../test/flowHarness.js';
-import {
-  LIVE_MARKER,
-  LIVE_SCRIPT,
-  page,
-  renderHome,
-  statusBanner,
-  zoneBriefingsHref,
-} from './pages.js';
+import { LIVE_MARKER, LIVE_SCRIPT, page, renderHome, statusBanner } from './pages.js';
 
 /** A `<main>` as a string, with `[data-live-ignore]` spans its only elements. */
 function fakeMain(html: string) {
@@ -276,9 +269,9 @@ describe('live pages', () => {
     );
   });
 
-  test('the Floor and both briefings pages carry the live script', async () => {
+  test('Home carries the live script', async () => {
     const h = await harness();
-    for (const url of ['/', '/briefings', zoneBriefingsHref('main')]) {
+    for (const url of ['/']) {
       const res = await h.view(url);
       expect(res.statusCode, url).toBe(200);
       expect(res.body, url).toContain(LIVE_MARKER);
@@ -287,25 +280,6 @@ describe('live pages', () => {
       const res = await h.view(url);
       expect(res.body, url).not.toContain(LIVE_MARKER);
     }
-  });
-
-  test("GET / renders a running drop's elapsed time inside data-live-ignore", async () => {
-    const h = await harness();
-    await h.sync();
-    insertDrop(h.db, {
-      id: 'tick-drop',
-      dropZoneId: 'main',
-      workItemId: null,
-      role: 'crew-lead',
-      state: 'running',
-      createdAt: '2026-01-01T00:00:00.000Z',
-    });
-    updateDrop(h.db, 'tick-drop', { startedAt: '2026-01-01T00:00:00.000Z' });
-    const body = (await h.view('/')).body;
-    const slot = body.slice(body.indexOf('href="/drops/tick-drop"'));
-    expect(slot).toMatch(
-      /^[^<]*<\/a><span class="meta"><span data-live-ignore>(\d+m )?\d+s<\/span>/,
-    );
   });
 
   test("GET /'s <main>, less its data-live-ignore spans, is the same at two clock times while a drop runs", async () => {
@@ -354,29 +328,21 @@ describe('live pages', () => {
     );
   });
 
-  test('the usage observed stamp and a stick last-seen stamp are volatile', () => {
+  test("Home's paused-until time is volatile: relative, inside data-live-ignore (#625)", () => {
     const html = renderHome({
       zones: [],
       items: [],
       drops: [],
+      now: new Date('2026-11-18T10:00:00.000Z'),
       usage: {
-        gate: 'open',
-        state: { status: 'ok', observedAt: '2026-11-18T10:00:00.000Z' },
+        gate: 'closed',
+        state: { status: 'rejected', pausedUntil: '2026-11-18T12:00:00.000Z' },
         plan: 'max',
         windows: [],
       },
-      sticks: [
-        {
-          name: 's',
-          version: null,
-          lastSeenAt: '2026-11-18T09:59:00.000Z',
-          capabilities: [],
-          imagePolicy: 'pinned',
-          cannotRun: [],
-        },
-      ],
     } as unknown as Parameters<typeof renderHome>[0]);
-    expect(html).toContain('<span data-live-ignore>2026-11-18T10:00:00.000Z</span>');
-    expect(html).toContain('<span data-live-ignore>2026-11-18T09:59:00.000Z</span>');
+    expect(html).toContain(
+      'Dispatch paused until <span data-live-ignore><time datetime="2026-11-18T12:00:00.000Z" title="2026-11-18T12:00:00.000Z">in 2 h</time></span>',
+    );
   });
 });

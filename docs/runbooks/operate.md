@@ -94,12 +94,13 @@ The mode is runtime state, separate from the config: a config change never flips
 These act on one zone. The [kill switch](#kill-switch) (`ctl kill`, `ctl unkill`) stops every
 zone at once and, for zones on GitHub Apps, suspends their app installations.
 
-A paused or observing zone's open briefings are held off the floor: they are not listed or counted
-in "Waiting on you" or the status line, and the zone gets one line instead, `<repo>: paused, N
-briefings held`, linking to the zone's briefings (`/briefings?zone=<zone>`, also linked from the
-zone's page). The briefings are unchanged; resuming the zone lists them on the floor again. The
-zone's briefings view can **Dismiss all** of them after a confirmation that states the count
-(`ctl dismiss <zone> <briefing>…` names them). A dismissal records no ruling: whatever the briefing
+A paused or observing zone's open briefings are held off Home: they are not listed or counted
+in **Needs you** or the status line, and the zone gets one line instead, `<repo>: paused, N
+briefings held`, linking to the project's page (`/projects/<zone>`; the old
+`/briefings?zone=<zone>` redirects there). The briefings are unchanged, and the project's
+Overview still lists them under its own **Needs you**; resuming the zone lists them on Home
+again. The project's **Needs you** can **Dismiss all** of them after a confirmation that states
+the count (`ctl dismiss <zone> <briefing>…` names them). A dismissal records no ruling: whatever the briefing
 was about is not ruled on, and nothing is written to GitHub. A dismissed parked briefing is not
 raised again until the item parks again.
 

@@ -210,9 +210,10 @@ td>code:first-child{white-space:nowrap}
 .tile:hover{background:var(--bg-weak-50);text-decoration:none}
 .tile b{font:500 1.25rem/1.75rem var(--font-sans);font-variant-numeric:tabular-nums;color:var(--text-strong-950)}
 .tile span{font-size:.75rem;line-height:1rem;overflow-wrap:anywhere}
-.zone-card .tiles{display:grid;gap:.5rem;grid-template-columns:repeat(4,minmax(0,1fr))}
-.zone-card .tiles .tile{box-shadow:none;background:var(--bg-weak-50);padding:.5rem}
-@media (max-width:420px){.zone-card .tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.needs-list,.project-rows{list-style:none;margin:0;padding:0;display:grid;gap:.5rem}
+.needs-row,.project-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:.375rem;overflow-wrap:anywhere}
+.chip{display:inline-block;padding:0 .5rem;border-radius:999px;font-size:.75rem;line-height:1.25rem;background:var(--bg-weak-50);box-shadow:inset 0 0 0 1px var(--stroke-soft-200);color:var(--text-sub-600)}
+.needs-row[data-kind=check] .chip{color:var(--error-base)}
 .zone-card>h2 a{color:var(--text-strong-950);overflow-wrap:anywhere}
 .card-state{margin-left:auto;font:500 .6875rem/1rem var(--font-sans);letter-spacing:.06em;text-transform:uppercase;color:var(--text-soft-400)}
 .zone-card[data-state=needs-you]{box-shadow:var(--shadow-xs),inset 0 0 0 1px var(--warning-light),inset 4px 0 0 var(--warning-base)}
