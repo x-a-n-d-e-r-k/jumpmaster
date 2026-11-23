@@ -1,3 +1,4 @@
+import { RoleSchema } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
 import type { z } from 'zod';
 import { DropZoneObject, EditableSchema, IDENTITIES } from '../config.js';
@@ -54,6 +55,12 @@ function derivedKind(s: z.ZodType): FlagKind {
       return 'select';
     case 'array':
       return defOf(def.element as z.ZodType).type === 'string' ? 'list' : 'elsewhere';
+    case 'record':
+      // A string for each value of an enum: one text input per key.
+      return defOf(def.keyType as z.ZodType).type === 'enum' &&
+        defOf(def.valueType as z.ZodType).type === 'string'
+        ? 'record'
+        : 'elsewhere';
     default:
       return 'elsewhere';
   }
@@ -114,6 +121,17 @@ describe('kinds, options and bounds from the schema', () => {
     expect(FLAGS.find((f) => f.path === 'usage.probeJitterSeconds')?.elsewhere).toBe(
       'Changed with jumpmaster ctl settings set or in the config file.',
     );
+  });
+
+  test('models is a record: one text input per role, keyed by RoleSchema (#672)', () => {
+    const models = row(zoneRows(), 'models');
+    expect(models.entry.kind).toBe('record');
+    expect(models.keys).toEqual(RoleSchema.options);
+    expect(models.guard).toBe('free');
+    expect(models).toMatchObject({ value: {}, defaultValue: {}, explicit: false });
+    const set = row(zoneRows({ ...minimalZone, models: { implement: 'm1' } }), 'models');
+    expect(set).toMatchObject({ value: { implement: 'm1' }, explicit: true });
+    for (const e of FLAGS) if (e.kind !== 'record') expect(rowOf(e).keys, e.path).toBeUndefined();
   });
 
   test('select rows carry the enum values; other rows carry none', () => {
@@ -289,6 +307,30 @@ describe('reviews on Fable (#605)', () => {
     expect(r.entry.help).toBe(
       'Reviews stop using Fable once its weekly usage reaches this share, so the audit, diagnose and arbitrate drops keep Fable.',
     );
+  });
+});
+
+describe('no setting is stranded (#672)', () => {
+  const zoneEntries = FLAGS.filter((f) => f.path.startsWith(ZONE));
+
+  test('no zone entry says it is changed in the JSON editor or the Advanced section', () => {
+    for (const e of zoneEntries) {
+      expect(e.elsewhere ?? '', e.path).not.toMatch(/json/i);
+      expect(e.elsewhere ?? '', e.path).not.toMatch(/advanced/i);
+    }
+  });
+
+  test('every zone entry is editable unless a Setup section, id or its guard explains why', () => {
+    const SETUP_SECTIONS = ['Project', 'Stack', 'Egress', 'Merging'];
+    for (const e of zoneEntries) {
+      if (e.kind !== 'elsewhere') continue;
+      const section = /(\w+) section/.exec(e.elsewhere ?? '')?.[1] ?? '';
+      const excused =
+        SETUP_SECTIONS.includes(section) ||
+        e.path === 'dropZones[].id' ||
+        ['refused', 'browser-forbidden'].includes(rowOf(e).guard);
+      expect(excused, e.path).toBe(true);
+    }
   });
 });
 

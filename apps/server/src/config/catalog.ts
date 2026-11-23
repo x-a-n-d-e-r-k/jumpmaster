@@ -26,7 +26,8 @@ export type FlagGroup =
   | 'transcripts'
   | 'safety'
   | 'other';
-export type FlagKind = 'bool' | 'number' | 'text' | 'select' | 'list' | 'elsewhere';
+/** 'record': a string for each value of an enum (a zone's `models`), one text input per key. */
+export type FlagKind = 'bool' | 'number' | 'text' | 'select' | 'list' | 'record' | 'elsewhere';
 export type FlagGuard = 'free' | 'guarded' | 'browser-forbidden' | 'refused';
 
 export interface FlagEntry {
@@ -55,6 +56,8 @@ export interface FlagRow {
   guard: FlagGuard;
   /** kind 'select': the enum's values. */
   options?: readonly string[];
+  /** kind 'record': the keys of the record's enum, one input each. */
+  keys?: readonly string[];
   /** kind 'number': from the schema's checks. */
   min?: number;
   max?: number;
@@ -113,7 +116,6 @@ function groupOf(key: string, guard: FlagGuard): FlagGroup {
 type Words = Omit<FlagEntry, 'group'>;
 
 const STACK = 'Changed in the Stack section.';
-const ADVANCED = "Changed in the zone's JSON editor (Advanced section).";
 
 const z_ = (key: string, label: string, help: string, kind: FlagKind, elsewhere?: string) =>
   w(`${ZONE_PREFIX}${key}`, label, help, kind, elsewhere);
@@ -558,8 +560,7 @@ const WORDS: Words[] = [
     'models',
     'Model for each role',
     'A model for each drop role, such as implement or review, in place of the zone model.',
-    'elsewhere',
-    ADVANCED,
+    'record',
   ),
   z_(
     'maxTurns',
@@ -803,6 +804,7 @@ export function flagRows(
       guard: guardOf(entry.path),
       ...(entry.kind === 'select' ? { options: optionsOf(leaf) } : {}),
       ...(entry.kind === 'number' ? bounds(leaf) : {}),
+      ...(entry.kind === 'record' ? { keys: optionsOf(defOf(leaf).keyType as z.ZodType) } : {}),
     };
   });
   return rows.sort(

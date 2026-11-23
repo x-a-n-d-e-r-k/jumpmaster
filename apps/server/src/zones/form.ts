@@ -120,8 +120,8 @@ export function formToZone(fields: Fields): unknown {
 
 /**
  * The field a schema issue belongs to, for this zone (its index in the document), or undefined
- * when the issue is another zone's or the install's. A path the forms do not carry belongs to the
- * Advanced editor.
+ * when the issue is another zone's or the install's. A path the forms do not carry is shown in the
+ * Advanced section, beside the stored zone (it is changed on the advanced settings page).
  */
 export function issueField(path: string, zoneIndex: number): string | undefined {
   const prefix = `dropZones.${zoneIndex}.`;
@@ -153,7 +153,7 @@ export function issueField(path: string, zoneIndex: number): string | undefined 
 
 /**
  * The RFC 7396 merge patch that turns `before` into `after`: changed values, `null` for a removed
- * key at any depth, arrays whole. The Advanced editor sends it, so a deleted key is deleted.
+ * key at any depth, arrays whole. The Setup form sends it, so a cleared field's key is deleted.
  */
 export function toMergePatch(before: unknown, after: unknown): unknown {
   const isObj = (v: unknown): v is Record<string, unknown> =>

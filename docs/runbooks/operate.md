@@ -45,8 +45,9 @@ The zone page, `/projects/<zone>`, has a section per concern, each with its own 
   ([Egress adoption](#egress-adoption)).
 - **Merging**: the accounts (two-bot or starter), CI, the CI deadline, branch rules, the author as
   admin, the read token for review drops, the protected paths and the override approvers.
-- **Advanced**: the zone as JSON, for everything else (models, budgets, crew, `gateCi`); it is
-  checked as the sections are.
+- **Advanced**: a read-only view of the zone as stored, as JSON. Everything the sections above
+  don't carry (`models`, budgets, crew, `gateCi`) is changed on the project's advanced settings
+  page (`/projects/<zone>/flags`, one row per setting) or with `ctl zones set`.
 
 A save is one change to that zone, made against the config revision the page was drawn from: if
 someone changed the config meanwhile, it says so and changes nothing (reload and redo it). It
@@ -54,8 +55,8 @@ applies at the next pass, with no restart; a drop already running keeps the sett
 with. `ctl zones set <zone> <path>=<json>` does the same from a terminal, for example
 `ctl zones set <zone> readyLabel=go`. `ctl zones show <zone>` prints the zone.
 
-**`gateCi`.** Gates run with `CI=true` by default (frozen installs, no watch mode). `"gateCi":
-false` in the Advanced section (or `ctl zones set <zone> gateCi=false`) makes them run with
+**`gateCi`.** Gates run with `CI=true` by default (frozen installs, no watch mode). Turning
+`gateCi` off on the project's advanced settings page (or `ctl zones set <zone> gateCi=false`) makes them run with
 `CI=false`; it sets the variable to `false`, it does not unset it. Upgrade the sticks and the zone
 images before you set `gateCi: false`: an older stick drops the field, so its gates still run with
 `CI=true`.
