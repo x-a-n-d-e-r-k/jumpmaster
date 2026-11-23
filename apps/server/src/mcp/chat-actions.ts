@@ -36,6 +36,7 @@ import {
 } from '../outbox.js';
 import { redactionList } from '../scrub.js';
 import { projectHref } from '../ui/links.js';
+import { projectWords } from '../ui/zone-name.js';
 import { dispatchGate } from '../usage.js';
 import { type ChatToolContext, type ChatToolDef, type Outcome, ok, refused } from './kit.js';
 import { type ChatPrincipal, isChatPrincipal } from './tokens.js';
@@ -84,16 +85,6 @@ const ACTION_WORDS: Record<CardKind, string> = {
   setting: 'Changing a setting',
   goal_change: 'Changing the goals',
 };
-
-/**
- * A refusal's words as a card shows them: the UI says project where the audit's reason code and
- * the tool's answer say zone (issue #629).
- */
-const projectWords = (text: string): string =>
-  text.replace(
-    /\b(Z|z)one(s?)\b/g,
-    (_m, z: string, s: string) => `${z === 'Z' ? 'P' : 'p'}roject${s}`,
-  );
 
 /** A refused card's summary: what was refused and the refusal's reason code, in project words. */
 export function refusedCardSummary(kind: CardKind, detail: string | undefined): string {

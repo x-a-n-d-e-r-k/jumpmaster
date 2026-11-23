@@ -628,6 +628,16 @@ async function createZone(zone, resume, out) {
 </script>`;
 }
 
+/**
+ * A doctor fix as HTML: escaped, with each ctl command (`jumpmaster ctl …`, up to the end of its
+ * sentence) and each API call (`POST /api/…`) set as code, since those keep their own words.
+ */
+const fixHtml = (fix: string): string =>
+  escapeHtml(fix).replace(
+    /\bjumpmaster ctl [^\n;]*?(?=\.(?:\s|$)|[;\n]|$)|\b(?:(?:GET|POST|PUT|PATCH|DELETE) )?\/api\/[^\s()]*[^\s().,;:]/g,
+    (m) => `<code>${m}</code>`,
+  );
+
 function doctorPage(db: Db, zones: readonly ZoneRef[]): string {
   const name = zoneNamer(zones);
   const run = latestDoctorRun(db);
@@ -636,7 +646,7 @@ function doctorPage(db: Db, zones: readonly ZoneRef[]): string {
   const rows = checks
     .map(
       (c) =>
-        `<li class="${c.status}"><strong>${c.status.toUpperCase()}</strong> ${c.zoneId ? name(c.zoneId) : ''} <code>${escapeHtml(c.id)}</code>: ${escapeHtml(c.summary)}${c.status !== 'pass' && c.fix ? `<br><small>Fix: ${escapeHtml(c.id === 'config.file' ? projectWords(c.fix) : c.fix)}</small>` : ''}${c.status !== 'pass' && c.doc ? ` <a href="${escapeHtml(c.doc)}"${linkTarget(c.doc)}>how</a>` : ''}</li>`,
+        `<li class="${c.status}"><strong>${c.status.toUpperCase()}</strong> ${c.zoneId ? name(c.zoneId) : ''} <code>${escapeHtml(c.id)}</code>: ${escapeHtml(c.summary)}${c.status !== 'pass' && c.fix ? `<br><small>Fix: ${fixHtml(c.id === 'config.file' ? projectWords(c.fix) : c.fix)}</small>` : ''}${c.status !== 'pass' && c.doc ? ` <a href="${escapeHtml(c.doc)}"${linkTarget(c.doc)}>how</a>` : ''}</li>`,
     )
     .join('');
   const fails = checks.filter((c) => c.status === 'fail').length;

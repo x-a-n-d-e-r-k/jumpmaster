@@ -53,4 +53,18 @@ describe('projectWords', () => {
       'dropZones.1.id shares JM_ZONE_SECRET_A_<NAME>',
     );
   });
+
+  test('leaves an id shown as a value alone, even an id that is or holds the word zone', () => {
+    expect(projectWords('duplicate zone id: drop-zone')).toBe('duplicate project id: drop-zone');
+    expect(projectWords('duplicate zone id: zone')).toBe('duplicate project id: zone');
+    expect(projectWords('zone zone: preset python needs the lock')).toBe(
+      'project zone: preset python needs the lock',
+    );
+    expect(projectWords('zone ids zone-a and zone share JM_ZONE_SECRET_ZONE_<NAME>')).toBe(
+      'project ids zone-a and zone share JM_ZONE_SECRET_ZONE_<NAME>',
+    );
+    expect(projectWords('a zone id may not be zone_x; not zone')).toBe(
+      'a project id may not be zone_x; not zone',
+    );
+  });
 });

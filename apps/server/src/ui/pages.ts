@@ -63,7 +63,14 @@ import {
 } from './links.js';
 import { STYLE } from './theme.js';
 import { relativeTime } from './time.js';
-import { type ZoneRef, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
+import {
+  projectWords,
+  type ZoneRef,
+  zoneName,
+  zoneNamer,
+  zoneNameText,
+  zoneTextNamer,
+} from './zone-name.js';
 
 export const escapeHtml = (v: unknown): string =>
   String(v)
@@ -2497,7 +2504,7 @@ export function renderDoctor(
       const help =
         c.status === 'pass'
           ? ''
-          : `${c.action ? renderAction(c.action) : ''}${c.fix ? `<pre>${escapeHtml(c.fix)}</pre>` : ''}${c.doc ? `<div>See ${escapeHtml(c.doc)}</div>` : ''}`;
+          : `${c.action ? renderAction(c.action) : ''}${c.fix ? `<pre>${escapeHtml(c.id === 'config.file' ? projectWords(c.fix) : c.fix)}</pre>` : ''}${c.doc ? `<div>See ${escapeHtml(c.doc)}</div>` : ''}`;
       // Ask (#627): a thread focused on this finding of this run.
       const ask = askForm(
         { kind: 'doctor', zoneId: c.zoneId ?? INSTALL_ZONE, ref: c.id },

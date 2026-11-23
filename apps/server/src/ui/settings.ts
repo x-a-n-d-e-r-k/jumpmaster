@@ -60,7 +60,14 @@ import {
   settingId,
 } from './setting-controls.js';
 import { appOptionsFor, CLAUDE_SAVED, forgeGuideFor, guideSection } from './setup.js';
-import { type ZoneRef, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
+import {
+  projectWords,
+  type ZoneRef,
+  zoneName,
+  zoneNamer,
+  zoneNameText,
+  zoneTextNamer,
+} from './zone-name.js';
 
 /**
  * Settings, part one: the Credentials tab (§7.5, §10.3). A page over Task 4's secret routes, with
@@ -831,7 +838,7 @@ function installSection(o: { store: ConfigStore; config: Config; saved?: number 
       ? `<p class="warn restart-pending" role="status"><strong>Restart pending:</strong> ${escapeHtml(status.restartPending.join(', '))} changed since the server started and ${RESTART_NOTE}: run <code>docker compose restart jumpmaster</code>.</p>`
       : '';
   const warnings = status.warnings?.length
-    ? `<div class="warn warnings"><p>The config file was read leniently:</p><ul>${status.warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join('')}</ul></div>`
+    ? `<div class="warn warnings"><p>The config file was read leniently:</p><ul>${status.warnings.map((w) => `<li>${escapeHtml(projectWords(w))}</li>`).join('')}</ul></div>`
     : '';
   const banner = fileMode
     ? fileModeBanner(store)

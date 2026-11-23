@@ -40,6 +40,13 @@ const CHAT_STYLE = `<style>.chat-log{display:flex;flex-direction:column;gap:.75r
 const CHIP_STYLE = `<style>.chip{display:inline-block;margin-left:.5rem;padding:0 .5rem;border-radius:6px;font:500 .75rem/1.5rem var(--font-sans);white-space:nowrap;vertical-align:middle;background:var(--faded-lighter);color:var(--text-sub-600)}</style>`;
 
 /**
+ * A thread's title as the UI shows it. A project-focused thread stored before #629 is titled
+ * "Zone <id>"; it reads "Project <id>", as a new one is stored.
+ */
+const threadTitle = (t: Pick<ChatThread, 'title' | 'focusKind'>): string =>
+  t.focusKind === 'zone' ? t.title.replace(/^Zone /, 'Project ') : t.title;
+
+/**
  * What a focused thread is about, as a chip: the project for `zone`, `<project> · goals` for
  * `goals`, `Briefing <ref>` for `briefing`, `Drop <8-char id>` for `drop`, `Doctor: <check id>`
  * for `doctor`. A zone no longer configured goes by its id; an
@@ -77,7 +84,7 @@ export function renderChatList(
       : `<table><tr><th>Thread</th><th>Updated</th></tr>${threads
           .map(
             (t) =>
-              `<tr><td><a href="/chat/${encodeURIComponent(t.id)}">${codeHtml(t.title)}</a>${focusChip(t, zones)}</td><td>${relativeTime(t.updatedAt, now)}</td></tr>`,
+              `<tr><td><a href="/chat/${encodeURIComponent(t.id)}">${codeHtml(threadTitle(t))}</a>${focusChip(t, zones)}</td><td>${relativeTime(t.updatedAt, now)}</td></tr>`,
           )
           .join('')}</table>`;
   const script = `<script>document.getElementById('new-thread').addEventListener('submit',async(e)=>{e.preventDefault();const r=await jmFetch('/api/chat/threads',{});if(r.ok){const b=await r.json();location.href='/chat/'+encodeURIComponent(b.thread.id);}else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});</script>`;
@@ -333,7 +340,7 @@ export function renderThread(
   const last = messages.reduce((n, m) => Math.max(n, m.seq), 0);
   const busy = messages.some((m) => m.state === 'queued' || m.state === 'running');
   return page(
-    `${CHAT_STYLE}${CHIP_STYLE}${o.panel ? '' : breadcrumb([{ label: 'Chat', href: '/chat' }, { label: codeHtml(t.title) }])}<h2>${codeHtml(t.title)}${focusChip(t, o.zones ?? [])}</h2>` +
+    `${CHAT_STYLE}${CHIP_STYLE}${o.panel ? '' : breadcrumb([{ label: 'Chat', href: '/chat' }, { label: codeHtml(threadTitle(t)) }])}<h2>${codeHtml(threadTitle(t))}${focusChip(t, o.zones ?? [])}</h2>` +
       `<div id="chat" data-thread="${t.id}" data-last="${last}" data-busy="${busy ? '1' : '0'}">` +
       `<div id="messages" class="chat-log" aria-live="polite">${logHtml(messages, cards, cardHtml, busy)}</div>` +
       `<form id="send" class="chat-send"><textarea name="text" maxlength="20000" required placeholder="Ask Jumpmaster" aria-describedby="send-hint"></textarea><small id="send-hint" class="hint">Enter to send, Shift+Enter for a new line</small><button class="primary">Send</button></form>${CONFIRM_DIALOG}</div>` +
@@ -341,7 +348,7 @@ export function renderThread(
       (o.panel ? PANEL_ESCAPE_SCRIPT : ''),
     // A tab title can't hold code: a doctor check's thread (titled by its check id) says so.
     {
-      title: t.focusKind === 'doctor' ? 'Chat: doctor check' : t.title,
+      title: t.focusKind === 'doctor' ? 'Chat: doctor check' : threadTitle(t),
       ...(o.panel ? { panel: true } : {}),
     },
   );

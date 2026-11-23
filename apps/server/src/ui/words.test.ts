@@ -1,8 +1,9 @@
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { raiseBriefing } from '../briefings.js';
 import { recordCard } from '../chat/cards.js';
 import { appendMessage, createThread } from '../chat/store.js';
 import { GUARDED_PATHS, type GuardCtx, REFUSED_PATHS } from '../config/guarded.js';
+import { LEGACY_READY_LABEL } from '../config/ready-label.js';
 import { type ConfigIssue, parseEditable } from '../config.js';
 import { type Drop, insertDrop, setZoneMode, stampStick, type WorkItem } from '../db/repo.js';
 import type { DoctorCheck } from '../doctor/checks.js';
@@ -188,6 +189,13 @@ async function doctorFindings(): Promise<DoctorCheck[]> {
       };
       return w;
     })(),
+    // The legacy ready label, and no labels on the repository: both fixes name a ctl command or
+    // an API path (zone.ready-label, forge.labels).
+    (() => {
+      const w = world({ zone: { readyLabel: LEGACY_READY_LABEL } });
+      w.f.state.labels = [];
+      return w;
+    })(),
     // A doctor drop whose Claude call, service and gate all failed (zone.doctor-drop).
     (() => {
       const w = world();
@@ -233,6 +241,8 @@ const DOCTOR_REACHED = [
   'credential.missing',
   'zone.doctor-drop',
   'config.file',
+  'zone.ready-label',
+  'forge.labels',
 ];
 
 async function seeded(doctor: DoctorCheck[] = []) {
@@ -473,6 +483,66 @@ describe('every rendered page says project and Home', () => {
     expect(doctor).toContain("or set the project's egress.mode to off");
     // The confirmation page lists the starter consequence, naming the project.
     expect(visibleText((await h.view(confirm, { cookie })).body)).toContain('project merlin: ');
+  });
+
+  test('a ctl command and an API path in a doctor fix are set as code on the doctor page', async () => {
+    const { h } = await seeded(await doctorFindings());
+    const html = (await h.view('/setup/doctor')).body;
+    expect(html).toContain('<code>jumpmaster ctl zones set main readyLabel=');
+    expect(html).toContain('<code>POST /api/control/zones/main/labels</code>');
+    expect(offenders(visibleText(html))).toEqual([]);
+  });
+
+  test("the config file's lenient-read warnings on System → Server say project", async () => {
+    const { h } = await seeded();
+    const store = h.store;
+    if (!store) throw new Error('live harness has a store');
+    const v = parseEditable({ dropZones: [fileZone('My_App')] }, { devImages: true });
+    const warnings = v.ok ? (v.warnings ?? []) : [];
+    // Non-vacuous: the validator's own warning says zone.
+    expect(warnings.join('\n')).toMatch(/zone id My_App/);
+    const real = store.status.bind(store);
+    vi.spyOn(store, 'status').mockImplementation(() => ({ ...real(), warnings }));
+    const text = visibleText((await h.view('/system/server')).body);
+    expect(text).toContain('project id My_App is not lower case letters');
+    expect(offenders(text)).toEqual([]);
+  });
+
+  test("the Health page shows the config file's fix in project words", async () => {
+    const issues = invalidFileIssues();
+    const fix = issues.map((i) => `${i.path}: ${i.message}`).join('\n');
+    const { h } = await seeded([
+      { id: 'config.file', zoneId: null, status: 'fail', summary: 'the file is refused', fix },
+      {
+        id: 'forge.labels',
+        zoneId: 'merlin',
+        status: 'fail',
+        summary: 'labels missing',
+        fix: 'POST /api/control/zones/merlin/labels for drop-zone',
+      },
+    ]);
+    const html = (await h.view('/system')).body;
+    const pre = [...html.matchAll(/<pre>([\s\S]*?)<\/pre>/g)].map((m) => m[1]).join('\n');
+    expect(pre).toContain('a starter project requires ciRequired');
+    expect(pre).toContain('duplicate project id: a');
+    expect(pre).not.toMatch(/starter zone|zone id/);
+    // Only the config file's validator prose is translated: another fix stays as written.
+    expect(pre).toContain('POST /api/control/zones/merlin/labels for drop-zone');
+  });
+
+  test('a stored thread titled before the change, "Zone <id>", reads Project <id>', async () => {
+    const { h } = await seeded();
+    const old = createThread(
+      h.db,
+      { title: 'Zone merlin', focus: { kind: 'zone', zoneId: 'merlin', ref: 'merlin' } },
+      h.now(),
+    );
+    const list = visibleText((await h.view('/chat')).body);
+    expect(list).toContain('Project merlin');
+    expect(offenders(list)).toEqual([]);
+    const page = visibleText((await h.view(`/chat/${old.id}`)).body);
+    expect(page).toContain('Project merlin');
+    expect(offenders(page)).toEqual([]);
   });
 
   test('a ctl command inside <code> on a page is not a finding', async () => {
