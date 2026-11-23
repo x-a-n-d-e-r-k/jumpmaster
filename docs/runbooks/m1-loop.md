@@ -255,7 +255,7 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   ruling": do that. Its text is the park reason followed by every reported change in full, at
   most 8,000 characters: each changed gate script as `name: "<old>" → "<new>"` (merge base →
   head), and tool changes with old → new versions where the guard knows them. Rule on
-  `/briefings`, or `ctl rule <briefing> <option id> [note]` (the id is shown beside each option)
+  Home's **Needs you**, or `ctl rule <briefing> <option id> [note]` (the id is shown beside each option)
   over the operator-authenticated control route. While it is open, the briefing is refreshed
   when what it would say changes (a new head judged, a park that became or stopped being fully
   read); the Allow option's id changes with it, so a ruling from a page showing an older version
@@ -269,7 +269,7 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   `pull request not open`. After a failed ruling the item is briefed again once a new head is
   judged; after `briefing out of date` it is briefed again on the next pass, on what it is
   parked on now. With the crew on, a parked briefing is diagnosed once: the diagnosis shows
-  under the why on `/briefings` (and beside the ruling once ruled) and stays while the why is
+  under the why on the briefing's own page (`/briefings/<n>`, linked from Home's **Needs you**) (and beside the ruling once ruled) and stays while the why is
   unchanged; when the why changes (another park reason, or a new head judged) the diagnosis is
   dropped and the briefing is diagnosed again. A moved merge base or a different change list on the same head
   is not covered by the allowance either. Otherwise the allowance is recorded (it
@@ -320,7 +320,7 @@ Start from the M0 config. The zone gains these fields (defaults shown):
 ### Parked briefings: Retry and Close as done
 
 Every parked item raises a parked briefing with three options, plus the allow option above for a
-fully read gate park on the current head. Rule on `/briefings`, or `ctl rule <briefing> <option id>
+fully read gate park on the current head. Rule on Home's **Needs you**, or `ctl rule <briefing> <option id>
 [note]`; the ruling is applied by the next pass.
 
 - **Retry** (`retry`): the item goes back to work and an agent runs it again from where it parked.

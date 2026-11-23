@@ -1445,7 +1445,7 @@ that user (`ls -ln secrets`). Doctor check: `config.uid`.
 
 Jumpmaster watches your Claude usage. Near the limit it runs only finishing work (review, heal,
 resolve) and doctor drops you asked for; at the limit it pauses until the window resets; if a drop runs on extra-usage credits it
-stops dispatch and raises a briefing for you to rule on (`/briefings`). Doctor check: `usage.gate`.
+stops dispatch and raises a briefing for you to rule on (Home's **Needs you**). Doctor check: `usage.gate`.
 
 ## Crew
 
@@ -1473,7 +1473,7 @@ is on, `forge.labels` reports either one missing, and its action creates them.
 - **split:** the issue becomes one or more drop-ready child issues, filed staged (`agent-staged`)
   under objective `triage:#N`. They go through refute and promotion like any crew issue: none
   starts until it is reviewed and promoted.
-- **questions:** the crew needs a decision first. It raises a briefing on `/briefings`; once you
+- **questions:** the crew needs a decision first. It raises a briefing on Home's **Needs you**; once you
   rule on it, triage runs again with your ruling.
 - **not-agent-work:** the issue isn't a task for an agent (a question, a duplicate, work for a
   person). Nothing is filed.
@@ -1494,7 +1494,7 @@ A failed triage, or one replaced because you edited the issue's text, leaves no 
 is built from the outcome, the child numbers, the briefing subject and the reason only: it never
 quotes the issue. Each ends with a hidden marker, so a retry or a restart never posts it twice. In
 an observe-mode zone nothing is written. Jumpmaster doesn't read replies to its comment: answer a
-question on `/briefings`, or edit the issue to have it triaged again.
+question on Home's **Needs you**, or edit the issue to have it triaged again.
 
 ## Troubleshooting by check id
 

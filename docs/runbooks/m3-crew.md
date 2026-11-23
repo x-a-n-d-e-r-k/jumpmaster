@@ -180,7 +180,7 @@ When the attempts run out without a verdict, the issue comes to you with **Promo
 ### 3. Promote by ruling
 
 A passing refute promotes on its own (§4); this is the path with `refutePromotes: false`, and for
-an issue whose refute attempts ran out. Open `/briefings` and rule **Promote** on each refuted
+an issue whose refute attempts ran out. Open Home's **Needs you** and rule **Promote** on each refuted
 issue you agree with, or from a terminal:
 
 ```bash
@@ -368,7 +368,8 @@ this zone's items and that a revoked or expired token gets 401.
   `raise_briefing` (up to 3 per call, options with no effect). They use the crew's own schema and
   checks: objective on the ladder, drop-ready format, no duplicate, a free `maxStaged` slot, zone
   active, kill switch off. Filed issues wait under the staged label for your **Promote** ruling,
-  as crew issues do. Assistant briefings show as "Raised by assistant (MCP)" on `/briefings`,
+  as crew issues do. Assistant briefings show as "Raised by assistant (MCP)" on the briefing's own page
+  (`/briefings/<n>`, linked from Home's **Needs you**),
   under an `mcp:` subject: they can never update a crew or server briefing, and raising one on the
   subject of an open assistant briefing replaces its text.
 - **Ruling on an assistant briefing** checks that its options are the ones you read. The page
@@ -443,7 +444,7 @@ cp -R skills/jumpmaster-intake-existing skills/jumpmaster-intake-idea \
 ```
 
 Then, in a checkout of the zone's repository, ask Claude Code to run the one that fits. None of
-it needs the crew on: each filed issue gets a Promote briefing on `/briefings`, and your Promote
+it needs the crew on: each filed issue gets a Promote briefing on Home's **Needs you**, and your Promote
 ruling starts it. Enabling the crew is a separate, later choice that spends usage (its own cycles
 start then).
 For a quick first issue without the crew, the in-app New issue page (`/zones/<id>/issues/new`) files one
