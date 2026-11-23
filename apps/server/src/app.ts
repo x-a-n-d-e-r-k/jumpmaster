@@ -277,6 +277,10 @@ function usageView(db: Db, config: Config, at: Date): NonNullable<HomeState['usa
 }
 
 const FRAME_ANCESTORS = "frame-ancestors 'none'";
+/** The Ask panel's thread view (#626) may be framed by this origin's own pages, and no other. */
+const FRAME_SELF = "frame-ancestors 'self'";
+/** The replies that are an Ask panel's thread view. */
+const PANEL_REPLIES = new WeakSet<object>();
 const ROUTES = new WeakMap<FastifyInstance, { method: string; url: string }[]>();
 
 /** The routes an app from `createApp` registered (HEAD included, as Fastify adds it). */
@@ -395,11 +399,13 @@ export function createApp(
     const csp = reply.getHeader('content-security-policy');
     const html = String(reply.getHeader('content-type') ?? '').startsWith('text/html');
     if (!html && csp === undefined) return payload;
+    const self = PANEL_REPLIES.has(reply) && reply.statusCode === 200;
+    const policy = self ? FRAME_SELF : FRAME_ANCESTORS;
     reply.header(
       'content-security-policy',
-      csp === undefined ? FRAME_ANCESTORS : `${String(csp)}; ${FRAME_ANCESTORS}`,
+      csp === undefined ? policy : `${String(csp)}; ${policy}`,
     );
-    reply.header('x-frame-options', 'DENY');
+    reply.header('x-frame-options', self ? 'SAMEORIGIN' : 'DENY');
     return payload;
   });
   /** The request's snapshot (taken by the guard). */
@@ -922,22 +928,30 @@ export function createApp(
     ),
   );
 
-  app.get<{ Params: { id: string } }>('/chat/:id', async (req, reply) => {
-    const id = threadIdOf(req.params.id);
-    const thread = id === undefined ? undefined : getThread(deps.db, id);
-    if (!thread) return reply.code(404).type('text/plain').send('not found');
-    return reply.type('text/html; charset=utf-8').send(
-      withCsrf(
-        req,
-        renderThread(thread, listMessages(deps.db, thread.id), listCards(deps.db, thread.id), {
-          zones: cfg(req).dropZones,
-          now: deps.now(),
-          // A pending card's change still waits only while the viewing session can confirm it.
-          ...(deps.config instanceof ConfigStore ? { pendingLive: pendingLiveFor(req) } : {}),
-        }),
-      ),
-    );
-  });
+  // `?panel=1` (#626): the same thread view for the Ask panel, without the page chrome, framable
+  // by this origin's pages only.
+  app.get<{ Params: { id: string }; Querystring: { panel?: string } }>(
+    '/chat/:id',
+    async (req, reply) => {
+      const id = threadIdOf(req.params.id);
+      const thread = id === undefined ? undefined : getThread(deps.db, id);
+      if (!thread) return reply.code(404).type('text/plain').send('not found');
+      const panel = req.query.panel === '1';
+      if (panel) PANEL_REPLIES.add(reply);
+      return reply.type('text/html; charset=utf-8').send(
+        withCsrf(
+          req,
+          renderThread(thread, listMessages(deps.db, thread.id), listCards(deps.db, thread.id), {
+            zones: cfg(req).dropZones,
+            now: deps.now(),
+            ...(panel ? { panel: true } : {}),
+            // A pending card's change still waits only while the viewing session can confirm it.
+            ...(deps.config instanceof ConfigStore ? { pendingLive: pendingLiveFor(req) } : {}),
+          }),
+        ),
+      );
+    },
+  );
 
   // Health (#623): the doctor's latest run, and a store install's zone problems above it.
   app.get(SYSTEM_HREF, async (req, reply) =>

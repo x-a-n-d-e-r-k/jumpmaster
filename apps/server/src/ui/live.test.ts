@@ -65,10 +65,12 @@ function live() {
     contains: (el: unknown) => el === textarea,
     querySelectorAll: (sel: string) => (sel === 'form' ? forms : []),
   };
+  const askPanel = { hidden: true };
   const document = {
     visibilityState: 'visible',
     activeElement: null as unknown,
     querySelector: (sel: string) => (sel === 'main' ? mainEl : null),
+    getElementById: (id: string) => (id === 'ask-panel' ? askPanel : null),
     addEventListener: (ev: string, fn: () => void) => {
       (listeners[ev] ??= []).push(fn);
     },
@@ -105,6 +107,7 @@ function live() {
     calls,
     reload,
     document,
+    askPanel,
     textarea,
     forms,
     listeners,
@@ -163,6 +166,22 @@ describe('LIVE_SCRIPT', () => {
     expect(w.reload.count).toBe(0);
     w.document.activeElement = null;
     expect(w.reload.count).toBe(0);
+    await w.tick();
+    expect(w.reload.count).toBe(1);
+  });
+
+  test('an open Ask panel holds the reload, so a draft in its frame survives (#626)', async () => {
+    const w = live();
+    await w.tick();
+    w.askPanel.hidden = false;
+    // Typing in the panel's frame: the parent sees the IFRAME as the active element.
+    w.document.activeElement = { tagName: 'IFRAME' };
+    w.state.answer = () => Promise.resolve(ok('<main>two</main>'));
+    await w.tick();
+    await w.tick();
+    expect(w.reload.count).toBe(0);
+    w.askPanel.hidden = true;
+    w.document.activeElement = null;
     await w.tick();
     expect(w.reload.count).toBe(1);
   });
