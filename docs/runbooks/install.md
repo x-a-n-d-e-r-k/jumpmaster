@@ -251,12 +251,12 @@ Saving a credential asks for your passphrase again (sudo, good for five minutes)
    (`https://github.com/apps/<slug>/installations/new`); install it and press **Detect** again.
    **Create the project** needs no token either. Then **Find the installations** (step 2.5
    above), and take the ruleset and CODEOWNERS from the zone's GitHub page,
-   `/zones/<zone>/github` (step 5), once the zone exists.
+   `/projects/<zone>/setup#github` (step 5), once the zone exists.
 5. **Doctor** (`/setup/doctor`). **Run the doctor**; see step 6.
 
 ### Step 5: The GitHub page
 
-Each zone has a GitHub page, `/zones/<zone>/github` (the **GitHub** link on Zones and on home). It
+Each zone has a GitHub guide, the GitHub section of its Setup page, `/projects/<zone>/setup#github` (the **GitHub** link on Projects and on home). It
 writes nothing to GitHub: it gives you links and generated files, and you click.
 
 - **Which accounts** and **Create the tokens**: the recommendation and the pre-filled token links.
@@ -325,7 +325,7 @@ under `enforce`. See [Egress](#egress). Doctor checks: `zone.egress`, `zone.doct
 
 ### Step 7: File the first issue from the New issue page
 
-Open the zone's page from **Zones** and follow its **New issue** link, `/zones/<zone>/issues/new`.
+Open the zone's page from **Projects** and follow its **New issue** link, `/projects/<zone>/issues/new`.
 Give the issue a title, the context, acceptance criteria and the tests that prove it, and **File
 the issue**. It is filed on GitHub as a ready issue (`drop-ready`) at once, and the next pass picks
 it up. Submitting twice never files twice. After a filing the page shows the issue's link and a
@@ -1896,9 +1896,9 @@ and run the doctor again. GitHub's rate limit is a warn.
 
 ### `zone.mode`
 
-**Action:** Open the zones (`/zones`).
+**Action:** Open Projects (`/projects`).
 
-The zone is paused or observing: **Resume** on `/zones`, or
+The zone is paused or observing: **Resume** on `/projects`, or
 `docker compose exec jumpmaster jumpmaster ctl resume <zone>`.
 
 ### `zone.ready-label`

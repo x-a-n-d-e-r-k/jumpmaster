@@ -304,6 +304,19 @@ describe('statusOf', () => {
     expect(hrefs).toContain('/projects/main/issues/new');
   });
 
+  test('the paused next step says Projects, not zones, when the projects page is registered (#664)', () => {
+    const s = statusOf(
+      base({
+        zones: [zone({ mode: 'paused' })],
+        pages: { zones: true, settings: true, credentials: true },
+      }),
+      NOW,
+    );
+    expect(s.action?.href).toBe('/projects');
+    expect(s.action?.label).toContain('Projects');
+    expect(s.action?.label).not.toContain('zones');
+  });
+
   test('statusOf returns one headline per state, in priority order, over the fixture table', () => {
     const input = everything();
     const seen: [string, string, string, string | undefined][] = [];

@@ -310,4 +310,14 @@ describe('runbooks after the New issue split (#581)', () => {
     }
     expect(read('install.md')).toContain('/issues/new');
   });
+
+  test('install.md and operate.md give the /projects page paths, not the /zones ones (#664)', () => {
+    for (const f of ['install.md', 'operate.md']) {
+      const text = read(f);
+      expect(text.match(/`\/zones[`\/][^`]*`?/g) ?? [], f).toEqual([]);
+      expect(text, f).toContain('ctl zones');
+    }
+    expect(read('install.md')).toContain('**Action:** Open Projects (`/projects`).');
+    expect(read('install.md')).toContain('**Resume** on `/projects`');
+  });
 });
