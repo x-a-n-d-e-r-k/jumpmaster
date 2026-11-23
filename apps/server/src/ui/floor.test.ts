@@ -17,8 +17,15 @@ import {
   type WorkItemState,
 } from '../db/repo.js';
 import { harness } from '../test/flowHarness.js';
-import { type FloorCounts, floorCounts, listHref } from './floor.js';
-import { type HomeState, renderHome } from './pages.js';
+import {
+  type FailingCheck,
+  type FloorCounts,
+  floorCounts,
+  listHref,
+  type NeedsRow,
+  rankNeeds,
+} from './floor.js';
+import { BOARD_COLUMNS, type HomeState, renderBoard, renderHome } from './pages.js';
 
 const OPERATOR = { authorization: `Bearer ${'o'.repeat(32)}`, host: 'localhost:80' };
 
@@ -51,25 +58,17 @@ test('the floor lists only an active zone’s briefings; a paused zone gets one 
   const h = await twoZones();
   setZoneMode(h.db, 'shadow', 'paused', h.now());
   const home = (await h.view('/')).body;
-  expect(home).toContain('<a href="/briefings?zone=main">octo/demo: 1 waiting</a>');
-  expect(home).not.toContain('octo/shadow: 2 waiting');
-  expect(home).not.toContain('Decide crew:m1 in main?');
+  expect(home).toContain('octo/demo: Decide crew:m1 in main?');
   expect(home).not.toContain('Decide crew:s1 in shadow?');
   expect(home).not.toContain('Decide crew:s2 in shadow?');
-  expect(home).toContain('1 decision waiting');
   expect(home).toContain('Waiting on you: 1 briefing');
   expect(home).toContain(
-    '<a href="/briefings?zone=shadow">octo/shadow: paused, 2 briefings held</a>',
+    '<a class="muted" href="/projects/shadow">octo/shadow: paused, 2 briefings held</a>',
   );
-  // Untouched, and still reachable from that link.
+  // Untouched, and still listed on that project's page.
   expect(listBriefings(h.db, { zoneId: 'shadow', state: 'open' })).toHaveLength(2);
-  const view = (await h.view('/briefings?zone=shadow')).body;
-  expect(view).toContain('Decide crew:s1 in shadow?');
-  expect(view).toContain('Decide crew:s2 in shadow?');
-  expect(view).not.toContain('Decide crew:m1 in main?');
-  expect(view).toContain('Dismiss all 2 briefings of octo/shadow');
-  expect(view).toContain('data-ask="Dismiss 2 briefings of octo/shadow?');
-  expect(view).toContain('data-zone="shadow"');
+  const view = await h.view('/briefings?zone=shadow');
+  expect([view.statusCode, view.headers.location]).toEqual([301, '/projects/shadow']);
 });
 
 test('a zone in observe is collapsed too', async () => {
@@ -77,7 +76,7 @@ test('a zone in observe is collapsed too', async () => {
   setZoneMode(h.db, 'shadow', 'observe', h.now());
   const home = (await h.view('/')).body;
   expect(home).not.toContain('Decide crew:s1 in shadow?');
-  expect(home).toContain('octo/shadow: observe, 2 briefings held');
+  expect(home).toContain('octo/shadow: observing, 2 briefings held');
 });
 
 test('resuming the paused zone lists its briefings on the floor again', async () => {
@@ -85,10 +84,10 @@ test('resuming the paused zone lists its briefings on the floor again', async ()
   setZoneMode(h.db, 'shadow', 'paused', h.now());
   setZoneMode(h.db, 'shadow', 'active', h.now());
   const home = (await h.view('/')).body;
-  expect(home).toContain('<a href="/briefings?zone=shadow">octo/shadow: 2 waiting</a>');
-  expect(home).toContain('<a href="/briefings?zone=main">octo/demo: 1 waiting</a>');
-  expect(home.indexOf('octo/shadow: 2 waiting')).toBeLessThan(home.indexOf('octo/demo: 1 waiting'));
-  expect(home).toContain('3 decisions waiting');
+  expect(home).toContain('octo/shadow: Decide crew:s1 in shadow?');
+  expect(home).toContain('octo/shadow: Decide crew:s2 in shadow?');
+  expect(home).toContain('octo/demo: Decide crew:m1 in main?');
+  expect(home.match(/data-kind="briefing"/g)).toHaveLength(3);
   expect(home).toContain('Waiting on you: 3 briefings');
   expect(home).not.toContain('briefings held');
 });
@@ -224,20 +223,21 @@ test('an open promote_held is a notice: Needs you and the headline count only th
   expect(f.notices.map((b) => b.kind)).toEqual(['promote_held']);
   expect(f.held).toEqual([]);
   const home = (await h.view('/')).body;
-  expect(home).toContain('<a class="tile" data-tile="needs-you" href="/briefings"><b>1</b>');
+  expect(home.match(/data-kind="briefing"/g)).toHaveLength(1);
+  expect(home).toContain('Parked item:2?');
+  expect(home).not.toContain('Hold issue:1');
   expect(home).toContain('Waiting on you: 1 briefing');
   expect(home).not.toContain('Waiting on you: 2 briefings');
-  expect(home).toContain('1 decision waiting');
 });
 
 test('only a promote_held open: Needs you is 0, and the Floor shows no notice count', async () => {
   const h = await oneZone();
   raiseBriefing(h.db, held('main', 'issue:1'), h.now());
   const home = (await h.view('/')).body;
-  expect(home).toContain('<a class="tile" data-tile="needs-you" href="/briefings"><b>0</b>');
+  expect(home).not.toContain('data-kind="briefing"');
   expect(home).not.toContain('Waiting on you: 1 briefing');
   expect(home).not.toContain('Going ahead unless you stop it');
-  expect(home).toContain('Nothing is waiting on you.');
+  expect(home).toContain('Nothing needs you');
 });
 
 test('a promote_held in a paused zone is held with its other briefings, as before', async () => {
@@ -249,7 +249,7 @@ test('a promote_held in a paused zone is held with its other briefings, as befor
   expect(f).toMatchObject({ listed: [], notices: [], held: [{ zoneId: 'main', count: 2 }] });
   const home = (await h.view('/')).body;
   expect(home).toContain('octo/demo: paused, 2 briefings held');
-  expect(home).toContain('<a class="tile" data-tile="needs-you" href="/briefings"><b>0</b>');
+  expect(home).not.toContain('data-kind="briefing"');
 });
 
 test('floorCounts never counts a notice as needs-you, on the card or in the totals', () => {
@@ -385,7 +385,7 @@ describe('floorCounts', () => {
     expect(zoneOf(f, 'A').state).toBe(expected);
   });
 
-  test('a held card reads PAUSED or OBSERVING by mode, after working ones (#495)', () => {
+  test("a held project's row reads its held sentence, PAUSED or OBSERVING by mode, after working ones (#495, #625)", () => {
     const paused = renderHome(
       home({
         zones: [zone('A')],
@@ -394,12 +394,12 @@ describe('floorCounts', () => {
       }),
     );
     expect(paused).toMatch(
-      /data-state="held" data-zone="A">.*?<span class="card-state">PAUSED<\/span>/,
+      /data-state="held" data-zone="A">.*?<span class="state">PAUSED: 0 running, 3 queued, 0 PRs open, 0 merged \(24h\)\.<\/span>/,
     );
     const observing = renderHome(
       home({ zones: [zone('A')], modes: { A: 'observe' }, items: [wi('A', 'ready')] }),
     );
-    expect(observing).toContain('<span class="card-state">OBSERVING</span>');
+    expect(observing).toContain('<span class="state">OBSERVING: 0 running, 1 queued');
     const order = renderHome(
       home({
         zones: [zone('I'), zone('H'), zone('W')],
@@ -531,104 +531,7 @@ test('the merge query reads merges done in the window, with the zone of their it
   ]);
 });
 
-describe('the dashboard', () => {
-  const cardOrder = (html: string) =>
-    [...html.matchAll(/class="card zone-card" data-state="([^"]+)" data-zone="([^"]+)"/g)].map(
-      (m) => `${m[2]}:${m[1]}`,
-    );
-
-  test('cards render needs-you, then blocked, working and idle, whatever the configured order', () => {
-    const html = renderHome(
-      home({
-        zones: [zone('idle'), zone('work'), zone('block'), zone('need')],
-        items: [wi('block', 'parked')],
-        drops: [dr('work', 'running')],
-        briefings: [br('need')],
-      }),
-    );
-    expect(cardOrder(html)).toEqual([
-      'need:needs-you',
-      'block:blocked',
-      'work:working',
-      'idle:idle',
-    ]);
-    expect(html).toContain('Idle: nothing queued or running.');
-  });
-
-  test('a working card shows zero Working counts as 0', () => {
-    const html = renderHome(home({ zones: [zone('A')], drops: [dr('A', 'running')] }));
-    const card = html.slice(html.indexOf('data-zone="A"'));
-    expect(card).toContain('href="/projects/A/work?state=ready"><b>0</b><span>Queued</span>');
-  });
-
-  test('a merge count that failed to load shows "–", never 0', () => {
-    const html = renderHome(home({ zones: [zone('A')], merges24h: undefined }));
-    const tiles = [...html.matchAll(/<a class="tile" data-tile="merged"[^>]*>.*?<\/a>/g)].map(
-      (m) => m[0],
-    );
-    expect(tiles.length).toBeGreaterThan(0);
-    for (const t of tiles) {
-      expect(t).toContain('<b title="unavailable">–</b>');
-      expect(t).not.toContain('>0<');
-    }
-    expect(
-      floorCounts(home({ zones: [zone('A')], merges24h: undefined }), NOW).totals.merged24h,
-    ).toBeNull();
-  });
-
-  test('zone links carry the zone id URL-encoded', () => {
-    const B = zone('a b');
-    const html = renderHome(home({ zones: [zone('A'), B], items: [wi('a b', 'parked')] }));
-    expect(listHref('/activity/work', 'a b', 'parked')).toBe('/projects/a%20b/work?state=parked');
-    expect(html).toContain('<a href="/projects/a%20b/work?state=parked">1 parked</a>');
-    expect(html).toContain('href="/projects/a%20b"');
-    expect(html).toContain('href="/activity/drops?zone=a%20b&amp;state=active&amp;kind=all"');
-    expect(html).toMatch(/data-tile="running" href="\/activity\/drops\?[^"]*kind=all"/);
-    const needs = renderHome(home({ zones: [B], briefings: [br('a b')] }));
-    expect(needs).toContain('<a href="/briefings?zone=a%20b">1 briefing needs you</a>');
-  });
-
-  test('the totals strip links each count to its list', () => {
-    const html = renderHome(home({ zones: [zone('A')] }));
-    const strip = html.slice(
-      html.indexOf('<nav class="totals"'),
-      html.indexOf('</nav>', html.indexOf('<nav class="totals"')),
-    );
-    for (const href of [
-      '/activity/drops?state=active&amp;kind=all',
-      '/activity/work?state=ready',
-      '/activity/work?state=pr_open',
-      '/activity/work?state=done',
-      '/activity/work?state=parked',
-      '/briefings',
-    ])
-      expect(strip).toContain(`href="${href}"`);
-  });
-
-  test('the removed sections are gone, and sticks are collapsed', () => {
-    const html = renderHome(home({ zones: [zone('A')], items: [wi('A', 'ready')], sticks: [] }));
-    for (const h of [
-      '<h2>Work items</h2>',
-      '<h2>Drops</h2>',
-      '<h2>Drop zones</h2>',
-      '<h2>Outbox</h2>',
-      '<h2>Up next</h2>',
-      '<h2>Last rate limit</h2>',
-    ])
-      expect(html).not.toContain(h);
-    expect(html).toContain('<details id="sticks"');
-    expect(html).toContain('<summary>Sticks: 0 live</summary>');
-  });
-
-  test('no zones: no totals strip, and "No project yet"', () => {
-    const html = renderHome(home({ zones: [], setup: { active: false, addProject: true } }));
-    expect(html).not.toContain('class="totals"');
-    expect(html).toContain('No project yet');
-    expect(html).toContain('<a href="/projects/new">Add a project</a>');
-  });
-});
-
-describe('pending guarded changes on the floor (#507)', () => {
+describe('Home (#625)', () => {
   const pending = (over: Partial<Pending> = {}): Pending => ({
     id: 'pend-1',
     sessionIdHash: 'sess-a',
@@ -644,32 +547,94 @@ describe('pending guarded changes on the floor (#507)', () => {
     notes: [],
     ...over,
   });
-  const strip = (html: string) =>
-    html.slice(
-      html.indexOf('<nav class="totals"'),
-      html.indexOf('</nav>', html.indexOf('<nav class="totals"')),
-    );
+  const fail = (zoneId: string, id = 'forge.labels'): FailingCheck => ({
+    zoneId,
+    id,
+    summary: `${id} fails`,
+  });
+  /** Home's Needs you section, start to end. */
+  const needsOf = (html: string) => {
+    const at = html.indexOf('id="waiting-on-you"');
+    return html.slice(at, html.indexOf('</section>', at));
+  };
+  const kinds = (html: string) =>
+    [...needsOf(html).matchAll(/<li class="needs-row" data-kind="([^"]+)">/g)].map((m) => m[1]);
 
-  test('one pending change and no briefings: Needs you = 1', () => {
-    const state = home({ zones: [zone('A')], briefings: [], pending: [{ change: pending() }] });
-    expect(floorCounts(state, NOW).totals.needsYou).toBe(1);
-    expect(floorCounts(home({ zones: [zone('A')], briefings: [] }), NOW).totals.needsYou).toBe(0);
-    expect(strip(renderHome(state))).toContain('<b>1</b><span>Needs you</span>');
+  test('Needs you ranks a failing check, a pending change, a briefing and a parked item in that order, whatever the order given', () => {
+    // Seeded in reverse: the parked item first, the failing check last.
+    const rows: NeedsRow[] = [
+      { kind: 'parked', what: 'p', action: { label: 'Open', href: '/p' } },
+      { kind: 'briefing', what: 'b', action: { label: 'Answer', href: '/b' } },
+      { kind: 'change', what: 'c', action: { label: 'Review and confirm', href: '/c' } },
+      { kind: 'check', what: 'k', action: { label: 'Fix in System', href: '/system' } },
+    ];
+    expect(rankNeeds(rows).map((r) => r.kind)).toEqual(['check', 'change', 'briefing', 'parked']);
+    // Non-vacuous: the insertion order is the reverse of the ranking.
+    expect(rows.map((r) => r.kind)).not.toEqual(['check', 'change', 'briefing', 'parked']);
+    // And as Home renders them, from each source.
+    const html = renderHome(
+      home({
+        zones: [zone('A')],
+        items: [wi('A', 'parked')],
+        briefings: [br('A')],
+        pending: [{ change: pending() }],
+        doctorFails: [fail('A')],
+      }),
+    );
+    expect(kinds(html)).toEqual(['check', 'change', 'briefing', 'parked']);
+    const needs = needsOf(html);
+    expect(needs).toContain('<span class="chip">Failing check</span>');
+    expect(needs).toContain('<span class="chip">Guarded change</span>');
+    expect(needs).toContain('<span class="chip">Briefing</span>');
+    expect(needs).toContain('<span class="chip">Parked</span>');
+    expect(needs).toContain('<a href="/system">Fix in System</a>');
+    expect(needs).toContain('<a href="/config/confirm/pend-1">Review and confirm</a>');
+    expect(needs).toMatch(/<a href="\/briefings\/\d+">Answer<\/a>/);
+    expect(needs).toMatch(/<a href="\/projects\/A\/work\/\d+">Open<\/a>/);
+    // One action link per row (a chat link aside, which only a chat-staged change has).
+    for (const row of needs.match(/<li class="needs-row".*?<\/li>/g) ?? [])
+      expect(row.match(/<a /g)).toHaveLength(1);
   });
 
-  test('a row: the first guarded item, "and N more", expiry and the Review and confirm link', () => {
-    const one = renderHome(
-      home({ zones: [zone('A')], briefings: [], pending: [{ change: pending() }] }),
+  test('failing checks are grouped per project, and only a configured project counts', () => {
+    const html = renderHome(
+      home({
+        zones: [zone('A'), zone('B')],
+        doctorFails: [fail('A', 'one'), fail('B', 'two'), fail('A', 'three'), fail('gone', 'x')],
+      }),
     );
+    const rows = needsOf(html).match(/<li class="needs-row".*?<\/li>/g) ?? [];
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toContain('octo/A: 2 failing checks (one, three)');
+    expect(rows[1]).toContain('octo/B: 1 failing check (two)');
+  });
+
+  test('"Nothing needs you" shows only when every source is empty', () => {
+    const empty = renderHome(home({ zones: [zone('A')] }));
+    expect(needsOf(empty)).toContain('<p class="empty">Nothing needs you</p>');
+    const only: [string, Partial<HomeState>][] = [
+      ['check', { doctorFails: [fail('A')] }],
+      ['change', { pending: [{ change: pending() }] }],
+      ['briefing', { briefings: [br('A')] }],
+      ['parked', { items: [wi('A', 'parked')] }],
+    ];
+    for (const [kind, over] of only) {
+      const html = renderHome(home({ zones: [zone('A')], ...over }));
+      expect(needsOf(html), kind).not.toContain('Nothing needs you');
+      expect(kinds(html), kind).toEqual([kind]);
+    }
+  });
+
+  test('a pending change row: the first guarded item, "and N more", expiry, and the chat it came from; never the patch', () => {
+    const one = renderHome(home({ zones: [zone('A')], pending: [{ change: pending() }] }));
     expect(one).toContain('Turns on the MCP server');
-    expect(one).not.toContain('more</');
     expect(one).toContain('expires in 7 min');
-    expect(one).toContain('<a href="/config/confirm/pend-1">Review and confirm</a>');
     expect(one).not.toContain('from chat:');
+    expect(one).not.toContain('PATCH-ONLY-VALUE-x9');
+    expect(one).not.toContain('secretOnlyInPatch');
     const three = renderHome(
       home({
         zones: [zone('A')],
-        briefings: [],
         pending: [
           {
             change: pending({
@@ -689,55 +654,153 @@ describe('pending guarded changes on the floor (#507)', () => {
     expect(three).toContain('from chat: <a href="/chat/42">Tune &lt;the&gt; zone</a>');
   });
 
-  const tileHref = (html: string) =>
-    /<a class="tile" data-tile="needs-you" href="([^"]*)">/.exec(strip(html))?.[1];
-
-  test('with only a pending change, the Needs you tile links to where the change is listed (#585)', () => {
+  test("a briefing row's time is relative, and a held zone's briefing or a notice is not a row", () => {
     const html = renderHome(
-      home({ zones: [zone('A')], briefings: [], pending: [{ change: pending() }] }),
+      home({
+        zones: [zone('A'), zone('B')],
+        modes: { B: 'paused' },
+        briefings: [br('A'), br('B'), { ...br('A'), kind: 'promote_held' } as Briefing],
+      }),
     );
-    const tile = tileHref(html);
-    expect(tile).not.toBe('/briefings');
-    expect(tile).toBe('#waiting-on-you');
-    const card = html.slice(html.indexOf('id="waiting-on-you"'));
-    expect(html).toContain('id="waiting-on-you"');
-    expect(card).toContain('<a href="/config/confirm/pend-1">Review and confirm</a>');
-    expect(html).not.toContain('PATCH-ONLY-VALUE-x9');
+    expect(kinds(html)).toEqual(['briefing']);
+    expect(needsOf(html)).toContain(`<time datetime="${ago(1)}"`);
+    expect(needsOf(html)).toContain('1 h ago');
   });
 
-  test('with briefings only, the Needs you tile links to /briefings (#585)', () => {
-    const html = renderHome(home({ zones: [zone('A')], briefings: [br('A')] }));
-    expect(strip(html)).toContain('<b>1</b><span>Needs you</span>');
-    expect(tileHref(html)).toBe('/briefings');
-  });
-
-  test('with briefings and a pending change, the tile leads to the card listing both (#585)', () => {
+  test('a project row: name, mode badge, state sentence, New issue and Open; needs-you first', () => {
     const html = renderHome(
-      home({ zones: [zone('A')], briefings: [br('A')], pending: [{ change: pending() }] }),
+      home({
+        zones: [zone('idle'), zone('work'), zone('block'), zone('need')],
+        items: [wi('block', 'parked')],
+        drops: [dr('work', 'running')],
+        briefings: [br('need')],
+      }),
     );
-    expect(strip(html)).toContain('<b>2</b><span>Needs you</span>');
-    expect(tileHref(html)).toBe('#waiting-on-you');
-    const card = html.slice(html.indexOf('id="waiting-on-you"'));
-    expect(card.slice(0, card.indexOf('</section>'))).toContain(
-      '<a href="/config/confirm/pend-1">Review and confirm</a>',
+    const order = [
+      ...html.matchAll(/class="project-row" data-state="([^"]+)" data-zone="([^"]+)"/g),
+    ].map((m) => `${m[2]}:${m[1]}`);
+    expect(order).toEqual(['need:needs-you', 'block:blocked', 'work:working', 'idle:idle']);
+    expect(html).toContain(
+      '<li class="project-row" data-state="idle" data-zone="idle"><a href="/projects/idle">octo/idle</a> <span class="badge ok">active</span> <span class="state">Idle: nothing queued or running.</span> <a href="/projects/idle/issues/new">New issue</a> <a href="/projects/idle">Open</a></li>',
     );
-    expect(card.slice(0, card.indexOf('</section>'))).toContain(
-      '1 decision waiting. <a href="/briefings">',
+    expect(html).toContain(
+      'Needs you: 0 running, 0 queued, 0 PRs open, 0 merged (24h), 1 briefing needs you.',
     );
   });
 
-  test('with nothing waiting, the tile still links to /briefings (#585)', () => {
-    const html = renderHome(home({ zones: [zone('A')], briefings: [] }));
-    expect(tileHref(html)).toBe('/briefings');
+  test('zone links carry the zone id URL-encoded', () => {
+    const B = zone('a b');
+    const html = renderHome(home({ zones: [zone('A'), B], items: [wi('a b', 'parked')] }));
+    expect(listHref('/activity/work', 'a b', 'parked')).toBe('/projects/a%20b/work?state=parked');
+    expect(html).toContain('href="/projects/a%20b"');
+    expect(html).toContain('href="/projects/a%20b/issues/new"');
+    expect(html).toMatch(/href="\/projects\/a%20b\/work\/\d+">Open<\/a>/);
   });
 
-  test('the row never renders a value that is only in the patch', () => {
+  test('Pipeline: five numbers, each linking to Activity filtered to that state', () => {
+    const html = renderHome(home({ zones: [zone('A')] }));
+    const pipeline = html.slice(html.indexOf('id="pipeline"'));
+    const tiles = [
+      ...pipeline.matchAll(
+        /<a class="tile" data-tile="([^"]+)" href="([^"]*)"><b>(\d+)<\/b><span>([^<]+)<\/span>/g,
+      ),
+    ].map((m) => [m[1], m[2], m[4]]);
+    expect(tiles).toEqual([
+      ['ready', '/activity/work?state=ready', 'Ready'],
+      ['running', '/activity/drops?state=active&amp;kind=all', 'Running'],
+      ['in-review', '/activity/work?state=pr_open', 'In review'],
+      ['parked', '/activity/work?state=parked', 'Parked'],
+      ['merged', '/activity/work?state=done', 'Merged (24 h)'],
+    ]);
+  });
+
+  test('the Pipeline numbers equal the counts the Activity board shows for the same state', () => {
+    const zones = [zone('A'), zone('B')];
+    const busy = wi('B', 'ready');
+    const done = wi('A', 'done');
+    const old = wi('B', 'done');
+    const items = [
+      wi('A', 'ready'),
+      wi('A', 'ready'),
+      busy,
+      wi('A', 'in_flight'),
+      wi('B', 'pr_open'),
+      wi('A', 'parked'),
+      wi('B', 'parked'),
+      wi('B', 'parked'),
+      done,
+      old,
+    ];
+    const drops = [{ ...dr('B', 'running'), workItemId: busy.id }, dr('A', 'running')];
+    const merges = [
+      { zoneId: 'A', at: ago(2), workItemId: done.id },
+      { zoneId: 'B', at: ago(30), workItemId: old.id },
+    ];
+    const html = renderHome(home({ zones, items, drops, merges24h: merges }));
+    const board = renderBoard({ zones, items, drops, merges, now: NOW });
+    const pipeline = html.slice(html.indexOf('id="pipeline"'));
+    const shown: Record<string, string | undefined> = {};
+    const counted: Record<string, string | undefined> = {};
+    for (const c of BOARD_COLUMNS) {
+      shown[c] = new RegExp(`data-tile="${c}" href="[^"]*"><b>(\\d+)</b>`).exec(pipeline)?.[1];
+      counted[c] = new RegExp(`data-column="${c}"><h3>[^<]*<span class="count">(\\d+)</span>`).exec(
+        board,
+      )?.[1];
+    }
+    expect(shown).toEqual(counted);
+    // Non-vacuous: every column has its own, nonzero count.
+    expect(shown).toEqual({ ready: '2', running: '2', 'in-review': '1', parked: '3', merged: '1' });
+  });
+
+  test('a merge count that failed to load shows "–", never 0', () => {
+    const html = renderHome(home({ zones: [zone('A')], merges24h: undefined }));
+    const pipeline = html.slice(html.indexOf('id="pipeline"'));
+    expect(pipeline).toContain(
+      '<a class="tile" data-tile="merged" href="/activity/work?state=done"><b title="unavailable">–</b>',
+    );
+  });
+
+  test("no element of class tile remains but Pipeline's, and the removed sections are gone", () => {
     const html = renderHome(
-      home({ zones: [zone('A')], briefings: [], pending: [{ change: pending() }] }),
+      home({
+        zones: [zone('A'), zone('B')],
+        items: [wi('A', 'ready'), wi('B', 'parked')],
+        drops: [dr('A', 'running')],
+        briefings: [br('A')],
+        sticks: [],
+      }),
     );
-    expect(html).toContain('Review and confirm');
-    expect(html).not.toContain('PATCH-ONLY-VALUE-x9');
-    expect(html).not.toContain('secretOnlyInPatch');
+    const at = html.indexOf('id="pipeline"');
+    const outside = html.slice(0, at) + html.slice(html.indexOf('</section>', at));
+    expect(outside).not.toMatch(/class="[^"]*\btiles?\b[^"]*"/);
+    expect(html.slice(at).match(/class="tile"/g)).toHaveLength(5);
+    for (const h of [
+      'class="totals" aria-label="Totals"',
+      'class="card zone-card"',
+      'Running now',
+      '<h2>Crew</h2>',
+      '<h2>Work items</h2>',
+      '<h2>Drops</h2>',
+      '<h2>Up next</h2>',
+      'Overage',
+      '<dt>Gate</dt>',
+    ])
+      expect(html, h).not.toContain(h);
+    // The kill switch stays where it is, until the top-bar slice.
+    expect(html).toContain('<form id="kill">');
+    // Top to bottom: Needs you, Projects, Capacity, Pipeline.
+    const order = ['id="waiting-on-you"', 'id="projects"', 'id="capacity"', 'id="pipeline"'].map(
+      (x) => html.indexOf(x),
+    );
+    expect(order.every((x) => x > -1)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(html).toContain('<title>Jumpmaster: Home</title>');
+  });
+
+  test('no zones: "No project yet", and the Add a project link', () => {
+    const html = renderHome(home({ zones: [], setup: { active: false, addProject: true } }));
+    expect(html).toContain('No project yet');
+    expect(html).toContain('<a href="/projects/new">Add a project</a>');
   });
 });
 
@@ -778,7 +841,7 @@ test('a paused zone that is still configured holds its credits stop briefing (#5
   expect(f.held).toMatchObject([{ zoneId: 'shadow', count: 3 }]);
 });
 
-test('the Floor row of a credits stop on a removed zone leads to a page that lists it (#593)', async () => {
+test('the Home row of a credits stop on a removed zone leads to a page that shows it (#593, #625)', async () => {
   const h = await twoZones();
   for (const zoneId of ['old', '']) {
     raiseBriefing(
@@ -788,26 +851,21 @@ test('the Floor row of a credits stop on a removed zone leads to a page that lis
     );
   }
   const home = (await h.view('/')).body;
-  const rows = [...home.matchAll(/<li><a href="([^"]*)">([^<]*): 1 waiting<\/a><\/li>/g)];
-  const stops = rows.filter((m) => !(m[1] ?? '').includes('zone=main'));
-  expect(stops.map((m) => m[2])).toEqual(expect.arrayContaining(['old', 'All dispatch stopped']));
-  expect(home).toContain('<a href="/briefings?zone=main">octo/demo: 1 waiting</a>');
-  for (const [, href = '', label = ''] of stops) {
-    expect(label).not.toBe('');
-    expect(href).not.toContain('zone=');
-    const res = await h.view(href.replaceAll('&amp;', '&'));
+  const rows = [
+    ...home.matchAll(
+      /<li class="needs-row" data-kind="briefing">.*?([^>]*): Decide credits:stop:d1 in [^<]*<.*?<a href="([^"]*)">Answer<\/a><\/li>/g,
+    ),
+  ];
+  expect(rows.map((m) => (m[1] ?? '').trim()).sort()).toEqual(['All dispatch stopped', 'old']);
+  for (const [, , href = ''] of rows) {
+    expect(href).toMatch(/^\/briefings\/\d+$/);
+    const res = await h.view(href);
     expect(res.statusCode).toBe(200);
-    expect(res.body).toContain('Decide credits:stop:d1 in old?');
-    expect(res.body).toContain('Decide credits:stop:d1 in ?');
-  }
-  const own = listBriefings(h.db, { state: 'open' }).filter((b) => b.zoneId !== 'main');
-  for (const b of own.filter((x) => x.subject.startsWith('credits:stop'))) {
-    const page = await h.view(`/briefings/${b.id}`);
-    expect(page.statusCode).toBe(200);
-    for (const [, href = ''] of page.body.matchAll(/href="(\/briefings[^"]*)"/g)) {
-      const res = await h.view(href.replaceAll('&amp;', '&'));
-      expect(res.statusCode).toBe(200);
+    expect(res.body).toContain('Decide credits:stop:d1 in');
+    // Every briefings link on it lands without a redirect chain.
+    for (const [, link = ''] of res.body.matchAll(/href="(\/briefings[^"]*)"/g)) {
+      const next = await h.view(link.replaceAll('&amp;', '&'));
+      expect(next.statusCode, link).toBe(200);
     }
   }
-  expect((await h.view('/briefings?zone=old')).statusCode).toBe(404);
 });

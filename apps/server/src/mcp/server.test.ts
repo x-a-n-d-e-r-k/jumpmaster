@@ -680,10 +680,10 @@ describe('write tools', () => {
     });
     expect(mine?.options.every((o) => o.effect === 'none')).toBe(true);
 
-    // The briefings page names the assistant, not the crew.
+    // The briefing's page names the assistant, not the crew.
     const page = await app?.inject({
       method: 'GET',
-      url: '/briefings',
+      url: `/briefings/${mine?.id}`,
       headers: { host: HOST, cookie: operatorSession(s.db, t0).cookie },
     });
     expect(page?.body).toContain('Raised by</th><td>assistant (MCP)');
@@ -1008,7 +1008,7 @@ describe('review fixes', () => {
     expect(seen.digest).toMatch(/^[0-9a-f]{16}$/);
     const page = await app?.inject({
       method: 'GET',
-      url: '/briefings',
+      url: `/briefings/${seen.id}`,
       headers: { host: HOST, cookie: operatorSession(s.db, t0).cookie },
     });
     expect(page?.body).toContain(`data-options="${seen.digest}"`);

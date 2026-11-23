@@ -181,7 +181,7 @@ const STEPS: Step[] = [
     (i) => void (i.usage = { gate: 'finishing_only' }),
     `Stopped: drop cd9 ran on usage credits at ${STOP_AT}; nothing new runs until you rule on the credits briefing or the window resets at ${RESET_AT}`,
     'you',
-    '/briefings',
+    '/#waiting-on-you',
   ],
   [
     'usage pause',
@@ -242,7 +242,7 @@ const STEPS: Step[] = [
     (i) => void (i.openBriefings = 0),
     'Waiting on you: 2 briefings',
     'you',
-    '/briefings',
+    '/#waiting-on-you',
   ],
   [
     'paused',
@@ -527,7 +527,7 @@ describe('usage holds (round 2, I1 and I2)', () => {
     );
     expect(s.waitingOn).toBe('you');
     expect(s.since).toBe(STOP_AT);
-    expect(s.action).toEqual({ label: 'Rule on it', href: '/briefings' });
+    expect(s.action).toEqual({ label: 'Rule on it', href: '/#waiting-on-you' });
     expect(s.detail).toContain('Run on credits now');
     expect(s.detail).toContain('Noted');
     expect(s.detail).toContain('reviews included');
@@ -934,7 +934,7 @@ describe('pending guarded changes wait on you as a briefing does (#507)', () => 
   test('briefings and pending changes are both named', () => {
     const s = statusOf(base({ openBriefings: 2, pendingChanges: 1 }), NOW);
     expect(s.headline).toBe('Waiting on you: 2 briefings, 1 guarded change to confirm');
-    expect(s.action?.href).toBe('/briefings');
+    expect(s.action?.href).toBe('/#waiting-on-you');
   });
 });
 
@@ -1012,7 +1012,7 @@ describe('an open goal change waits on Command (#645)', () => {
     );
     const s = await w.status();
     expect(s.headline).toBe('Waiting on you: 1 briefing, 1 goal change to confirm');
-    expect(s.action).toEqual({ label: 'Answer them', href: '/briefings' });
+    expect(s.action).toEqual({ label: 'Answer them', href: '/#waiting-on-you' });
     expect(s.detail).toBe('Work they hold waits for your ruling.');
   });
 

@@ -210,6 +210,10 @@ td>code:first-child{white-space:nowrap}
 .tile:hover{background:var(--bg-weak-50);text-decoration:none}
 .tile b{font:500 1.25rem/1.75rem var(--font-sans);font-variant-numeric:tabular-nums;color:var(--text-strong-950)}
 .tile span{font-size:.75rem;line-height:1rem;overflow-wrap:anywhere}
+.needs-list,.project-rows{list-style:none;margin:0;padding:0;display:grid;gap:.5rem}
+.needs-row,.project-row{display:flex;flex-wrap:wrap;align-items:baseline;gap:.375rem;overflow-wrap:anywhere}
+.chip{display:inline-block;padding:0 .5rem;border-radius:999px;font-size:.75rem;line-height:1.25rem;background:var(--bg-weak-50);box-shadow:inset 0 0 0 1px var(--stroke-soft-200);color:var(--text-sub-600)}
+.needs-row[data-kind=check] .chip{color:var(--error-base)}
 .zone-card .tiles{display:grid;gap:.5rem;grid-template-columns:repeat(4,minmax(0,1fr))}
 .zone-card .tiles .tile{box-shadow:none;background:var(--bg-weak-50);padding:.5rem}
 @media (max-width:420px){.zone-card .tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}

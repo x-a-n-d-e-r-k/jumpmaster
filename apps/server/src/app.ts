@@ -81,7 +81,7 @@ import {
 import { AppManifestStore } from './setup/app-manifest-state.js';
 import { registerGitHubAppInstalledRoutes } from './setup/github-app-installed.js';
 import { registerGitHubAppRoutes } from './setup/github-app-routes.js';
-import { buildStatus } from './status.js';
+import { buildStatus, projectFails } from './status.js';
 import { lastSyncResult } from './sync.js';
 import { transcriptPruned } from './transcripts.js';
 import { registerAuthPages } from './ui/auth-pages.js';
@@ -111,10 +111,8 @@ import {
   LOG_KINDS,
   type LogKind,
   PROJECTS_HREF,
-  pageParams,
   renderBoard,
   renderBriefing,
-  renderBriefings,
   renderDoctor,
   renderDrop,
   renderDropList,
@@ -295,6 +293,7 @@ function stickLine(s: Stick, config: Config): StickLine {
     lastSeenAt: s.lastSeenAt,
     capabilities: s.capabilities,
     imagePolicy: s.imagePolicy,
+    slots: effectiveSlots(s),
     cannotRun: config.dropZones
       .map((z) => ({ zoneId: z.id, missing: missingFor(s, zoneRequirements(z, config)) }))
       .filter((c) => c.missing.length > 0),
@@ -694,47 +693,12 @@ export function createApp(
       now: at,
       usage: usageView(db, config, at),
       pending,
-      crew: config.dropZones.map((z) => crewLine(db, config, z, at)),
+      doctorFails: projectFails(latestDoctorRun(db)?.checks ?? [], config.dropZones),
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });
 
-  // Every open briefing grouped by project, or one zone's paged (`?zone=`: where the floor's lines
-  // and the zone page link, with that zone's bulk dismiss). `per` and `page` never refuse.
-  app.get<{ Querystring: { zone?: string; per?: string; page?: string } }>(
-    '/briefings',
-    async (req, reply) => {
-      const { db } = deps;
-      const config = cfg(req);
-      const zoneId = typeof req.query.zone === 'string' ? req.query.zone : undefined;
-      const zone = zoneId === undefined ? undefined : config.dropZones.find((z) => z.id === zoneId);
-      if (zoneId !== undefined && !zone)
-        return reply.code(404).type('text/plain').send('no such zone');
-      const zones = zone ? [zone] : config.dropZones;
-      const holds = new Map<string, string>();
-      for (const z of zones) {
-        for (const c of listCrewIssues(db, z.id, ['promote_held'])) {
-          if (c.holdUntil) holds.set(`issue:${c.id}`, c.holdUntil);
-        }
-      }
-      const open = listBriefings(db, { state: 'open', ...(zone ? { zoneId: zone.id } : {}) });
-      const html = renderBriefings({
-        open,
-        ...briefingContext(db, config.dropZones, open),
-        pending: pendingDiagnoses(db, config.dropZones, open, deps.now()),
-        // Every ruling, for `Ruling n` references: the rulings themselves are the Log's (#621).
-        rulings: zones.flatMap((z) => listRulings(db, z.id, ALL_RULINGS)),
-        zones: config.dropZones,
-        holds,
-        modes: Object.fromEntries(
-          config.dropZones.map((z) => [z.id, getZoneMode(db, z.id, z.mode)]),
-        ),
-        ...pageParams(req.query),
-        ...(zone ? { zone: { id: zone.id, mode: getZoneMode(db, zone.id, zone.mode) } } : {}),
-      });
-      return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
-    },
-  );
+  // `/briefings` and `/briefings?zone=` redirect to Home's Needs you and the project (#625).
 
   // One briefing, open or not, with its rulings: where `Briefing n` and `ctl briefings` link.
   app.get<{ Params: { id: string } }>('/briefings/:id', async (req, reply) => {

@@ -96,7 +96,7 @@ describe('UI routes', () => {
     );
   });
 
-  test('the home page names an enrolled stick that cannot run an enforce zone', async () => {
+  test("the home page counts each enrolled stick's troopers", async () => {
     const h = await harness({ zone: { egress: { mode: 'enforce' } } });
     insertStick(h.db, { id: 's1', name: 'm3-stick', tokenHash: 'h1', slots: 1 });
     insertStick(h.db, {
@@ -106,12 +106,13 @@ describe('UI routes', () => {
       slots: 1,
       capabilities: ['egress-v1'],
     });
+    // Home's Capacity counts each stick's troopers (#625); the Sticks page says what one lacks.
     const html = (await get(h, '/')).body;
-    expect(html).toMatch(/m3-stick<\/td>.*cannot run octo\/demo: lacks egress-v1/);
-    expect(html).toMatch(/new-stick<\/td>.*all zones/);
+    expect(html).toContain('m3-stick: 0 of 1 troopers busy');
+    expect(html).toContain('new-stick: 0 of 1 troopers busy');
   });
 
-  test('/briefings resolves About and crew keys, and /briefings/<n> shows one briefing (#226)', async () => {
+  test('/briefings/<n> resolves About and crew keys and shows one briefing (#226)', async () => {
     const h = await crewHarness();
     const at = h.now();
     const issue = insertCrewIssue(h.db, {
@@ -138,12 +139,10 @@ describe('UI routes', () => {
       },
       at,
     );
-    const list = await get(h, '/briefings');
-    expect(list.body).toContain('>#224 Push tokens in app mode</a>');
-    expect(list.body).toContain(
+    const one = await get(h, `/briefings/${id}`);
+    expect(one.body).toContain(
       'app-push-token (<a href="https://github.com/octo/demo/issues/224" target="_blank" rel="noopener noreferrer">#224</a>)',
     );
-    const one = await get(h, `/briefings/${id}`);
     expect(one.statusCode).toBe(200);
     expect(one.body).toContain(`id="briefing-${id}"`);
     expect(one.body).toContain('>#224 Push tokens in app mode</a>');
@@ -152,7 +151,7 @@ describe('UI routes', () => {
     expect((await get(h, '/briefings/abc')).statusCode).toBe(404);
   });
 
-  test('/briefings lists open briefings; recorded rulings are on the Log (#621)', async () => {
+  test('Home lists open briefings; recorded rulings are on the Log (#621, #625)', async () => {
     const h = await crewHarness();
     const at = h.now();
     const open = raiseBriefing(
@@ -188,23 +187,19 @@ describe('UI routes', () => {
       at,
     );
     ruleBriefing(h.db, ruled, 'o2', 'not now', at);
-    const res = await get(h, '/briefings');
+    const res = await get(h, `/briefings/${open}`);
     expect(res.statusCode).toBe(200);
-    expect(res.body).toContain('Open &lt;b&gt;question&lt;/b&gt;');
     expect(res.body).toContain(`data-briefing="${open}"`);
-    expect(res.body).not.toContain(`data-briefing="${ruled}"`);
-    expect(res.body).not.toContain('not now');
-    expect(res.body).toContain(
-      '<a href="/projects/main/log?kind=rulings">Rulings for octo/demo</a>',
-    );
     const log = await get(h, '/projects/main/log?kind=rulings');
     expect(log.statusCode).toBe(200);
     expect(log.body).toContain('not now');
     const home = await get(h, '/');
-    expect(home.body).toContain('Waiting on you');
-    expect(home.body).toContain('<a href="/briefings?zone=main">octo/demo: 1 waiting</a>');
-    expect(home.body).not.toContain('Open &lt;b&gt;question&lt;/b&gt;');
-    expect(home.body).toContain('<h2>Crew</h2>');
+    expect(home.body).toContain('<h2>Needs you</h2>');
+    expect(home.body).toContain('octo/demo: Open &lt;b&gt;question&lt;/b&gt;');
+    expect(home.body).toContain(`<a href="/briefings/${open}">Answer</a>`);
+    expect(home.body).not.toContain(`/briefings/${ruled}"`);
+    expect(home.body).not.toContain('not now');
+    expect(home.body).not.toContain('<h2>Crew</h2>');
   });
 
   test('/projects/:id/goals shows the ladder, crew issues and the skipped list from the last sync', async () => {
@@ -578,7 +573,7 @@ describe('doctor fix links (Task 8)', () => {
 });
 
 describe('the status line (Task 12)', () => {
-  test('the home page opens with the status banner and its action link, and titles the page with the headline', async () => {
+  test('the home page opens with its Home heading, then the status banner and its action link (#625)', async () => {
     const h = await harness({ live: true, zone: { protectedPaths: [...DEFAULT_PROTECTED_PATHS] } });
     // A live stick and a parked item whose reason carries markup.
     insertStick(h.db, { id: 'live', name: 'stick-live', tokenHash: 'hl', slots: 1 });
@@ -596,16 +591,16 @@ describe('the status line (Task 12)', () => {
     const status = api.json() as { headline: string; action?: { href: string } };
     expect(status.headline).toBe('1 parked: no CI result: <ci> & friends');
     const home = (await h.view('/')).body;
-    // The status line is the first thing in the page's content, beside the kill switch.
+    // The status line follows the Home heading, beside the kill switch.
     const body = home.slice(home.indexOf('<main id="main">') + '<main id="main">'.length);
     expect(
-      body.startsWith('<div class="floor-head"><div class="status" data-waiting-on="you">'),
+      body.startsWith(
+        '<h2 class="page-h">Home</h2><div class="floor-head"><div class="status" data-waiting-on="you">',
+      ),
     ).toBe(true);
     expect(body).toContain('<strong>1 parked: no CI result: &lt;ci&gt; &amp; friends</strong>');
     expect(body).toContain(`<a href="${status.action?.href}">`);
-    expect(home).toContain(
-      '<title>Jumpmaster: 1 parked: no CI result: &lt;ci&gt; &amp; friends</title>',
-    );
+    expect(home).toContain('<title>Jumpmaster: Home</title>');
     expect(home).not.toContain('<ci>');
     // Redacted where it is built (M5): a reason that quotes a secret value never shows it.
     setWorkItemState(h.db, first?.id as number, 'parked', 'merge refused for author-token');
@@ -673,9 +668,7 @@ describe('the status line (Task 12)', () => {
     expect(home).toContain(
       '<strong>Queued: 1 issue; no stick can run zone octo/demo: no live stick has egress-v1</strong>',
     );
-    expect(home).toContain(
-      '<title>Jumpmaster: Queued: 1 issue; no stick can run zone octo/demo: no live stick has egress-v1</title>',
-    );
+    expect(home).toContain('<title>Jumpmaster: Home</title>');
     expect(home).not.toContain('zone main');
   });
 
@@ -1106,13 +1099,15 @@ describe('/work and /drops list pages (#119)', () => {
     expect(res.body).toBe(text);
   });
 
-  test('the floor (#120): totals and a card per zone, every count linked, no ledgers', async () => {
+  test("Home (#625): Pipeline's five numbers are the Activity board's, each linked; a row per project", async () => {
     const { h, item } = await lists();
     item('main', 'parked');
     item('main', 'parked');
     item('ref', 'ready');
-    const merged = item('main', 'pr_open');
-    drop(h, 'live-ref', 'running', 'ref');
+    item('ref', 'pr_open');
+    const running = item('ref', 'ready');
+    const merged = item('main', 'done');
+    drop(h, 'live-ref', 'running', 'ref', undefined, running.id);
     const at = (hours: number) => new Date(h.now().getTime() - hours * 3_600_000);
     const merge = (key: string, state: 'done' | 'failed', hoursAgo: number) => {
       insertOutbox(h.db, {
@@ -1128,39 +1123,34 @@ describe('/work and /drops list pages (#119)', () => {
       updateOutbox(h.db, key, { state }, at(hoursAgo));
     };
     merge('m-23h', 'done', 23);
-    merge('m-25h', 'done', 25);
     merge('m-failed', 'failed', 1);
     const home = (await h.view('/')).body;
-    const tile = (key: string, scope: string) => {
-      const from = home.indexOf(scope);
-      const m = home
-        .slice(from)
-        .match(new RegExp(`<a class="tile" data-tile="${key}" href="([^"]*)"><b[^>]*>([^<]*)</b>`));
+    const board = (await h.view('/activity')).body;
+    const pipeline = home.slice(home.indexOf('id="pipeline"'));
+    const tile = (key: string) => {
+      const m = pipeline.match(
+        new RegExp(`<a class="tile" data-tile="${key}" href="([^"]*)"><b[^>]*>([^<]*)</b>`),
+      );
       return m ? { href: m[1], n: m[2] } : undefined;
     };
-    expect(tile('running', 'class="totals"')).toEqual({
-      href: '/activity/drops?state=active&amp;kind=all',
-      n: '1',
-    });
-    expect(tile('queued', 'class="totals"')).toEqual({
-      href: '/activity/work?state=ready',
-      n: '1',
-    });
-    expect(tile('parked', 'class="totals"')).toEqual({
-      href: '/activity/work?state=parked',
-      n: '2',
-    });
-    expect(tile('merged', 'class="totals"')).toEqual({ href: '/activity/work?state=done', n: '1' });
-    expect(tile('merged', 'data-zone="main"')).toEqual({
-      href: '/projects/main/work?state=done',
-      n: '1',
-    });
-    expect(tile('running', 'data-zone="ref"')).toEqual({
-      href: '/activity/drops?zone=ref&amp;state=active&amp;kind=all',
-      n: '1',
-    });
-    // The failed merge counts as blocked on main's card; main comes first, then ref.
-    expect(home).toContain('<a href="/projects/main/work?state=parked">2 parked</a>');
+    const column = (key: string) =>
+      board.match(
+        new RegExp(`data-column="${key}"><h3>[^<]*<span class="count">([^<]*)</span>`),
+      )?.[1];
+    const expected = {
+      ready: ['/activity/work?state=ready', '1'],
+      running: ['/activity/drops?state=active&amp;kind=all', '1'],
+      'in-review': ['/activity/work?state=pr_open', '1'],
+      parked: ['/activity/work?state=parked', '2'],
+      merged: ['/activity/work?state=done', '1'],
+    } as const;
+    for (const [key, [href, n]] of Object.entries(expected)) {
+      expect(tile(key), key).toEqual({ href, n });
+      expect(column(key), key).toBe(n);
+      const list = await h.view(href.replaceAll('&amp;', '&'));
+      expect(list.statusCode, href).toBe(200);
+    }
+    // A row per project: the failed merge counts as blocked on main, which comes first.
     expect(home).toContain('1 forge write unknown or failed');
     expect(home.indexOf('data-zone="main"')).toBeLessThan(home.indexOf('data-zone="ref"'));
     expect(home).toContain('data-state="blocked" data-zone="main"');
@@ -1168,13 +1158,12 @@ describe('/work and /drops list pages (#119)', () => {
     expect(home).toContain('<a href="/projects/ref">octo/ref</a>');
     for (const gone of ['<h2>Work items</h2>', '<h2>Drops</h2>', '<h2>Drop zones</h2>'])
       expect(home).not.toContain(gone);
-    expect(home).toMatch(/<details id="sticks"[^>]*><summary>Sticks: \d+ live/);
   });
 
-  test('anonymous: /work and /drops are refused as /briefings is', async () => {
+  test('anonymous: /work and /drops are refused as / is', async () => {
     const { h } = await lists();
     const anon = async (url: string) => (await h.app.inject({ method: 'GET', url })).statusCode;
-    const briefings = await anon('/briefings');
+    const briefings = await anon('/');
     expect(briefings).not.toBe(200);
     expect(await anon('/activity/work')).toBe(briefings);
     expect(await anon('/activity/drops')).toBe(briefings);
@@ -1186,155 +1175,6 @@ describe('/work and /drops list pages (#119)', () => {
     expect(home).toContain('href="/activity/work?state=ready"');
     expect(home).toContain('href="/activity/drops?state=active&amp;kind=all"');
     expect(home).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/activity">Activity<\/a>.*<\/nav>/);
-  });
-});
-
-describe('/briefings grouped by project and paged (#132)', () => {
-  /** The harness zone `main` (octo/demo), plus `ref` and `a b` (which needs encoding). */
-  async function projects() {
-    const h = await harness({
-      extraZones: [
-        { id: 'ref', repo: 'octo/ref' },
-        { id: 'a b', repo: 'octo/spaced' },
-      ],
-    });
-    const raise = (zoneId: string, n: number) => {
-      const ids: number[] = [];
-      for (let i = 1; i <= n; i++)
-        ids.push(
-          raiseBriefing(
-            h.db,
-            {
-              zoneId,
-              kind: 'crew',
-              subject: `crew:${zoneId}-${i}`,
-              decision: `Decide ${zoneId} number ${i}?`,
-              why: 'w',
-              options: [{ id: 'ok', label: 'OK', effect: 'none' }],
-              source: 'crew',
-            },
-            h.now(),
-          ),
-        );
-      return ids;
-    };
-    return { h, raise };
-  }
-  const blocks = (html: string): number => html.match(/data-briefing="/g)?.length ?? 0;
-
-  test('the zone view pages 23 briefings: Next only on page 1, Previous only on the last, clamped', async () => {
-    const { h, raise } = await projects();
-    raise('main', 23);
-    const view = async (q: string) => (await h.view(`/briefings?zone=main${q}`)).body;
-    const one = await view('');
-    expect(blocks(one)).toBe(10);
-    expect(one).toContain('Page 1 of 3');
-    expect(one).toContain('>Next</a>');
-    expect(one).not.toContain('>Previous</a>');
-    expect(one).toContain('Decide main number 23?');
-    const three = await view('&page=3');
-    expect(blocks(three)).toBe(3);
-    expect(three).toContain('Page 3 of 3');
-    expect(three).toContain('>Previous</a>');
-    expect(three).not.toContain('>Next</a>');
-    expect(three).toContain('Decide main number 1?');
-    // The CSRF token differs per session: compare what the pages show.
-    const shown = (html: string) => [
-      ...[...html.matchAll(/data-briefing="(\d+)"/g)].map((m) => m[1]),
-      html.match(/Page \d+ of \d+/)?.[0],
-    ];
-    expect(shown(await view('&page=99'))).toEqual(shown(three));
-    expect(shown(await view('&page=-1'))).toEqual(shown(one));
-    const p2 = await view('&per=20&page=2');
-    expect(blocks(p2)).toBe(3);
-    expect(p2).toContain('Page 2 of 2');
-    expect(p2).toContain('>Previous</a>');
-    expect(p2).not.toContain('>Next</a>');
-  });
-
-  test.each([
-    ['10', 10],
-    ['20', 20],
-    ['50', 50],
-    ['100', 100],
-    ['7', 10],
-    ['abc', 10],
-    ['0', 10],
-    ['1000', 10],
-    [undefined, 10],
-  ])('per=%s shows %i of 120 briefings, on both views', async (per, shown) => {
-    const { h, raise } = await projects();
-    raise('main', 120);
-    const q = per === undefined ? '' : `per=${per}`;
-    for (const url of [`/briefings?${q}`, `/briefings?zone=main&${q}`]) {
-      const res = await h.view(url);
-      expect(res.statusCode).toBe(200);
-      expect(blocks(res.body)).toBe(shown);
-      expect(res.body).toContain(`per=${shown}" aria-current="page">${shown}</a>`);
-    }
-  });
-
-  test('the dismiss form on page 1 of 3 dismisses all 23 of the zone, and says so', async () => {
-    const { h, raise } = await projects();
-    raise('main', 23);
-    raise('ref', 2);
-    const html = (await h.view('/briefings?zone=main&per=10&page=1')).body;
-    expect(html).toContain('Dismiss all 23 briefings of octo/demo');
-    const ids = JSON.parse(
-      (html.match(/<form id="dismiss-all" [^>]*data-ids="([^"]*)"/)?.[1] ?? '[]').replaceAll(
-        '&quot;',
-        '"',
-      ),
-    ) as number[];
-    const session = operatorSession(h.db, h.now());
-    const res = await h.app.inject({
-      method: 'POST',
-      url: '/api/control/zones/main/briefings/dismiss',
-      headers: session.headers,
-      payload: { ids },
-    });
-    expect(res.statusCode).toBe(200);
-    expect(listBriefings(h.db, { zoneId: 'main', state: 'open' })).toEqual([]);
-    expect(listBriefings(h.db, { zoneId: 'ref', state: 'open' })).toHaveLength(2);
-  });
-
-  test('all projects: sections by count, a paused zone collapsed last and not counted', async () => {
-    const { h, raise } = await projects();
-    raise('main', 3);
-    raise('ref', 12);
-    raise('a b', 30);
-    setZoneMode(h.db, 'a b', 'paused', h.now());
-    const res = await h.view('/briefings');
-    expect(res.statusCode).toBe(200);
-    const html = res.body;
-    const at = (id: string) => html.indexOf(`data-zone="${id}"`);
-    expect(at('ref')).toBeLessThan(at('main'));
-    expect(at('main')).toBeLessThan(at('a b'));
-    expect(html).toContain('<details class="project held" data-zone="a b">');
-    expect(html).toContain('<summary>octo/spaced: 30 held while paused</summary>');
-    expect(html).toContain('15 decisions waiting');
-    expect(html).toContain('Show all 12 in octo/ref');
-    expect(html).toContain('href="/briefings?zone=a%20b&amp;per=10"');
-    expect(html).not.toMatch(/zone (main|ref|a b)\b/);
-  });
-
-  test('the floor card holds one counted line per project and no decision text', async () => {
-    const { h, raise } = await projects();
-    raise('main', 2);
-    raise('a b', 3);
-    const home = (await h.view('/')).body;
-    const card = home.slice(home.indexOf('<h2>Waiting on you</h2>'));
-    const list = card.slice(card.indexOf('<ul>'), card.indexOf('</ul>'));
-    expect(list.match(/<li>/g)).toHaveLength(2);
-    expect(list).toContain('<a href="/briefings?zone=a%20b">octo/spaced: 3 waiting</a>');
-    expect(list).toContain('<a href="/briefings?zone=main">octo/demo: 2 waiting</a>');
-    expect(list.indexOf('octo/spaced')).toBeLessThan(list.indexOf('octo/demo'));
-    expect(home).not.toContain('Decide ');
-  });
-
-  test('an unknown zone is still 404, whatever the paging', async () => {
-    const { h } = await projects();
-    expect((await h.view('/briefings?zone=nope&per=20&page=2')).statusCode).toBe(404);
   });
 });
 
@@ -1390,13 +1230,7 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
       createdAt: '2026-01-01T00:00:00.000Z',
     });
     const anchors: string[] = [];
-    for (const url of [
-      '/',
-      '/activity/work',
-      '/activity/drops',
-      '/briefings',
-      '/projects/main/setup',
-    ]) {
+    for (const url of ['/', '/activity/work', '/activity/drops', '/projects/main/setup']) {
       const res = await h.view(url);
       expect(res.statusCode, url).toBe(200);
       anchors.push(...(res.body.match(/<a\b[^>]*>/g) ?? []).map((a) => `${url}: ${a}`));
@@ -1461,7 +1295,7 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
     expect(html).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/system">System<\/a>.*<\/nav>/);
     expect(html).toContain('<a href="/system/sticks" aria-current="page">Sticks</a>');
     const home = (await h.view('/')).body;
-    expect(home).toMatch(/<details id="sticks"[^>]*>.*<a href="\/system\/sticks">.*<\/details>/);
+    expect(home).toMatch(/<div id="sticks">.*<a href="\/system\/sticks">Manage sticks<\/a>/);
   });
 
   test('anonymous: /sticks is refused as /work is', async () => {
@@ -1518,8 +1352,9 @@ describe('route classes (crew chat, #349)', () => {
 
 describe("this session's pending guarded changes under Waiting on you (#507)", () => {
   const OPERATOR = { authorization: `Bearer ${'o'.repeat(32)}`, host: 'localhost:80' };
-  const needsYou = (body: string) => /data-tile="needs-you"[^>]*><b>(\d+)<\/b>/.exec(body)?.[1];
-  const tileHref = (body: string) => /data-tile="needs-you" href="([^"]*)"/.exec(body)?.[1];
+  /** How many guarded-change rows Home's Needs you lists. */
+  const needsYou = (body: string) =>
+    String(body.match(/<li class="needs-row" data-kind="change">/g)?.length ?? 0);
 
   async function staged() {
     const h = await harness({ live: true, zone: { protectedPaths: [...DEFAULT_PROTECTED_PATHS] } });
@@ -1546,11 +1381,8 @@ describe("this session's pending guarded changes under Waiting on you (#507)", (
     expect(mine).toContain('Turns on the MCP server for A');
     expect(mine).toContain(`<a href="/config/confirm/${p.id}">Review and confirm</a>`);
     expect(mine).toContain('expires in 10 min');
-    expect(mine).toContain('1 guarded change to confirm');
     expect(mine).not.toContain('PATCH-SECRET-A');
     expect(needsYou(mine)).toBe('1');
-    // The tile leads to the card that lists A's pending row (#585).
-    expect(tileHref(mine)).toBe('#waiting-on-you');
     const card = mine.slice(mine.indexOf('id="waiting-on-you"'));
     expect(card.slice(0, card.indexOf('</section>'))).toContain(
       `<a href="/config/confirm/${p.id}">Review and confirm</a>`,
@@ -1558,9 +1390,8 @@ describe("this session's pending guarded changes under Waiting on you (#507)", (
     const theirs = (await h.view('/', { cookie: b.cookie })).body;
     expect(theirs).not.toContain('Turns on the MCP server for A');
     expect(theirs).not.toContain(p.id);
-    expect(theirs).not.toContain('guarded change to confirm');
     expect(needsYou(theirs)).toBe('0');
-    expect(tileHref(theirs)).toBe('/briefings');
+    expect(theirs).toContain('Nothing needs you');
   });
 
   test('a control-token request to / lists none', async () => {
@@ -1595,7 +1426,9 @@ describe("this session's pending guarded changes under Waiting on you (#507)", (
     );
     const body = (await h.view('/', { cookie: a.cookie })).body;
     const row = (id: string) =>
-      new RegExp(`<li class="pending-change" data-pending="${id}">.*?</li>`).exec(body)?.[0] ?? '';
+      [...body.matchAll(/<li class="needs-row" data-kind="change">.*?<\/li>/g)]
+        .map((m) => m[0])
+        .find((r) => r.includes(`/config/confirm/${id}"`)) ?? '';
     expect(row(fromChat.id)).toContain(`from chat: <a href="/chat/${th.id}">Tune main</a>`);
     expect(row(fromSettings.id)).toContain('Settings change');
     expect(row(fromSettings.id)).not.toContain('from chat:');
@@ -1712,7 +1545,6 @@ describe('project pages live under /projects (issue #615)', () => {
       '/projects/jm',
       '/projects/jm/setup#github',
       '/projects/jm/goals',
-      '/projects/jm/goals#goal-stub',
       '/projects/jm/issues/new',
       '/projects/jm/flags',
       '/projects/jm/setup',
@@ -2072,7 +1904,6 @@ describe('the Activity board (#622)', () => {
       '/activity/log',
       '/drops/sweep-1',
       `/projects/main/work/${w.issueNumber}`,
-      '/briefings',
       '/system',
     ]) {
       const res = await h.view(url);
@@ -2209,7 +2040,6 @@ describe('the System area (#623)', () => {
     for (const url of [
       '/',
       '/activity',
-      '/briefings',
       '/projects',
       `/projects/${h.zone.id}`,
       `/projects/${h.zone.id}/setup`,

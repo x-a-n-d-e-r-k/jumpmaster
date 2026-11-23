@@ -247,7 +247,7 @@ describe('the zones page', () => {
         t0,
       );
     const page = (await w.get('/projects/main/setup')).body;
-    expect(page).toContain('<a href="/briefings?zone=main">Briefings (2 open)</a>');
+    expect(page).toContain('<a href="/projects/main#needs-you">Briefings (2 open)</a>');
   });
 
   test('a schema issue is rendered beside the field its path names', async () => {
