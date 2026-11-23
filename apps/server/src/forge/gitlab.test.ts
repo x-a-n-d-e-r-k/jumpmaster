@@ -310,7 +310,8 @@ describe('no-op and refusals', () => {
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GitLabUnsupportedError);
     expect((err as Error).message).toContain('merge');
-    await expect(forge.getPull(1)).rejects.toBeInstanceOf(GitLabUnsupportedError);
+    await expect(forge.checksFor('abc')).rejects.toBeInstanceOf(GitLabUnsupportedError);
+    await expect(forge.listReviews(1)).rejects.toBeInstanceOf(GitLabUnsupportedError);
     await expect(forge.repoAccess()).rejects.toBeInstanceOf(GitLabUnsupportedError);
     expect(gl.requests).toEqual([]);
   });
@@ -888,6 +889,487 @@ describe('edges, through an injected fetch', () => {
       },
     ]);
     expect(await byId.forge.findIssueCommentByMarker(1, '<!-- m -->')).toEqual({ id: 9 });
+  });
+});
+
+const MRS = `${API}/merge_requests`;
+const MR_URL = (n: number) => `${GITLAB}/${PROJECT.path}/-/merge_requests/${n}`;
+
+/**
+ * trunk: base {a, gone, old}. agent/one: base → a modified, b added, gone deleted, old renamed.
+ * release: base. agent/two: base → a modified, b added (no rename).
+ */
+function mrRepo(gl: FakeGitLab) {
+  const base = gl.seedCommit({
+    branch: 'trunk',
+    files: { a: '1\n', gone: 'x\n', old: 'same\n' },
+    message: 'base',
+  });
+  gl.seedBranch('agent/one', base);
+  const head = gl.seedCommit({
+    branch: 'agent/one',
+    files: { a: '2\n', b: 'new\n', renamed: 'same\n' },
+    message: 'work',
+  });
+  gl.seedBranch('release', base);
+  gl.seedBranch('agent/two', base);
+  const two = gl.seedCommit({
+    branch: 'agent/two',
+    files: { a: '2\n', b: 'new\n', gone: 'x\n', old: 'same\n' },
+    message: 'two',
+  });
+  return { base, head, two };
+}
+
+/** Mark stored MR `iid` as coming from a fork. */
+function fork(gl: FakeGitLab, iid: number) {
+  const mr = gl.mergeRequest(iid);
+  if (!mr) throw new Error(`no MR ${iid}`);
+  mr.source_project_id = 999;
+}
+
+/** A forge whose every request gets `reply`'s JSON; the calls are recorded. */
+function jsonForge(reply: (url: URL, method: string) => { status?: number; body: unknown }) {
+  const calls: { url: URL; method: string }[] = [];
+  const stub = (async (input: string | URL | Request, init: RequestInit = {}) => {
+    const url = new URL(String(input));
+    const method = init.method ?? 'GET';
+    calls.push({ url, method });
+    const r = reply(url, method);
+    return new Response(JSON.stringify(r.body), {
+      status: r.status ?? 200,
+      headers: { 'content-type': 'application/json' },
+    });
+  }) as typeof fetch;
+  return { forge: new GitLabForge(GITLAB, PROJECT.path, AGENT, { fetch: stub }), calls };
+}
+
+const NEW = { title: 'Agent work', body: 'Closes #1' };
+
+describe('merge requests: findOrCreatePullRequest', () => {
+  test('creates an MR, then reuses it whatever the target, with no second POST', async () => {
+    const { gl, forge } = setup();
+    mrRepo(gl);
+    const made = await forge.findOrCreatePullRequest({ head: 'agent/one', base: 'trunk', ...NEW });
+    expect(made).toEqual({ number: 1, url: MR_URL(1), created: true });
+    expect(gl.mergeRequest(1)).toMatchObject({
+      source_branch: 'agent/one',
+      target_branch: 'trunk',
+      title: 'Agent work',
+      description: 'Closes #1',
+      author: { username: 'agent' },
+    });
+    expect(gl.requests[0]).toMatchObject({
+      method: 'GET',
+      path: MRS,
+      query: { state: 'opened', source_branch: 'agent/one' },
+    });
+
+    gl.requests.length = 0;
+    const again = await forge.findOrCreatePullRequest({ head: 'agent/one', base: 'trunk', ...NEW });
+    expect(again).toEqual({ number: 1, url: MR_URL(1), created: false });
+    const other = await forge.findOrCreatePullRequest({
+      head: 'agent/one',
+      base: 'release',
+      ...NEW,
+    });
+    expect(other).toEqual({ number: 1, url: MR_URL(1), created: false });
+    expect(gl.requests.filter((r) => r.method !== 'GET')).toEqual([]);
+    expect(gl.mergeRequests).toHaveLength(1);
+  });
+
+  test('a 409 race returns the MR that appeared, with no second POST', async () => {
+    let gl: FakeGitLab | undefined;
+    const fetch = hookedFetch(
+      (m, u) => m === 'GET' && u.pathname === MRS,
+      () =>
+        gl?.seedMergeRequest({
+          sourceBranch: 'agent/one',
+          targetBranch: 'trunk',
+          title: 'raced',
+          author: 'other',
+        }),
+    );
+    const s = setup({ fetch });
+    gl = s.gl;
+    mrRepo(gl);
+    const got = await s.forge.findOrCreatePullRequest({
+      head: 'agent/one',
+      base: 'trunk',
+      ...NEW,
+    });
+    expect(got).toEqual({ number: 1, url: MR_URL(1), created: false });
+    expect(gl.requests.filter((r) => r.method === 'POST')).toHaveLength(1);
+    expect(
+      gl.mergeRequests.filter((m) => m.state === 'opened' && m.source_branch === 'agent/one'),
+    ).toHaveLength(1);
+  });
+
+  test('a 409 whose re-read finds nothing throws a GitLabForgeError', async () => {
+    const { forge, calls } = jsonForge((_u, m) =>
+      m === 'POST' ? { status: 409, body: { message: ['exists'] } } : { body: [] },
+    );
+    const err = (await forge
+      .findOrCreatePullRequest({ head: 'agent/one', base: 'trunk', ...NEW })
+      .catch((e: unknown) => e)) as GitLabForgeError;
+    expect(err).toBeInstanceOf(GitLabForgeError);
+    expect(err.status).toBe(409);
+    expect(err.message).not.toContain(AGENT);
+    expect(calls.map((c) => c.method)).toEqual(['GET', 'POST', 'GET']);
+  });
+
+  test('a fork MR for the branch is not reused: a new same-project MR is created', async () => {
+    const { gl, forge } = setup();
+    mrRepo(gl);
+    gl.seedMergeRequest({ sourceBranch: 'agent/one', targetBranch: 'release', title: 'fork' });
+    fork(gl, 1);
+    const made = await forge.findOrCreatePullRequest({ head: 'agent/one', base: 'trunk', ...NEW });
+    expect(made).toEqual({ number: 2, url: MR_URL(2), created: true });
+  });
+
+  test('branch names go URL-encoded in the query, never in the path', async () => {
+    const { forge, calls } = jsonForge(() => ({ body: [] }));
+    await forge.findOpenPullByHead('agent/a b&c=d');
+    const url = calls[0]?.url;
+    expect(url?.pathname).toBe(MRS);
+    expect(url?.search).toContain('source_branch=agent%2Fa+b%26c%3Dd');
+    expect(url?.searchParams.get('source_branch')).toBe('agent/a b&c=d');
+  });
+});
+
+describe('merge requests: getPull', () => {
+  test('open, closed and merged MRs map to PullFacts', async () => {
+    const { gl, forge } = setup();
+    const { head, two } = mrRepo(gl);
+    gl.seedMergeRequest({
+      sourceBranch: 'agent/one',
+      targetBranch: 'trunk',
+      title: 'One',
+      description: null,
+      labels: ['jm:hold', 'agent'],
+      author: 'other',
+    });
+    gl.seedMergeRequest({
+      sourceBranch: 'agent/two',
+      targetBranch: 'release',
+      title: 'Two',
+      description: 'body two',
+    });
+    gl.seedMergeRequest({ sourceBranch: 'agent/two', targetBranch: 'trunk', title: 'Three' });
+    gl.closeMergeRequest(2);
+    gl.markMergeRequestMerged(3);
+
+    expect(await forge.getPull(1)).toEqual({
+      number: 1,
+      title: 'One',
+      state: 'open',
+      merged: false,
+      headSha: head,
+      headRef: 'agent/one',
+      headRepo: PROJECT.path,
+      baseRef: 'trunk',
+      author: 'other',
+      body: '',
+      labels: ['agent', 'jm:hold'],
+    });
+    expect(await forge.getPull(2)).toMatchObject({
+      number: 2,
+      title: 'Two',
+      state: 'closed',
+      merged: false,
+      headSha: two,
+      baseRef: 'release',
+      body: 'body two',
+      author: 'root',
+    });
+    expect(await forge.getPull(3)).toMatchObject({ state: 'closed', merged: true });
+    expect(await forge.getPull(99)).toBeNull();
+    expect(gl.requests.map((r) => r.path)).toEqual([1, 2, 3, 99].map((n) => `${MRS}/${n}`));
+  });
+
+  test('a fork MR is returned with headRepo null; a missing sha gives headSha null', async () => {
+    const { gl, forge } = setup();
+    mrRepo(gl);
+    gl.seedMergeRequest({ sourceBranch: 'agent/one', targetBranch: 'trunk', title: 'f' });
+    fork(gl, 1);
+    expect(await forge.getPull(1)).toMatchObject({ number: 1, headRepo: null });
+    gl.closeMergeRequest(1);
+    (gl.mergeRequest(1) as unknown as { sha: string | null }).sha = null;
+    expect(await forge.getPull(1)).toMatchObject({ headSha: null });
+  });
+
+  test('a number that is not a positive integer is refused unsent, without "issue"', async () => {
+    const { gl, forge } = setup();
+    for (const n of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      for (const p of [forge.getPull(n), forge.listPullFiles(n)]) {
+        const err = (await p.catch((e: unknown) => e)) as Error;
+        expect(err).toBeInstanceOf(GitLabForgeError);
+        expect(err.message).toContain('merge request');
+        expect(err.message).not.toMatch(/issue/i);
+      }
+    }
+    expect(gl.requests).toEqual([]);
+  });
+
+  test('an error other than 404 is a GitLabForgeError with the status and no token', async () => {
+    const { forge } = jsonForge(() => ({ status: 500, body: { message: 'boom' } }));
+    const err = (await forge.getPull(1).catch((e: unknown) => e)) as GitLabForgeError;
+    expect(err).toBeInstanceOf(GitLabForgeError);
+    expect(err.status).toBe(500);
+    expect(err.message).not.toContain(AGENT);
+    expect(JSON.stringify(err)).not.toContain(AGENT);
+  });
+});
+
+describe('merge requests: findOpenPullByHead and listOpenAgentPulls', () => {
+  test('findOpenPullByHead: the open MR, and null for closed, none, or a fork', async () => {
+    const { gl, forge } = setup();
+    mrRepo(gl);
+    gl.seedMergeRequest({ sourceBranch: 'agent/one', targetBranch: 'trunk', title: 'open' });
+    gl.seedMergeRequest({ sourceBranch: 'agent/two', targetBranch: 'trunk', title: 'shut' });
+    gl.closeMergeRequest(2);
+    gl.seedBranch('agent/fork', gl.branchSha('agent/two') as string);
+    gl.seedMergeRequest({ sourceBranch: 'agent/fork', targetBranch: 'trunk', title: 'fork' });
+    fork(gl, 3);
+
+    expect(await forge.findOpenPullByHead('agent/one')).toMatchObject({
+      number: 1,
+      state: 'open',
+      headRef: 'agent/one',
+      headRepo: PROJECT.path,
+    });
+    expect(await forge.findOpenPullByHead('agent/two')).toBeNull();
+    expect(await forge.findOpenPullByHead('agent/none')).toBeNull();
+    expect(await forge.findOpenPullByHead('agent/fork')).toBeNull();
+    expect(gl.requests[0]?.query).toMatchObject({ state: 'opened', source_branch: 'agent/one' });
+  });
+
+  test('listOpenAgentPulls filters by prefix across pages and leaves out forks', async () => {
+    const { gl, forge } = setup();
+    const { base } = mrRepo(gl);
+    for (let i = 0; i < 110; i++) {
+      gl.seedBranch(`agent/n${i}`, gl.branchSha('agent/two') as string);
+      gl.seedMergeRequest({ sourceBranch: `agent/n${i}`, targetBranch: 'trunk', title: `n${i}` });
+    }
+    for (let i = 0; i < 5; i++) {
+      gl.seedBranch(`human/h${i}`, gl.branchSha('agent/two') as string);
+      gl.seedMergeRequest({ sourceBranch: `human/h${i}`, targetBranch: 'trunk', title: `h${i}` });
+    }
+    gl.seedBranch('agent/forked', base);
+    gl.seedCommit({ branch: 'agent/forked', files: { z: '1' }, message: 'z' });
+    const forked = gl.seedMergeRequest({
+      sourceBranch: 'agent/forked',
+      targetBranch: 'trunk',
+      title: 'fork',
+    });
+    fork(gl, forked.iid);
+    const shut = gl.seedMergeRequest({
+      sourceBranch: 'agent/one',
+      targetBranch: 'trunk',
+      title: 'shut',
+    });
+    gl.closeMergeRequest(shut.iid);
+
+    const pulls = await forge.listOpenAgentPulls('agent/');
+    expect(pulls).toHaveLength(110);
+    expect(pulls.every((p) => p.headRef.startsWith('agent/n') && p.state === 'open')).toBe(true);
+    expect(pulls.every((p) => p.headRepo === PROJECT.path)).toBe(true);
+    const pages = gl.requests.filter((r) => r.path === MRS);
+    expect(pages).toHaveLength(2);
+    expect(pages[0]?.query).toMatchObject({ state: 'opened', per_page: '100', page: '1' });
+    expect(pages[1]?.query).toMatchObject({ page: '2' });
+  });
+});
+
+describe('merge requests: listPullFiles', () => {
+  test('maps added, modified, deleted and renamed files, complete when changes_count agrees', async () => {
+    const { gl, forge } = setup();
+    mrRepo(gl);
+    gl.seedMergeRequest({ sourceBranch: 'agent/one', targetBranch: 'trunk', title: 'one' });
+    expect(await forge.listPullFiles(1)).toEqual({
+      files: [
+        { path: 'a' },
+        { path: 'b' },
+        { path: 'gone' },
+        { path: 'renamed', previousPath: 'old' },
+      ],
+      complete: true,
+    });
+    expect(gl.requests.map((r) => r.path).sort()).toEqual([`${MRS}/1`, `${MRS}/1/diffs`]);
+  });
+
+  test('pages more than 100 files', async () => {
+    const { gl, forge } = setup();
+    const base = gl.seedCommit({ branch: 'trunk', files: { a: '1' }, message: 'base' });
+    gl.seedBranch('agent/big', base);
+    const files: Record<string, string> = { a: '1' };
+    for (let i = 0; i < 150; i++) files[`f${String(i).padStart(3, '0')}`] = `${i}\n`;
+    gl.seedCommit({ branch: 'agent/big', files, message: 'big' });
+    gl.seedMergeRequest({ sourceBranch: 'agent/big', targetBranch: 'trunk', title: 'big' });
+    const got = await forge.listPullFiles(1);
+    expect(got.files).toHaveLength(150);
+    expect(got.complete).toBe(true);
+    expect(gl.requests.filter((r) => r.path === `${MRS}/1/diffs`)).toHaveLength(2);
+  });
+
+  test('an overflowing, mismatched, missing or odd changes_count is incomplete', async () => {
+    const { gl, forge } = setup();
+    mrRepo(gl);
+    const mr = gl.seedMergeRequest({
+      sourceBranch: 'agent/one',
+      targetBranch: 'trunk',
+      title: 'one',
+    });
+    for (const count of ['1000+', '4+', '3', '5', '', ' 4', '4.0', '0x4', null]) {
+      mr.changes_count = count;
+      const got = await forge.listPullFiles(1);
+      expect(got.files).toHaveLength(4);
+      expect(got.complete, `changes_count ${String(count)}`).toBe(false);
+    }
+    mr.changes_count = '4';
+    expect((await forge.listPullFiles(1)).complete).toBe(true);
+  });
+
+  test('3000 or more files is incomplete even when changes_count agrees', async () => {
+    // One long page (no x-next-page), so the count is whatever the stub lists.
+    const forgeFor = (n: number) =>
+      jsonForge((u) =>
+        u.pathname.endsWith('/diffs')
+          ? {
+              body: Array.from({ length: n }, (_, i) => ({
+                old_path: `f${i}`,
+                new_path: `f${i}`,
+              })),
+            }
+          : { body: { iid: 1, changes_count: String(n) } },
+      ).forge;
+    expect((await forgeFor(2999).listPullFiles(1)).complete).toBe(true);
+    expect((await forgeFor(3000).listPullFiles(1)).complete).toBe(false);
+  });
+
+  test('a missing MR is a GitLabForgeError with status 404', async () => {
+    const { forge } = setup();
+    const err = (await forge.listPullFiles(42).catch((e: unknown) => e)) as GitLabForgeError;
+    expect(err).toBeInstanceOf(GitLabForgeError);
+    expect(err.status).toBe(404);
+  });
+});
+
+describe('merge requests: changeDigest', () => {
+  test('stable for the same change, different when a patch changes, merge-base compare', async () => {
+    const { gl, forge } = setup();
+    mrRepo(gl);
+    const one = await forge.changeDigest('trunk', 'agent/two');
+    expect(one.complete).toBe(true);
+    expect(one.digest).toMatch(/^[0-9a-f]{64}$/);
+    // trunk moving on (a file agent/two doesn't touch) leaves the change from the merge base alone.
+    gl.seedCommit({
+      branch: 'trunk',
+      files: { a: '1\n', gone: 'x\n', old: 'same\n', t: 'trunk\n' },
+      message: 'trunk moves',
+    });
+    expect(await forge.changeDigest('trunk', 'agent/two')).toEqual(one);
+    gl.seedCommit({
+      branch: 'agent/two',
+      files: { a: '3\n', b: 'new\n', gone: 'x\n', old: 'same\n' },
+      message: 'edit',
+    });
+    const edited = await forge.changeDigest('trunk', 'agent/two');
+    expect(edited.complete).toBe(true);
+    expect(edited.digest).not.toBe(one.digest);
+    const compares = gl.requests.filter((r) => r.path === `${API}/repository/compare`);
+    expect(compares[0]?.query).toEqual({ from: 'trunk', to: 'agent/two' });
+  });
+
+  test('a pure rename (an empty diff) is incomplete', async () => {
+    const { gl, forge } = setup();
+    mrRepo(gl);
+    expect(await forge.changeDigest('trunk', 'agent/one')).toEqual({ digest: '', complete: false });
+  });
+
+  const diff = (o: Record<string, unknown> = {}) => ({
+    old_path: 'a',
+    new_path: 'a',
+    new_file: false,
+    renamed_file: false,
+    deleted_file: false,
+    diff: '@@ -1 +1 @@\n-1\n+2\n',
+    ...o,
+  });
+  const digestOf = async (diffs: unknown[], extra: Record<string, unknown> = {}) => {
+    const { forge, calls } = jsonForge(() => ({
+      body: { commits: [], diffs, compare_timeout: false, ...extra },
+    }));
+    const got = await forge.changeDigest('trunk', 'agent/x');
+    expect(calls.map((c) => c.url.pathname)).toEqual([`${API}/repository/compare`]);
+    expect(calls[0]?.url.searchParams.has('straight')).toBe(false);
+    return got;
+  };
+
+  test('path, status, previous path and patch each change the digest', async () => {
+    const plain = await digestOf([diff(), diff({ old_path: 'b', new_path: 'b' })]);
+    expect(plain.complete).toBe(true);
+    expect(await digestOf([diff({ old_path: 'b', new_path: 'b' }), diff()])).toEqual(plain);
+    const variants = [
+      [diff({ old_path: 'c', new_path: 'c' }), diff({ old_path: 'b', new_path: 'b' })],
+      [diff({ new_file: true }), diff({ old_path: 'b', new_path: 'b' })],
+      [diff({ deleted_file: true }), diff({ old_path: 'b', new_path: 'b' })],
+      [diff({ renamed_file: true, old_path: 'z' }), diff({ old_path: 'b', new_path: 'b' })],
+      [diff({ diff: '@@ -1 +1 @@\n-1\n+3\n' }), diff({ old_path: 'b', new_path: 'b' })],
+    ];
+    const digests = new Set([plain.digest]);
+    for (const v of variants) {
+      const d = await digestOf(v);
+      expect(d.complete).toBe(true);
+      digests.add(d.digest);
+    }
+    expect(digests.size).toBe(variants.length + 1);
+  });
+
+  test('a timed-out compare, or an empty, too_large or collapsed diff, is incomplete', async () => {
+    const incomplete = { digest: '', complete: false };
+    expect(await digestOf([diff()], { compare_timeout: true })).toEqual(incomplete);
+    expect(await digestOf([diff(), diff({ new_path: 'b', diff: '' })])).toEqual(incomplete);
+    expect(await digestOf([diff({ diff: null })])).toEqual(incomplete);
+    expect(await digestOf([diff({ too_large: true })])).toEqual(incomplete);
+    expect(await digestOf([diff({ collapsed: true })])).toEqual(incomplete);
+    expect(await digestOf([diff()], { diffs: undefined })).toEqual(incomplete);
+  });
+});
+
+describe('merge requests: secrets', () => {
+  test('no recorded request carries the token, and a thrown error does not either', async () => {
+    const { gl, forge } = setup();
+    mrRepo(gl);
+    await forge.findOrCreatePullRequest({ head: 'agent/one', base: 'trunk', ...NEW });
+    await forge.getPull(1);
+    await forge.findOpenPullByHead('agent/one');
+    await forge.listOpenAgentPulls('agent/');
+    await forge.listPullFiles(1);
+    await forge.changeDigest('trunk', 'agent/two');
+    expect(gl.requests.length).toBeGreaterThan(6);
+    for (const r of gl.requests) {
+      expect(r.path).not.toContain(AGENT);
+      expect(JSON.stringify(r.query)).not.toContain(AGENT);
+      expect(JSON.stringify(r.body ?? null)).not.toContain(AGENT);
+    }
+    const wrong = new GitLabForge(GITLAB, PROJECT.path, WRONG);
+    const errors = await Promise.all([
+      wrong.getPull(1).catch((e: unknown) => e),
+      wrong.findOpenPullByHead('agent/one').catch((e: unknown) => e),
+      wrong.listOpenAgentPulls('agent/').catch((e: unknown) => e),
+      wrong.listPullFiles(1).catch((e: unknown) => e),
+      wrong.changeDigest('trunk', 'agent/two').catch((e: unknown) => e),
+      wrong
+        .findOrCreatePullRequest({ head: 'agent/one', base: 'trunk', ...NEW })
+        .catch((e: unknown) => e),
+    ]);
+    for (const e of errors) {
+      expect(e).toBeInstanceOf(GitLabForgeError);
+      expect((e as GitLabForgeError).status).toBe(401);
+      expect((e as Error).message).not.toContain(AGENT);
+      expect((e as Error).message).not.toContain(WRONG);
+    }
   });
 });
 
