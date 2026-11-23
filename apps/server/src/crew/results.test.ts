@@ -635,6 +635,96 @@ describe('diagnose results', () => {
   });
 });
 
+describe('a diagnose that failed only because the head moved (#709)', () => {
+  const stale = (reason = 'head moved: expected abc, got def'): DropResult => ({
+    status: 'failed',
+    reason,
+    gates: [],
+  });
+  const diagnoseDrops = () =>
+    (w.db.prepare(`SELECT id FROM drops WHERE role = 'diagnose'`).all() as { id: string }[]).length;
+  const counters = (id: number) =>
+    w.db
+      .prepare(
+        'SELECT diagnose_attempts AS a, diagnose_stale_reruns AS r FROM briefings WHERE id = ?',
+      )
+      .get(id) as { a: number; r: number };
+  let item = -1;
+  function parked(): number {
+    item = w.item(1, 'ready');
+    setWorkItemState(w.db, item, 'parked', 'budget exhausted: heal', t0);
+    syncParkBriefings(w.db, w.zone, t0);
+    const [b] = listBriefings(w.db, { zoneId: 'main', state: 'open', kind: 'parked' });
+    return b?.id ?? -1;
+  }
+
+  test('a stale failure → the next pass diagnoses the same briefing again', async () => {
+    const b = parked();
+    const id = await crewDrop();
+    expect(counters(b)).toEqual({ a: 1, r: 0 });
+    await applyResult(w.db, deps(), id, stale(), plus(t0, MIN));
+    expect(getDrop(w.db, id)?.state).toBe('failed');
+    expect(counters(b)).toEqual({ a: 0, r: 1 });
+    expect(nextCrewWork(w.db, w.zone, plus(t0, 2 * MIN))).toMatchObject({
+      role: 'diagnose',
+      briefingId: b,
+    });
+  });
+
+  test('"stale info" is stale too', async () => {
+    const b = parked();
+    const id = await crewDrop();
+    await applyResult(w.db, deps(), id, stale('stale info: the PR changed'), plus(t0, MIN));
+    expect(counters(b)).toEqual({ a: 0, r: 1 });
+  });
+
+  test('D3: three stale failures → three diagnose drops in all; a fourth pass schedules none', async () => {
+    const b = parked();
+    for (let i = 0; i < 3; i++) {
+      const id = await crewDrop(plus(t0, 2 * i * MIN));
+      await applyResult(w.db, deps(), id, stale(), plus(t0, (2 * i + 1) * MIN));
+    }
+    expect(diagnoseDrops()).toBe(3);
+    expect(counters(b)).toEqual({ a: 1, r: 2 });
+    expect(nextCrewWork(w.db, w.zone, plus(t0, 10 * MIN))).not.toMatchObject({
+      role: 'diagnose',
+    });
+    const pass = await zonePass(w.forges, w.zone, 'main');
+    await enqueueCrew(w.db, w.forges, w.zone, pass, promptVersions(), usageCfg, plus(t0, 10 * MIN));
+    expect(diagnoseDrops()).toBe(3);
+  });
+
+  test('any other failure counts as the one attempt: no rerun', async () => {
+    const b = parked();
+    const id = await crewDrop();
+    await applyResult(w.db, deps(), id, stale('claude exit 1'), plus(t0, MIN));
+    expect(counters(b)).toEqual({ a: 1, r: 0 });
+    expect(nextCrewWork(w.db, w.zone, plus(t0, 2 * MIN))).not.toMatchObject({
+      role: 'diagnose',
+    });
+  });
+
+  test('a briefing ruled or withdrawn before the stale result lands is not rediagnosed', async () => {
+    for (const end of ['ruled', 'withdrawn'] as const) {
+      w = await crewWorld();
+      const b = parked();
+      const id = await crewDrop();
+      if (end === 'ruled') {
+        expect(ruleBriefing(w.db, b, 'leave', '', plus(t0, MIN)).ok).toBe(true);
+      } else {
+        setWorkItemState(w.db, item, 'ready', undefined, plus(t0, MIN));
+        syncParkBriefings(w.db, w.zone, plus(t0, MIN));
+      }
+      const before = counters(b);
+      await applyResult(w.db, deps(), id, stale(), plus(t0, 2 * MIN));
+      expect(counters(b), end).toEqual(before);
+      expect(nextCrewWork(w.db, w.zone, plus(t0, 3 * MIN)), end).not.toMatchObject({
+        role: 'diagnose',
+      });
+    }
+  });
+});
+
 describe('triage results (#184)', () => {
   /** #179's shape: two complaints in two sentences, plus a screenshot. */
   const TEXT_179 = {

@@ -1613,6 +1613,14 @@ ALTER TABLE new_chat_threads RENAME TO chat_threads;
 CREATE INDEX chat_threads_updated ON chat_threads (updated_at);
 `;
 
+/**
+ * v58 (#709): a diagnose drop that failed only because the item's head moved is rerun, at most
+ * `diagnose_stale_reruns` (2) times per briefing, so a head that keeps moving can't loop.
+ */
+const V58_SQL = `
+ALTER TABLE briefings ADD COLUMN diagnose_stale_reruns INTEGER NOT NULL DEFAULT 0;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1671,6 +1679,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 55, sql: V55_SQL },
   { version: 56, sql: V56_SQL },
   { version: 57, sql: V57_SQL, foreignKeysOff: true },
+  { version: 58, sql: V58_SQL },
 ];
 
 /**
