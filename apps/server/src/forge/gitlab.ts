@@ -2,7 +2,8 @@
 // and viewer methods of `Forge` (first slice, #676) and the branch, file, directory, compare and
 // first-parent methods (second slice, #683), merge requests (third slice, #690), approvals as
 // reviews (fourth slice, #696), pipelines and jobs as checks (fifth slice, #697) and the SHA-pinned
-// squash merge and rebase as the branch update (sixth slice, #698). Not wired
+// squash merge and rebase as the branch update (sixth slice, #698) and member access levels as
+// `isTrusted`, `isMaintainer` and `repoAccess`, the namespace as `ownerType` (#705). Not wired
 // in: GitLab zones are still refused with GITLAB_UNSUPPORTED wherever a forge is built.
 //
 // GitLab mapping notes:
@@ -141,6 +142,20 @@
 //     head. That is accepted: the flow re-reads the head on its next pass, and the SHA-pinned
 //     merge refuses any head it has not seen.
 // - Every path segment (branch, file path, ref) is URL-encoded; refs otherwise go in the query.
+// - Access (#705; the spec gives no GitLab mapping, so this one is chosen to keep the operator's
+//   work lowest). Levels: 10 Guest, 20 Reporter, 30 Developer, 40 Maintainer, 50 Owner.
+//   - `isTrusted` is Developer or above and `isMaintainer` Maintainer or above, read from
+//     `GET members/all` (inherited members included, never `members`), matching the username
+//     exactly (`query` only filters). A non-member, or a member whose `state` is present and not
+//     `active` (`blocked`, say), is neither.
+//   - `repoAccess` reads the project, `GET /user` (the token's user id) and that user's level from
+//     `GET members/all/:id` (404: level 0). `pull` and `triage` at Reporter, `push` at Developer,
+//     `maintain` at Maintainer, `admin` at Owner. `private` is any visibility but `public`.
+//     `scopes` and `tokenExpiresAt` (`expires_at` as GitLab gives it) come from
+//     `GET /personal_access_tokens/self`; a 401 or 404 there gives null for both, other errors
+//     reject. `grantedPermissions` is never set.
+//   - `ownerType` (also in `repoAccess`) is `namespace.kind`: `user` is User, `group` is
+//     Organization; any other kind is refused with a GitLabForgeError that does not echo it.
 // Every other `Forge` method throws GitLabUnsupportedError, naming the method, until a later slice.
 //
 // Secrets: the token goes only in the PRIVATE-TOKEN header, a redirect is never followed, and no
@@ -208,6 +223,12 @@ const REBASE_POLL_DELAY_MS = 1000;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/** GitLab's member access levels (Guest 10 is never enough for anything here). */
+const ACCESS_REPORTER = 20;
+const ACCESS_DEVELOPER = 30;
+const ACCESS_MAINTAINER = 40;
+const ACCESS_OWNER = 50;
+
 /** The most pages a list follows: 1,000 pages of 100 is far past any project this serves. */
 const MAX_PAGES = 1000;
 
@@ -260,6 +281,12 @@ type RawFile = {
   blob_id: string;
   commit_id: string;
   last_commit_id: string;
+};
+type RawMember = { username?: string; access_level?: unknown; state?: string | null };
+type RawProject = {
+  default_branch?: unknown;
+  visibility?: unknown;
+  namespace?: { kind?: unknown } | null;
 };
 type RawPipeline = { id: number; status: string };
 type RawJob = { name: string; status: string; allow_failure?: boolean };
@@ -1122,14 +1149,41 @@ export class GitLabForge implements Forge {
     throw new GitLabUnsupportedError('addBlockedBy');
   }
 
-  // --- Later slices --------------------------------------------------------------------------
+  // --- Access --------------------------------------------------------------------------------
 
-  async isTrusted(_login: string): Promise<boolean> {
-    throw new GitLabUnsupportedError('isTrusted');
+  /** Developer (30) or above, read from `members/all` (inherited members too). */
+  async isTrusted(login: string): Promise<boolean> {
+    return (await this.memberLevel(login)) >= ACCESS_DEVELOPER;
   }
-  async isMaintainer(_login: string): Promise<boolean> {
-    throw new GitLabUnsupportedError('isMaintainer');
+
+  /** Maintainer (40) or above, read as `isTrusted`. */
+  async isMaintainer(login: string): Promise<boolean> {
+    return (await this.memberLevel(login)) >= ACCESS_MAINTAINER;
   }
+
+  /**
+   * `login`'s effective access level: 0 unless a member of `members/all` has exactly that username
+   * (`query` only filters, by substring) and an `active` state, or none at all.
+   */
+  private async memberLevel(login: string): Promise<number> {
+    const members = await this.list<RawMember>('listing members', '/members/all', {
+      query: login,
+    });
+    const m = members.find((x) => x?.username === login);
+    if (!m) return 0;
+    if (m.state !== undefined && m.state !== null && m.state !== 'active') return 0;
+    return typeof m.access_level === 'number' ? m.access_level : 0;
+  }
+
+  private async readProject(): Promise<RawProject> {
+    const p = await this.request<RawProject | null>('reading the project', 'GET', '');
+    if (!p || typeof p !== 'object')
+      throw new GitLabForgeError('GitLabForge: reading the project failed: not an object');
+    return p;
+  }
+
+  // --- Branch rules, merge and rebase ---------------------------------------------------------
+
   async getBranchRules(_branch: string): Promise<BranchRulesRead> {
     throw new GitLabUnsupportedError('getBranchRules');
   }
@@ -1209,18 +1263,82 @@ export class GitLabForge implements Forge {
       `GitLabForge: rebasing merge request ${n} failed: still in progress after ${REBASE_POLL_TRIES} reads`,
     );
   }
+  /**
+   * The project (visibility, default branch, namespace), the token's user and its member access
+   * level (a 404 is level 0), and the token's own scopes and expiry (a 401 or 404 there gives
+   * null for both: not every token can read itself).
+   */
   async repoAccess(): Promise<RepoAccess> {
-    throw new GitLabUnsupportedError('repoAccess');
+    const project = await this.readProject();
+    const ownerType = namespaceOwnerType(project);
+    const { json: me } = await this.send('reading the user', 'GET', `${this.api}/user`);
+    const id = (me as { id?: unknown } | null)?.id;
+    if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0)
+      throw new GitLabForgeError('GitLabForge: the user has no id');
+    let level = 0;
+    try {
+      const m = await this.request<RawMember | null>(
+        'reading the user’s access level',
+        'GET',
+        `/members/all/${id}`,
+      );
+      if (typeof m?.access_level === 'number') level = m.access_level;
+    } catch (err) {
+      if ((err as GitLabForgeError).status !== 404) throw err;
+    }
+    let scopes: string[] | null = null;
+    let tokenExpiresAt: string | null = null;
+    try {
+      const { json } = await this.send(
+        'reading the token',
+        'GET',
+        `${this.api}/personal_access_tokens/self`,
+      );
+      const t = json as { scopes?: unknown; expires_at?: unknown } | null;
+      if (Array.isArray(t?.scopes) && t.scopes.every((x) => typeof x === 'string'))
+        scopes = t.scopes as string[];
+      if (typeof t?.expires_at === 'string') tokenExpiresAt = t.expires_at;
+    } catch (err) {
+      const status = (err as GitLabForgeError).status;
+      if (status !== 401 && status !== 404) throw err;
+    }
+    return {
+      private: project.visibility !== 'public',
+      defaultBranch: typeof project.default_branch === 'string' ? project.default_branch : '',
+      permissions: {
+        admin: level >= ACCESS_OWNER,
+        maintain: level >= ACCESS_MAINTAINER,
+        push: level >= ACCESS_DEVELOPER,
+        triage: level >= ACCESS_REPORTER,
+        pull: level >= ACCESS_REPORTER,
+      },
+      scopes,
+      tokenExpiresAt,
+      ownerType,
+    };
   }
+
+  /** The project's `namespace.kind`: `user` is a User, `group` an Organization. */
   async ownerType(): Promise<'User' | 'Organization'> {
-    throw new GitLabUnsupportedError('ownerType');
+    return namespaceOwnerType(await this.readProject());
   }
+
+  // --- Later slices --------------------------------------------------------------------------
+
   async probeReads(_sha: string): Promise<ReadProbe[]> {
     throw new GitLabUnsupportedError('probeReads');
   }
   async probeAdministration(): Promise<ReadProbe> {
     throw new GitLabUnsupportedError('probeAdministration');
   }
+}
+
+/** The owner type of a project's `namespace.kind`; any other kind is refused without echoing it. */
+function namespaceOwnerType(p: RawProject): 'User' | 'Organization' {
+  const kind = p.namespace?.kind;
+  if (kind === 'user') return 'User';
+  if (kind === 'group') return 'Organization';
+  throw new GitLabForgeError('GitLabForge: the project namespace kind is neither user nor group');
 }
 
 /** A pipeline id GitLab gave, as a path segment; anything but a positive integer is refused. */

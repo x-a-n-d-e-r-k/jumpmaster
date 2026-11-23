@@ -21,6 +21,8 @@ export type FakeGitLabProject = {
   path: string;
   defaultBranch?: string;
   visibility?: 'private' | 'internal' | 'public';
+  /** The project's `namespace.kind` (default `user`); any string, so tests can seed an unknown one. */
+  namespaceKind?: string;
 };
 
 export type RecordedRequest = {
@@ -174,7 +176,15 @@ export type GitLabCommitStatus = {
   finished_at: string | null;
 };
 
-type User = GitLabUser & { token?: string; accessLevel?: number; scopes: string[] };
+type User = GitLabUser & {
+  token?: string;
+  accessLevel?: number;
+  scopes: string[];
+  /** The token's `expires_at` as `GET /personal_access_tokens/self` gives it (default null). */
+  expiresAt?: string | null;
+  /** The member `state` (default `active`). */
+  state?: string;
+};
 type Reply = [number, unknown] | [number, unknown, Record<string, string>];
 type Ctx = {
   method: string;
@@ -185,6 +195,8 @@ type Ctx = {
 };
 
 const API = '/api/v4';
+/** Routes outside a project that answer for the calling user, with `GET /user`'s scope rule. */
+const OWN_ROUTES = new Set(['/user', '/personal_access_tokens/self']);
 const TOKEN_PARAMS = ['private_token', 'access_token'];
 const REDACTED = '[redacted]';
 
@@ -372,6 +384,7 @@ export function fakeGitLab(opts: {
     path: opts.project.path,
     defaultBranch: opts.project.defaultBranch ?? 'main',
     visibility: opts.project.visibility ?? 'private',
+    namespaceKind: opts.project.namespaceKind ?? 'user',
   };
 
   const requests: RecordedRequest[] = [];
@@ -465,7 +478,13 @@ export function fakeGitLab(opts: {
 
   const member = (u: User) =>
     u.accessLevel !== undefined && u.accessLevel > 0
-      ? { id: u.id, username: u.username, name: u.name, access_level: u.accessLevel }
+      ? {
+          id: u.id,
+          username: u.username,
+          name: u.name,
+          access_level: u.accessLevel,
+          state: u.state ?? 'active',
+        }
       : undefined;
   const members = () => users.flatMap((u) => member(u) ?? []);
 
@@ -491,6 +510,7 @@ export function fakeGitLab(opts: {
       path_with_namespace: project.path,
       default_branch: project.defaultBranch,
       visibility: project.visibility,
+      namespace: { kind: project.namespaceKind },
     },
   ]);
 
@@ -1513,7 +1533,8 @@ export function fakeGitLab(opts: {
     const rel = url.pathname.slice(prefix.length);
     const seg = /^\/projects\/([^/]+)(\/.*)?$/.exec(rel);
     const projectRoute = seg ? matchProjectRoute(req.method, seg[2] ?? '') : undefined;
-    const known = (req.method === 'GET' && rel === '/user') || projectRoute !== undefined;
+    const own = req.method === 'GET' && OWN_ROUTES.has(rel);
+    const known = own || projectRoute !== undefined;
     if (!known) {
       unknown.push(`${req.method} ${redact(url.pathname, secrets)}`);
       return NOT_FOUND;
@@ -1522,11 +1543,13 @@ export function fakeGitLab(opts: {
     if (!user) return UNAUTHORIZED;
     const write = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
     const scopes = user.scopes;
-    const readScopes = rel === '/user' ? ['read_api', 'read_user'] : ['read_api'];
+    const readScopes = own ? ['read_api', 'read_user'] : ['read_api'];
     if (!scopes.includes('api') && (write || !readScopes.some((s) => scopes.includes(s))))
       return INSUFFICIENT_SCOPE;
 
-    if (rel === '/user') return [200, publicUser(user)];
+    if (own && rel === '/user') return [200, publicUser(user)];
+    if (own && rel === '/personal_access_tokens/self')
+      return [200, { scopes: [...user.scopes], expires_at: user.expiresAt ?? null }];
     if (!seg || !projectRoute) return NOT_FOUND;
 
     let id: string;
@@ -1570,20 +1593,33 @@ export function fakeGitLab(opts: {
       accessLevel?: number;
       scopes?: string[];
       name?: string;
+      /** The token's expiry, as `GET /personal_access_tokens/self` gives it (default null). */
+      expiresAt?: string | null;
+      /** The member `state` (default `active`). */
+      state?: string;
     }): GitLabUser {
       const user = ensureUser(u.username);
       user.token = u.token;
       user.accessLevel = u.accessLevel;
       user.scopes = u.scopes ?? ['api'];
+      user.expiresAt = u.expiresAt ?? null;
+      if (u.state !== undefined) user.state = u.state;
       if (u.name) user.name = u.name;
       return publicUser(user);
     },
     /** A project member with no token. */
-    seedMember(m: { username: string; accessLevel: number; name?: string }) {
+    seedMember(m: { username: string; accessLevel: number; name?: string; state?: string }) {
       const user = ensureUser(m.username);
       user.accessLevel = m.accessLevel;
       if (m.name) user.name = m.name;
-      return { id: user.id, username: user.username, name: user.name, access_level: m.accessLevel };
+      if (m.state !== undefined) user.state = m.state;
+      return {
+        id: user.id,
+        username: user.username,
+        name: user.name,
+        access_level: m.accessLevel,
+        state: user.state ?? 'active',
+      };
     },
     seedIssue: addIssue,
     seedLabel(l: { name: string; color?: string; description?: string }): GitLabLabel {
