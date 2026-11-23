@@ -10,9 +10,10 @@ install and run.
 
 The current milestone is M5: GitHub App authentication, built as specified in
 `docs/superpowers/specs/2026-11-13-github-app-auth.md` (the spec). Each objective below is one
-task of the spec's §13, except "GitLab forge adapter", which is the GitLab adapter that spec §9 and
-the design spec's §5.5 (`docs/superpowers/specs/2026-10-19-jumpmaster-design.md`) assume and
-Task 12 builds on. Read the named sections of the spec before planning; the spec, the spike
+task of the spec's §13, except "Usage gate decides on reported utilization", which fixes how the
+dispatch gate reads Claude's usage signals, and "GitLab forge adapter", which is the GitLab adapter
+that spec §9 and the design spec's §5.5 (`docs/superpowers/specs/2026-10-19-jumpmaster-design.md`)
+assume and Task 12 builds on. Read the named sections of the spec before planning; the spec, the spike
 results in `docs/spikes/2026-11-14-github-app.md`, and the push container already on `main`
 (spec Task 4) are the ground truth. File issues small enough for one drop each, in dependency
 order, each naming the spec sections it implements.
@@ -61,6 +62,28 @@ instead". `forge.actions-approval` may be deferred.
 Install (GitHub Apps first for two-bot, tokens for starter and as the alternative), operate (key
 rotation, adding a repository or an owner, pending pushes), troubleshooting by check id, the key's
 reach.
+
+### Usage gate decides on reported utilization
+
+The dispatch gate (`apps/server/src/usage.ts`) holds new work on the owner's threshold
+(`usage.throttleUtilization`) applied to the utilization Claude reports, and on nothing looser.
+Command's decision of 2026-11-23: **the threshold is the control; Claude's `allowed_warning` is
+information.** Parts, in this order:
+
+- **Per-window gating**: the gate reads each reported window from `usage_windows`, each expiring
+  by its own reset or observed time; a window missing from a report that carries
+  `unifiedWindows` is forgotten (the `ultra` plan has no 5-hour window); only account-wide windows
+  hold all dispatch, and a per-model window holds only drops on its model.
+- **The warning informs**: `allowed_warning` is stored (window, time, reset) and holds work only
+  when Claude reported no utilization for the warned window, and then only until that window's
+  reset. Chat turns never extend a hold while utilization is reported.
+- **Reasons and the warning shown**: one `gateReason` shared by Home, the doctor and `get_queue`
+  names what holds the gate (window, figure, threshold, or pause, credits stop or warning
+  fallback); the Home usage card shows a current Claude warning as information whether or not
+  the gate is open.
+
+`rejected`, probes and the credits stop are unchanged. The override in #728 and #729 assumes the
+warning holds work; Command decides whether it is still wanted once these land.
 
 ### GitLab forge adapter
 
