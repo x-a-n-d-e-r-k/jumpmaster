@@ -1688,6 +1688,44 @@ describe('reviews: listReviews', () => {
     await expect(forge.findReviewByMarker(-2, MARKER)).rejects.toBeInstanceOf(GitLabForgeError);
     expect(gl.requests).toEqual([]);
   });
+
+  test('a malformed approvals response or a note with no author fails closed', async () => {
+    const sha = 'a'.repeat(40);
+    const notes = [
+      { id: 5, body: `${header('APPROVE', sha)}\nok`, author: { username: 'agent' } },
+      { id: 6, body: `${header('REQUEST_CHANGES', sha)}\nno`, created_at: '2026-11-01T00:00:00Z' },
+    ];
+    for (const approvals of [
+      null,
+      {},
+      { approved_by: { length: 1 } },
+      {
+        approved_by: [
+          null,
+          {},
+          { user: null },
+          { user: {} },
+          { user: { username: '' } },
+          { user: { username: 5 } },
+        ],
+      },
+    ]) {
+      const { forge } = jsonForge((url) => ({
+        body: url.pathname.endsWith('/approvals') ? approvals : notes,
+      }));
+      expect(await forge.listReviews(1)).toEqual([
+        { id: 5, author: 'agent', state: 'DISMISSED', commitId: sha, body: 'ok', submittedAt: '' },
+        {
+          id: 6,
+          author: '',
+          state: 'CHANGES_REQUESTED',
+          commitId: sha,
+          body: 'no',
+          submittedAt: '2026-11-01T00:00:00Z',
+        },
+      ]);
+    }
+  });
 });
 
 describe('reviews: findReviewByMarker', () => {
@@ -1740,6 +1778,24 @@ describe('reviews: findReviewByMarker', () => {
       commitId: head,
     });
     expect(await forge.findReviewByMarker(1, MARKER)).toEqual(r);
+  });
+
+  test("returns the viewer's newest review when several carry the marker", async () => {
+    const { gl, forge } = setup();
+    const { head } = reviewRepo(gl);
+    const newest = gl.seedNote({
+      mergeRequestIid: 1,
+      author: 'agent',
+      body: `${header('APPROVE', head)}\nsecond\n${MARKER}`,
+      createdAt: '2026-11-05T00:00:00.000Z',
+    });
+    gl.seedNote({
+      mergeRequestIid: 1,
+      author: 'agent',
+      body: `${header('REQUEST_CHANGES', head)}\nfirst\n${MARKER}`,
+      createdAt: '2026-11-02T00:00:00.000Z',
+    });
+    expect(await forge.findReviewByMarker(1, MARKER)).toEqual({ id: newest.id });
   });
 });
 
