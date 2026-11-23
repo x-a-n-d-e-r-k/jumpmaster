@@ -1638,7 +1638,7 @@ describe('pairFor by credential kind (spec §4.4)', () => {
   });
 });
 
-describe('a GitLab zone gets no forge pair until GitLabForge lands (issue #667)', () => {
+describe('a GitLab zone without gitlabTokens gets no forge pair (issue #667)', () => {
   const alnum = (n: number) => 'aB3'.repeat(Math.ceil(n / 3)).slice(0, n);
   const tokens = {
     githubAuthorToken: `ghp_${alnum(36)}`,

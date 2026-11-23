@@ -4,8 +4,9 @@
 // reviews (fourth slice, #696), pipelines and jobs as checks (fifth slice, #697) and the SHA-pinned
 // squash merge and rebase as the branch update (sixth slice, #698) and member access levels as
 // `isTrusted`, `isMaintainer` and `repoAccess`, the namespace as `ownerType` (#705), and
-// protected branches, approval rules and approval settings as `getBranchRules` (#715). Not wired
-// in: GitLab zones are still refused with GITLAB_UNSUPPORTED wherever a forge is built.
+// protected branches, approval rules and approval settings as `getBranchRules` (#715). `pairFor`
+// builds a pair of these from the GitLab tokens a caller passes in (#718), but the live server
+// passes none yet, so GitLab zones are still refused with GITLAB_UNSUPPORTED there.
 //
 // GitLab mapping notes:
 // - An issue's `number` is its project-scoped `iid`, and its body is the `description`.
