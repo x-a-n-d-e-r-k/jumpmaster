@@ -95,6 +95,14 @@ export type GitLabMergeRequest = {
   /** GitLab's `changes_count` (a string, `"1000+"` when the diff overflows). The single-MR read
    *  reports the count of its diff files unless a test sets this; `null` leaves it out. */
   changes_count?: string | null;
+  /** The merge commit an accept without squash made, else `null`. */
+  merge_commit_sha: string | null;
+  /** The commit a squash accept made, else `null`. */
+  squash_commit_sha: string | null;
+  /** Why the last rebase failed, else `null`. */
+  merge_error: string | null;
+  /** The fake rebases synchronously, so a read always shows `false`. */
+  rebase_in_progress: boolean;
 };
 export type GitLabLabel = { id: number; name: string; color: string; description: string | null };
 export type GitLabNote = {
@@ -929,6 +937,10 @@ export function fakeGitLab(opts: {
       merged_at: null,
       closed_at: null,
       diff_refs: refs,
+      merge_commit_sha: null,
+      squash_commit_sha: null,
+      merge_error: null,
+      rebase_in_progress: false,
     };
     for (const l of mr.labels) ensureLabel(l);
     mergeRequests.push(mr);
@@ -1108,6 +1120,113 @@ export function fakeGitLab(opts: {
     if (at === -1) return NOT_FOUND;
     list.splice(at, 1);
     return [201, approvalsJson(mr)];
+  });
+
+  // --- Accept (merge) and rebase ------------------------------------------------------------
+
+  /** MR iid → whether it may be merged (true unless a test says otherwise). */
+  const mergeable = new Map<number, boolean>();
+  const yes = (v: unknown) => v === true || v === 'true';
+  /** Whether `path` differs between two snapshots, presence included (a deletion is a change). */
+  const differs = (x: Record<string, string>, y: Record<string, string>, path: string) =>
+    Object.hasOwn(x, path) !== Object.hasOwn(y, path) || x[path] !== y[path];
+  const pathsOf = (...snaps: Record<string, string>[]) =>
+    new Set(snaps.flatMap((f) => Object.keys(f)));
+
+  /** `onto` with the changes from `from` to `to` applied, or `undefined` when one of them
+   *  touches a path `onto` also changed since `from`, to different contents. */
+  function applyChanges(
+    onto: Record<string, string>,
+    from: Record<string, string>,
+    to: Record<string, string>,
+  ): Record<string, string> | undefined {
+    const out = { ...onto };
+    for (const path of pathsOf(from, to)) {
+      if (!differs(from, to, path)) continue;
+      if (differs(from, onto, path) && differs(onto, to, path)) return undefined;
+      if (Object.hasOwn(to, path)) out[path] = to[path] as string;
+      else delete out[path];
+    }
+    return out;
+  }
+
+  /** The files the open MR `mr` would merge into its target, or `undefined` on a conflict. */
+  function mergedFiles(mr: GitLabMergeRequest) {
+    const { base_sha, start_sha, head_sha } = mr.diff_refs;
+    return applyChanges(
+      commitOf(start_sha).files,
+      commitOf(base_sha).files,
+      commitOf(head_sha).files,
+    );
+  }
+
+  route('PUT', /^\/merge_requests\/(\d+)\/merge$/, (c, m) => {
+    const mr = findMr(m[1]);
+    if (!mr) return err(404, '404 Not found');
+    if (c.level < ACCESS.developer) return FORBIDDEN;
+    if (mr.state !== 'opened') return err(405, '405 Method Not Allowed');
+    const sha = str(c.params.sha);
+    if (sha !== undefined && sha !== mr.sha)
+      return err(409, 'SHA does not match HEAD of source branch');
+    if (mergeable.get(mr.iid) === false) return err(405, '405 Method Not Allowed');
+    const files = mergedFiles(mr);
+    if (!files) return err(406, 'Branch cannot be merged');
+    const target = mr.diff_refs.start_sha;
+    const source = mr.diff_refs.head_sha;
+    let commit: string;
+    if (yes(c.params.squash)) {
+      commit = makeCommit([target], str(c.params.squash_commit_message) ?? mr.title, files);
+      mr.squash_commit_sha = commit;
+    } else {
+      const message =
+        str(c.params.merge_commit_message) ??
+        `Merge branch '${mr.source_branch}' into '${mr.target_branch}'\n\n${mr.title}\n\nSee merge request ${project.path}!${mr.iid}`;
+      commit = makeCommit([target, source], message, files);
+      mr.merge_commit_sha = commit;
+    }
+    // Freeze `sha` and `diff_refs` before the target moves.
+    finish(mr.iid, 'merged');
+    branches.set(mr.target_branch, commit);
+    if (yes(c.params.should_remove_source_branch)) branches.delete(mr.source_branch);
+    return [200, mr];
+  });
+
+  route('PUT', /^\/merge_requests\/(\d+)\/rebase$/, (c, m) => {
+    const mr = findMr(m[1]);
+    if (!mr) return err(404, '404 Not found');
+    if (c.level < ACCESS.developer) return FORBIDDEN;
+    if (mr.state !== 'opened') return err(405, '405 Method Not Allowed');
+    const { base_sha, start_sha, head_sha } = mr.diff_refs;
+    // The first-parent source commits since the merge base, oldest first.
+    const behind = reachable(base_sha);
+    const replay: FakeCommit[] = [];
+    for (let at: string | undefined = head_sha; at && !behind.has(at); ) {
+      const commit = commitOf(at);
+      replay.unshift(commit);
+      at = commit.parent_ids[0];
+    }
+    // Work out every new snapshot first, so a conflict leaves no commit behind.
+    const snapshots: Record<string, string>[] = [];
+    let files = commitOf(start_sha).files;
+    for (const commit of replay) {
+      const parent = commit.parent_ids[0];
+      const next = applyChanges(files, parent ? commitOf(parent).files : {}, commit.files);
+      if (!next) {
+        mr.merge_error = `Rebase failed: conflict replaying ${commit.id.slice(0, 8)} onto ${mr.target_branch}`;
+        return [202, { rebase_in_progress: true }];
+      }
+      snapshots.push(next);
+      files = next;
+    }
+    let head = start_sha;
+    replay.forEach((commit, i) => {
+      head = makeCommit([head], commit.message, snapshots[i] as Record<string, string>);
+    });
+    branches.set(mr.source_branch, head);
+    mr.merge_error = null;
+    mr.rebase_in_progress = false;
+    refreshed(mr);
+    return [202, { rebase_in_progress: true }];
   });
 
   route('GET', /^\/merge_requests\/(\d+)\/diffs$/, (c, m) => {
@@ -1531,6 +1650,12 @@ export function fakeGitLab(opts: {
       finish(iid, 'closed', o.closedAt),
     /** The stored merge request, as the fake holds it now. */
     mergeRequest: (iid: number) => findMr(iid),
+    /** Set whether merge request `iid` may be merged (true by default); a merge of one that
+     *  may not answers 405. */
+    setMergeable(iid: number, value: boolean) {
+      if (!findMr(iid)) throw new Error(`unknown merge request ${iid}`);
+      mergeable.set(iid, value);
+    },
     /** Set how many approvals merge request `iid` requires (0 by default). */
     setApprovalsRequired(iid: number, n: number) {
       if (!findMr(iid)) throw new Error(`unknown merge request ${iid}`);
