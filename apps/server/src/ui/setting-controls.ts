@@ -13,7 +13,7 @@ export interface Control {
   path: string;
   kind: ControlKind;
   value: unknown;
-  /** `<input>` attributes for a number (min, max, step). */
+  /** `<input>` attributes for a number (min, max, step) or a text input. */
   attrs?: string;
   options?: readonly string[];
   /** How a select's option reads (default: its value). */
@@ -52,7 +52,7 @@ export function settingControl(s: Control): string {
     return `<textarea rows="${Math.min(8, Math.max(3, lines.split('\n').length + 1))}" cols="40" ${data}${lock}>${escapeHtml(lines)}</textarea>`;
   }
   const value = s.value === null || s.value === undefined ? '' : String(s.value);
-  const type = s.kind === 'number' ? `type="number" ${s.attrs ?? ''}` : 'type="text"';
+  const type = `type="${s.kind === 'number' ? 'number' : 'text'}"${s.attrs ? ` ${s.attrs}` : ''}`;
   return `<input ${type} ${data} value="${escapeHtml(value)}"${lock}>`;
 }
 

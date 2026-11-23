@@ -584,7 +584,7 @@ function setupPage(
   if (!raw || !resolved) return undefined;
   const all = store.current().dropZones;
   const readOnly = store.mode() === 'file';
-  // The forms show what is in effect (defaults filled); the Advanced editor what is stored.
+  // The forms show what is in effect (defaults filled); the read-only Advanced JSON what is stored.
   const f = zoneToForm(resolved);
   const mode = getZoneMode(db, id, resolved.mode);
   const stopping = stoppingLine(db, id);
@@ -638,7 +638,6 @@ function setupPage(
   const egressOptions = ['off', 'monitor', 'enforce']
     .map((m) => `<option value="${m}"${f['egress.mode'] === m ? ' selected' : ''}>${m}</option>`)
     .join('');
-  const hidden = `<input type="hidden" name="id" value="${escapeHtml(id)}">`;
 
   const project = setupSection(
     'project',

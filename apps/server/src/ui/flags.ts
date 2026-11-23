@@ -11,8 +11,8 @@ import { type ZoneRef, zoneName, zoneNameText } from './zone-name.js';
  * The advanced settings pages: a zone's (`/projects/:id/flags`, issue #322) and the install's
  * (`/system/advanced`, issue #323; #623 moved it from `/settings/flags`). Each lists every setting of its scope in the catalog, one per
  * row, grouped, with its plain words, a control, whether the document sets it and a Reset. One
- * Save sends one merge patch of what changed through `PATCH /api/control/config`, as the JSON
- * editor and the Install tab do, so every guard and confirmation applies unchanged: the page only
+ * Save sends one merge patch of what changed through `PATCH /api/control/config`, as the Setup
+ * form and the Install tab do, so every guard and confirmation applies unchanged: the page only
  * mirrors them. In file mode every control is disabled. Both pages draw their rows with
  * `renderFlagsForm` and run `FLAGS_SCRIPT`.
  */
@@ -54,9 +54,9 @@ export interface FlagsForm {
 }
 
 /**
- * The link beside an `elsewhere` sentence. A zone's: the section of the zone page it names, else
- * the JSON editor (Advanced). The install's: the Other machines tab for the address; none for a
- * setting changed only with ctl or in the file.
+ * The link beside an `elsewhere` sentence. A zone's: the Setup section it names, else none (the
+ * Advanced JSON is read-only, #617). The install's: the Other machines tab for the address; none
+ * for a setting changed only with ctl or in the file.
  */
 function elsewhereLink(f: FlagsForm, r: FlagRow): string {
   const sentence = r.entry.elsewhere ?? '';
@@ -66,9 +66,9 @@ function elsewhereLink(f: FlagsForm, r: FlagRow): string {
       : '';
   }
   const base = projectHref(f.target.zone?.id ?? '');
-  const named = /(\w+) section/.exec(sentence)?.[1]?.toLowerCase() ?? 'advanced';
-  const words = named === 'advanced' ? 'the JSON editor' : `the ${named} section`;
-  return ` <a href="${base}/setup#${escapeHtml(named)}">${escapeHtml(words)}</a>`;
+  const named = /(\w+) section/.exec(sentence)?.[1]?.toLowerCase();
+  if (!named) return '';
+  return ` <a href="${base}/setup#${escapeHtml(named)}">${escapeHtml(`the ${named} section`)}</a>`;
 }
 
 /**
@@ -81,6 +81,28 @@ function forbiddenLocked(f: FlagsForm, r: FlagRow): boolean {
   return f.scope === 'zone' || r.entry.kind !== 'bool' || r.value === true;
 }
 
+/**
+ * A record's control: one text input per key, each at its own path (`models.implement`), drawn
+ * with the key's stored value and whether the document sets it. An empty input the document sets
+ * sends null, which removes the key; one it doesn't set sends nothing.
+ */
+function recordControl(r: FlagRow, locked: boolean): string {
+  const value = (r.value && typeof r.value === 'object' ? r.value : {}) as Record<string, unknown>;
+  return (r.keys ?? [])
+    .map((k) => {
+      const path = `${r.key}.${k}`;
+      const set = Object.hasOwn(value, k);
+      return `<label for="${settingId(path)}">${escapeHtml(k)}</label> ${settingControl({
+        path,
+        kind: 'text',
+        value: value[k],
+        locked,
+        attrs: `data-explicit="${set ? '1' : '0'}"`,
+      })}`;
+    })
+    .join('<br>');
+}
+
 function row(f: FlagsForm, r: FlagRow): string {
   const { entry, key, guard } = r;
   const forbidden = forbiddenLocked(f, r);
@@ -88,27 +110,29 @@ function row(f: FlagsForm, r: FlagRow): string {
   const control =
     entry.kind === 'elsewhere'
       ? `${escapeHtml(entry.elsewhere ?? '')}${elsewhereLink(f, r)}`
-      : settingControl({
-          path: key,
-          kind: entry.kind,
-          value: r.value,
-          locked,
-          ...(r.options ? { options: r.options } : {}),
-          ...(entry.kind === 'select' && r.defaultValue === undefined
-            ? { empty: '(not set)' }
-            : {}),
-          ...(entry.kind === 'number'
-            ? {
-                attrs: [
-                  r.min === undefined ? '' : `min="${r.min}"`,
-                  r.max === undefined ? '' : `max="${r.max}"`,
-                  `step="${r.integer ? 1 : 'any'}"`,
-                ]
-                  .filter(Boolean)
-                  .join(' '),
-              }
-            : {}),
-        });
+      : entry.kind === 'record'
+        ? recordControl(r, locked)
+        : settingControl({
+            path: key,
+            kind: entry.kind,
+            value: r.value,
+            locked,
+            ...(r.options ? { options: r.options } : {}),
+            ...(entry.kind === 'select' && r.defaultValue === undefined
+              ? { empty: '(not set)' }
+              : {}),
+            ...(entry.kind === 'number'
+              ? {
+                  attrs: [
+                    r.min === undefined ? '' : `min="${r.min}"`,
+                    r.max === undefined ? '' : `max="${r.max}"`,
+                    `step="${r.integer ? 1 : 'any'}"`,
+                  ]
+                    .filter(Boolean)
+                    .join(' '),
+                }
+              : {}),
+          });
   const resettable =
     r.explicit &&
     !f.readOnly &&
@@ -132,7 +156,7 @@ function row(f: FlagsForm, r: FlagRow): string {
     .filter(Boolean)
     .join(' ');
   const label =
-    entry.kind === 'elsewhere'
+    entry.kind === 'elsewhere' || entry.kind === 'record'
       ? `<strong>${escapeHtml(entry.label)}</strong>`
       : `<label for="${settingId(key)}">${escapeHtml(entry.label)}</label>`;
   const search = `${entry.label} ${entry.help} ${key}`.toLowerCase();
@@ -170,6 +194,18 @@ function jmFlagsPatch(fields) {
     at[keys[keys.length - 1]] = v;
   }
   return patch;
+}
+function jmRowFields(row) {
+  const key = row.dataset.flag;
+  if (row.dataset.reset === '1') return [{ key, reset: true }];
+  const fields = [];
+  // One control per row, or one per key of a record, each at its own data-path.
+  for (const el of row.querySelectorAll('[data-path]')) {
+    if (el.disabled) continue;
+    const own = el.dataset.explicit;
+    fields.push({ key: el.dataset.path, kind: el.dataset.kind, value: el.dataset.kind === 'bool' ? el.checked : el.value, original: JSON.parse(el.dataset.original), explicit: (own === undefined ? row.dataset.explicit : own) === '1' });
+  }
+  return fields;
 }
 function jmFlagIssueAt(path, target) {
   const p = String(path || '');
@@ -228,13 +264,7 @@ document.addEventListener('DOMContentLoaded', () => {
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const fields = [];
-    for (const row of form.querySelectorAll('tr[data-flag]')) {
-      const key = row.dataset.flag;
-      if (row.dataset.reset === '1') { fields.push({ key, reset: true }); continue; }
-      const el = row.querySelector('[data-path]');
-      if (!el || el.disabled) continue;
-      fields.push({ key, kind: el.dataset.kind, value: el.dataset.kind === 'bool' ? el.checked : el.value, original: JSON.parse(el.dataset.original), explicit: row.dataset.explicit === '1' });
-    }
+    for (const row of form.querySelectorAll('tr[data-flag]')) fields.push(...jmRowFields(row));
     await jmSaveFlags(JSON.parse(form.dataset.target), jmFlagsPatch(fields), Number(form.dataset.revision), document.getElementById('flags-out'), (to) => { location.href = to; });
   });
 });
@@ -295,8 +325,8 @@ export function renderFlags(
   return page(
     `${
       o.header
-        ? `${o.header(resolved, all)}<p><a href="${base}/setup#advanced">Edit the zone as JSON</a></p>`
-        : `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${base}">${zoneName(resolved, all)}</a> · <a href="${base}/setup#advanced">Edit the zone as JSON</a></p>`
+        ? `${o.header(resolved, all)}<p><a href="${base}/setup#advanced">View the zone as JSON</a></p>`
+        : `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${base}">${zoneName(resolved, all)}</a> · <a href="${base}/setup#advanced">View the zone as JSON</a></p>`
     }
 <h2>Advanced settings · ${zoneName(resolved, all)}</h2>
 <p>Every setting for this zone. Changes apply at the next pass; one that loosens a safeguard asks you to confirm first.</p>
