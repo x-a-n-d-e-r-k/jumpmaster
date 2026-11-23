@@ -2,7 +2,9 @@
 // It answers `${baseUrl}/api/v4/...` from in-memory state for one project, and never lets a
 // request through to the network: any route it doesn't know answers 404. Every request is
 // recorded without its token. Later slices add the endpoints they need here.
+import { createHash } from 'node:crypto';
 import nock from 'nock';
+import { gitBlobSha } from '../forge/github.js';
 
 /** GitLab's access levels. */
 export const ACCESS = {
@@ -29,6 +31,29 @@ export type RecordedRequest = {
   body: unknown;
   /** The caller's username, `null` with no token, `"<unknown>"` when the token matched no user. */
   user: string | null;
+};
+
+/** A commit in the fake's in-memory repository: a full file snapshot, path → UTF-8 content. */
+export type FakeCommit = {
+  id: string;
+  parent_ids: string[];
+  message: string;
+  files: Record<string, string>;
+};
+export type GitLabCommit = {
+  id: string;
+  short_id: string;
+  parent_ids: string[];
+  message: string;
+  title: string;
+};
+export type GitLabDiff = {
+  old_path: string;
+  new_path: string;
+  new_file: boolean;
+  renamed_file: boolean;
+  deleted_file: boolean;
+  diff: string;
 };
 
 export type GitLabUser = { id: number; username: string; name: string };
@@ -145,6 +170,89 @@ function redact(value: unknown, secrets: string[]): unknown {
       ]),
     );
   return value;
+}
+
+const SHA = /^[0-9a-f]{40}$/;
+const byPath = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
+/** A commit's SHA: sha1 over an unambiguous serialization of its parents, message and files. */
+function commitSha(parents: string[], message: string, files: Record<string, string>): string {
+  const sorted = Object.keys(files)
+    .sort(byPath)
+    .map((p) => [p, files[p]]);
+  return createHash('sha1')
+    .update(JSON.stringify({ parents, message, files: sorted }))
+    .digest('hex');
+}
+
+/** A file's lines: split on `\n`, one trailing `\n` adds no empty line, empty content has none. */
+function lines(content: string): string[] {
+  if (content === '') return [];
+  return (content.endsWith('\n') ? content.slice(0, -1) : content).split('\n');
+}
+
+/** One whole-file hunk from `before` to `after`. */
+function hunk(before: string, after: string): string {
+  const a = lines(before);
+  const b = lines(after);
+  return [
+    `@@ -1,${a.length} +1,${b.length} @@\n`,
+    ...a.map((l) => `-${l}\n`),
+    ...b.map((l) => `+${l}\n`),
+  ].join('');
+}
+
+/** The diffs from snapshot `from` to snapshot `to`, sorted by `new_path`, renames paired. */
+function snapshotDiffs(from: Record<string, string>, to: Record<string, string>): GitLabDiff[] {
+  const has = (o: Record<string, string>, p: string) => Object.hasOwn(o, p);
+  const gone = Object.keys(from)
+    .filter((p) => !has(to, p))
+    .sort(byPath);
+  const added = Object.keys(to)
+    .filter((p) => !has(from, p))
+    .sort(byPath);
+  const out: GitLabDiff[] = [];
+  const paired = new Set<string>();
+  for (const old of gone) {
+    const match = added.find((p) => !paired.has(p) && to[p] === from[old]);
+    if (match !== undefined) {
+      paired.add(match);
+      paired.add(old);
+      out.push({
+        old_path: old,
+        new_path: match,
+        new_file: false,
+        renamed_file: true,
+        deleted_file: false,
+        diff: '',
+      });
+    }
+  }
+  const entry = (old_path: string, new_path: string, kind: 'new' | 'deleted' | 'changed') => ({
+    old_path,
+    new_path,
+    new_file: kind === 'new',
+    renamed_file: false,
+    deleted_file: kind === 'deleted',
+    diff: hunk(
+      kind === 'new' ? '' : (from[old_path] ?? ''),
+      kind === 'deleted' ? '' : (to[new_path] ?? ''),
+    ),
+  });
+  for (const p of gone) if (!paired.has(p)) out.push(entry(p, p, 'deleted'));
+  for (const p of added) if (!paired.has(p)) out.push(entry(p, p, 'new'));
+  for (const p of Object.keys(to))
+    if (has(from, p) && from[p] !== to[p]) out.push(entry(p, p, 'changed'));
+  return out.sort((a, b) => byPath(a.new_path, b.new_path) || byPath(a.old_path, b.old_path));
+}
+
+/** A URL path segment, decoded; `undefined` when it isn't valid percent-encoding. */
+function decodeSegment(s: string | undefined): string | undefined {
+  try {
+    return decodeURIComponent(s ?? '');
+  } catch {
+    return undefined;
+  }
 }
 
 export function fakeGitLab(opts: { baseUrl: string; project: FakeGitLabProject }) {
@@ -380,6 +488,235 @@ export function fakeGitLab(opts: { baseUrl: string; project: FakeGitLabProject }
     paged(notesOf('MergeRequest', m[1]), c.query),
   );
 
+  // --- Repository -----------------------------------------------------------------------------
+
+  const commits = new Map<string, FakeCommit>();
+  /** Branch name → commit SHA. */
+  const branches = new Map<string, string>();
+
+  function makeCommit(parents: string[], message: string, files: Record<string, string>): string {
+    const id = commitSha(parents, message, files);
+    if (!commits.has(id))
+      commits.set(id, { id, parent_ids: [...parents], message, files: { ...files } });
+    return id;
+  }
+  branches.set(project.defaultBranch, makeCommit([], 'Initial commit', {}));
+
+  /** The commit SHA a ref (a full SHA or a branch name) names. */
+  const resolve = (ref: string | undefined | null): string | undefined => {
+    if (ref === undefined || ref === null) return undefined;
+    if (SHA.test(ref) && commits.has(ref)) return ref;
+    return branches.get(ref);
+  };
+  const commitOf = (sha: string) => commits.get(sha) as FakeCommit;
+
+  /** Every commit reachable from `sha` (itself included). */
+  function reachable(sha: string | undefined): Set<string> {
+    const seen = new Set<string>();
+    const stack = sha ? [sha] : [];
+    while (stack.length) {
+      const c = stack.pop() as string;
+      if (seen.has(c)) continue;
+      seen.add(c);
+      stack.push(...commitOf(c).parent_ids);
+    }
+    return seen;
+  }
+
+  /** The nearest common ancestor of `a` and `b`, found breadth-first from `b`. */
+  function mergeBase(a: string, b: string): string | undefined {
+    const ofA = reachable(a);
+    const seen = new Set<string>();
+    const queue = [b];
+    while (queue.length) {
+      const c = queue.shift() as string;
+      if (seen.has(c)) continue;
+      seen.add(c);
+      if (ofA.has(c)) return c;
+      queue.push(...commitOf(c).parent_ids);
+    }
+    return undefined;
+  }
+
+  const commitJson = (sha: string): GitLabCommit => {
+    const c = commitOf(sha);
+    return {
+      id: c.id,
+      short_id: c.id.slice(0, 8),
+      parent_ids: [...c.parent_ids],
+      message: c.message,
+      title: c.message.split('\n')[0] ?? '',
+    };
+  };
+
+  /** The newest first-parent ancestor of `sha` (itself included) that changed `path`. */
+  function lastCommitFor(sha: string, path: string): string {
+    let c = commitOf(sha);
+    for (;;) {
+      const parent = c.parent_ids[0];
+      const before = parent ? commitOf(parent).files : {};
+      if (
+        before[path] !== c.files[path] ||
+        Object.hasOwn(before, path) !== Object.hasOwn(c.files, path)
+      )
+        return c.id;
+      if (!parent) return c.id;
+      c = commitOf(parent);
+    }
+  }
+
+  /** Commits reachable from `to` and not from `base`, oldest first (topological, ties by SHA). */
+  function commitsBetween(base: string | undefined, to: string): string[] {
+    const exclude = reachable(base);
+    const set = [...reachable(to)].filter((c) => !exclude.has(c));
+    const inSet = new Set(set);
+    const done = new Set<string>();
+    const out: string[] = [];
+    while (out.length < set.length) {
+      const ready = set
+        .filter((c) => !done.has(c))
+        .filter((c) => commitOf(c).parent_ids.every((p) => !inSet.has(p) || done.has(p)))
+        .sort(byPath);
+      const next = ready[0] as string;
+      done.add(next);
+      out.push(next);
+    }
+    return out;
+  }
+
+  const branchJson = (name: string) => {
+    const { id, parent_ids, message, title } = commitJson(branches.get(name) as string);
+    return {
+      name,
+      commit: { id, parent_ids, message, title },
+      protected: false,
+      default: name === project.defaultBranch,
+    };
+  };
+
+  route('GET', /^\/repository\/branches\/([^/]+)$/, (_c, m) => {
+    const name = decodeSegment(m[1]);
+    if (name === undefined || !branches.has(name)) return err(404, '404 Branch Not Found');
+    return [200, branchJson(name)];
+  });
+  route('POST', /^\/repository\/branches$/, (c) => {
+    if (c.level < ACCESS.developer) return FORBIDDEN;
+    const name = str(c.params.branch);
+    const ref = str(c.params.ref);
+    if (!name) return [400, { error: 'branch is missing' }];
+    if (!ref) return [400, { error: 'ref is missing' }];
+    if (branches.has(name)) return err(400, 'Branch already exists');
+    const sha = resolve(ref);
+    if (!sha) return err(400, 'Invalid reference name');
+    branches.set(name, sha);
+    return [201, branchJson(name)];
+  });
+
+  /** The file at `ref`, or the reply that says why there isn't one. */
+  const fileLookup = (
+    c: Ctx,
+    seg: string | undefined,
+  ): { reply: Reply } | { path: string; ref: string; sha: string; content: string } => {
+    const path = decodeSegment(seg);
+    const ref = c.query.get('ref');
+    if (!ref) return { reply: [400, { error: 'ref is missing' }] };
+    const sha = resolve(ref);
+    if (path === undefined || !sha) return { reply: err(404, '404 File Not Found') };
+    const files = commitOf(sha).files;
+    if (!Object.hasOwn(files, path)) return { reply: err(404, '404 File Not Found') };
+    return { path, ref, sha, content: files[path] as string };
+  };
+  route('GET', /^\/repository\/files\/([^/]+)$/, (c, m) => {
+    const f = fileLookup(c, m[1]);
+    if ('reply' in f) return f.reply;
+    const bytes = Buffer.from(f.content, 'utf8');
+    return [
+      200,
+      {
+        file_path: f.path,
+        file_name: f.path.split('/').pop(),
+        size: bytes.length,
+        encoding: 'base64',
+        content: bytes.toString('base64'),
+        ref: f.ref,
+        blob_id: gitBlobSha(f.content),
+        commit_id: f.sha,
+        last_commit_id: lastCommitFor(f.sha, f.path),
+      },
+    ];
+  });
+  route('GET', /^\/repository\/files\/([^/]+)\/raw$/, (c, m) => {
+    const f = fileLookup(c, m[1]);
+    if ('reply' in f) return f.reply;
+    return [200, f.content, { 'content-type': 'text/plain; charset=utf-8' }];
+  });
+  const writeFile =
+    (create: boolean): Handler =>
+    (c, m) => {
+      if (c.level < ACCESS.developer) return FORBIDDEN;
+      const path = decodeSegment(m[1]);
+      if (!path) return err(400, 'file_path is invalid');
+      const branch = str(c.params.branch);
+      const message = str(c.params.commit_message);
+      const raw = str(c.params.content);
+      if (!branch) return [400, { error: 'branch is missing' }];
+      if (!message) return [400, { error: 'commit_message is missing' }];
+      if (raw === undefined) return [400, { error: 'content is missing' }];
+      const head = branches.get(branch);
+      if (!head) return err(400, 'You can only create or edit files when you are on a branch');
+      const files = commitOf(head).files;
+      const exists = Object.hasOwn(files, path);
+      if (create && exists) return err(400, 'A file with this name already exists');
+      if (!create && !exists) return err(400, "A file with this name doesn't exist");
+      const last = str(c.params.last_commit_id);
+      if (!create && last !== undefined && last !== lastCommitFor(head, path))
+        return err(
+          400,
+          'You are attempting to update a file that has changed since you started editing it.',
+        );
+      const content =
+        str(c.params.encoding) === 'base64' ? Buffer.from(raw, 'base64').toString('utf8') : raw;
+      branches.set(branch, makeCommit([head], message, { ...files, [path]: content }));
+      return [create ? 201 : 200, { file_path: path, branch }];
+    };
+  route('POST', /^\/repository\/files\/([^/]+)$/, writeFile(true));
+  route('PUT', /^\/repository\/files\/([^/]+)$/, writeFile(false));
+
+  route('GET', /^\/repository\/commits\/([^/]+)$/, (_c, m) => {
+    const sha = resolve(decodeSegment(m[1]));
+    return sha ? [200, commitJson(sha)] : err(404, '404 Commit Not Found');
+  });
+
+  route('GET', /^\/repository\/merge_base$/, (c) => {
+    const refs = c.query.getAll('refs[]');
+    if (refs.length !== 2) return err(400, 'Provide exactly two refs');
+    const [a, b] = refs.map(resolve);
+    if (!a || !b) return err(400, `Could not find ref ${refs[a ? 1 : 0]}`);
+    const base = mergeBase(a, b);
+    return base ? [200, commitJson(base)] : err(404, '404 Merge Base Not Found');
+  });
+
+  route('GET', /^\/repository\/compare$/, (c) => {
+    const fromRef = c.query.get('from') ?? '';
+    const toRef = c.query.get('to') ?? '';
+    const from = resolve(fromRef);
+    const to = resolve(toRef);
+    if (!from || !to) return NOT_FOUND;
+    const straight = c.query.get('straight') === 'true';
+    const base = straight ? from : mergeBase(from, to);
+    const list = commitsBetween(base, to).map(commitJson);
+    return [
+      200,
+      {
+        commit: list[list.length - 1] ?? null,
+        commits: list,
+        diffs: snapshotDiffs(base ? commitOf(base).files : {}, commitOf(to).files),
+        compare_timeout: false,
+        compare_same_ref: fromRef === toRef,
+      },
+    ];
+  });
+
   // --- Dispatch -----------------------------------------------------------------------------
 
   /** The project route for `rest` (the path after `/projects/:id`), if the fake knows it. */
@@ -501,6 +838,39 @@ export function fakeGitLab(opts: { baseUrl: string; project: FakeGitLabProject }
       return label;
     },
     seedNote: addNote,
+    /** Make a commit with the full file snapshot `files`, and return its SHA. With `branch` the
+     *  branch moves to it, and `parent` defaults to the branch's head. */
+    seedCommit(c: {
+      branch?: string;
+      parent?: string;
+      files: Record<string, string>;
+      message: string;
+    }): string {
+      let parent: string | undefined;
+      if (c.parent !== undefined) {
+        parent = resolve(c.parent);
+        if (!parent) throw new Error(`unknown parent ${c.parent}`);
+      } else if (c.branch !== undefined) parent = branches.get(c.branch);
+      const sha = makeCommit(parent ? [parent] : [], c.message, c.files);
+      if (c.branch !== undefined) branches.set(c.branch, sha);
+      return sha;
+    },
+    /** Point branch `name` at commit `sha`. */
+    seedBranch(name: string, sha: string) {
+      if (!commits.has(sha)) throw new Error(`unknown commit ${sha}`);
+      branches.set(name, sha);
+    },
+    /** The commit branch `name` points at. */
+    branchSha: (name: string) => branches.get(name),
+    /** The content of `path` at `ref` (a SHA or a branch name). */
+    fileAt(ref: string, path: string): string | undefined {
+      const sha = resolve(ref);
+      if (!sha) return undefined;
+      const files = commitOf(sha).files;
+      return Object.hasOwn(files, path) ? files[path] : undefined;
+    },
+    /** A stored commit. */
+    commit: (sha: string) => commits.get(sha),
     /** The stored issue, as the fake holds it now. */
     issue: (iid: number) => issues.find((i) => i.iid === iid),
     issues,

@@ -1,5 +1,6 @@
 import nock from 'nock';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
+import { gitBlobSha } from '../forge/github.js';
 import { ACCESS, type FakeGitLab, fakeGitLab } from './fake-gitlab.js';
 
 const GITLAB = 'https://gitlab.com';
@@ -75,7 +76,13 @@ function setup(baseUrl = GITLAB) {
       body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
     });
     const text = await res.text();
-    return { status: res.status, headers: res.headers, body: text ? JSON.parse(text) : undefined };
+    let body: unknown;
+    try {
+      body = text ? JSON.parse(text) : undefined;
+    } catch {
+      body = text;
+    }
+    return { status: res.status, headers: res.headers, body: body as any, text };
   };
   return { gl, call };
 }
@@ -496,5 +503,387 @@ describe('edges beyond the spec', () => {
     });
     expect((await call('GET', `/projects/${PROJECT.id}`, { token: ru })).status).toBe(403);
     expect(JSON.stringify(gl.requests)).not.toContain(ru);
+  });
+});
+
+describe('repository: branches', () => {
+  const P = `/projects/${PROJECT.id}`;
+
+  test('creates a branch from a SHA and from a branch name', async () => {
+    const { gl, call } = setup();
+    const head = gl.branchSha('main') as string;
+    const fromSha = await call('POST', `${P}/repository/branches`, {
+      body: { branch: 'a', ref: head },
+    });
+    expect(fromSha.status).toBe(201);
+    expect(fromSha.body.commit.id).toBe(head);
+    const fromName = await call('POST', `${P}/repository/branches`, {
+      body: { branch: 'b', ref: 'main' },
+    });
+    expect(fromName.status).toBe(201);
+    expect(gl.branchSha('b')).toBe(head);
+    const got = await call('GET', `${P}/repository/branches/b`);
+    expect(got.status).toBe(200);
+    expect(got.body).toEqual({
+      name: 'b',
+      commit: { id: head, parent_ids: [], message: 'Initial commit', title: 'Initial commit' },
+      protected: false,
+      default: false,
+    });
+    expect((await call('GET', `${P}/repository/branches/main`)).body.default).toBe(true);
+  });
+
+  test('a branch name with / works only URL-encoded', async () => {
+    const { gl, call } = setup();
+    const made = await call('POST', `${P}/repository/branches`, {
+      body: { branch: 'jm/x', ref: 'main' },
+    });
+    expect(made.status).toBe(201);
+    const got = await call('GET', `${P}/repository/branches/jm%2Fx`);
+    expect(got.status).toBe(200);
+    expect(got.body.name).toBe('jm/x');
+    const raw = await call('GET', `${P}/repository/branches/jm/x`);
+    expect(raw.status).toBe(404);
+    expect(gl.unknown).toEqual([`GET /api/v4${P}/repository/branches/jm/x`]);
+  });
+
+  test('a duplicate name or unknown ref gives 400', async () => {
+    const { call } = setup();
+    const dup = await call('POST', `${P}/repository/branches`, {
+      body: { branch: 'main', ref: 'main' },
+    });
+    expect(dup).toMatchObject({ status: 400, body: { message: 'Branch already exists' } });
+    const bad = await call('POST', `${P}/repository/branches`, {
+      body: { branch: 'x', ref: 'nope' },
+    });
+    expect(bad.status).toBe(400);
+  });
+
+  test('a Reporter gets 403 and a read_api token gets insufficient_scope', async () => {
+    const { gl, call } = setup();
+    const r = await call('POST', `${P}/repository/branches`, {
+      token: REPORTER,
+      body: { branch: 'x', ref: 'main' },
+    });
+    expect(r.status).toBe(403);
+    const ro = glpat('O');
+    gl.addUser({ username: 'ro', token: ro, accessLevel: ACCESS.maintainer, scopes: ['read_api'] });
+    const s = await call('POST', `${P}/repository/branches`, {
+      token: ro,
+      body: { branch: 'x', ref: 'main' },
+    });
+    expect(s.status).toBe(403);
+    expect(s.body.error).toBe('insufficient_scope');
+    expect(gl.branchSha('x')).toBeUndefined();
+    expect(JSON.stringify(gl.requests)).not.toContain(ro);
+    // Reads still work with read_api.
+    expect((await call('GET', `${P}/repository/branches/main`, { token: ro })).status).toBe(200);
+  });
+
+  test('a missing branch gives 404', async () => {
+    const { call } = setup();
+    expect((await call('GET', `${P}/repository/branches/nope`)).status).toBe(404);
+  });
+});
+
+describe('repository: files', () => {
+  const P = `/projects/${PROJECT.id}`;
+
+  test('gets a file as base64 and raw, with blob_id from gitBlobSha', async () => {
+    const { gl, call } = setup();
+    const content = 'héllo\nworld\n';
+    const sha = gl.seedCommit({ branch: 'main', files: { 'a.txt': content }, message: 'add a' });
+    const got = await call('GET', `${P}/repository/files/a.txt?ref=main`);
+    expect(got.status).toBe(200);
+    expect(got.body).toEqual({
+      file_path: 'a.txt',
+      file_name: 'a.txt',
+      size: Buffer.byteLength(content),
+      encoding: 'base64',
+      content: Buffer.from(content).toString('base64'),
+      ref: 'main',
+      blob_id: gitBlobSha(content),
+      commit_id: sha,
+      last_commit_id: sha,
+    });
+    const raw = await call('GET', `${P}/repository/files/a.txt/raw?ref=${sha}`);
+    expect(raw.status).toBe(200);
+    expect(raw.text).toBe(content);
+    expect((await call('GET', `${P}/repository/files/b.txt?ref=main`)).status).toBe(404);
+    expect((await call('GET', `${P}/repository/files/b.txt/raw?ref=main`)).status).toBe(404);
+    expect((await call('GET', `${P}/repository/files/a.txt?ref=nope`)).status).toBe(404);
+  });
+
+  test('last_commit_id is the newest first-parent commit that changed the file', async () => {
+    const { gl, call } = setup();
+    const c1 = gl.seedCommit({ branch: 'main', files: { a: '1', b: '1' }, message: 'one' });
+    const c2 = gl.seedCommit({ branch: 'main', files: { a: '1', b: '2' }, message: 'two' });
+    const got = await call('GET', `${P}/repository/files/a?ref=main`);
+    expect(got.body.commit_id).toBe(c2);
+    expect(got.body.last_commit_id).toBe(c1);
+  });
+
+  test('POST creates a file on a new commit; POST on an existing file gives 400', async () => {
+    const { gl, call } = setup();
+    const old = gl.branchSha('main') as string;
+    const made = await call('POST', `${P}/repository/files/new.txt`, {
+      body: { branch: 'main', content: 'x\n', commit_message: 'add new' },
+    });
+    expect(made).toMatchObject({ status: 201, body: { file_path: 'new.txt', branch: 'main' } });
+    const head = gl.branchSha('main') as string;
+    expect(head).not.toBe(old);
+    expect(gl.commit(head)?.parent_ids).toEqual([old]);
+    expect(gl.fileAt('main', 'new.txt')).toBe('x\n');
+    const again = await call('POST', `${P}/repository/files/new.txt`, {
+      body: { branch: 'main', content: 'y', commit_message: 'again' },
+    });
+    expect(again.status).toBe(400);
+    expect(gl.branchSha('main')).toBe(head);
+  });
+
+  test('PUT on a missing file gives 400; a stale last_commit_id gives 400', async () => {
+    const { gl, call } = setup();
+    const missing = await call('PUT', `${P}/repository/files/none.txt`, {
+      body: { branch: 'main', content: 'y', commit_message: 'edit' },
+    });
+    expect(missing.status).toBe(400);
+    const first = gl.seedCommit({ branch: 'main', files: { f: 'a' }, message: 'f1' });
+    const second = gl.seedCommit({ branch: 'main', files: { f: 'b' }, message: 'f2' });
+    const stale = await call('PUT', `${P}/repository/files/f`, {
+      body: { branch: 'main', content: 'c', commit_message: 'edit', last_commit_id: first },
+    });
+    expect(stale.status).toBe(400);
+    expect(gl.branchSha('main')).toBe(second);
+    const ok = await call('PUT', `${P}/repository/files/f`, {
+      body: { branch: 'main', content: 'c', commit_message: 'edit', last_commit_id: second },
+    });
+    expect(ok).toMatchObject({ status: 200, body: { file_path: 'f', branch: 'main' } });
+    expect(gl.fileAt('main', 'f')).toBe('c');
+    expect(gl.commit(gl.branchSha('main') as string)?.parent_ids).toEqual([second]);
+  });
+
+  test('a Reporter gets 403 on a file write and nothing changes', async () => {
+    const { gl, call } = setup();
+    const before = gl.branchSha('main');
+    const r = await call('POST', `${P}/repository/files/a`, {
+      token: REPORTER,
+      body: { branch: 'main', content: 'x', commit_message: 'm' },
+    });
+    expect(r.status).toBe(403);
+    expect(gl.branchSha('main')).toBe(before);
+  });
+
+  test('a path with / works only encoded', async () => {
+    const { gl, call } = setup();
+    const enc = encodeURIComponent('dir/sub/f.md');
+    const made = await call('POST', `${P}/repository/files/${enc}`, {
+      body: { branch: 'main', content: '# hi\n', commit_message: 'docs' },
+    });
+    expect(made.status).toBe(201);
+    expect(made.body.file_path).toBe('dir/sub/f.md');
+    const got = await call('GET', `${P}/repository/files/${enc}?ref=main`);
+    expect(got.status).toBe(200);
+    expect(got.body.file_name).toBe('f.md');
+    const raw = await call('GET', `${P}/repository/files/dir/sub/f.md?ref=main`);
+    expect(raw.status).toBe(404);
+    expect(gl.unknown).toEqual([`GET /api/v4${P}/repository/files/dir/sub/f.md`]);
+  });
+
+  test('no recorded request contains the token after a file write', async () => {
+    const { gl, call } = setup();
+    await call('POST', `${P}/repository/files/t`, {
+      body: { branch: 'main', content: 'x', commit_message: 'm' },
+    });
+    await call('PUT', `${P}/repository/files/t?private_token=${DEVELOPER}`, {
+      token: null,
+      body: { branch: 'main', content: 'y', commit_message: 'm2' },
+    });
+    expect(gl.requests.length).toBe(2);
+    expect(gl.requests[0]?.body).toMatchObject({ content: 'x' });
+    expect(JSON.stringify(gl.requests)).not.toContain(DEVELOPER);
+  });
+});
+
+describe('repository: commits and merge base', () => {
+  const P = `/projects/${PROJECT.id}`;
+
+  test('GET a commit returns parent_ids and short_id; an unknown SHA gives 404', async () => {
+    const { gl, call } = setup();
+    const root = gl.branchSha('main') as string;
+    const sha = gl.seedCommit({ branch: 'main', files: {}, message: 'Title\n\nBody' });
+    const got = await call('GET', `${P}/repository/commits/${sha}`);
+    expect(got.body).toEqual({
+      id: sha,
+      short_id: sha.slice(0, 8),
+      parent_ids: [root],
+      message: 'Title\n\nBody',
+      title: 'Title',
+    });
+    expect((await call('GET', `${P}/repository/commits/${'0'.repeat(40)}`)).status).toBe(404);
+  });
+
+  test('merge base of diverged branches, of an ancestor, and of unrelated roots', async () => {
+    const { gl, call } = setup();
+    const fork = gl.seedCommit({ branch: 'main', files: { a: '1' }, message: 'fork' });
+    gl.seedBranch('feature', fork);
+    gl.seedCommit({ branch: 'main', files: { a: '2' }, message: 'main side' });
+    gl.seedCommit({ branch: 'feature', files: { a: '1', b: '1' }, message: 'feature side' });
+    const mb = (a: string, b: string) =>
+      call(
+        'GET',
+        `${P}/repository/merge_base?refs[]=${encodeURIComponent(a)}&refs[]=${encodeURIComponent(b)}`,
+      );
+    const diverged = await mb('main', 'feature');
+    expect(diverged.status).toBe(200);
+    expect(diverged.body.id).toBe(fork);
+    expect(diverged.body.parent_ids).toHaveLength(1);
+    expect((await mb('feature', fork)).body.id).toBe(fork);
+    const lone = gl.seedCommit({ files: { z: '1' }, message: 'other root' });
+    expect((await mb('main', lone)).status).toBe(404);
+    expect((await mb('main', 'nope')).status).toBe(400);
+    expect((await call('GET', `${P}/repository/merge_base?refs[]=main`)).status).toBe(400);
+  });
+});
+
+describe('repository: compare', () => {
+  const P = `/projects/${PROJECT.id}`;
+  const cmp = (call: ReturnType<typeof setup>['call'], q: string) =>
+    call('GET', `${P}/repository/compare?${q}`);
+
+  function diverged(gl: FakeGitLab) {
+    const base = gl.seedCommit({
+      branch: 'main',
+      files: { 'keep.txt': 'k\n', 'old.txt': 'same\n', 'gone.txt': 'a\nb\n', 'edit.txt': 'one\n' },
+      message: 'base',
+    });
+    gl.seedBranch('feature', base);
+    const m1 = gl.seedCommit({
+      branch: 'main',
+      files: { 'keep.txt': 'k2\n', 'old.txt': 'same\n', 'gone.txt': 'a\nb\n', 'edit.txt': 'one\n' },
+      message: 'main change',
+    });
+    const f1 = gl.seedCommit({
+      branch: 'feature',
+      files: { 'keep.txt': 'k\n', 'new.txt': 'same\n', 'gone.txt': 'a\nb\n', 'edit.txt': 'two\n' },
+      message: 'feature rename + edit',
+    });
+    const f2 = gl.seedCommit({
+      branch: 'feature',
+      files: { 'keep.txt': 'k\n', 'new.txt': 'same\n', 'edit.txt': 'two\n', 'added.txt': 'x\ny' },
+      message: 'feature delete + add',
+    });
+    return { base, m1, f1, f2 };
+  }
+
+  test('straight=false diffs from the merge base; straight=true from `from`', async () => {
+    const { gl, call } = setup();
+    const { base, m1, f1, f2 } = diverged(gl);
+    for (const q of ['from=main&to=feature', 'from=main&to=feature&straight=false']) {
+      const r = await cmp(call, q);
+      expect(r.status).toBe(200);
+      expect(r.body.commits.map((c: { id: string }) => c.id)).toEqual([f1, f2]);
+      expect(r.body.commits[0].parent_ids).toEqual([base]);
+      expect(r.body.commits[1].parent_ids).toEqual([f1]);
+      expect(r.body.commit.id).toBe(f2);
+      expect(r.body.compare_same_ref).toBe(false);
+      expect(r.body.compare_timeout).toBe(false);
+      expect(r.body.diffs).toEqual([
+        {
+          old_path: 'added.txt',
+          new_path: 'added.txt',
+          new_file: true,
+          renamed_file: false,
+          deleted_file: false,
+          diff: '@@ -1,0 +1,2 @@\n+x\n+y\n',
+        },
+        {
+          old_path: 'edit.txt',
+          new_path: 'edit.txt',
+          new_file: false,
+          renamed_file: false,
+          deleted_file: false,
+          diff: '@@ -1,1 +1,1 @@\n-one\n+two\n',
+        },
+        {
+          old_path: 'gone.txt',
+          new_path: 'gone.txt',
+          new_file: false,
+          renamed_file: false,
+          deleted_file: true,
+          diff: '@@ -1,2 +1,0 @@\n-a\n-b\n',
+        },
+        {
+          old_path: 'old.txt',
+          new_path: 'new.txt',
+          new_file: false,
+          renamed_file: true,
+          deleted_file: false,
+          diff: '',
+        },
+      ]);
+    }
+    const mb = await call('GET', `${P}/repository/merge_base?refs[]=main&refs[]=feature`);
+    expect(mb.body.id).toBe(base);
+
+    const straight = await cmp(call, 'from=main&to=feature&straight=true');
+    expect(straight.body.commits.map((c: { id: string }) => c.id)).toEqual([f1, f2]);
+    const keep = straight.body.diffs.find((d: { new_path: string }) => d.new_path === 'keep.txt');
+    expect(keep.diff).toBe('@@ -1,1 +1,1 @@\n-k2\n+k\n');
+    expect(m1).toBe(gl.branchSha('main'));
+  });
+
+  test('comparing a ref with itself gives compare_same_ref and nothing else', async () => {
+    const { gl, call } = setup();
+    diverged(gl);
+    const r = await cmp(call, 'from=feature&to=feature');
+    expect(r.body).toEqual({
+      commit: null,
+      commits: [],
+      diffs: [],
+      compare_timeout: false,
+      compare_same_ref: true,
+    });
+  });
+
+  test('unrelated histories diff from the empty tree; an unknown ref gives 404', async () => {
+    const { gl, call } = setup();
+    const lone = gl.seedCommit({ files: { a: '' }, message: 'other root' });
+    gl.seedBranch('other', lone);
+    const r = await cmp(call, 'from=main&to=other');
+    expect(r.body.commits.map((c: { id: string }) => c.id)).toEqual([lone]);
+    expect(r.body.diffs).toEqual([
+      {
+        old_path: 'a',
+        new_path: 'a',
+        new_file: true,
+        renamed_file: false,
+        deleted_file: false,
+        diff: '@@ -1,0 +1,0 @@\n',
+      },
+    ]);
+    expect((await cmp(call, 'from=main&to=nope')).status).toBe(404);
+    expect((await cmp(call, 'from=nope&to=main')).status).toBe(404);
+  });
+
+  test('the same repository gives byte-identical SHAs and diffs across fakes', async () => {
+    const one = setup();
+    const two = setup(SELF_MANAGED);
+    expect(one.gl.branchSha('main')).toBe(two.gl.branchSha('main'));
+    expect(one.gl.branchSha('main')).toMatch(/^[0-9a-f]{40}$/);
+    const a = diverged(one.gl);
+    const b = diverged(two.gl);
+    expect(a).toEqual(b);
+    const ra = await cmp(one.call, 'from=main&to=feature');
+    const rb = await cmp(two.call, 'from=main&to=feature');
+    expect(JSON.stringify(ra.body.diffs)).toBe(JSON.stringify(rb.body.diffs));
+  });
+});
+
+describe('repository: unknown routes', () => {
+  test('GET /repository/tree lands in unknown with a 404', async () => {
+    const { gl, call } = setup();
+    const r = await call('GET', `/projects/${PROJECT.id}/repository/tree`);
+    expect(r.status).toBe(404);
+    expect(gl.unknown).toEqual([`GET /api/v4/projects/${PROJECT.id}/repository/tree`]);
   });
 });
