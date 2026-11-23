@@ -3323,15 +3323,15 @@ describe('the top bar (#628)', () => {
     );
     return /<nav class="topnav" aria-label="Main">([\s\S]*?)<\/nav>/.exec(full)?.[1] ?? '';
   };
+  /** An element's text: tags dropped, and any stray angle bracket with them, so no tag survives. */
+  const textOf = (html: string) => html.replace(/<[^>]+>/g, '').replace(/[<>]/g, '');
   const labels = (nav: string) =>
     [...nav.matchAll(/<a [^>]*>([\s\S]*?)<\/a>/g)].map((m) =>
-      (m[1] as string)
-        .replace(/<span class="nav-badge"[\s\S]*?<\/span><\/span>/, '')
-        .replace(/<[^>]+>/g, ''),
+      textOf((m[1] as string).replace(/<span class="nav-badge"[\s\S]*?<\/span><\/span>/, '')),
     );
   const current = (nav: string) =>
     [...nav.matchAll(/<a [^>]*aria-current="page"[^>]*>([\s\S]*?)<\/a>/g)].map((m) =>
-      (m[1] as string).replace(/<[^>]+>/g, ''),
+      textOf(m[1] as string),
     );
 
   test('the nav reads exactly Home, Projects, Activity, Chat, System, in order', () => {
