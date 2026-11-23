@@ -86,6 +86,21 @@ const ACTION_WORDS: Record<CardKind, string> = {
 };
 
 /**
+ * A refusal's words as a card shows them: the UI says project where the audit's reason code and
+ * the tool's answer say zone (issue #629).
+ */
+const projectWords = (text: string): string =>
+  text.replace(
+    /\b(Z|z)one(s?)\b/g,
+    (_m, z: string, s: string) => `${z === 'Z' ? 'P' : 'p'}roject${s}`,
+  );
+
+/** A refused card's summary: what was refused and the refusal's reason code, in project words. */
+export function refusedCardSummary(kind: CardKind, detail: string | undefined): string {
+  return `${ACTION_WORDS[kind]} was refused (${projectWords(detail ?? 'refused')}).`;
+}
+
+/**
  * Why no chat action may run now: the kill switch, a usage credits stop, or a token or secret in
  * the arguments. Null when it may.
  */
@@ -146,10 +161,7 @@ function cardOf(ctx: ChatToolContext, kind: CardKind, acted: Acted, blocked: boo
     kind,
     zoneId: ctx.zone?.id ?? null,
     state,
-    summary:
-      !blocked && acted.summary
-        ? acted.summary
-        : `${ACTION_WORDS[kind]} was refused (${acted.out.detail ?? 'refused'}).`,
+    summary: !blocked && acted.summary ? acted.summary : refusedCardSummary(kind, acted.out.detail),
     ...(ok && acted.target ? { target: acted.target } : {}),
     ...(ok && acted.link ? { link: acted.link } : {}),
     ...((state === 'done' || state === 'pending') && acted.undo !== undefined
@@ -401,7 +413,7 @@ const changeSettingTool: ChatToolDef = {
         if (!(e instanceof SettingError)) throw e;
         return {
           out: refused(e.message, 'unknown setting'),
-          summary: `Changing a setting was refused: ${e.message}.`,
+          summary: `Changing a setting was refused: ${projectWords(e.message)}.`,
         };
       }
       // The catalog's words for each, never the model's keys.
@@ -494,7 +506,7 @@ function observing(ctx: ChatToolContext, zone: DropZoneConfig): Acted | null {
   return getZoneMode(ctx.db, zone.id, zone.mode) === 'observe'
     ? {
         out: refused(
-          `zone ${zone.id} is in observe mode: nothing is written to the forge`,
+          `project ${zone.id} is in observe mode: nothing is written to the forge`,
           'observe mode',
         ),
       }

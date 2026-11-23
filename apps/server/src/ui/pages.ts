@@ -1711,7 +1711,7 @@ const CHECK_ID_WORD = new RegExp(
  * Plain status text as HTML: escaped, with `code` in backticks rendered as <code>, and each doctor
  * check id (an identifier such as `zone.mode`, as `ctl status` prints it) set as code too.
  */
-const codeHtml = (text: string): string =>
+export const codeHtml = (text: string): string =>
   escapeHtml(text)
     .split(/(`[^`]+`)/)
     .map((part) =>

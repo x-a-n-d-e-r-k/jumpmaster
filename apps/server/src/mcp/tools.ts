@@ -313,7 +313,7 @@ function filedCard(ctx: ToolContext, input: CrewActionInput): Acted {
   return {
     out,
     summary:
-      `Filed ${plural(r.filed.length, 'staged issue', 'staged issues')} in zone ${ctx.zone.id} ` +
+      `Filed ${plural(r.filed.length, 'staged issue', 'staged issues')} in project ${ctx.zone.id} ` +
       `(crew issue ${r.filed.join(', ')}). Nothing starts until Command promotes ` +
       `${r.filed.length === 1 ? 'it' : 'them'}.${refusedTail(r)}`,
     target: `zone:${ctx.zone.id}`,
@@ -327,7 +327,7 @@ function briefedCard(ctx: ToolContext, input: CrewActionInput): Acted {
   const first = r.briefings[0];
   return {
     out,
-    summary: `Raised ${plural(r.briefings.length, 'briefing', 'briefings')} for Command in zone ${ctx.zone.id}.${refusedTail(r)}`,
+    summary: `Raised ${plural(r.briefings.length, 'briefing', 'briefings')} for Command in project ${ctx.zone.id}.${refusedTail(r)}`,
     ...(first === undefined ? {} : { target: `briefing:${first}`, link: `/briefings/${first}` }),
   };
 }

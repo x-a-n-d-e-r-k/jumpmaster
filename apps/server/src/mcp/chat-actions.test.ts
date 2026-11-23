@@ -403,6 +403,8 @@ describe('chat action tools', () => {
     const [card] = listCards(w.db, w.one.id);
     expect(card).toMatchObject({ kind: 'file_issues', state: 'done', zoneId: 'main' });
     expect(card?.summary).toMatch(/1 staged issue/);
+    expect(card?.summary).toContain('in project main');
+    expect(card?.summary).not.toMatch(/\bzones?\b/i);
     expect(card?.link).toBe('/projects/main');
     // raise_briefing records a briefing card too.
     const b = await w.call('raise_briefing', {
@@ -419,7 +421,9 @@ describe('chat action tools', () => {
       ],
     });
     expect(b.isError).toBeFalsy();
-    expect(listCards(w.db, w.one.id).at(-1)).toMatchObject({ kind: 'briefing', state: 'done' });
+    const briefed = listCards(w.db, w.one.id).at(-1);
+    expect(briefed).toMatchObject({ kind: 'briefing', state: 'done' });
+    expect(briefed?.summary).toBe('Raised 1 briefing for Command in project main.');
   });
 
   test('CLAIM=PROOF there is no tool for comments or free issue text', () => {
@@ -726,6 +730,16 @@ describe('change_setting', () => {
     const [card] = listCards(w.db, w.thread.id);
     expect(card).toMatchObject({ kind: 'setting', state: 'refused' });
     expect(card?.summary).not.toContain('repo2');
+  });
+
+  test('an install path named for a project is refused on a card that says project (#629)', async () => {
+    const w = await settingWorld();
+    const r = await w.call('change_setting', { zoneId: 'main', set: { pollSeconds: 30 } });
+    expect(r.isError).toBe(true);
+    const [card] = listCards(w.db, w.thread.id);
+    expect(card).toMatchObject({ kind: 'setting', state: 'refused' });
+    expect(card?.summary).toContain('not a setting of a project');
+    expect(card?.summary).not.toMatch(/\bzones?\b/i);
   });
 
   test("a value the store refuses is refused with fixed words on the card, never the store's message quoting it", async () => {

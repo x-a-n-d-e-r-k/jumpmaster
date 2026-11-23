@@ -9,6 +9,7 @@ import type { ConfigStore } from '../config/store.js';
 import type { Config, DropZoneConfig } from '../config.js';
 import type { DoctorCheck } from '../doctor/checks.js';
 import type { AppTokenSource } from '../forge/app-tokens.js';
+import { GITLAB_UNSUPPORTED } from '../forge/kind.js';
 import {
   CODEOWNERS_PLACEHOLDER,
   EXPIRATION_NOTE,
@@ -360,6 +361,9 @@ const labelsSection = (zone: Pick<DropZoneConfig, 'readyLabel'>, status: string)
 /** The id of the code owners form, drawn outside Setup's form (a form can't hold a form). */
 export const GITHUB_REVIEWER_FORM = 'github-reviewer-form';
 
+/** The API's GitLab refusal as a page says it: project, not zone (issue #629). */
+const GITLAB_UNSUPPORTED_PAGE = 'GitLab projects are not supported yet';
+
 /**
  * The GitHub section of a project's Setup (#618): the guide (accounts, tokens or apps, access, the
  * ruleset, code owners), each checked step with its doctor status, then labels. Without guidance
@@ -376,7 +380,7 @@ export function githubSection(
 <p>What Jumpmaster needs on GitHub, as links and files: nothing here changes GitHub; the clicks and the commit are yours. The doctor checks each part; its last run's result is beside each step.</p>`;
   if (!guidance.ok)
     return `${head}
-<p class="warn">${escapeHtml(guidance.error)}</p><p>Set or replace the tokens in the <a href="/setup/forge">GitHub step</a>, then come back.</p>
+<p class="warn">${escapeHtml(guidance.error === GITLAB_UNSUPPORTED ? GITLAB_UNSUPPORTED_PAGE : guidance.error)}</p><p>Set or replace the tokens in the <a href="/setup/forge">GitHub step</a>, then come back.</p>
 <ul id="github-steps">${(Object.keys(STEP_CHECKS) as GithubStep[]).map((s) => `<li>${escapeHtml(STEP_LABELS[s])} ${chip(s)}</li>`).join('')}</ul>
 </section>`;
   const g = guidance.guidance;

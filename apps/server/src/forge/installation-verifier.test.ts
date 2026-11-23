@@ -277,6 +277,17 @@ describe('verifiedInstallation: the trust boundary', () => {
     expect(gh.calls).toEqual([]);
   });
 
+  test('a refusal shown as a doctor finding says project, never zone (#629)', async () => {
+    const w = world();
+    const starter = await refusal(w.mint({ ...ZONE, identity: 'starter' }));
+    const none = { id: 'zone-a', repo: 'acme/widgets', identity: 'two-bot' } as VerifiableZone;
+    const unrecorded = await refusal(w.mint(none));
+    expect(starter.message).toContain('is a starter project');
+    expect(unrecorded.message).toContain('the project records no author app installation');
+    for (const e of [starter, unrecorded])
+      expect(e.message.replaceAll(ZONE.id, '')).not.toMatch(/\bzones?\b/i);
+  });
+
   test('a starter zone and an owner with no app entry are refused without a GitHub call', async () => {
     const w = world();
     await refusal(w.mint({ ...ZONE, identity: 'starter' }));

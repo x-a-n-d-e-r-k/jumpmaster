@@ -5,12 +5,16 @@ import { appendMessage, createThread } from '../chat/store.js';
 import { GUARDED_PATHS, type GuardCtx, REFUSED_PATHS } from '../config/guarded.js';
 import { type Drop, insertDrop, setZoneMode, stampStick, type WorkItem } from '../db/repo.js';
 import type { DoctorCheck } from '../doctor/checks.js';
-import { modeCardSummary } from '../mcp/chat-actions.js';
+import { GITLAB_UNSUPPORTED } from '../forge/kind.js';
+import { modeCardSummary, refusedCardSummary } from '../mcp/chat-actions.js';
 import { DISCOVER_PATH, INSTALLED_PATH } from '../setup/github-app-installed.js';
 import { type StatusInput, type StatusZone, statusOf } from '../status.js';
 import { ago, world } from '../test/doctorWorld.js';
+import { makeZone } from '../test/fixtures.js';
 import { harness } from '../test/flowHarness.js';
 import { operatorSession, plus, t0 } from '../test/helpers.js';
+import { githubSection } from './github.js';
+import { codeHtml } from './pages.js';
 
 /**
  * What a reader sees of a page: no `<script>`, `<style>`, `<code>` or `<pre>` content, no tags
@@ -389,6 +393,18 @@ describe('every rendered page says project and Home', () => {
   });
 });
 
+describe('codeHtml', () => {
+  test('sets backticked text and doctor check ids as code, and nothing else', () => {
+    expect(codeHtml('the `zone.mode` check')).toBe('the <code>zone.mode</code> check');
+    expect(codeHtml('zone.mode warns: project merlin is paused')).toBe(
+      '<code>zone.mode</code> warns: project merlin is paused',
+    );
+    // Not an id inside a longer word or path, and escaped before it is wrapped.
+    expect(codeHtml('xzone.mode zone.mode.x <b>')).toBe('xzone.mode zone.mode.x &lt;b&gt;');
+    expect(offenders(visibleText(codeHtml('zone.mode and forge.ci fail')))).toEqual([]);
+  });
+});
+
 describe('guarded-change words', () => {
   const ctx: GuardCtx = { zoneId: 'main', install: {}, added: false };
   /** Every consequence a rule can say, each way round, as the confirmation page and Home show it. */
@@ -413,6 +429,22 @@ describe('chat card words', () => {
       'Paused project main: no new drops start, running ones finish.',
     );
     expect(modeCardSummary('active', 'main')).toBe('Resumed project main: it is active again.');
+  });
+
+  test('a refused card for a project the server does not know says project', () => {
+    expect(refusedCardSummary('pause', 'unknown zone')).toBe(
+      'Pausing a project was refused (unknown project).',
+    );
+    expect(refusedCardSummary('pause', 'killed')).toBe('Pausing a project was refused (killed).');
+  });
+});
+
+describe('GitLab project words', () => {
+  test("a GitLab project's Setup section says GitLab projects are not supported yet", () => {
+    const zone = makeZone({ id: 'lab', repo: 'octo/lab' });
+    const text = visibleText(githubSection(zone, { ok: false, error: GITLAB_UNSUPPORTED }, null));
+    expect(text).toContain('GitLab projects are not supported yet');
+    expect(offenders(text)).toEqual([]);
   });
 });
 

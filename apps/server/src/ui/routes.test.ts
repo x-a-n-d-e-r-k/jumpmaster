@@ -1091,7 +1091,7 @@ describe('/work and /drops list pages (#119)', () => {
   });
 
   test.each([
-    ['/activity/drops?zone=nope', 'no such zone'],
+    ['/activity/drops?zone=nope', 'no such project'],
     ['/activity/work?state=bogus', 'no such state'],
     ['/activity/drops?state=bogus', 'no such state'],
     ['/activity/drops?kind=', 'bad kind'],
