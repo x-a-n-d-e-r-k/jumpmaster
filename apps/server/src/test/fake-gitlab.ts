@@ -336,7 +336,24 @@ function decodeSegment(s: string | undefined): string | undefined {
   }
 }
 
-export function fakeGitLab(opts: { baseUrl: string; project: FakeGitLabProject }) {
+export type GitLabApprovals = {
+  approved: boolean;
+  approved_by: { user: GitLabUser }[];
+  approvals_required: number;
+  approvals_left: number;
+};
+
+export function fakeGitLab(opts: {
+  baseUrl: string;
+  project: FakeGitLabProject;
+  approvals?: {
+    /** Approvals count only while the source branch stays on the head they were given on
+     *  (default `true`). */
+    resetOnPush?: boolean;
+    /** Whether an MR's author may approve it (default `false`, as on GitLab). */
+    authorCanApprove?: boolean;
+  };
+}) {
   const base = new URL(opts.baseUrl);
   const prefix = `${base.pathname.replace(/\/+$/, '')}${API}`;
   const project = {
@@ -1014,6 +1031,76 @@ export function fakeGitLab(opts: { baseUrl: string; project: FakeGitLabProject }
     mr.updated_at = at;
     return [200, refreshed(mr)];
   });
+  // --- Merge request notes and approvals ---------------------------------------------------
+
+  route('POST', /^\/merge_requests\/(\d+)\/notes$/, (c, m) => {
+    const mr = findMr(m[1]);
+    if (!mr) return err(404, '404 Not found');
+    if (c.level < ACCESS.reporter) return FORBIDDEN;
+    const body = str(c.params.body);
+    if (!body) return [400, { error: 'body is missing' }];
+    const note = addNote({ mergeRequestIid: mr.iid, body, author: c.user.username });
+    mr.updated_at = note.created_at;
+    return [201, note];
+  });
+
+  const resetOnPush = opts.approvals?.resetOnPush ?? true;
+  const authorCanApprove = opts.approvals?.authorCanApprove ?? false;
+  type Approval = { username: string; sha: string };
+  /** MR iid → its approvals, oldest first, each with the head SHA it was given on. */
+  const approvalsByMr = new Map<number, Approval[]>();
+  const approvalsRequired = new Map<number, number>();
+
+  /** The approvals that count on `mr` now. With `resetOnPush`, ones given on a head the source
+   *  branch has since left are dropped. */
+  function currentApprovals(mr: GitLabMergeRequest): Approval[] {
+    const sha = refreshed(mr).sha;
+    const list = (approvalsByMr.get(mr.iid) ?? []).filter((a) => !resetOnPush || a.sha === sha);
+    approvalsByMr.set(mr.iid, list);
+    return list;
+  }
+  const approvalsJson = (mr: GitLabMergeRequest): GitLabApprovals => {
+    const list = currentApprovals(mr);
+    const required = approvalsRequired.get(mr.iid) ?? 0;
+    return {
+      approved: list.length > 0,
+      approved_by: list.map((a) => ({ user: publicUser(ensureUser(a.username)) })),
+      approvals_required: required,
+      approvals_left: Math.max(0, required - list.length),
+    };
+  };
+
+  route('GET', /^\/merge_requests\/(\d+)\/approvals$/, (_c, m) => {
+    const mr = findMr(m[1]);
+    return mr ? [200, approvalsJson(mr)] : err(404, '404 Not found');
+  });
+  /** GitLab answers 409 for a `sha` that isn't the head, and 401 for any other refusal. */
+  route('POST', /^\/merge_requests\/(\d+)\/approve$/, (c, m) => {
+    const mr = findMr(m[1]);
+    if (!mr) return err(404, '404 Not found');
+    const sha = str(c.params.sha);
+    if (sha !== undefined && sha !== mr.sha)
+      return err(409, 'SHA does not match HEAD of source branch');
+    const list = currentApprovals(mr);
+    const refused =
+      list.some((a) => a.username === c.user.username) ||
+      c.level < ACCESS.developer ||
+      mr.state !== 'opened' ||
+      (!authorCanApprove && mr.author.username === c.user.username);
+    if (refused) return UNAUTHORIZED;
+    list.push({ username: c.user.username, sha: mr.sha });
+    return [201, approvalsJson(mr)];
+  });
+  route('POST', /^\/merge_requests\/(\d+)\/unapprove$/, (c, m) => {
+    const mr = findMr(m[1]);
+    if (!mr) return err(404, '404 Not found');
+    const list = currentApprovals(mr);
+    const at = list.findIndex((a) => a.username === c.user.username);
+    if (at === -1) return NOT_FOUND;
+    list.splice(at, 1);
+    return [201, approvalsJson(mr)];
+  });
+
   route('GET', /^\/merge_requests\/(\d+)\/diffs$/, (c, m) => {
     const mr = findMr(m[1]);
     if (!mr) return err(404, '404 Not found');
@@ -1436,6 +1523,17 @@ export function fakeGitLab(opts: { baseUrl: string; project: FakeGitLabProject }
       finish(iid, 'closed', o.closedAt),
     /** The stored merge request, as the fake holds it now. */
     mergeRequest: (iid: number) => findMr(iid),
+    /** Set how many approvals merge request `iid` requires (0 by default). */
+    setApprovalsRequired(iid: number, n: number) {
+      if (!findMr(iid)) throw new Error(`unknown merge request ${iid}`);
+      approvalsRequired.set(iid, n);
+    },
+    /** The approvals merge request `iid` holds now, oldest first, with the head SHA each was
+     *  given on. */
+    approvals(iid: number): { username: string; sha: string }[] {
+      const mr = findMr(iid);
+      return mr ? currentApprovals(mr).map((a) => ({ ...a })) : [];
+    },
     mergeRequests,
     /** The stored issue, as the fake holds it now. */
     issue: (iid: number) => issues.find((i) => i.iid === iid),

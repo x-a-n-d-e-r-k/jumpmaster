@@ -45,8 +45,11 @@ afterAll(() => {
   nock.enableNetConnect();
 });
 
-function setup(baseUrl = GITLAB) {
-  const gl = fakeGitLab({ baseUrl, project: PROJECT });
+function setup(
+  baseUrl = GITLAB,
+  approvals?: { resetOnPush?: boolean; authorCanApprove?: boolean },
+) {
+  const gl = fakeGitLab({ baseUrl, project: PROJECT, approvals });
   fakes.push(gl);
   gl.addUser({ username: 'guest', token: GUEST, accessLevel: ACCESS.guest, scopes: ['api'] });
   gl.addUser({
@@ -1490,5 +1493,220 @@ describe('pipelines and jobs', () => {
       /unknown/,
     );
     expect(() => gl.setJobStatus(1, 'success')).toThrow(/unknown job/);
+  });
+});
+
+describe('merge request notes and approvals', () => {
+  const P = `/projects/${PROJECT.id}`;
+
+  /** An open MR `!1` from `feature` into `main`, authored by `author` (root by default). */
+  function withMr(gl: FakeGitLab, author = 'root') {
+    const base = gl.seedCommit({ branch: 'main', files: { 'a.txt': 'a\n' }, message: 'base' });
+    gl.seedBranch('feature', base);
+    const head = gl.seedCommit({
+      branch: 'feature',
+      files: { 'a.txt': 'b\n' },
+      message: 'feature work',
+    });
+    const mr = gl.seedMergeRequest({
+      sourceBranch: 'feature',
+      targetBranch: 'main',
+      title: 'Change a',
+      author,
+    });
+    return { base, head, mr };
+  }
+  const usernames = (body: { approved_by: { user: { username: string } }[] }) =>
+    body.approved_by.map((a) => a.user.username);
+
+  test('post an MR note and read it back; guest 403, missing body 400, unknown MR 404', async () => {
+    const { gl, call } = setup();
+    const { mr } = withMr(gl);
+    const before = gl.mergeRequest(1)?.updated_at as string;
+    const r = await call('POST', `${P}/merge_requests/1/notes`, {
+      body: { body: 'Looks good' },
+    });
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({
+      body: 'Looks good',
+      noteable_type: 'MergeRequest',
+      noteable_iid: mr.iid,
+      system: false,
+      author: { username: 'dev' },
+    });
+    expect((gl.mergeRequest(1)?.updated_at as string) > before).toBe(true);
+    const list = await call('GET', `${P}/merge_requests/1/notes`);
+    expect(list.body.map((n: { id: number }) => n.id)).toEqual([r.body.id]);
+
+    const asReporter = await call('POST', `${P}/merge_requests/1/notes`, {
+      token: REPORTER,
+      body: { body: 'reporter comment' },
+    });
+    expect(asReporter.status).toBe(201);
+    expect(
+      (
+        await call('POST', `${P}/merge_requests/1/notes`, {
+          token: GUEST,
+          body: { body: 'x' },
+        })
+      ).status,
+    ).toBe(403);
+    expect((await call('POST', `${P}/merge_requests/1/notes`, { body: {} })).status).toBe(400);
+    expect(
+      (await call('POST', `${P}/merge_requests/99/notes`, { body: { body: 'x' } })).status,
+    ).toBe(404);
+    expect(gl.notes.filter((n) => n.noteable_type === 'MergeRequest')).toHaveLength(2);
+  });
+
+  test('approve gives 201 and GET approvals shows the approver', async () => {
+    const { gl, call } = setup();
+    const { head } = withMr(gl);
+    const empty = await call('GET', `${P}/merge_requests/1/approvals`);
+    expect(empty.status).toBe(200);
+    expect(empty.body).toMatchObject({
+      approved: false,
+      approved_by: [],
+      approvals_required: 0,
+      approvals_left: 0,
+    });
+    const r = await call('POST', `${P}/merge_requests/1/approve`, { body: { sha: head } });
+    expect(r.status).toBe(201);
+    const got = await call('GET', `${P}/merge_requests/1/approvals`);
+    expect(r.body).toEqual(got.body);
+    expect(got.body.approved).toBe(true);
+    expect(got.body.approved_by).toEqual([
+      { user: { id: expect.any(Number), username: 'dev', name: 'dev' } },
+    ]);
+    expect(gl.approvals(1)).toEqual([{ username: 'dev', sha: head }]);
+    expect((await call('GET', `${P}/merge_requests/99/approvals`)).status).toBe(404);
+  });
+
+  test('approve refusals: again 401, stale sha 409, reporter 401, merged 401, unknown 404', async () => {
+    const { gl, call } = setup();
+    const { base } = withMr(gl);
+    const approve = (body: object = {}, token?: string, iid = 1) =>
+      call('POST', `${P}/merge_requests/${iid}/approve`, { token, body });
+    expect((await approve({ sha: base })).status).toBe(409);
+    expect(gl.approvals(1)).toEqual([]);
+    expect((await approve()).status).toBe(201);
+    expect((await approve()).status).toBe(401);
+    expect((await approve({}, REPORTER)).status).toBe(401);
+    expect((await approve({}, GUEST)).status).toBe(401);
+    expect((await approve({}, undefined, 99)).status).toBe(404);
+    gl.addUser({ username: 'dev2', token: WRONG, accessLevel: ACCESS.developer });
+    gl.markMergeRequestMerged(1);
+    expect((await approve({}, WRONG)).status).toBe(401);
+    expect(usernames((await call('GET', `${P}/merge_requests/1/approvals`)).body)).toEqual(['dev']);
+  });
+
+  test('the author cannot approve by default; authorCanApprove allows it', async () => {
+    const strict = setup();
+    withMr(strict.gl, 'dev');
+    expect((await strict.call('POST', `${P}/merge_requests/1/approve`)).status).toBe(401);
+    const lax = setup(SELF_MANAGED, { authorCanApprove: true });
+    withMr(lax.gl, 'dev');
+    expect((await lax.call('POST', `${P}/merge_requests/1/approve`)).status).toBe(201);
+    expect(lax.gl.approvals(1).map((a) => a.username)).toEqual(['dev']);
+  });
+
+  test('unapprove removes the approval; with none it answers 404', async () => {
+    const { gl, call } = setup();
+    withMr(gl);
+    expect((await call('POST', `${P}/merge_requests/1/unapprove`)).status).toBe(404);
+    await call('POST', `${P}/merge_requests/1/approve`);
+    await call('POST', `${P}/merge_requests/1/approve`, { token: REPORTER });
+    const r = await call('POST', `${P}/merge_requests/1/unapprove`);
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({ approved: false, approved_by: [] });
+    expect(gl.approvals(1)).toEqual([]);
+    expect((await call('POST', `${P}/merge_requests/1/unapprove`)).status).toBe(404);
+    expect((await call('POST', `${P}/merge_requests/99/unapprove`)).status).toBe(404);
+  });
+
+  test('moving the source branch clears approvals by default', async () => {
+    const { gl, call } = setup();
+    withMr(gl);
+    await call('POST', `${P}/merge_requests/1/approve`);
+    expect(gl.approvals(1)).toHaveLength(1);
+    gl.seedCommit({ branch: 'feature', files: { 'a.txt': 'c\n' }, message: 'push' });
+    expect(gl.approvals(1)).toEqual([]);
+    expect((await call('GET', `${P}/merge_requests/1/approvals`)).body.approved).toBe(false);
+
+    // Approve again on the new head, then move the branch through the file write route.
+    expect((await call('POST', `${P}/merge_requests/1/approve`)).status).toBe(201);
+    const w = await call('PUT', `${P}/repository/files/a.txt`, {
+      body: { branch: 'feature', commit_message: 'edit', content: 'd\n' },
+    });
+    expect(w.status).toBe(200);
+    expect(gl.approvals(1)).toEqual([]);
+    expect(usernames((await call('GET', `${P}/merge_requests/1/approvals`)).body)).toEqual([]);
+    // And through seedBranch.
+    await call('POST', `${P}/merge_requests/1/approve`);
+    gl.seedBranch('feature', gl.branchSha('main') as string);
+    expect(gl.approvals(1)).toEqual([]);
+  });
+
+  test('with resetOnPush: false approvals stay and keep the SHA each was given on', async () => {
+    const { gl, call } = setup(GITLAB, { resetOnPush: false });
+    const { head } = withMr(gl);
+    await call('POST', `${P}/merge_requests/1/approve`);
+    const next = gl.seedCommit({ branch: 'feature', files: { 'a.txt': 'c\n' }, message: 'push' });
+    await call('POST', `${P}/merge_requests/1/approve`, { token: WRONG }); // unknown token: 401
+    gl.addUser({ username: 'dev2', token: WRONG, accessLevel: ACCESS.maintainer });
+    expect((await call('POST', `${P}/merge_requests/1/approve`, { token: WRONG })).status).toBe(
+      201,
+    );
+    await call('PUT', `${P}/repository/files/a.txt`, {
+      body: { branch: 'feature', commit_message: 'edit', content: 'd\n' },
+    });
+    expect(gl.approvals(1)).toEqual([
+      { username: 'dev', sha: head },
+      { username: 'dev2', sha: next },
+    ]);
+    const got = (await call('GET', `${P}/merge_requests/1/approvals`)).body;
+    expect(usernames(got)).toEqual(['dev', 'dev2']);
+  });
+
+  test('approvals_required and approvals_left follow setApprovalsRequired', async () => {
+    const { gl, call } = setup();
+    withMr(gl);
+    const get = async () => (await call('GET', `${P}/merge_requests/1/approvals`)).body;
+    gl.setApprovalsRequired(1, 2);
+    expect(await get()).toMatchObject({
+      approvals_required: 2,
+      approvals_left: 2,
+      approved: false,
+    });
+    await call('POST', `${P}/merge_requests/1/approve`);
+    expect(await get()).toMatchObject({ approvals_required: 2, approvals_left: 1, approved: true });
+    gl.addUser({ username: 'dev2', token: WRONG, accessLevel: ACCESS.developer });
+    await call('POST', `${P}/merge_requests/1/approve`, { token: WRONG });
+    await call('POST', `${P}/merge_requests/1/approve`, { token: WRONG });
+    expect(await get()).toMatchObject({ approvals_required: 2, approvals_left: 0 });
+    gl.setApprovalsRequired(1, 1);
+    expect(await get()).toMatchObject({ approvals_required: 1, approvals_left: 0 });
+    expect(() => gl.setApprovalsRequired(99, 1)).toThrow(/unknown merge request/);
+  });
+
+  test('requests to the new routes carry no token; unknown routes answer 404 and are listed', async () => {
+    const { gl, call } = setup();
+    withMr(gl);
+    await call('POST', `${P}/merge_requests/1/notes?private_token=${DEVELOPER}`, {
+      body: { body: `token ${REPORTER} in a note` },
+    });
+    await call('POST', `${P}/merge_requests/1/approve`, { body: { access_token: REPORTER } });
+    await call('GET', `${P}/merge_requests/1/approvals?access_token=${GUEST}`);
+    await call('POST', `${P}/merge_requests/1/unapprove`);
+    expect((await call('POST', `${P}/merge_requests/1/reset_approvals`)).status).toBe(404);
+    expect(gl.unknown).toEqual([`POST /api/v4${P}/merge_requests/1/reset_approvals`]);
+    expect(gl.requests).toHaveLength(5);
+    expect(gl.requests.map((r) => `${r.method} ${r.path}`).slice(0, 4)).toEqual([
+      `POST /api/v4${P}/merge_requests/1/notes`,
+      `POST /api/v4${P}/merge_requests/1/approve`,
+      `GET /api/v4${P}/merge_requests/1/approvals`,
+      `POST /api/v4${P}/merge_requests/1/unapprove`,
+    ]);
+    const text = JSON.stringify(gl.requests);
+    for (const t of ALL_TOKENS) expect(text).not.toContain(t);
   });
 });
