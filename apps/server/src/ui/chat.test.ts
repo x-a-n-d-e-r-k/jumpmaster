@@ -1920,6 +1920,28 @@ describe('focus chips and relative times', () => {
     expect(rowOf(html, t.plain.id)).not.toContain('class="chip"');
   });
 
+  test('#627 a drop focus chips as Drop and its 8-char id; a doctor focus as Doctor: and its check', () => {
+    const db = openDb(tmpDbFile());
+    const at = new Date('2026-11-26T11:55:00.000Z');
+    const d = createThread(
+      db,
+      {
+        title: 'Drop',
+        focus: { kind: 'drop', zoneId: 'main', ref: '0123456789abcdef' },
+        owner: 'h',
+      },
+      at,
+    );
+    const c = createThread(
+      db,
+      { title: 'Doc', focus: { kind: 'doctor', zoneId: 'install', ref: 'claude.plan' } },
+      at,
+    );
+    const html = renderChatList(listThreads(db), { serviceMissing: false, zones, now });
+    expect(rowOf(html, d.id)).toContain('<span class="chip">Drop 01234567</span>');
+    expect(rowOf(html, c.id)).toContain('<span class="chip">Doctor: claude.plan</span>');
+  });
+
   test('a focus whose zone was removed shows its raw id', () => {
     const t = threads();
     const html = renderChatList(listThreads(t.db), { serviceMissing: false, zones, now });

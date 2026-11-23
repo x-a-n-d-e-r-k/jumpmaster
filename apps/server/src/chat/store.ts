@@ -5,7 +5,13 @@ import type { Db } from '../db/open.js';
  * allocated by the INSERT itself, so two appends to one thread never share one.
  */
 
-export type FocusKind = 'zone' | 'goals' | 'briefing';
+/**
+ * What a focused thread is about: `ref` is the zone id (`zone`, `goals`), the briefing id, the
+ * drop id, or the doctor check id (its zone in `zoneId`, or `install` for an install-wide check).
+ */
+export type FocusKind = 'zone' | 'goals' | 'briefing' | 'drop' | 'doctor';
+/** The focus kinds whose thread belongs to the session that opened it (#627). */
+export const SESSION_BOUND_FOCUS: readonly FocusKind[] = ['drop', 'doctor'];
 export type ChatRole = 'owner' | 'assistant' | 'tool' | 'system';
 export type ChatMessageState = 'queued' | 'running' | 'done' | 'failed';
 
@@ -116,16 +122,21 @@ const messageOf = ({
   ...(resultPrunedAt === null ? {} : { resultPrunedAt }),
 });
 
+/**
+ * A new thread. `owner` is the hash of the browser session it belongs to: another session's
+ * reads (with a `viewer`) never see it. Without one the thread is shared.
+ */
 export function createThread(
   db: Db,
-  o: { title: string; focus?: { kind: FocusKind; zoneId: string; ref: string } },
+  o: { title: string; focus?: { kind: FocusKind; zoneId: string; ref: string }; owner?: string },
   now: Date,
 ): ChatThread {
   const at = now.toISOString();
   return db
     .prepare(
-      `INSERT INTO chat_threads (title, focus_kind, focus_zone_id, focus_ref, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?) RETURNING ${THREAD_COLS}`,
+      `INSERT INTO chat_threads (title, focus_kind, focus_zone_id, focus_ref, created_at, updated_at,
+         owner_session)
+       VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING ${THREAD_COLS}`,
     )
     .get(
       o.title,
@@ -134,20 +145,30 @@ export function createThread(
       o.focus?.ref ?? null,
       at,
       at,
+      o.owner ?? null,
     ) as ChatThread;
 }
 
-/** The newest-updated threads first. */
-export function listThreads(db: Db, limit = 100): ChatThread[] {
+/** A shared thread, or one the viewing session owns; every thread when there is no viewer. */
+const VISIBLE = '(? IS NULL OR owner_session IS NULL OR owner_session = ?)';
+
+/** The newest-updated threads first; with a `viewer` (a session hash), only those it may see. */
+export function listThreads(db: Db, limit = 100, viewer?: string): ChatThread[] {
+  const v = viewer ?? null;
   return db
-    .prepare(`SELECT ${THREAD_COLS} FROM chat_threads ORDER BY updated_at DESC, id DESC LIMIT ?`)
-    .all(limit) as ChatThread[];
+    .prepare(
+      `SELECT ${THREAD_COLS} FROM chat_threads WHERE ${VISIBLE}
+       ORDER BY updated_at DESC, id DESC LIMIT ?`,
+    )
+    .all(v, v, limit) as ChatThread[];
 }
 
-export function getThread(db: Db, id: number): ChatThread | undefined {
-  return db.prepare(`SELECT ${THREAD_COLS} FROM chat_threads WHERE id = ?`).get(id) as
-    | ChatThread
-    | undefined;
+/** The thread; with a `viewer` (a session hash), undefined when it belongs to another session. */
+export function getThread(db: Db, id: number, viewer?: string): ChatThread | undefined {
+  const v = viewer ?? null;
+  return db
+    .prepare(`SELECT ${THREAD_COLS} FROM chat_threads WHERE id = ? AND ${VISIBLE}`)
+    .get(id, v, v) as ChatThread | undefined;
 }
 
 const touch = (db: Db, threadId: number, now: Date) =>

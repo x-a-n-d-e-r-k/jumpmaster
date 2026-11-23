@@ -913,13 +913,17 @@ export function createApp(
       .send(withCsrf(req, renderNewIssue(zone, zones, projectHeaderFor(deps.db, zone, zones))));
   });
 
+  // The session a chat page is for: another session's own threads (#627) are not shown. Any
+  // other principal sees only the shared threads.
+  const viewerOf = (req: FastifyRequest): string =>
+    (req.principal?.via === 'session' ? req.principal.sessionId : undefined) ?? '';
   // The crew chat's pages: without the chat service (an older compose file) `/chat` names the
   // one command that adds it.
   app.get('/chat', async (req, reply) =>
     reply.type('text/html; charset=utf-8').send(
       withCsrf(
         req,
-        renderChatList(listThreads(deps.db), {
+        renderChatList(listThreads(deps.db, 100, viewerOf(req)), {
           serviceMissing: deps.chatTurns === undefined,
           zones: cfg(req).dropZones,
           now: deps.now(),
@@ -934,7 +938,7 @@ export function createApp(
     '/chat/:id',
     async (req, reply) => {
       const id = threadIdOf(req.params.id);
-      const thread = id === undefined ? undefined : getThread(deps.db, id);
+      const thread = id === undefined ? undefined : getThread(deps.db, id, viewerOf(req));
       if (!thread) return reply.code(404).type('text/plain').send('not found');
       const panel = req.query.panel === '1';
       if (panel) PANEL_REPLIES.add(reply);
