@@ -171,7 +171,7 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   item that is otherwise ready to merge waits instead, so main stops moving under the older PR
   and pushing it behind again. Only that final merge waits: a reserved-out item still resolves,
   heals, is reviewed and waits on its own CI as before, and the wait spends no budget and counts
-  toward no deadline. Its reason on the Work page and in the status line (`ctl status`) reads
+  toward no deadline. Its reason on the project's **Work** tab and in the status line (`ctl status`) reads
   `waiting to merge after #<issue>`. The reservation lapses when the holder merges, leaves
   `pr_open`, gets a new head with no approve on it, or its approval is older than the limit; the
   next pass picks the next holder. `0` turns it off.

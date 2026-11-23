@@ -141,7 +141,7 @@ And at the top level of the server config:
    those drops (and Fable use on a Fable plan) before the first cycle. Check with the zone paused:
    `ctl pause <zone>`, set `crew.enabled: true`, restart.
 
-**Pass:** `/zones/<id>/goals` lists every objective with its status and marks the first open one
+**Pass:** `/projects/<id>/goals` lists every objective with its status and marks the first open one
 Current objective (a parse error shows there too). The project's Goals tab shows the zone's crew line
 with its next cycle and its Fable status (for `pro`: "plan pro does not include Fable"). Then
 `ctl resume <zone>`.
@@ -451,5 +451,5 @@ Then, in a checkout of the zone's repository, ask Claude Code to run the one tha
 it needs the crew on: each filed issue gets a Promote briefing on Home's **Needs you**, and your Promote
 ruling starts it. Enabling the crew is a separate, later choice that spends usage (its own cycles
 start then).
-For a quick first issue without the crew, the in-app New issue page (`/zones/<id>/issues/new`) files one
+For a quick first issue without the crew, the in-app New issue page (`/projects/<id>/issues/new`) files one
 ready issue directly.
