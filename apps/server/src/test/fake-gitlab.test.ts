@@ -2033,3 +2033,224 @@ describe('merge request accept and rebase', () => {
     for (const t of ALL_TOKENS) expect(text).not.toContain(t);
   });
 });
+
+describe('protected branches, approval rules and approval settings', () => {
+  const P = `/projects/${PROJECT.id}`;
+  const NEW_ROUTES = [
+    `${P}/protected_branches`,
+    `${P}/protected_branches/main`,
+    `${P}/approval_rules`,
+    `${P}/approvals`,
+  ];
+
+  test('the list and single read, by exact stored name only', async () => {
+    const { gl, call } = setup();
+    const main = gl.protectBranch({
+      name: 'main',
+      pushAccessLevels: [ACCESS.maintainer],
+      mergeAccessLevels: [ACCESS.developer],
+      codeOwnerApprovalRequired: true,
+    });
+    gl.protectBranch({ name: 'release/*', pushAccessLevels: [0], allowForcePush: true });
+    gl.protectBranch({ name: 'jm/x' });
+
+    const list = await call('GET', `${P}/protected_branches`);
+    expect(list.status).toBe(200);
+    expect(list.headers.get('x-total')).toBe('3');
+    expect(list.body.map((b: { name: string }) => b.name)).toEqual(['main', 'release/*', 'jm/x']);
+    expect(list.body[0]).toEqual({
+      id: main.id,
+      name: 'main',
+      push_access_levels: [{ access_level: 40, access_level_description: 'Maintainers' }],
+      merge_access_levels: [
+        { access_level: 30, access_level_description: 'Developers + Maintainers' },
+      ],
+      allow_force_push: false,
+      code_owner_approval_required: true,
+    });
+    const paged = await call('GET', `${P}/protected_branches?per_page=2&page=2`);
+    expect(paged.body.map((b: { name: string }) => b.name)).toEqual(['jm/x']);
+
+    const wildcard = await call('GET', `${P}/protected_branches/release%2F*`);
+    expect(wildcard.status).toBe(200);
+    expect(wildcard.body).toMatchObject({
+      name: 'release/*',
+      push_access_levels: [{ access_level: 0, access_level_description: 'No one' }],
+      allow_force_push: true,
+      code_owner_approval_required: false,
+    });
+    const slash = await call('GET', `${P}/protected_branches/jm%2Fx`);
+    expect(slash).toMatchObject({ status: 200, body: { name: 'jm/x' } });
+
+    expect((await call('GET', `${P}/protected_branches/develop`)).status).toBe(404);
+    // A concrete branch that only matches the wildcard does not answer the single read.
+    expect((await call('GET', `${P}/protected_branches/release%2F1.0`)).status).toBe(404);
+    expect(() => gl.protectBranch({ name: 'main' })).toThrow(/already protected/);
+  });
+
+  test('branch JSON reports protected for an exact or wildcard match only', async () => {
+    const { gl, call } = setup();
+    const head = gl.branchSha('main') as string;
+    for (const b of ['release/1.0', 'release', 'feature', 'jm/release/2']) gl.seedBranch(b, head);
+    const isProtected = async (name: string) =>
+      (await call('GET', `${P}/repository/branches/${encodeURIComponent(name)}`)).body.protected;
+    expect(await isProtected('main')).toBe(false);
+    gl.protectBranch({ name: 'main' });
+    gl.protectBranch({ name: 'release/*' });
+    expect(await isProtected('main')).toBe(true);
+    expect(await isProtected('release/1.0')).toBe(true);
+    expect(await isProtected('release')).toBe(false);
+    expect(await isProtected('feature')).toBe(false);
+    expect(await isProtected('jm/release/2')).toBe(false);
+    gl.protectBranch({ name: '*/release/*' });
+    expect(await isProtected('jm/release/2')).toBe(true);
+  });
+
+  test('approval rules as seeded; on the Free tier they answer 403, the rest still answer', async () => {
+    const { gl, call } = setup();
+    const main = gl.protectBranch({ name: 'main' });
+    const rule = gl.seedApprovalRule({
+      name: 'Reviewers',
+      approvalsRequired: 2,
+      eligibleApprovers: ['dev', 'reporter'],
+      protectedBranches: ['main'],
+    });
+    gl.seedApprovalRule({ name: 'Any', approvalsRequired: 1, ruleType: 'any_approver' });
+    const r = await call('GET', `${P}/approval_rules`);
+    expect(r.status).toBe(200);
+    expect(r.headers.get('x-total')).toBe('2');
+    expect(r.body[0]).toEqual({
+      id: rule.id,
+      name: 'Reviewers',
+      rule_type: 'regular',
+      approvals_required: 2,
+      eligible_approvers: [
+        { id: expect.any(Number), username: 'dev', name: 'dev' },
+        { id: expect.any(Number), username: 'reporter', name: 'reporter' },
+      ],
+      protected_branches: [main],
+    });
+    expect(r.body[1]).toMatchObject({
+      name: 'Any',
+      rule_type: 'any_approver',
+      approvals_required: 1,
+      eligible_approvers: [],
+      protected_branches: [],
+    });
+    expect(() =>
+      gl.seedApprovalRule({ name: 'x', approvalsRequired: 1, protectedBranches: ['nope'] }),
+    ).toThrow(/not protected/);
+
+    gl.setTier('free');
+    expect(await call('GET', `${P}/approval_rules`)).toMatchObject({
+      status: 403,
+      body: { message: '403 Forbidden' },
+    });
+    expect((await call('GET', `${P}/approvals`)).status).toBe(200);
+    expect((await call('GET', `${P}/protected_branches`)).status).toBe(200);
+    expect((await call('GET', `${P}/protected_branches/main`)).status).toBe(200);
+    gl.setTier('premium');
+    expect((await call('GET', `${P}/approval_rules`)).status).toBe(200);
+  });
+
+  test('approval settings: defaults follow the constructor options, and a subset is seedable', async () => {
+    const { gl, call } = setup();
+    expect((await call('GET', `${P}/approvals`)).body).toEqual({
+      approvals_before_merge: 0,
+      reset_approvals_on_push: true,
+      merge_requests_author_approval: false,
+      merge_requests_disable_committers_approval: false,
+    });
+    gl.setApprovalSettings({ approvals_before_merge: 2 });
+    gl.setApprovalSettings({ merge_requests_disable_committers_approval: true });
+    expect((await call('GET', `${P}/approvals`)).body).toEqual({
+      approvals_before_merge: 2,
+      reset_approvals_on_push: true,
+      merge_requests_author_approval: false,
+      merge_requests_disable_committers_approval: true,
+    });
+    const lax = setup(SELF_MANAGED, { resetOnPush: false, authorCanApprove: true });
+    expect((await lax.call('GET', `${P}/approvals`)).body).toMatchObject({
+      reset_approvals_on_push: false,
+      merge_requests_author_approval: true,
+    });
+  });
+
+  /** An open MR `!1` from `feature` into `main`, authored by `author`. */
+  function withMr(gl: FakeGitLab, author = 'root') {
+    const base = gl.seedCommit({ branch: 'main', files: { a: '1' }, message: 'base' });
+    gl.seedBranch('feature', base);
+    gl.seedCommit({ branch: 'feature', files: { a: '2' }, message: 'work' });
+    gl.seedMergeRequest({ sourceBranch: 'feature', targetBranch: 'main', title: 'A', author });
+  }
+
+  test('reset_approvals_on_push governs the merge request approvals route', async () => {
+    const { gl, call } = setup();
+    withMr(gl);
+    const approvedBy = async () =>
+      (await call('GET', `${P}/merge_requests/1/approvals`)).body.approved_by.map(
+        (a: { user: { username: string } }) => a.user.username,
+      );
+    gl.setApprovalSettings({ reset_approvals_on_push: false });
+    expect((await call('POST', `${P}/merge_requests/1/approve`)).status).toBe(201);
+    gl.seedCommit({ branch: 'feature', files: { a: '3' }, message: 'push' });
+    expect(await approvedBy()).toEqual(['dev']);
+    gl.setApprovalSettings({ reset_approvals_on_push: true });
+    expect(await approvedBy()).toEqual([]);
+    expect((await call('GET', `${P}/approvals`)).body.reset_approvals_on_push).toBe(true);
+  });
+
+  test('merge_requests_author_approval governs the approve route', async () => {
+    const { gl, call } = setup();
+    withMr(gl, 'dev');
+    gl.setApprovalSettings({ merge_requests_author_approval: false });
+    expect((await call('POST', `${P}/merge_requests/1/approve`)).status).toBe(401);
+    gl.setApprovalSettings({ merge_requests_author_approval: true });
+    expect((await call('POST', `${P}/merge_requests/1/approve`)).status).toBe(201);
+    expect(gl.approvals(1).map((a) => a.username)).toEqual(['dev']);
+
+    const strict = setup(SELF_MANAGED, { authorCanApprove: true });
+    withMr(strict.gl, 'dev');
+    strict.gl.setApprovalSettings({ merge_requests_author_approval: false });
+    expect((await strict.call('POST', `${P}/merge_requests/1/approve`)).status).toBe(401);
+  });
+
+  test('every new route refuses a missing or wrong token and another project, and is recorded', async () => {
+    const { gl, call } = setup();
+    gl.protectBranch({ name: 'main' });
+    for (const path of NEW_ROUTES) {
+      expect(await call('GET', path, { token: null })).toMatchObject({ status: 401 });
+      expect(await call('GET', path, { token: WRONG })).toMatchObject({ status: 401 });
+      expect((await call('GET', path)).status).toBe(200);
+      const other = await call('GET', path.replace(P, '/projects/999'));
+      expect(other).toMatchObject({ status: 404, body: { message: '404 Project Not Found' } });
+    }
+    expect(gl.unknown).toEqual([]);
+    expect(gl.requests).toHaveLength(NEW_ROUTES.length * 4);
+    expect(gl.requests.slice(0, 3)).toEqual([
+      {
+        method: 'GET',
+        path: `/api/v4${P}/protected_branches`,
+        query: {},
+        body: undefined,
+        user: null,
+      },
+      {
+        method: 'GET',
+        path: `/api/v4${P}/protected_branches`,
+        query: {},
+        body: undefined,
+        user: '<unknown>',
+      },
+      {
+        method: 'GET',
+        path: `/api/v4${P}/protected_branches`,
+        query: {},
+        body: undefined,
+        user: 'dev',
+      },
+    ]);
+    const text = JSON.stringify(gl.requests);
+    for (const t of ALL_TOKENS) expect(text).not.toContain(t);
+  });
+});

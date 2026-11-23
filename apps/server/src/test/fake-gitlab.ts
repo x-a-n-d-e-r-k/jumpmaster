@@ -366,6 +366,55 @@ export type GitLabApprovals = {
   approvals_left: number;
 };
 
+export type GitLabAccessLevel = { access_level: number; access_level_description: string };
+export type GitLabProtectedBranch = {
+  id: number;
+  /** The exact name or wildcard (`release/*`) as protected. */
+  name: string;
+  push_access_levels: GitLabAccessLevel[];
+  merge_access_levels: GitLabAccessLevel[];
+  allow_force_push: boolean;
+  code_owner_approval_required: boolean;
+};
+export type GitLabApprovalRule = {
+  id: number;
+  name: string;
+  rule_type: string;
+  approvals_required: number;
+  eligible_approvers: GitLabUser[];
+  protected_branches: GitLabProtectedBranch[];
+};
+export type GitLabProjectApprovals = {
+  approvals_before_merge: number;
+  reset_approvals_on_push: boolean;
+  merge_requests_author_approval: boolean;
+  merge_requests_disable_committers_approval: boolean;
+};
+/** The GitLab tier the fake models: on `free`, project approval rules answer 403. */
+export type GitLabTier = 'free' | 'premium';
+
+const ACCESS_DESCRIPTIONS: Record<number, string> = {
+  0: 'No one',
+  30: 'Developers + Maintainers',
+  40: 'Maintainers',
+  60: 'Admins',
+};
+const accessLevel = (n: number): GitLabAccessLevel => ({
+  access_level: n,
+  access_level_description: ACCESS_DESCRIPTIONS[n] ?? `Access level ${n}`,
+});
+
+/** Whether branch `name` matches protected-branch pattern `pattern` (GitLab's `*` glob, which
+ *  matches any run of characters, `/` included). */
+export function matchesProtectedPattern(pattern: string, name: string): boolean {
+  if (!pattern.includes('*')) return pattern === name;
+  const re = pattern
+    .split('*')
+    .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('.*');
+  return new RegExp(`^${re}$`).test(name);
+}
+
 export function fakeGitLab(opts: {
   baseUrl: string;
   project: FakeGitLabProject;
@@ -622,6 +671,8 @@ export function fakeGitLab(opts: {
   const commits = new Map<string, FakeCommit>();
   /** Branch name → commit SHA. */
   const branches = new Map<string, string>();
+  /** Protected branches, exact names and wildcards, in the order protected. */
+  const protectedBranches: GitLabProtectedBranch[] = [];
 
   function makeCommit(parents: string[], message: string, files: Record<string, string>): string {
     const id = commitSha(parents, message, files);
@@ -718,7 +769,7 @@ export function fakeGitLab(opts: {
     return {
       name,
       commit: { id, parent_ids, message, title },
-      protected: false,
+      protected: protectedBranches.some((p) => matchesProtectedPattern(p.name, name)),
       default: name === project.defaultBranch,
     };
   };
@@ -1085,8 +1136,14 @@ export function fakeGitLab(opts: {
     return [201, note];
   });
 
-  const resetOnPush = opts.approvals?.resetOnPush ?? true;
-  const authorCanApprove = opts.approvals?.authorCanApprove ?? false;
+  /** The project approval settings, the single source for both `GET /approvals` and the merge
+   *  request approve and approvals routes. */
+  const approvalSettings: GitLabProjectApprovals = {
+    approvals_before_merge: 0,
+    reset_approvals_on_push: opts.approvals?.resetOnPush ?? true,
+    merge_requests_author_approval: opts.approvals?.authorCanApprove ?? false,
+    merge_requests_disable_committers_approval: false,
+  };
   type Approval = { username: string; sha: string };
   /** MR iid → its approvals, oldest first, each with the head SHA it was given on. */
   const approvalsByMr = new Map<number, Approval[]>();
@@ -1096,7 +1153,9 @@ export function fakeGitLab(opts: {
    *  branch has since left are dropped. */
   function currentApprovals(mr: GitLabMergeRequest): Approval[] {
     const sha = refreshed(mr).sha;
-    const list = (approvalsByMr.get(mr.iid) ?? []).filter((a) => !resetOnPush || a.sha === sha);
+    const list = (approvalsByMr.get(mr.iid) ?? []).filter(
+      (a) => !approvalSettings.reset_approvals_on_push || a.sha === sha,
+    );
     approvalsByMr.set(mr.iid, list);
     return list;
   }
@@ -1127,7 +1186,7 @@ export function fakeGitLab(opts: {
       list.some((a) => a.username === c.user.username) ||
       c.level < ACCESS.developer ||
       mr.state !== 'opened' ||
-      (!authorCanApprove && mr.author.username === c.user.username);
+      (!approvalSettings.merge_requests_author_approval && mr.author.username === c.user.username);
     if (refused) return UNAUTHORIZED;
     list.push({ username: c.user.username, sha: mr.sha });
     return [201, approvalsJson(mr)];
@@ -1141,6 +1200,23 @@ export function fakeGitLab(opts: {
     list.splice(at, 1);
     return [201, approvalsJson(mr)];
   });
+
+  // --- Protected branches, approval rules and project approval settings ---------------------
+
+  let tier: GitLabTier = 'premium';
+  const approvalRules: GitLabApprovalRule[] = [];
+
+  route('GET', /^\/protected_branches$/, (c) => paged(protectedBranches, c.query));
+  /** The exact stored name only: a branch that merely matches a wildcard answers 404. */
+  route('GET', /^\/protected_branches\/([^/]+)$/, (_c, m) => {
+    const name = decodeSegment(m[1]);
+    const found = protectedBranches.find((p) => p.name === name);
+    return found ? [200, found] : err(404, '404 Not found');
+  });
+  route('GET', /^\/approval_rules$/, (c) =>
+    tier === 'free' ? FORBIDDEN : paged(approvalRules, c.query),
+  );
+  route('GET', /^\/approvals$/, () => [200, { ...approvalSettings }]);
 
   // --- Accept (merge) and rebase ------------------------------------------------------------
 
@@ -1696,6 +1772,64 @@ export function fakeGitLab(opts: {
     setApprovalsRequired(iid: number, n: number) {
       if (!findMr(iid)) throw new Error(`unknown merge request ${iid}`);
       approvalsRequired.set(iid, n);
+    },
+    /** Protect branch `name`, an exact name or a wildcard such as `release/*`. Push and merge
+     *  default to Maintainers. */
+    protectBranch(p: {
+      name: string;
+      pushAccessLevels?: number[];
+      mergeAccessLevels?: number[];
+      allowForcePush?: boolean;
+      codeOwnerApprovalRequired?: boolean;
+    }): GitLabProtectedBranch {
+      if (protectedBranches.some((x) => x.name === p.name))
+        throw new Error(`branch ${p.name} already protected`);
+      const entry: GitLabProtectedBranch = {
+        id: newId(),
+        name: p.name,
+        push_access_levels: (p.pushAccessLevels ?? [ACCESS.maintainer]).map(accessLevel),
+        merge_access_levels: (p.mergeAccessLevels ?? [ACCESS.maintainer]).map(accessLevel),
+        allow_force_push: p.allowForcePush ?? false,
+        code_owner_approval_required: p.codeOwnerApprovalRequired ?? false,
+      };
+      protectedBranches.push(entry);
+      return entry;
+    },
+    /** Add a project approval rule. `protectedBranches` names already protected branches;
+     *  `eligibleApprovers` are usernames. */
+    seedApprovalRule(r: {
+      name: string;
+      approvalsRequired: number;
+      ruleType?: string;
+      eligibleApprovers?: string[];
+      protectedBranches?: string[];
+    }): GitLabApprovalRule {
+      const branchesOf = (r.protectedBranches ?? []).map((name) => {
+        const found = protectedBranches.find((p) => p.name === name);
+        if (!found) throw new Error(`branch ${name} is not protected`);
+        return found;
+      });
+      const rule: GitLabApprovalRule = {
+        id: newId(),
+        name: r.name,
+        rule_type: r.ruleType ?? 'regular',
+        approvals_required: r.approvalsRequired,
+        eligible_approvers: (r.eligibleApprovers ?? []).map((u) => publicUser(ensureUser(u))),
+        protected_branches: branchesOf,
+      };
+      approvalRules.push(rule);
+      return rule;
+    },
+    /** Set any subset of the project approval settings. `reset_approvals_on_push` and
+     *  `merge_requests_author_approval` also govern the merge request approval routes. */
+    setApprovalSettings(s: Partial<GitLabProjectApprovals>): GitLabProjectApprovals {
+      for (const [k, v] of Object.entries(s) as [keyof GitLabProjectApprovals, never][])
+        if (v !== undefined) approvalSettings[k] = v;
+      return { ...approvalSettings };
+    },
+    /** Set the tier the fake models (default `premium`); on `free` approval rules answer 403. */
+    setTier(t: GitLabTier) {
+      tier = t;
     },
     /** The approvals merge request `iid` holds now, oldest first, with the head SHA each was
      *  given on. */
