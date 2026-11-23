@@ -198,7 +198,12 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
     }
     return n;
   };
-  const zones = () => store.current().dropZones.map((z) => ({ id: z.id, repo: z.repo }));
+  const zones = () =>
+    store.current().dropZones.map((z) => ({
+      id: z.id,
+      repo: z.repo,
+      ...(z.forge === undefined ? {} : { forge: z.forge }),
+    }));
 
   const view = (name: CredentialName, r: Resolved[CredentialName]) => {
     const gate = parseGateSecretName(name);

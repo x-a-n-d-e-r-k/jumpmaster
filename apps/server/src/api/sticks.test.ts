@@ -1425,6 +1425,28 @@ describe('push container routes', () => {
     expect(liveGrants(db)).toBe(0);
   });
 
+  test('push-token refuses a GitLab zone, even with a valid owner/name path (issue #667)', async () => {
+    const gitlab: Config = {
+      ...config,
+      dropZones: [
+        {
+          ...config.dropZones[0]!,
+          forge: 'gitlab',
+          gitlab: { baseUrl: 'https://gitlab.example.com' },
+        },
+      ],
+    };
+    const { db } = setup({ queued: false, config: gitlab });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const res = await grant(stickToken);
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toEqual({ refused: 'forge', retryable: false });
+    expect(res.body).not.toContain(config.dropZones[0]!.repo);
+    expect(res.body).not.toContain('gitlab.example.com');
+    expect(liveGrants(db)).toBe(0);
+  });
+
   test('one live reservation per drop', async () => {
     const { db } = setup({ queued: false });
     const { stickId, stickToken } = await enroll();

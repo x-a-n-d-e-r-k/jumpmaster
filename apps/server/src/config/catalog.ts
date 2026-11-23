@@ -275,6 +275,18 @@ const WORDS: Words[] = [
     'text',
   ),
   z_(
+    'forge',
+    'Forge the project lives on',
+    "Whether this zone's project is on GitHub (the default when unset) or GitLab. It can't change: remove the zone and add a new one.",
+    'select',
+  ),
+  z_(
+    'gitlab.baseUrl',
+    'GitLab instance address',
+    "A GitLab zone's instance, as an https:// address with no path, such as https://gitlab.com. It can't change: remove the zone and add a new one.",
+    'text',
+  ),
+  z_(
     'mode',
     'Starting mode',
     'Whether a new zone starts active, paused or observing. It is used only until an operator stores a mode.',

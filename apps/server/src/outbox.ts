@@ -22,6 +22,7 @@ import {
   type PullFacts,
   type TokenProvider,
 } from './forge/github.js';
+import { type ForgeKind, forgeKind, GITLAB_UNSUPPORTED } from './forge/kind.js';
 import { credentialFingerprint, type Resolved } from './vault/credentials.js';
 import type { AppRole, CredentialRef } from './vault/github-app-entries.js';
 import {
@@ -107,10 +108,18 @@ export type PairOptions = {
  * stale flag, and the reviewer it would route merges to may be unable to merge (spec §4.4).
  */
 export function pairFor(
-  zone: { repo: string; authorMayBeAdmin: boolean; identity?: 'two-bot' | 'starter' },
+  zone: {
+    repo: string;
+    authorMayBeAdmin: boolean;
+    identity?: 'two-bot' | 'starter';
+    forge?: ForgeKind | undefined;
+  },
   secrets: { githubAuthorToken: string; githubReviewerToken?: string },
   opts: PairOptions = {},
 ): ForgePair {
+  // Issue #667: until GitLabForge lands, a GitLab zone gets no forge at all, so nothing is sent
+  // to GitHub on its behalf. The message is fixed: never the base URL or the project path.
+  if (forgeKind(zone) === 'gitlab') throw new Error(GITLAB_UNSUPPORTED);
   const [owner = '', name = ''] = zone.repo.split('/');
   const forgeOpts =
     opts.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: opts.requestTimeoutMs };
@@ -330,6 +339,8 @@ export function pairKey(zone: PairZone, secrets: PairTokens, opts: PairOptions =
     zone.authorMayBeAdmin,
     forgeTokenFingerprint(secrets),
     ...refsKey(zone, opts),
+    // A GitHub zone's key is as it was; a GitLab zone's differs from any GitHub one.
+    ...(forgeKind(zone) === 'gitlab' ? [['forge:gitlab']] : []),
   ]);
 }
 

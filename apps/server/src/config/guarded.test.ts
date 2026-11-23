@@ -626,3 +626,70 @@ describe('githubApp ids (spec §4.2): not secret, but guarded', () => {
     ]);
   });
 });
+
+describe('a zone forge (issue #667)', () => {
+  const gitlab = (baseUrl = 'https://gitlab.example.com') => ({
+    repo: 'group/sub/web',
+    forge: 'gitlab',
+    gitlab: { baseUrl },
+  });
+
+  test('changing forge on an existing zone is refused the way repo is', () => {
+    const c = edit({}, { forge: 'gitlab', gitlab: { baseUrl: 'https://gitlab.example.com' } });
+    expect(c.refused).toContainEqual({
+      path: 'dropZones[web].forge',
+      message: "the forge of a zone can't change: remove the zone and add a new one",
+    });
+    expect(c.refused.map((r) => r.path)).toContain('dropZones[web].gitlab.baseUrl');
+    const back = edit({ ...gitlab(), repo: 'octo/web' }, { forge: undefined, gitlab: undefined });
+    expect(back.refused).toEqual(
+      expect.arrayContaining([expect.objectContaining({ path: 'dropZones[web].forge' })]),
+    );
+  });
+
+  test('changing gitlab.baseUrl on an existing zone is refused', () => {
+    const c = edit(gitlab(), gitlab('https://other.example.com'));
+    expect(c.refused).toEqual([
+      {
+        path: 'dropZones[web].gitlab.baseUrl',
+        message: "the GitLab instance of a zone can't change: remove the zone and add a new one",
+      },
+    ]);
+    expect(c.guarded).toEqual([]);
+  });
+
+  test('writing out forge: github on an existing GitHub zone changes nothing', () => {
+    const c = edit({}, { forge: 'github' });
+    expect(c).toMatchObject({ guarded: [], refused: [], sessionForbidden: [] });
+  });
+
+  test('an added GitLab zone with a nested path guards its repo, forge and base URL', () => {
+    const added = zone('new', { egress: { mode: 'monitor', allow: [] }, ...gitlab() });
+    expect(() => ADD_BASELINE(added)).not.toThrow();
+    expect(ADD_BASELINE(added)).toMatchObject({
+      repo: 'group/sub/web',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    });
+    const c = classify(doc([]), doc([added]));
+    expect(c.refused).toEqual([]);
+    expect(c.guarded).toEqual([
+      newProject('new', 'group/sub/web'),
+      {
+        path: 'dropZones[new].forge',
+        consequence:
+          'Zone new lives on GitLab (forge: gitlab): Jumpmaster will act on its issues and merge requests there',
+      },
+      {
+        path: 'dropZones[new].gitlab.baseUrl',
+        consequence:
+          'Zone new will use the GitLab instance at https://gitlab.example.com (gitlab.baseUrl): the forge tokens will be sent there',
+      },
+    ]);
+  });
+
+  test('the add baseline refuses a nested path on a GitHub zone', () => {
+    expect(() => ADD_BASELINE(zone('new', { repo: 'group/sub/web' }))).toThrow();
+    expect(() => ADD_BASELINE(zone('new', { repo: 'group/sub/web', forge: 'github' }))).toThrow();
+  });
+});
