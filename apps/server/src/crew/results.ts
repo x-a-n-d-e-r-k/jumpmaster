@@ -29,7 +29,7 @@ import { chargeBudget, fingerprint } from '../flow/budgets.js';
 import type { Feedback } from '../flow/decide.js';
 import type { ForgePair } from '../outbox.js';
 import { type CrewInputJson, promptVersions } from '../payloads.js';
-import type { ResultDeps } from '../results.js';
+import { type ResultDeps, STALE_REASON } from '../results.js';
 import { retryParkedItem } from '../sync.js';
 import {
   applyCrewActions,
@@ -58,6 +58,7 @@ import {
   getTriageRequest,
   insertCrewRetry,
   insertDoneClaim,
+  itemArbitrationSubject,
   listUnappliedCrewRetries,
   markCrewRerun,
   releaseArbitrationApply,
@@ -539,6 +540,25 @@ export function crewMayRetry(db: Db, zone: DropZoneConfig, itemId: number): bool
 }
 
 type DiagnoseWork = Extract<CrewInputJson['work'], { role: 'diagnose' }>;
+
+/** Stale diagnose failures rerun per briefing before one counts as its attempt (#709, D3). */
+export const MAX_DIAGNOSE_STALE_RERUNS = 2;
+
+/**
+ * A diagnose drop that failed only because the item's head moved while it ran (`STALE_REASON`)
+ * gives its attempt back, so the next pass diagnoses afresh at the current basis: only while the
+ * briefing is still the open park on the item, and at most `MAX_DIAGNOSE_STALE_RERUNS` times per
+ * briefing (the stored counter bounds a head that keeps moving). Any other failure is the attempt.
+ */
+function rerunStaleDiagnose(db: Db, work: DiagnoseWork, result: DropResult): void {
+  if (result.status !== 'failed' || !STALE_REASON.test(result.reason ?? '')) return;
+  db.prepare(
+    `UPDATE briefings SET diagnose_attempts = diagnose_attempts - 1,
+       diagnose_stale_reruns = diagnose_stale_reruns + 1
+     WHERE id = ? AND state = 'open' AND kind = 'parked' AND subject = ?
+       AND diagnose_attempts > 0 AND diagnose_stale_reruns < ?`,
+  ).run(work.briefingId, itemArbitrationSubject(work.itemId), MAX_DIAGNOSE_STALE_RERUNS);
+}
 
 /**
  * Records a diagnosis on the parked briefing it was asked for, beside the server's why, if that
@@ -1023,6 +1043,7 @@ export async function applyCrewResult(
     }
     if (result.status !== 'completed') {
       failed(`the drop ${result.status}: ${result.reason ?? ''}`);
+      if (role === 'diagnose' && work?.role === 'diagnose') rerunStaleDiagnose(db, work, result);
       return finish(db, drop, 'failed', now, result.reason ?? result.status);
     }
     const parsed =

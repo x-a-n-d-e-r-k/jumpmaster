@@ -188,7 +188,9 @@ export function reviewDisagreement(db: Db, item: WorkItem): boolean {
  * The zone's next work on its parked briefings: an open one not yet diagnosed is arbitrated when
  * its item is a review disagreement (`reviewDisagreement`, with `crew.arbiter` on and Fable
  * available), skipped while that arbitration is in flight or waits to be applied, and else
- * diagnosed. It answers a park the server raised, so it runs at the daily crew cap too.
+ * diagnosed. It answers a park the server raised, so it runs at the daily crew cap too. A diagnose
+ * that failed only because the head moved gave its attempt back (`rerunStaleDiagnose`), so it is
+ * picked again here.
  */
 export function nextDiagnose(
   db: Db,
@@ -437,7 +439,8 @@ function nextTriage(db: Db, zone: DropZoneConfig, now: Date): number | null {
 /**
  * Crew drops created in the trailing 24 hours, not counting lost or rate-limited ones, doctor
  * drops, nor diagnose drops: a diagnosis answers a park the server raised, one per park
- * (`diagnose_attempts`), so it is not the crew's self-directed spend the cap bounds.
+ * (`diagnose_attempts`; a stale failure is rerun at most twice, `rerunStaleDiagnose`), so it is not
+ * the crew's self-directed spend the cap bounds.
  */
 export function crewDropsToday(db: Db, zoneId: string, now: Date): number {
   const { n } = db
