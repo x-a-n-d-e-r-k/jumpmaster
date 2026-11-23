@@ -934,7 +934,7 @@ describe('the pages while a diagnosis is pending (#397)', () => {
   const crewZone = { crew: crewOn, triage: { ...makeZone({}).triage, gate: false } };
   const notice = 'The crew is looking at this.';
 
-  test('/briefings, its zone view and the briefing page show the notice, then the rule form', async () => {
+  test('the briefing page shows the notice, then the rule form', async () => {
     const h = await harness({ zone: crewZone });
     await h.reconcile();
     await h.finishDrop('implement', {
@@ -948,7 +948,8 @@ describe('the pages while a diagnosis is pending (#397)', () => {
     syncParkBriefings(h.db, h.zone, h.now());
     const b = listBriefings(h.db, { zoneId: 'main', state: 'open' })[0];
     if (!b) throw new Error('no briefing');
-    const pages = ['/briefings', '/briefings?zone=main', `/briefings/${b.id}`];
+    // The list views are Home's Needs you and the project now (#625): the briefing page rules.
+    const pages = [`/briefings/${b.id}`];
     for (const url of pages) {
       const html = (await h.view(url)).body;
       expect(html, url).toContain(notice);

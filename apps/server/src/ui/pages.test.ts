@@ -30,6 +30,7 @@ import {
   askButton,
   type CrewLine,
   DROP_HEAD,
+  dismissAllForm,
   dropRows,
   escapeHtml,
   FAVICON_HREF,
@@ -42,9 +43,7 @@ import {
   OBSERVATION_ACTIONS,
   observationWords,
   page,
-  pageParams,
   renderBriefing,
-  renderBriefings,
   renderDoctor,
   renderDrop,
   renderDropList,
@@ -56,7 +55,6 @@ import {
   renderWorkList,
   STUB_SCRIPT,
   statusBanner,
-  waitingOnYou,
   workItemRows,
 } from './pages.js';
 import { zoneTextNamer } from './zone-name.js';
@@ -108,11 +106,17 @@ const drop: Drop = {
 };
 
 describe('renderHome', () => {
-  test('the home page shows each stick, and names a stick that cannot run a zone and why', () => {
+  test("Capacity shows each stick's troopers busy out of its total, escaped, an offline one marked (#625)", () => {
+    const now = new Date('2026-01-01T00:00:30.000Z');
     const html = renderHome({
       zones: [z],
       items: [],
-      drops: [],
+      drops: [
+        { ...drop, id: 'r1', state: 'running', stickId: 's1', finishedAt: null },
+        { ...drop, id: 'r2', state: 'leased', stickId: 's1', finishedAt: null },
+        { ...drop, id: 'q1', state: 'queued', stickId: null, finishedAt: null },
+      ],
+      now,
       sticks: [
         {
           id: 's1',
@@ -121,7 +125,8 @@ describe('renderHome', () => {
           lastSeenAt: '2026-01-01T00:00:00.000Z',
           capabilities: [],
           imagePolicy: 'allowlist',
-          cannotRun: [{ zoneId: 'locked', missing: ['egress-v1', 'image-policy:signed'] }],
+          cannotRun: [{ zoneId: 'locked', missing: ['egress-v1'] }],
+          slots: 3,
         },
         {
           id: 's2',
@@ -131,46 +136,38 @@ describe('renderHome', () => {
           capabilities: ['egress-v1'],
           imagePolicy: 'signed',
           cannotRun: [],
+          slots: 2,
         },
       ],
     });
-    // Collapsed: the summary counts the live ones (none here) and those that can't run a zone.
-    expect(html).toContain(
-      '<details id="sticks" class="card sticks"><summary>Sticks: 0 live, 1 can&#39;t run a zone</summary>',
+    const capacity = html.slice(html.indexOf('id="capacity"'), html.indexOf('id="pipeline"'));
+    // Each stick names a project it cannot run and what it lacks.
+    expect(capacity).toContain(
+      'old&lt;stick&gt;: 2 of 3 troopers busy <small class="cannot-run">cannot run locked: lacks egress-v1</small></li>',
     );
-    expect(html).toContain('old&lt;stick&gt;');
+    expect(capacity).toContain('new: 0 of 2 troopers busy <small class="muted">offline</small>');
     expect(html).not.toContain('old<stick>');
-    expect(html).toContain('cannot run locked: lacks egress-v1, image-policy:signed');
-    expect(html).toMatch(
-      /new<\/td><td>0\.4\.0<\/td><td>never<\/td><td>egress-v1<\/td><td>signed<\/td><td>all zones<\/td>/,
-    );
-    // No sticks known: the section says so rather than vanishing.
+    // The status's "See the sticks" link lands here.
+    expect(capacity).toContain('<div id="sticks">');
     expect(renderHome({ zones: [z], items: [], drops: [], sticks: [] })).toContain(
       'No stick has enrolled.',
     );
   });
 
-  test("the Crew table links each zone's New issue page and its GOAL.md stub, the id encoded (#581)", () => {
+  test("a project row links the project's New issue page and its page, the id encoded (#625)", () => {
     const id = 'a"<>&/b';
-    const html = renderHome({
-      zones: [z],
-      items: [],
-      drops: [],
-      crew: [{ zoneId: id, enabled: true, lastCycle: null, nextDue: null, fable: 'available' }],
-    });
+    const html = renderHome({ zones: [{ ...z, id }], items: [], drops: [] });
     const enc = encodeURIComponent(id);
     expect(html).toContain(`<a href="/projects/${enc}/issues/new">New issue</a>`);
-    expect(html).toContain(`<a href="/projects/${enc}/goals#goal-stub">GOAL.md stub</a>`);
-    expect(html).not.toContain('/intake"');
-    expect(html).not.toContain(`/intake">Intake</a>`);
+    expect(html).toContain(`<a href="/projects/${enc}">Open</a>`);
     expect(html).not.toContain(id);
   });
 
   test('escapes issue titles', () => {
     const html = renderHome({
       zones: [z],
-      items: [{ ...item, title: '<script>alert(1)</script>' }],
-      drops: [{ ...drop, state: 'running', finishedAt: null }],
+      items: [{ ...item, state: 'parked', title: '<script>alert(1)</script>' }],
+      drops: [],
     });
     expect(html).not.toContain('<script>alert(1)</script>');
     expect(html).toContain('&lt;script&gt;');
@@ -518,20 +515,67 @@ describe('the Usage card by plan (#144)', () => {
 });
 
 describe('renderHome loop state', () => {
-  test('shows usage gate', () => {
+  test('shows the gate in words, the bars, and no raw usage field as a label (#625)', () => {
     const html = renderHome({
       zones: [z],
       items: [],
       drops: [],
+      now: new Date('2026-01-01T00:00:00.000Z'),
       usage: { gate: 'closed', state: usageState, plan: 'pro', windows: [] },
     });
-    expect(html).toContain('<h2>Usage</h2>');
-    expect(html).toContain('closed');
-    expect(html).toContain('2026-01-01T05:00:00.000Z');
-    expect(html).toContain('97%');
-    expect(html).toContain('41%');
-    expect(html).toContain('2026-01-01T00:30:00.000Z');
-    expect(html).toContain('d-cause');
+    const capacity = html.slice(html.indexOf('id="capacity"'), html.indexOf('id="pipeline"'));
+    expect(capacity).toContain('<h2>Capacity</h2>');
+    expect(capacity).toContain('Dispatch paused until');
+    expect(capacity).toContain('datetime="2026-01-01T05:00:00.000Z"');
+    expect(capacity).toContain('in 5 h');
+    expect(capacity).toContain('97%');
+    expect(capacity).toContain('41%');
+    for (const raw of ['Gate', 'Overage', 'Cause drop', 'Paused until', 'Observed', 'closed'])
+      expect(capacity, raw).not.toContain(raw);
+    expect(capacity).not.toContain('d-cause');
+  });
+
+  test('a closed gate is paused until the later of its pause and its probe time, either alone (#625)', () => {
+    const capacity = (state: typeof usageState) => {
+      const html = renderHome({
+        zones: [z],
+        items: [],
+        drops: [],
+        now: new Date('2026-01-01T00:00:00.000Z'),
+        usage: { gate: 'closed', state, plan: 'pro', windows: [] },
+      });
+      return html.slice(html.indexOf('id="capacity"'), html.indexOf('id="pipeline"'));
+    };
+    const later = '2026-01-01T07:00:00.000Z';
+    // The probe time is later than the pause: it is the one shown.
+    const probeLater = capacity({ ...usageState, probeNotBefore: later });
+    expect(probeLater).toContain(`datetime="${later}"`);
+    expect(probeLater).not.toContain('datetime="2026-01-01T05:00:00.000Z"');
+    // The probe time alone, with no pause.
+    const probeOnly = capacity({ ...usageState, pausedUntil: null, probeNotBefore: later });
+    expect(probeOnly).toContain(
+      `Dispatch paused until <span data-live-ignore><time datetime="${later}"`,
+    );
+    // The pause is later than the probe time: the pause is shown.
+    const pauseLater = capacity({ ...usageState, probeNotBefore: '2026-01-01T02:00:00.000Z' });
+    expect(pauseLater).toContain('datetime="2026-01-01T05:00:00.000Z"');
+    expect(pauseLater).not.toContain('datetime="2026-01-01T02:00:00.000Z"');
+  });
+
+  test.each([
+    ['open', 'Dispatch open'],
+    ['finishing_only', 'Dispatch open to finishing work only'],
+    ['probe', 'Dispatch probing'],
+    ['stopped', 'Dispatch paused'],
+    ['credits_resume', 'Dispatch open on credits'],
+  ] as const)('the %s gate reads "%s"', (gate, words) => {
+    const html = renderHome({
+      zones: [z],
+      items: [],
+      drops: [],
+      usage: { gate, state: usageState, plan: 'pro', windows: [] },
+    });
+    expect(html).toContain(words);
   });
 
   test('shows verdict and attempts', () => {
@@ -680,25 +724,24 @@ const ruling = (o: Partial<Ruling> = {}): Ruling => ({
 });
 
 describe('briefings', () => {
-  test('home shows "Waiting on you" with a counted line per project and a link to /briefings', () => {
+  test('Home lists each open briefing under Needs you, with its page as the one action (#625)', () => {
     const html = renderHome({
       zones: [z],
       items: [],
       drops: [],
       briefings: [briefing(), briefing({ id: 5, decision: 'Retry #7?' })],
     });
-    expect(html).toContain('<h2>Waiting on you</h2>');
-    expect(html).toContain('<a href="/briefings?zone=main">octo/demo: 2 waiting</a>');
-    expect(html).not.toContain('Split the CLI objective?');
-    expect(html).not.toContain('Retry #7?');
-    expect(html).toContain('href="/briefings"');
-    expect(waitingOnYou([])).toContain('Nothing is waiting on you.');
+    const needs = html.slice(html.indexOf('id="waiting-on-you"'));
+    expect(needs).toContain('<h2>Needs you</h2>');
+    expect(needs).toContain('octo/demo: Split the CLI objective?');
+    expect(needs).toContain('<a href="/briefings/4">Answer</a>');
+    expect(needs).toContain('<a href="/briefings/5">Answer</a>');
+    expect(html).not.toContain('href="/briefings"');
+    expect(html).not.toContain('/briefings?');
   });
 
-  test('each open briefing shows decision, why, options, recommendation and what is on hold', () => {
-    const html = renderBriefings({ open: [briefing()], rulings: [], zones: [z] });
-    expect(html).toContain('Briefings (decisions waiting on you)');
-    expect(html).toContain('<a href="/projects/main/log?kind=rulings">Rulings for ');
+  test('an open briefing shows decision, why, options, recommendation and what is on hold', () => {
+    const html = renderBriefing({ briefing: briefing(), rulings: [], zones: [z] });
     for (const text of [
       'Split the CLI objective?',
       'It is two drops of work.',
@@ -711,13 +754,11 @@ describe('briefings', () => {
   });
 
   test('a briefing keeps the line breaks of its why and shows each option id for ctl', () => {
-    const html = renderBriefings({
-      open: [
-        briefing({
-          why: 'gate script changed: test\n  test: "a" → "<b>"',
-          options: [{ id: 'allow-x', label: 'Allow', effect: 'allow_gate_change', sha: 'x' }],
-        }),
-      ],
+    const html = renderBriefing({
+      briefing: briefing({
+        why: 'gate script changed: test\n  test: "a" → "<b>"',
+        options: [{ id: 'allow-x', label: 'Allow', effect: 'allow_gate_change', sha: 'x' }],
+      }),
       rulings: [],
       zones: [z],
     });
@@ -735,7 +776,7 @@ describe('briefings', () => {
       diagnosis: 'The test is flaky.',
       source: 'server',
     });
-    const html = renderBriefings({ open: [parked], rulings: [], zones: [z] });
+    const html = renderBriefing({ briefing: parked, rulings: [], zones: [z] });
     expect(html).toMatch(
       /<pre>heal budget exhausted<\/pre><\/td><\/tr><tr><th>Diagnosis<\/th><td><pre>The test is flaky\.<\/pre>/,
     );
@@ -775,8 +816,8 @@ describe('briefings', () => {
       ],
       source: 'server',
     });
-    const html = renderBriefings({
-      open: [held],
+    const html = renderBriefing({
+      briefing: held,
       rulings: [],
       zones: [z],
       holds: new Map([['issue:3', '2026-01-01T00:01:00.000Z']]),
@@ -819,27 +860,19 @@ describe('briefings', () => {
       },
       h.now(),
     );
-    for (const url of ['/briefings', '/briefings?zone=main']) {
-      const html = (await h.view(url)).body;
-      const heading = html.indexOf('Going ahead unless you stop it');
-      expect(heading).toBeGreaterThan(-1);
-      const parkedAt = html.indexOf(`id="briefing-${parked}"`);
-      const heldAt = html.indexOf(`id="briefing-${held}"`);
-      expect(parkedAt).toBeGreaterThan(-1);
-      expect(parkedAt).toBeLessThan(heading);
-      expect(heldAt).toBeGreaterThan(heading);
-      const block = html.slice(heldAt);
-      expect(block).toContain(`<form class="rule" data-briefing="${held}"`);
-      expect(block).toContain('value="reject"');
-      expect(block).toContain('value="promote"');
-      expect(block).toContain('Promote now');
-    }
-    // The all-projects page counts only what needs you.
-    expect((await h.view('/briefings')).body).toContain('1 decision waiting.');
+    // The briefing's own page has the rule form; Home's Needs you lists only what needs you.
+    const block = (await h.view(`/briefings/${held}`)).body;
+    expect(block).toContain(`<form class="rule" data-briefing="${held}"`);
+    expect(block).toContain('value="reject"');
+    expect(block).toContain('value="promote"');
+    expect(block).toContain('Promote now');
+    const home = (await h.view('/')).body;
+    expect(home).toContain(`<a href="/briefings/${parked}">Answer</a>`);
+    expect(home).not.toContain(`/briefings/${held}"`);
   });
 
   test('a rule form posts optionId through jmFetch, with no token field', () => {
-    const html = renderBriefings({ open: [briefing()], rulings: [], zones: [z] });
+    const html = renderBriefing({ briefing: briefing(), rulings: [], zones: [z] });
     expect(html).toMatch(/<form class="rule" data-briefing="4" data-options="[0-9a-f]{16}">/);
     expect(html).not.toContain('type="password"');
     expect(html).toContain(
@@ -866,7 +899,7 @@ describe('briefings', () => {
     });
     const evilRuling = ruling({ choice: X, note: X, applyError: X, diagnosis: X });
     const html =
-      renderBriefings({ open: [evil], rulings: [evilRuling], zones: [z] }) +
+      renderBriefing({ briefing: evil, rulings: [evilRuling], zones: [z] }) +
       renderHome({ zones: [z], items: [], drops: [], briefings: [evil] }) +
       renderGoals({
         zone: z,
@@ -1100,25 +1133,10 @@ describe('models on the drop page', () => {
 });
 
 describe('home crew line', () => {
-  test('each zone shows whether its crew is on, the last cycle, the next due and the Fable status', () => {
-    const html = renderHome({
-      zones: [z],
-      items: [],
-      drops: [],
-      crew: [
-        {
-          zoneId: 'main',
-          enabled: true,
-          lastCycle: '2026-01-01T00:00:00.000Z',
-          nextDue: '2026-01-01T01:00:00.000Z',
-          fable: 'plan pro does not include Fable',
-        },
-      ],
-    });
-    expect(html).toContain('<h2>Crew</h2>');
-    expect(html).toMatch(
-      /octo\/demo<\/td><td>on<\/td><td>2026-01-01T00:00:00.000Z<\/td><td>2026-01-01T01:00:00.000Z<\/td><td>plan pro does not include Fable/,
-    );
+  test('Home has no crew table: it is on Goals (#625)', () => {
+    const html = renderHome({ zones: [z], items: [], drops: [] });
+    expect(html).not.toContain('<h2>Crew</h2>');
+    expect(html).not.toContain('<th>Crew</th>');
   });
 });
 
@@ -1343,7 +1361,7 @@ describe('the page shell and its forms', () => {
     const pages = {
       kill: renderHome({ zones: [z], items: [], drops: [], sticks: [] }),
       killed: renderHome({ zones: [z], items: [], drops: [], sticks: [], killed: true }),
-      rule: renderBriefings({ open: [briefing()], rulings: [], zones: [z] }),
+      rule: renderBriefing({ briefing: briefing(), rulings: [], zones: [z] }),
       doctor: renderDoctor(null, [z]),
       goals: renderGoals({
         zone: z,
@@ -1412,9 +1430,7 @@ describe('the status banner (Task 12, round 2)', () => {
 
 test('the home page sticks section has an anchor the status links to', () => {
   const html = renderHome({ zones: [], items: [], drops: [], sticks: [] });
-  expect(html).toContain(
-    '<details id="sticks" class="card sticks"><summary>Sticks: 0 live</summary>',
-  );
+  expect(html).toContain('<div id="sticks"><h3>Sticks</h3>');
 });
 
 describe('zones are named by their repository (#99)', () => {
@@ -1450,13 +1466,6 @@ describe('zones are named by their repository (#99)', () => {
         },
       ],
       briefings: [briefing({ zoneId: 'zid-b' })],
-      crew: zones.map((zz) => ({
-        zoneId: zz.id,
-        enabled: true,
-        lastCycle: null,
-        nextDue: null,
-        fable: 'ok',
-      })),
       sticks: [
         {
           id: 's1',
@@ -1484,13 +1493,14 @@ describe('zones are named by their repository (#99)', () => {
     expect(html).toContain('acme/shared <small>(zid-a)</small>');
     expect(html).toContain('acme/shared <small>(zid-b)</small>');
     expect(html).toContain('Starter mode in acme/widgets');
+    expect(html).toContain('acme/shared <small>(zid-b)</small>: Split the CLI objective?');
     expect(html).toContain('cannot run acme/widgets: lacks egress-v1');
     // The ids stay in the URLs.
-    expect(html).toContain('href="/projects/zid-solo/goals"');
+    expect(html).toContain('href="/projects/zid-solo/issues/new"');
     expectNoBareId(html);
   });
 
-  test("the floor's status banner and page title name zones by repository", () => {
+  test("Home's status banner names zones by repository; its title is Home (#625)", () => {
     const problem = {
       zoneId: 'zid-a',
       kind: 'missing',
@@ -1525,7 +1535,8 @@ describe('zones are named by their repository (#99)', () => {
       new Date(),
     );
     const html = renderHome({ zones, items: [], drops: [], sticks: [], status });
-    expect(html).toContain('<title>Jumpmaster: Blocked: acme/shared (zid-a) needs claudeToken');
+    expect(html).toContain('<title>Jumpmaster: Home</title>');
+    expect(html).toContain('<h2 class="page-h">Home</h2>');
     expect(html).toContain('<strong>Blocked: acme/shared (zid-a) needs claudeToken');
     expect(html).toContain('acme/shared (zid-b): no Claude token');
     expect(html).toContain('acme/widgets is paused');
@@ -1534,35 +1545,26 @@ describe('zones are named by their repository (#99)', () => {
     expectNoBareId(html.replaceAll(/acme\/shared \(zid-[ab]\)/g, ''));
   });
 
-  test('the briefings page names the zone of each briefing and ruling by repository', () => {
-    const html = renderBriefings({
-      open: [briefing({ zoneId: 'zid-solo' }), briefing({ id: 5, zoneId: 'zid-a' })],
-      rulings: [ruling({ zoneId: 'zid-b' })],
-      zones,
-    });
+  test("a briefing's page names its zone by repository", () => {
+    const html =
+      renderBriefing({ briefing: briefing({ zoneId: 'zid-solo' }), rulings: [], zones }) +
+      renderBriefing({ briefing: briefing({ id: 5, zoneId: 'zid-a' }), rulings: [], zones });
     expect(html).toContain('<th>Zone</th><td>acme/widgets</td>');
     expect(html).toContain('<th>Zone</th><td>acme/shared <small>(zid-a)</small></td>');
-    expect(html).toContain('>Rulings for acme/shared <small>(zid-b)</small></a>');
     expectNoBareId(html.replaceAll(/href="[^"]*"/g, ''));
   });
 
-  test("one zone's briefings page names the zone by repository in its bulk dismiss", () => {
-    const html = renderBriefings({
-      open: [briefing({ zoneId: 'zid-a' }), briefing({ id: 5, zoneId: 'zid-a' })],
-      rulings: [],
+  test("a project's bulk dismiss names the zone by repository (#625: on its Overview)", () => {
+    const html = dismissAllForm(
+      'zid-a',
+      [briefing({ zoneId: 'zid-a' }), briefing({ id: 5, zoneId: 'zid-a' })],
       zones,
-      zone: { id: 'zid-a', mode: 'paused' },
-    });
+    );
     expect(html).toContain('Dismiss all 2 briefings of acme/shared <small>(zid-a)</small>');
     expect(html).toContain('data-ask="Dismiss 2 briefings of acme/shared (zid-a)?');
     expect(html).toContain('data-zone="zid-a"');
     expectNoBareId(html);
-    const solo1 = renderBriefings({
-      open: [briefing({ zoneId: 'zid-solo' })],
-      rulings: [],
-      zones,
-      zone: { id: 'zid-solo', mode: 'active' },
-    });
+    const solo1 = dismissAllForm('zid-solo', [briefing({ zoneId: 'zid-solo' })], zones);
     expect(solo1).toContain('Dismiss all 1 briefing of acme/widgets</button>');
     expectNoBareId(solo1);
   });
@@ -1699,214 +1701,54 @@ describe('renderWorkList and renderDropList (#119)', () => {
   });
 });
 
-describe('briefings grouped by project and paged (#132)', () => {
+describe('briefings on Home and on a project (#625, was the paged list of #132)', () => {
   const za: DropZoneConfig = { ...z, id: 'za', repo: 'acme/alpha' };
   const zb: DropZoneConfig = { ...z, id: 'zb', repo: 'acme/beta' };
-  const zc: DropZoneConfig = { ...z, id: 'zc', repo: 'acme/gamma' };
   /** `n` open briefings of `zoneId`, ids from `from`, each decision naming its zone and number. */
   const many = (zoneId: string, n: number, from = 1): Briefing[] =>
     Array.from({ length: n }, (_, i) =>
       briefing({ id: from + i, zoneId, decision: `Decide ${zoneId}#${from + i}?` }),
     );
-  const blocks = (html: string): number => html.match(/data-briefing="/g)?.length ?? 0;
-  /** The HTML of one project's section, from its opening tag to its close. */
-  const section = (html: string, zoneId: string): string => {
-    const start = html.search(
-      new RegExp(`<(section|details) class="project[^"]*" data-zone="${zoneId}"`),
-    );
-    expect(start).toBeGreaterThanOrEqual(0);
-    const tag = html.slice(start + 1, html.indexOf(' ', start));
-    return html.slice(start, html.indexOf(`</${tag}><!--/project-->`, start));
-  };
 
-  test('pageParams: per is 10, 20, 50 or 100, else 10; page is a positive integer, else 1', () => {
-    for (const per of ['10', '20', '50', '100']) expect(pageParams({ per }).per).toBe(Number(per));
-    for (const per of [undefined, '0', '7', 'abc', '1000', '', ['20', '50'], '20.0'])
-      expect(pageParams({ per }).per).toBe(10);
-    expect(pageParams({ page: '3' })).toEqual({ per: 10, page: 3 });
-    for (const page of [undefined, '-1', '0', 'x', '1.5', ['2']])
-      expect(pageParams({ page })).toEqual({ per: 10, page: 1 });
-  });
-
-  test('grouping: the busier project comes first with 10 blocks and Show all; no briefing crosses sections', () => {
-    const open = [...many('za', 3, 1), ...many('zb', 12, 100)];
-    const html = renderBriefings({ open, rulings: [], zones: [za, zb] });
-    const a = section(html, 'za');
-    const b = section(html, 'zb');
-    expect(html.indexOf(b)).toBeLessThan(html.indexOf(a));
-    expect(blocks(b)).toBe(10);
-    expect(b).toContain('Show all 12 in acme/beta');
-    expect(b).toContain('href="/briefings?zone=zb&amp;per=10"');
-    expect(blocks(a)).toBe(3);
-    expect(a).not.toContain('Show all');
-    expect(a).toContain('3 waiting');
-    expect(b).toContain('12 waiting');
-    for (const x of many('za', 3, 1)) expect(b).not.toContain(x.decision);
-    for (const x of many('zb', 12, 100)) expect(a).not.toContain(x.decision);
-    // Newest first: the highest ids of zb show, the two oldest do not.
-    expect(b).toContain('Decide zb#111?');
-    expect(b).not.toContain('Decide zb#101?');
-    expect(html).not.toContain('Rulings (decisions recorded)');
-  });
-
-  test('order: by open count descending, ties by repository; then quiet projects; no zone ids shown', () => {
-    const open = [...many('zc', 2, 1), ...many('za', 2, 10), ...many('zb', 5, 20)];
-    const quiet: DropZoneConfig = { ...z, id: 'zq', repo: 'acme/aaa-quiet' };
-    const html = renderBriefings({ open, rulings: [], zones: [zc, quiet, za, zb] });
-    const at = (id: string) => html.indexOf(section(html, id));
-    expect(at('zb')).toBeLessThan(at('za'));
-    expect(at('za')).toBeLessThan(at('zc'));
-    expect(at('zc')).toBeLessThan(at('zq'));
-    expect(section(html, 'zq')).toContain('Nothing waiting');
-    expect(blocks(section(html, 'zq'))).toBe(0);
-    // The decisions name their zone (fixture text), so they are taken out with the URLs.
-    const text = html
-      .replace(/(href|data-[a-z-]+)="[^"]*"/g, '')
-      .replace(/Decide z[a-z]#\d+\?/g, '');
-    expect(text).not.toMatch(/\bz[abcq]\b/);
-    expect(html).not.toMatch(/zone z[abcq]/);
-  });
-
-  test('a held project is collapsed after the others and not counted as waiting', () => {
-    const open = [...many('za', 2, 1), ...many('zb', 30, 100)];
-    const html = renderBriefings({
-      open,
-      rulings: [],
-      zones: [za, zb, zc],
-      modes: { za: 'active', zb: 'paused', zc: 'active' },
-    });
-    const held = section(html, 'zb');
-    expect(held.startsWith('<details class="project held"')).toBe(true);
-    expect(held).toContain('<summary>acme/beta: 30 held while paused</summary>');
-    expect(blocks(held)).toBe(10);
-    expect(held).toContain('Show all 30 in acme/beta');
-    expect(html.indexOf(held)).toBeGreaterThan(html.indexOf(section(html, 'za')));
-    expect(html.indexOf(held)).toBeGreaterThan(html.indexOf(section(html, 'zc')));
-    expect(html).toContain('2 decisions waiting');
-    expect(html).not.toContain('32 decisions');
-  });
-
-  test("no ruling is rendered: each section links to its project's rulings on the Log (#621)", () => {
-    const rulings = Array.from({ length: 12 }, (_, i) =>
-      ruling({ id: i + 1, zoneId: 'za', note: `note-a-${i + 1}` }),
-    ).concat([ruling({ id: 99, zoneId: 'zb', note: 'note-b' })]);
-    const html = renderBriefings({ open: many('za', 1), rulings, zones: [za, zb] });
-    const a = section(html, 'za');
-    expect(a).toContain(
-      '<p class="rulings"><a href="/projects/za/log?kind=rulings">Rulings for acme/alpha</a></p>',
-    );
-    expect(section(html, 'zb')).toContain(
-      '<a href="/projects/zb/log?kind=rulings">Rulings for acme/beta</a>',
-    );
-    for (const text of [
-      'note-a-12',
-      'note-b',
-      'id="ruling-',
-      'Rulings (',
-      '<details class="rulings"',
-    ])
-      expect(html).not.toContain(text);
-    const one = renderBriefings({
-      open: many('za', 1),
-      rulings,
-      zones: [za],
-      zone: { id: 'za', mode: 'active' },
-    });
-    expect(one).toContain('<a href="/projects/za/log?kind=rulings">Rulings for acme/alpha</a>');
-    for (const text of ['note-a-12', 'id="ruling-', 'Rulings (decisions recorded)'])
-      expect(one).not.toContain(text);
-  });
-
-  test.each([10, 20, 50, 100])('per=%i shows exactly that many blocks', (per) => {
-    const html = renderBriefings({ open: many('za', 120), rulings: [], zones: [za], per });
-    expect(blocks(html)).toBe(per);
-    const one = renderBriefings({
-      open: many('za', 120),
-      rulings: [],
-      zones: [za],
-      zone: { id: 'za', mode: 'active' },
-      per,
-    });
-    expect(blocks(one)).toBe(per);
-  });
-
-  test('the size selector marks the current size and keeps the zone, resetting the pages', () => {
-    const html = renderBriefings({
-      open: many('za', 30),
-      rulings: [],
-      zones: [za],
-      zone: { id: 'za', mode: 'active' },
-      per: 20,
-      page: 2,
-    });
-    expect(html).toContain('<a href="/briefings?zone=za&amp;per=10">10</a>');
-    expect(html).toContain('<a href="/briefings?zone=za&amp;per=20" aria-current="page">20</a>');
-    expect(html).toContain('<a href="/briefings?zone=za&amp;per=50">50</a>');
-    expect(html).toContain('<a href="/briefings?zone=za&amp;per=100">100</a>');
-    const all = renderBriefings({ open: [], rulings: [], zones: [za] });
-    expect(all).toContain('<a href="/briefings?per=10" aria-current="page">10</a>');
-  });
-
-  test('the zone view pages briefings, clamps the page, and keeps the dismiss for all of them', () => {
+  test('the bulk dismiss carries every open briefing of the zone, and says how many', () => {
     const open = many('za', 23);
-    const view = (page: number) =>
-      renderBriefings({ open, rulings: [], zones: [za], zone: { id: 'za', mode: 'active' }, page });
-    const first = view(1);
-    expect(blocks(first)).toBe(10);
-    expect(first).toContain('Page 1 of 3');
-    expect(first).toContain('href="/briefings?zone=za&amp;per=10&amp;page=2">Next</a>');
-    expect(first).not.toContain('>Previous</a>');
-    expect(first).toContain('Decide za#23?');
-    expect(first).toContain('Dismiss all 23 briefings of acme/alpha');
-    expect(first).toContain(`data-ids="${escapeHtml(JSON.stringify(open.map((b) => b.id)))}"`);
-    const last = view(3);
-    expect(blocks(last)).toBe(3);
-    expect(last).toContain('Page 3 of 3');
-    expect(last).toContain('href="/briefings?zone=za&amp;per=10&amp;page=2">Previous</a>');
-    expect(last).not.toContain('>Next</a>');
-    expect(last).toContain('Decide za#1?');
-    expect(view(99)).toBe(last);
+    const html = dismissAllForm('za', open, [za]);
+    expect(html).toContain('Dismiss all 23 briefings of acme/alpha');
+    expect(html).toContain(`data-ids="${escapeHtml(JSON.stringify(open.map((b) => b.id)))}"`);
+    expect(html).toContain('data-ask="Dismiss 23 briefings of acme/alpha?');
   });
 
-  test('the floor card shows one counted line per project, in the same order, and no decision', () => {
-    const open = [...many('za', 2, 1), ...many('zb', 5, 10)];
-    const html = waitingOnYou(open, [], [za, zb]);
-    const lines = html.match(/<li>.*?<\/li>/g) ?? [];
-    expect(lines).toEqual([
-      '<li><a href="/briefings?zone=zb">acme/beta: 5 waiting</a></li>',
-      '<li><a href="/briefings?zone=za">acme/alpha: 2 waiting</a></li>',
-    ]);
-    expect(html).toContain('7 decisions waiting');
-    expect(html).toContain('href="/briefings"');
-    for (const b of open) expect(html).not.toContain(b.decision);
+  test("Home's Needs you lists each briefing by project, in the order given, each to its page (#625)", () => {
+    const open = [...many('za', 2, 1), ...many('zb', 1, 10)];
+    const html = renderHome({ zones: [za, zb], items: [], drops: [], briefings: open });
+    const rows = html.match(/<li class="needs-row"[^>]*>.*?<\/li>/g) ?? [];
+    expect(rows).toHaveLength(3);
+    expect(rows.map((r) => /href="(\/briefings\/\d+)">Answer/.exec(r)?.[1])).toEqual(
+      open.map((b) => `/briefings/${b.id}`),
+    );
+    expect(rows[2]).toContain('acme/beta: ');
   });
 
   test('escaping: a decision with <script> is escaped, and a zone id needing it is encoded', () => {
     const odd: DropZoneConfig = { ...z, id: 'a b', repo: 'acme/<odd>' };
-    const open = [
-      ...many('a b', 11, 1),
-      briefing({ id: 50, zoneId: 'a b', decision: '<script>alert(1)</script>' }),
-    ];
-    const all = renderBriefings({ open, rulings: [ruling({ zoneId: 'a b' })], zones: [odd] });
-    const one = renderBriefings({
-      open,
-      rulings: [],
+    const evil = briefing({ id: 50, zoneId: 'a b', decision: '<script>alert(1)</script>' });
+    const open = [...many('a b', 3, 1), evil];
+    const floor = renderHome({ zones: [odd], items: [], drops: [], briefings: open });
+    const one = renderBriefing({
+      briefing: evil,
+      rulings: [ruling({ zoneId: 'a b' })],
       zones: [odd],
-      zone: { id: 'a b', mode: 'active' },
-      page: 1,
     });
-    const floor = waitingOnYou(open, [], [odd]);
-    for (const html of [all, one, floor]) {
+    const dismiss = dismissAllForm('a b', open, [odd]);
+    for (const html of [floor, one, dismiss]) {
       expect(html).not.toContain('<script>alert');
       expect(html).not.toContain('<odd>');
-      const hrefs = [...html.matchAll(/href="([^"]*)"/g)].map((m) => m[1]);
-      for (const href of hrefs.filter((x) => x?.includes('zone='))) {
-        expect(href).toContain('zone=a%20b');
-      }
-      expect(hrefs.some((x) => x?.includes('zone=a%20b'))).toBe(true);
     }
-    expect(all).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(floor).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
     expect(one).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(floor).toContain('href="/projects/a%20b"');
+    expect(one).toContain('href="/projects/a%20b#needs-you"');
+    expect(dismiss).toContain('data-zone="a b"');
   });
 });
 
@@ -1915,32 +1757,29 @@ describe('a credits stop on an unconfigured zone (#593)', () => {
   const stop = (zoneId: string) =>
     briefing({ id: 9, zoneId, kind: 'credits_required', subject: 'credits:stop:d1' });
 
-  test('its Waiting on you row links to /briefings, never to a zone that 404s, with a label', () => {
-    for (const zoneId of ['old', '']) {
-      const html = waitingOnYou([stop(zoneId)], [], zones);
-      expect(html).not.toContain(`href="/briefings?zone=${encodeURIComponent(zoneId)}"`);
-      expect(html).not.toMatch(/<a [^>]*>: 1 waiting<\/a>/);
-      const rows = html.match(/<li>.*?<\/li>/g) ?? [];
+  test('its Needs you row names it and links to its own page, never to a zone that 404s (#625)', () => {
+    for (const [zoneId, label] of [
+      ['old', 'old'],
+      ['', 'All dispatch stopped'],
+    ] as const) {
+      const html = renderHome({ zones, items: [], drops: [], briefings: [stop(zoneId)] });
+      const rows = html.match(/<li class="needs-row"[^>]*>.*?<\/li>/g) ?? [];
       expect(rows).toHaveLength(1);
-      expect(rows[0]).toMatch(/^<li><a href="\/briefings">[^<:]+: 1 waiting<\/a><\/li>$/);
+      expect(rows[0]).toContain(`${label}: Split the CLI objective?`);
+      expect(rows[0]).toContain('<a href="/briefings/9">Answer</a>');
+      expect(html).not.toContain('/projects/old');
     }
-    expect(waitingOnYou([stop('')], [], zones)).toContain('All dispatch stopped: 1 waiting');
-    expect(waitingOnYou([stop('old')], [], zones)).toContain('old: 1 waiting');
-  });
-
-  test('a configured zone’s row still links to its zone briefings', () => {
-    const html = waitingOnYou([stop('main'), briefing({ id: 3 })], [], zones);
-    expect(html).toContain('<a href="/briefings?zone=main">octo/demo: 2 waiting</a>');
   });
 
   test('its own page offers no "Briefings of" link to an unconfigured zone', () => {
     for (const zoneId of ['old', '']) {
       const html = renderBriefing({ briefing: stop(zoneId), rulings: [], zones });
       expect(html).not.toContain('/briefings?zone=');
-      expect(html).toContain('<a href="/briefings">All briefings</a>');
+      expect(html).toContain('<a href="/#waiting-on-you">Needs you</a>');
+      expect(html).not.toContain('Briefings of');
     }
     const ok = renderBriefing({ briefing: stop('main'), rulings: [], zones });
-    expect(ok).toContain('<a href="/briefings?zone=main">Briefings of octo/demo</a>');
+    expect(ok).toContain('<a href="/projects/main#needs-you">Briefings of octo/demo</a>');
   });
 });
 
@@ -1986,8 +1825,8 @@ describe('external links open in a new tab (#133)', () => {
     );
     expect(html).toMatch(/<a href="\/activity"[^>]*>/);
     expect(html).not.toMatch(/<a href="\/activity"[^>]*target=/);
-    expect(html).toMatch(/<a [^>]*href="\/drops\/d1"[^>]*>/);
-    expect(html).not.toMatch(/<a [^>]*href="\/drops\/d1"[^>]*target=/);
+    expect(html).toMatch(/<a [^>]*href="\/activity\/drops\?[^"]*"[^>]*>/);
+    expect(html).not.toMatch(/<a [^>]*href="\/activity\/[^"]*"[^>]*target=/);
   });
 });
 
@@ -2334,9 +2173,8 @@ describe('every briefing stands on its own (#226)', () => {
     expect(linkify('see #12.', refs)).toBe(
       'see <a href="https://github.com/octo/demo/issues/12" target="_blank" rel="noopener noreferrer">#12</a>.',
     );
-    expect(linkify('after Ruling 42', refs)).toBe(
-      'after <a href="/briefings#ruling-42">Ruling 42</a>',
-    );
+    // No briefing page to land on: the removed /briefings list is not a fallback (#625).
+    expect(linkify('after Ruling 42', refs)).toBe('after Ruling 42');
     expect(
       linkify('after Ruling 42 and Briefing 125', {
         ...refs,
@@ -2359,7 +2197,7 @@ describe('every briefing stands on its own (#226)', () => {
 
   test('a script beside #12 is escaped, and the #12 link is the only markup (D4)', () => {
     const evil = '<script>alert(1)</script><a href="javascript:x">#13</a> "Ruling 1" #12';
-    const html = linkify(evil, refs);
+    const html = linkify(evil, { ...refs, rulingHref: (n) => `#ruling-${n}` });
     expect(html).not.toContain('<script');
     expect(html).toContain(
       '&lt;script&gt;alert(1)&lt;/script&gt;&lt;a href=&quot;javascript:x&quot;&gt;',
@@ -2373,8 +2211,8 @@ describe('every briefing stands on its own (#226)', () => {
     expect(html.match(/<a /g)).toHaveLength(3);
     expect(html).toContain('<a href="https://github.com/octo/demo/issues/12"');
     // In a rendered briefing the same holds for every field.
-    const page = renderBriefings({
-      open: [briefing({ decision: evil, why: evil, recommendation: evil, onHold: evil })],
+    const page = renderBriefing({
+      briefing: briefing({ decision: evil, why: evil, recommendation: evil, onHold: evil }),
       rulings: [],
       zones: [z],
     });
@@ -2396,13 +2234,11 @@ describe('every briefing stands on its own (#226)', () => {
     );
     expect(effectText('parked', 'retry_item')).toMatch(/runs it again/);
     expect(effectText('parked', 'none')).toMatch(/stays parked/);
-    const html = renderBriefings({
-      open: [
-        briefing({
-          kind: 'promote',
-          options: [{ id: 'promote', label: 'Promote', effect: 'promote_issue' }],
-        }),
-      ],
+    const html = renderBriefing({
+      briefing: briefing({
+        kind: 'promote',
+        options: [{ id: 'promote', label: 'Promote', effect: 'promote_issue' }],
+      }),
       rulings: [],
       zones: [z],
     });
@@ -2478,11 +2314,11 @@ describe('every briefing stands on its own (#226)', () => {
         { id: 'reject', label: 'Reject', effect: 'reject_issue' },
       ],
     });
-    const html = renderBriefings({
-      open: [b],
+    const html = renderBriefing({
+      briefing: b,
       rulings: [],
       zones: [z],
-      about: new Map([[b.id, briefingAbout(w.db, w.zone, b)]]),
+      about: briefingAbout(w.db, w.zone, b),
     });
     expect(html).toContain(
       '<a href="https://github.com/octo/demo/issues/224" target="_blank" rel="noopener noreferrer">#224 Push tokens in app mode</a>',
@@ -2503,14 +2339,6 @@ describe('every briefing stands on its own (#226)', () => {
     const notice =
       '<p class="pending">The crew is looking at this. You&#39;ll be asked if it needs you.</p>';
     for (const html of [
-      renderBriefings({ open: [parked], rulings: [], zones: [z], pending: new Set([6]) }),
-      renderBriefings({
-        open: [parked],
-        rulings: [],
-        zones: [z],
-        zone: { id: 'main', mode: 'active' },
-        pending: new Set([6]),
-      }),
       renderBriefing({ briefing: parked, rulings: [], zones: [z], pending: true }),
     ]) {
       expect(html).toContain(notice);
@@ -2522,8 +2350,7 @@ describe('every briefing stands on its own (#226)', () => {
     }
     // Not pending: the rule form, as before.
     for (const html of [
-      renderBriefings({ open: [parked], rulings: [], zones: [z], pending: new Set([7]) }),
-      renderBriefings({ open: [parked], rulings: [], zones: [z] }),
+      renderBriefing({ briefing: parked, rulings: [], zones: [z] }),
       renderBriefing({ briefing: parked, rulings: [], zones: [z], pending: false }),
     ]) {
       expect(html).not.toContain('class="pending"');
@@ -2531,7 +2358,7 @@ describe('every briefing stands on its own (#226)', () => {
     }
   });
 
-  test('/briefings/<n> shows one briefing with its rulings, and the lists carry anchors', () => {
+  test('/briefings/<n> shows one briefing with its rulings, and its references carry anchors', () => {
     const ruled = briefing({ id: 7, state: 'ruled', decision: 'Split it, after Ruling 3?' });
     const one = renderBriefing({
       briefing: ruled,
@@ -2547,19 +2374,26 @@ describe('every briefing stands on its own (#226)', () => {
     expect(one).not.toContain('class="rule"');
     const open = renderBriefing({ briefing: briefing({ id: 8 }), rulings: [], zones: [z] });
     expect(open).toContain('class="rule"');
-    const list = renderBriefings({
-      open: [briefing({ id: 8, why: 'see Briefing 8, Briefing 2 and Ruling 1 and Ruling 5' })],
+    const list = renderBriefing({
+      briefing: briefing({ id: 8, why: 'see Briefing 8, Briefing 2 and Ruling 1 and Ruling 5' }),
       rulings: [ruling({ id: 1, briefingId: 2 }), ruling({ id: 5, briefingId: 3 })],
       zones: [z],
-      per: 10,
     });
     expect(list).toContain('id="briefing-8"');
-    // The list shows no ruling (#621): a reference leads to the ruling on its briefing's page.
+    // Another briefing's ruling is not shown: a reference leads to it on its briefing's page.
     expect(list).not.toContain('<tr id="ruling-1">');
     expect(list).toContain('<a href="#briefing-8">Briefing 8</a>');
     expect(list).toContain('<a href="/briefings/2">Briefing 2</a>');
     expect(list).toContain('<a href="/briefings/2#ruling-1">Ruling 1</a>');
     expect(list).toContain('<a href="/briefings/3#ruling-5">Ruling 5</a>');
+    // A ruling of no known briefing stays text, not a link to the removed /briefings list.
+    const unknown = renderBriefing({
+      briefing: briefing({ id: 8, why: 'see Ruling 77' }),
+      rulings: [],
+      zones: [z],
+    });
+    expect(unknown).toContain('see Ruling 77');
+    expect(unknown).not.toContain('#ruling-77');
     // Each briefing links to its own page.
     expect(list).toContain('<a href="/briefings/8">');
   });

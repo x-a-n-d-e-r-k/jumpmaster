@@ -145,6 +145,25 @@ export type StatusInput = {
   zoneName?: (id: string) => string;
 };
 
+/** Home's Needs you (#625): where `/briefings` went. */
+export const NEEDS_YOU_HREF = '/#waiting-on-you';
+
+/**
+ * The failing doctor checks that block a project (#625): status fail, about a configured zone.
+ * Home's Needs you groups them per project.
+ */
+export function projectFails(
+  checks: readonly DoctorCheck[],
+  zones: readonly { id: string }[],
+): { zoneId: string; id: string; summary: string }[] {
+  const configured = new Set(zones.map((z) => z.id));
+  return checks.flatMap((c) =>
+    c.status === 'fail' && c.zoneId !== null && configured.has(c.zoneId)
+      ? [{ zoneId: c.zoneId, id: c.id, summary: c.summary }]
+      : [],
+  );
+}
+
 const ALL_PAGES: Pages = { zones: true, settings: true, credentials: true };
 const ACTIVE = new Set(['leased', 'running']);
 /** The roles that still lease under the throttle (leases.ts FINISHING). */
@@ -307,7 +326,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
         'Nothing leases, reviews included. The briefing offers two rulings: Run on credits now (work resumes, spending credits, until the window resets), or Noted (wait for the reset).',
       waitingOn: 'you',
       ...(usage.overageStoppedAt ? { since: usage.overageStoppedAt } : {}),
-      action: { label: 'Rule on it', href: '/briefings' },
+      action: { label: 'Rule on it', href: NEEDS_YOU_HREF },
     });
 
   if (input.usagePausedUntil)
@@ -484,7 +503,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
         waitingOn: 'you',
         action:
           input.openBriefings > 0
-            ? { label: 'Answer them', href: '/briefings' }
+            ? { label: 'Answer them', href: NEEDS_YOU_HREF }
             : pendingChanges > 0 || oldestGoalChange === undefined
               ? { label: 'Review them on home', href: '/' }
               : { label: 'Approve and merge', href: goalConfirmHref(oldestGoalChange) },

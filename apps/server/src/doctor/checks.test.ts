@@ -267,7 +267,7 @@ describe('global checks', () => {
     expect(one(await w.run(), 'usage.gate')).toMatchObject({
       status: 'fail',
       summary: expect.stringContaining('usage credits'),
-      fix: expect.stringContaining('/briefings'),
+      fix: expect.stringContaining('/#waiting-on-you'),
     });
   });
 

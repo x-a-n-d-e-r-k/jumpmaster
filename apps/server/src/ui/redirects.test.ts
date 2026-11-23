@@ -219,6 +219,62 @@ describe('the redirect table (issue #615)', () => {
     });
   });
 
+  describe('the briefings list is Home (#625)', () => {
+    test('/briefings is a 301 to /#waiting-on-you, the query kept before the hash; POST is a 308', async () => {
+      const app = bare();
+      for (const [url, to] of [
+        ['/briefings', '/#waiting-on-you'],
+        ['/briefings?per=20&page=2', '/?per=20&page=2#waiting-on-you'],
+        ['/briefings?zone=', '/?zone=#waiting-on-you'],
+      ]) {
+        const res = await app.inject({ method: 'GET', url });
+        expect([url, res.statusCode, res.headers.location]).toEqual([url, 301, to]);
+        const head = await app.inject({ method: 'HEAD', url });
+        expect([url, head.statusCode, head.headers.location]).toEqual([url, 301, to]);
+        const post = await app.inject({ method: 'POST', url });
+        expect([url, post.statusCode, post.headers.location]).toEqual([url, 308, to]);
+      }
+    });
+
+    test('/briefings?zone=jm is a 301 to /projects/jm, the rest of the query kept', async () => {
+      const app = bare();
+      for (const [url, to] of [
+        ['/briefings?zone=jm', '/projects/jm'],
+        ['/briefings?zone=jm&per=20', '/projects/jm?per=20'],
+        ['/briefings?zone=a%2Fb', '/projects/a%2Fb'],
+      ]) {
+        const res = await app.inject({ method: 'GET', url });
+        expect([url, res.statusCode, res.headers.location]).toEqual([url, 301, to]);
+        const head = await app.inject({ method: 'HEAD', url });
+        expect([url, head.statusCode, head.headers.location]).toEqual([url, 301, to]);
+        const post = await app.inject({ method: 'POST', url });
+        expect([url, post.statusCode, post.headers.location]).toEqual([url, 308, to]);
+      }
+    });
+
+    test('/briefings/12 does not move', async () => {
+      const res = await bare().inject({ method: 'GET', url: '/briefings/12' });
+      expect([res.statusCode, res.headers.location]).toEqual([404, undefined]);
+    });
+
+    test('in the app, both redirect, Home renders its Needs you, and a briefing keeps its page', async () => {
+      const h = await harness({});
+      for (const [from, to] of [
+        ['/briefings', '/#waiting-on-you'],
+        ['/briefings?zone=main', '/projects/main'],
+      ]) {
+        const res = await h.view(from);
+        expect([from, res.statusCode, res.headers.location]).toEqual([from, 301, to]);
+      }
+      const home = await h.view('/');
+      expect(home.statusCode).toBe(200);
+      expect(home.body).toContain('id="waiting-on-you"');
+      // A briefing's own page answers itself: 404 for one that does not exist, never a redirect.
+      const one = await h.view('/briefings/12');
+      expect([one.statusCode, one.headers.location]).toEqual([404, undefined]);
+    });
+  });
+
   describe('the install-wide pages move under System (#623)', () => {
     const SYSTEM: [string, string][] = [
       ['/doctor', '/system'],
@@ -289,7 +345,7 @@ describe('the redirect table (issue #615)', () => {
       const location = String(res.headers.location);
       expect(
         /^\/(projects|activity|system)\//.test(location) ||
-          ['/projects', '/system'].includes(location),
+          ['/projects', '/system', '/#waiting-on-you'].includes(location),
         url,
       ).toBe(true);
       // The target is not itself redirected.

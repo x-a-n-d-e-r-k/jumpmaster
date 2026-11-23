@@ -3,9 +3,7 @@ import {
   type About,
   type Briefing,
   effectText,
-  HELD_MODES,
   type HeldZone,
-  isNotice,
   issueUrl,
   optionsDigest,
   type Ruling,
@@ -36,14 +34,15 @@ import { sliceWhole } from '../slice-whole.js';
 import type { Status } from '../status.js';
 import type { Gate } from '../usage.js';
 import {
+  type FailingCheck,
   floorCounts,
+  isRunning,
   listHref,
+  liveSticks,
+  needsRows,
+  needsYouSection,
   type PendingLine,
-  pendingRows,
-  sticksSummary,
-  totalsStrip,
-  WAITING_ON_YOU_ID,
-  zoneCards,
+  projectsSection,
 } from './floor.js';
 import {
   ACTIVITY_DROPS_HREF,
@@ -117,15 +116,17 @@ export interface HomeState {
    * Merges done in the last 24 hours, by zone. Absent when they could not be read: the floor
    * then says "unavailable", never 0.
    */
-  merges24h?: Array<{ zoneId: string; at: string }>;
-  /** Open briefings, for "Waiting on you": a paused or observing zone's are held back. */
+  merges24h?: Array<{ zoneId: string; at: string; workItemId?: number | null }>;
+  /** List every Needs you row (`/?needs=all`), not the first NEEDS_CAP. */
+  needsAll?: boolean;
+  /** Failing doctor checks of configured projects, for Needs you (#625). */
+  doctorFails?: FailingCheck[];
+  /** Open briefings, for Needs you: a paused or observing zone's are held back. */
   briefings?: Briefing[];
   /** The zones whose briefings are held back, one collapsed line each. */
   heldBriefings?: HeldZone[];
   /** The viewing session's unexpired pending guarded changes, oldest first (#507). */
   pending?: PendingLine[];
-  /** One line per zone about its crew. */
-  crew?: CrewLine[];
   /** Every enrolled stick, and the zones each can't run. */
   sticks?: StickLine[];
 }
@@ -139,6 +140,8 @@ export interface StickLine {
   imagePolicy: string;
   /** Zones whose requirements this stick lacks, and what it lacks for each. */
   cannotRun: { zoneId: string; missing: string[] }[];
+  /** How many troopers it runs at once (`effectiveSlots`): Home's Capacity (#625). */
+  slots?: number;
 }
 
 export interface CrewLine {
@@ -184,13 +187,6 @@ const TONES: Record<string, string> = {
 export const badge = (state: string): string =>
   `<span class="badge ${TONES[state] ?? ''}">${escapeHtml(state)}</span>`;
 
-/**
- * A floor card: an eyebrow with the plain-English name (§4: the UI says each airborne term in
- * plain words too), the section's heading, and its body.
- */
-const card = (plain: string, heading: string, body: string, cls = '', id = ''): string =>
-  `<section${id ? ` id="${id}"` : ''} class="card${cls ? ` ${cls}` : ''}"><span class="term">${plain}</span>${heading}${body}</section>`;
-
 /** The kill control. It posts with the session's CSRF header, so a page visit cannot trigger it. */
 function killSection(killed: boolean): string {
   const label = killed ? 'Reset kill switch' : 'Engage kill switch';
@@ -200,23 +196,6 @@ function killSection(killed: boolean): string {
 /** The engaged kill switch, said first and in red: nothing else on the floor matters as much. */
 const KILLED_NOTICE =
   '<div class="kill-on" role="alert"><p><strong>The kill switch is engaged.</strong> No work runs and no forge writes happen. Forge and Claude tokens stay valid until you revoke them with their providers.</p></div>';
-
-/** The credits stop, in words: why nothing leases, or the Resume in force. */
-function creditsLine(u: NonNullable<HomeState['usage']>): string | null {
-  const s = u.state;
-  if (u.gate === 'stopped') {
-    return `stopped: drop ${s.overageDropId} ran on usage credits at ${s.overageStoppedAt}. Nothing leases, reviews included, until ${s.overageUntil} (the exhausted window resets) or you rule Run on credits.`;
-  }
-  if (u.gate === 'credits_resume') {
-    const n = u.creditDropsSinceResume ?? 0;
-    return `resumed on credits until ${s.overageResumeUntil}; ${n} drop${n === 1 ? '' : 's'} reported credits since. Only the resumed work item's drops lease.`;
-  }
-  const lifted = s.overageProbeSince ?? s.overageUntil ?? s.overageResumeUntil;
-  if (u.gate === 'probe' && lifted !== null) {
-    return `probing: the credits stop ended at ${lifted}; one drop runs until a drop reports running in plan.`;
-  }
-  return null;
-}
 
 /** A utilisation meter: the figure, and a bar that warms at 80% and goes red at 95%. */
 function meter(label: string, v: number | null, note?: string): string {
@@ -279,24 +258,78 @@ function usageMeters(u: NonNullable<HomeState['usage']>): string {
   );
 }
 
-function usageSection(u: HomeState['usage']): string {
-  if (!u) return '';
+/** A time that changes with the clock alone, as `relativeTime` says it: no reload for it. */
+const at = (iso: string, now: Date): string => volatile(relativeTime(iso, now));
+
+/**
+ * The usage gate in words (#625): whether dispatch is open, and until when it is paused. The
+ * gate's own name, and the raw usage fields, are never shown.
+ */
+export function gateWords(u: NonNullable<HomeState['usage']>, now: Date): string {
   const s = u.state;
-  const row = (k: string, v: unknown) => `<dt>${k}</dt><dd>${escapeHtml(v ?? '-')}</dd>`;
-  const credits = creditsLine(u);
-  return card(
-    'Claude subscription',
-    '<h2>Usage</h2>',
-    usageMeters(u) +
-      '<dl class="kv">' +
-      row('Gate', u.gate) +
-      (credits ? row('Credits', credits) : '') +
-      row('Overage status', u.overageStatus) +
-      row('Status', s.status) +
-      row('Paused until', s.pausedUntil) +
-      `<dt>Observed</dt><dd>${s.observedAt ? volatile(escapeHtml(s.observedAt)) : '-'}</dd>` +
-      row('Cause drop', s.causeDropId) +
-      '</dl>',
+  const until = (iso: string | null | undefined, rest = ''): string =>
+    iso ? `Dispatch paused until ${at(iso, now)}${rest}` : `Dispatch paused${rest}`;
+  switch (u.gate) {
+    case 'open':
+      return 'Dispatch open';
+    case 'finishing_only':
+      return 'Dispatch open to finishing work only: usage is near its limit';
+    case 'probe':
+      return 'Dispatch probing: one drop at a time until Claude allows more';
+    case 'closed':
+      return until(laterOf(s.pausedUntil, s.probeNotBefore), ': Claude usage is at its limit');
+    case 'stopped':
+      return until(
+        s.overageUntil,
+        `: drop ${escapeHtml(s.overageDropId ?? '-')} ran on usage credits. Rule Run on credits to go on`,
+      );
+    case 'credits_resume': {
+      const n = u.creditDropsSinceResume ?? 0;
+      return `Dispatch open on credits${s.overageResumeUntil ? ` until ${at(s.overageResumeUntil, now)}` : ''}, for the resumed work only; ${n} drop${n === 1 ? '' : 's'} used credits since`;
+    }
+    default: {
+      const never: never = u.gate;
+      return never;
+    }
+  }
+}
+
+/** The later of two ISO times, either possibly absent. */
+const laterOf = (a?: string | null, b?: string | null): string | null =>
+  a == null ? (b ?? null) : b == null ? a : Date.parse(a) >= Date.parse(b) ? a : b;
+
+/**
+ * Home's Capacity (#625): the Claude usage bars, each stick's troopers busy out of its total, and
+ * the gate in words.
+ */
+function capacitySection(state: HomeState, now: Date): string {
+  const u = state.usage;
+  const bars = u ? usageMeters(u) : '<p class="empty">No usage reported yet.</p>';
+  const gate = u ? `<p class="gate-words">${gateWords(u, now)}.</p>` : '';
+  const sticks = state.sticks ?? [];
+  const live = new Set(liveSticks(sticks, now).map((s) => s.id));
+  const busy = (id: string): number =>
+    state.drops.filter((d) => d.stickId === id && isRunning(d.state)).length;
+  const name = zoneNamer(state.zones);
+  // What a stick cannot run and what it lacks: the diagnostic the sticks table carried.
+  const cannot = (s: StickLine): string =>
+    s.cannotRun.length === 0
+      ? ''
+      : ` <small class="cannot-run">${s.cannotRun
+          .map((c) => `cannot run ${name(c.zoneId)}: lacks ${escapeHtml(c.missing.join(', '))}`)
+          .join('; ')}</small>`;
+  const lines =
+    sticks.length === 0
+      ? '<p class="empty">No stick has enrolled.</p>'
+      : `<ul class="stick-capacity">${sticks
+          .map(
+            (s) =>
+              `<li data-stick="${escapeHtml(s.id)}">${escapeHtml(s.name)}: ${busy(s.id)} of ${s.slots ?? 0} troopers busy${live.has(s.id) ? '' : ' <small class="muted">offline</small>'}${cannot(s)}</li>`,
+          )
+          .join('')}</ul>`;
+  return (
+    `<section id="capacity" class="card"><h2>Capacity</h2>${gate}${bars}` +
+    `<div id="sticks"><h3>Sticks</h3>${lines}<p><a href="${SYSTEM_STICKS_HREF}">Manage sticks</a></p></div></section>`
   );
 }
 
@@ -321,173 +354,11 @@ const githubBlobHref = (repo: string, path: string): string => {
   return `https://github.com/${enc(repo)}/blob/HEAD/${enc(path)}`;
 };
 
-/** A zone's briefings view: where the floor's held line and the zone page link. */
-export const zoneBriefingsHref = (zoneId: string): string =>
-  `/briefings?zone=${encodeURIComponent(zoneId)}`;
-
-/**
- * Where a project's briefings are listed: its zone briefings view when the zone is configured,
- * else (a credits stop outliving its zone, or of zone `''`, #593) the unfiltered /briefings, as
- * `/briefings?zone=` answers 404 for a zone not configured.
- */
-const projectBriefingsHref = (zones: readonly ZoneRef[], zoneId: string): string =>
-  zones.some((z) => z.id === zoneId) ? zoneBriefingsHref(zoneId) : '/briefings';
-
-/** A zone's name as zoneNamer gives it, but never empty: zone `''` is the credits stop's. */
-const projectNamer = (zones: readonly ZoneRef[]): ((id: string) => string) => {
-  const name = zoneNamer(zones);
-  return (id) => (id === '' ? 'All dispatch stopped' : name(id));
-};
-
-/** The page sizes the briefings pages offer (#132); anything else is the first. */
-export const PAGE_SIZES = [10, 20, 50, 100] as const;
-export type PageParams = { per: number; page: number };
-
-const positiveInt = (v: unknown): number =>
-  typeof v === 'string' && /^[1-9][0-9]{0,8}$/.test(v) ? Number(v) : 1;
-
-/**
- * The briefings pages' paging: `per` among PAGE_SIZES, else 10; `page` a positive integer,
- * else 1. Never refused: a stale bookmark still opens a page. Clamping to the last page
- * is the renderer's, which knows the counts.
- */
-export function pageParams(q: { per?: unknown; page?: unknown }): PageParams {
-  const per = PAGE_SIZES.find((n) => String(n) === q.per) ?? PAGE_SIZES[0];
-  return { per, page: positiveInt(q.page) };
-}
-
-/** A project's open briefings (newest first) and rulings, as the briefings pages group them. */
-type Project = { id: string; text: string; mode: string; open: Briefing[]; rulings: Ruling[] };
+/** A project's open briefings: its Overview's Needs you (#625: `/briefings?zone=` redirects there). */
+export const zoneBriefingsHref = (zoneId: string): string => `${projectHref(zoneId)}#needs-you`;
 
 const newestFirst = <T extends { id: number }>(xs: readonly T[]): T[] =>
   [...xs].sort((x, y) => y.id - x.id);
-
-/** Most open briefings first, ties by repository name: the order of sections and floor lines. */
-const byWaiting = (a: Project, b: Project): number =>
-  b.open.length - a.open.length || (a.text < b.text ? -1 : a.text > b.text ? 1 : 0);
-
-/**
- * One project per configured zone, and per zone still named by a briefing or ruling though no
- * longer configured.
- */
-function projectsOf(
-  zones: readonly (ZoneRef & { mode?: string })[],
-  open: readonly Briefing[],
-  rulings: readonly Ruling[],
-  modes: Readonly<Record<string, string>> = {},
-): Project[] {
-  const text = zoneTextNamer(zones);
-  const byId = new Map<string, Project>();
-  const at = (id: string, mode?: string): Project => {
-    let p = byId.get(id);
-    if (!p) {
-      p = { id, text: text(id), mode: modes[id] ?? mode ?? 'active', open: [], rulings: [] };
-      byId.set(id, p);
-    }
-    return p;
-  };
-  for (const z of zones) at(z.id, z.mode);
-  for (const b of newestFirst(open)) at(b.zoneId).open.push(b);
-  for (const r of newestFirst(rulings)) at(r.zoneId).rulings.push(r);
-  return [...byId.values()];
-}
-
-/**
- * The home page's Waiting on you card: one line per project with open briefings, counted and
- * linking to that project's briefings, in the order of the /briefings sections. No briefing's text
- * shows here. A paused or observing zone's briefings are not counted: it gets one held line.
- */
-export function waitingOnYou(
-  open: Briefing[],
-  held: HeldZone[] = [],
-  zones: readonly ZoneRef[] = [],
-  pending: readonly PendingLine[] = [],
-  now: Date = new Date(),
-): string {
-  const name = zoneNamer(zones);
-  const heldLines =
-    held.length === 0
-      ? ''
-      : `<ul class="held">${held
-          .map(
-            (z) =>
-              `<li><a href="${escapeHtml(zoneBriefingsHref(z.zoneId))}">${name(z.zoneId, z.repo)}: ${escapeHtml(z.mode)}, ${plural(z.count, 'briefing')} held</a></li>`,
-          )
-          .join('')}</ul>`;
-  const changes = pendingRows(pending, now);
-  if (open.length === 0 && changes === '') {
-    return card(
-      'Briefings',
-      '<h2>Waiting on you</h2>',
-      `<p class="empty">Nothing is waiting on you. <a href="/briefings">Briefings and rulings</a></p>${heldLines}`,
-      '',
-      WAITING_ON_YOU_ID,
-    );
-  }
-  const project = projectNamer(zones);
-  const rows = projectsOf(zones, open, [])
-    .filter((p) => p.open.length > 0)
-    .sort(byWaiting)
-    .map(
-      (p) =>
-        `<li><a href="${escapeHtml(projectBriefingsHref(zones, p.id))}">${project(p.id)}: ${p.open.length} waiting</a></li>`,
-    )
-    .join('');
-  return card(
-    'Briefings',
-    '<h2>Waiting on you</h2>',
-    changes +
-      (open.length > 0
-        ? `<p>${plural(open.length, 'decision')} waiting. <a href="/briefings">Answer them on the briefings page</a>.</p><ul>${rows}</ul>`
-        : '') +
-      heldLines,
-    'attention',
-    WAITING_ON_YOU_ID,
-  );
-}
-
-function crewSection(lines: CrewLine[] | undefined, name: (id: string) => string): string {
-  if (!lines || lines.length === 0) return '';
-  const rows = lines
-    .map(
-      (c) =>
-        `<tr><td>${name(c.zoneId)}</td><td>${c.enabled ? 'on' : 'off'}</td><td>${escapeHtml(c.lastCycle ?? '-')}</td><td>${escapeHtml(c.enabled ? (c.nextDue ?? 'now') : '-')}</td><td>${escapeHtml(c.fable)}</td><td><a href="${projectHref(c.zoneId, 'goals')}">Goals</a> <a href="${projectHref(c.zoneId, 'issues/new')}">New issue</a> <a href="${projectHref(c.zoneId, 'goals')}#goal-stub">GOAL.md stub</a></td></tr>`,
-    )
-    .join('');
-  return card(
-    'Per-project judgment agents',
-    '<h2>Crew</h2>',
-    `<table><tr><th>Zone</th><th>Crew</th><th>Last cycle</th><th>Next due</th><th>Fable</th><th></th></tr>${rows}</table>`,
-  );
-}
-
-/** The sticks, collapsed: a summary line, the table inside (`#sticks`, where the status links). */
-function sticksSection(
-  lines: StickLine[] | undefined,
-  name: (id: string) => string,
-  now: Date,
-): string {
-  if (!lines) return '';
-  const body =
-    lines.length === 0
-      ? '<p class="empty">No stick has enrolled.</p>'
-      : `<table><tr><th>Stick</th><th>Version</th><th>Last seen</th><th>Capabilities</th><th>Image policy</th><th>Zones</th></tr>${lines
-          .map((s) => {
-            const runs =
-              s.cannotRun.length === 0
-                ? 'all zones'
-                : s.cannotRun
-                    .map(
-                      (c) =>
-                        `cannot run ${name(c.zoneId)}: lacks ${escapeHtml(c.missing.join(', '))}`,
-                    )
-                    .join('<br>');
-            return `<tr><td>${escapeHtml(s.name)}</td><td>${escapeHtml(s.version ?? '-')}</td><td>${s.lastSeenAt ? volatile(escapeHtml(s.lastSeenAt)) : 'never'}</td><td>${escapeHtml(s.capabilities.join(', ') || '-')}</td><td>${escapeHtml(s.imagePolicy)}</td><td>${runs}</td></tr>`;
-          })
-          .join('')}</table>`;
-  const manage = `<p><a href="${SYSTEM_STICKS_HREF}">Set each stick\'s troopers on the sticks page</a></p>`;
-  return `<details id="sticks" class="card sticks"><summary>${escapeHtml(sticksSummary(lines, now))}</summary>${body}${manage}</details>`;
-}
 
 /** One shared handler for every rule form: it posts with the session's CSRF header. */
 const RULE_SCRIPT = `<script>for(const f of document.querySelectorAll('form.rule'))f.addEventListener('submit',async(e)=>{e.preventDefault();const o=f.querySelector('input[name=option]:checked');if(!o){alert('Choose an option');return;}const r=await jmFetch('/api/control/briefings/'+f.dataset.briefing+'/rule',{optionId:o.value,optionsDigest:f.dataset.options,note:f.querySelector('textarea').value});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});</script>`;
@@ -500,8 +371,8 @@ export type LinkRefs = {
   crewKeys?: ReadonlyMap<string, number>;
   /** Where `Briefing n` links; else its own page. */
   briefingHref?: (n: number) => string;
-  /** Where `Ruling n` links; else its row on /briefings. */
-  rulingHref?: (n: number) => string;
+  /** Where `Ruling n` links; unset, or `undefined` for it, leaves it text (no page shows it). */
+  rulingHref?: (n: number) => string | undefined;
 };
 
 /**
@@ -531,10 +402,8 @@ export function linkify(text: string, refs: LinkRefs): string {
     else if (word !== undefined) {
       const n = Number(wordN);
       const href =
-        word === 'Ruling'
-          ? (refs.rulingHref?.(n) ?? `/briefings#ruling-${n}`)
-          : (refs.briefingHref?.(n) ?? `/briefings/${n}`);
-      out += anchor(href, all);
+        word === 'Ruling' ? refs.rulingHref?.(n) : (refs.briefingHref?.(n) ?? `/briefings/${n}`);
+      out += href === undefined ? escapeHtml(all) : anchor(href, all);
     } else if (dropId !== undefined) out += anchor(`/drops/${dropId}`, 'full text');
     else {
       const n = key !== undefined && /[a-z]/.test(key) ? refs.crewKeys?.get(key) : undefined;
@@ -598,177 +467,18 @@ function briefingBlock(b: Briefing, ctx: BlockContext, heading: 'h3' | 'h4' = 'h
 }
 
 /**
- * Dismisses all the zone's open briefings, every page of them, after a confirmation that states
- * the count. It posts the ids it was rendered with, so a briefing raised since is not dismissed
+ * Dismisses all the zone's open briefings after a confirmation that states the count: on its
+ * project's Overview, under Needs you (#625). It posts the ids it was rendered with, so a briefing raised since is not dismissed
  * unseen.
  */
-function dismissAllForm(zoneId: string, open: Briefing[], zones: readonly ZoneRef[]): string {
+export function dismissAllForm(
+  zoneId: string,
+  open: readonly Briefing[],
+  zones: readonly ZoneRef[],
+): string {
   const what = `${plural(open.length, 'briefing')} of`;
-  const ask = `Dismiss ${what} ${zoneTextNamer(zones)(zoneId)}? Each is taken off the floor without a ruling: nothing it is about is ruled on, and nothing is written to GitHub.`;
+  const ask = `Dismiss ${what} ${zoneTextNamer(zones)(zoneId)}? Each is taken off Needs you without a ruling: nothing it is about is ruled on, and nothing is written to GitHub.`;
   return `<form id="dismiss-all" data-zone="${escapeHtml(zoneId)}" data-ids="${escapeHtml(JSON.stringify(open.map((b) => b.id)))}" data-ask="${escapeHtml(ask)}"><button class="danger">Dismiss all ${escapeHtml(what)} ${zoneNamer(zones)(zoneId)}</button></form><script>{const f=document.getElementById('dismiss-all');f.addEventListener('submit',async(e)=>{e.preventDefault();if(!confirm(f.dataset.ask))return;const r=await jmFetch('/api/control/zones/'+encodeURIComponent(f.dataset.zone)+'/briefings/dismiss',{ids:JSON.parse(f.dataset.ids)});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});}</script>`;
-}
-
-/** A /briefings URL, unescaped: the zone id is URL-encoded, a page of 1 or less is left out. */
-function briefingsHref(q: { zone?: string; per: number; page?: number }): string {
-  const parts = [
-    ...(q.zone !== undefined ? [`zone=${encodeURIComponent(q.zone)}`] : []),
-    `per=${q.per}`,
-    ...(q.page !== undefined ? [`page=${q.page}`] : []),
-  ];
-  return `/briefings?${parts.join('&')}`;
-}
-
-/** The page-size links; each keeps the zone and starts again at page 1. */
-function sizeSelector(zone: string | undefined, per: number): string {
-  const links = PAGE_SIZES.map(
-    (n) =>
-      `<a href="${escapeHtml(briefingsHref({ ...(zone !== undefined ? { zone } : {}), per: n }))}"${n === per ? ' aria-current="page"' : ''}>${n}</a>`,
-  ).join(' · ');
-  return `<nav class="filters" aria-label="Page size"><p>Per page: ${links}</p></nav>`;
-}
-
-/** One page of `xs`, clamped to the last page, and its Previous / Page X of Y / Next line. */
-function paged<T>(
-  xs: readonly T[],
-  per: number,
-  asked: number,
-  label: string,
-  href: (page: number) => string,
-): { rows: T[]; nav: string } {
-  const pages = Math.max(1, Math.ceil(xs.length / per));
-  const at = Math.min(Math.max(1, asked), pages);
-  const link = (n: number, text: string) => `<a href="${escapeHtml(href(n))}">${text}</a>`;
-  const nav = [
-    ...(at > 1 ? [link(at - 1, 'Previous')] : []),
-    `Page ${at} of ${pages}`,
-    ...(at < pages ? [link(at + 1, 'Next')] : []),
-  ].join(' · ');
-  return {
-    rows: xs.slice((at - 1) * per, at * per),
-    nav: `<nav class="pager" aria-label="${label}"><p>${nav}</p></nav>`,
-  };
-}
-
-/**
- * Briefings waiting on Command, with a rule form each. Rulings are the project's Log (#621): each
- * project links to its rulings there; `rulings` only resolve `Ruling n` references.
- */
-export function renderBriefings(s: {
-  open: Briefing[];
-  rulings: Ruling[];
-  zones: DropZoneConfig[];
-  /** Hold-until per subject, for held refute promotions. */
-  holds?: Map<string, string>;
-  /** One zone's view (`open` and `rulings` are that zone's): paged, with the bulk dismiss. */
-  zone?: { id: string; mode: string };
-  /** Each zone's mode as stored (getZoneMode), for the all-projects view; else its config's. */
-  modes?: Readonly<Record<string, string>>;
-  per?: number;
-  page?: number;
-  /** Each briefing's subject resolved (briefingAbout), by briefing id; else the raw subject. */
-  about?: ReadonlyMap<number, About>;
-  /** Each zone's filed crew issues by key (crewKeyNumbers), by zone id. */
-  crewKeys?: ReadonlyMap<string, ReadonlyMap<string, number>>;
-  /** Open briefings the crew is still to diagnose (`diagnosePending`), by id. */
-  pending?: ReadonlySet<number>;
-}): string {
-  const name = zoneNamer(s.zones);
-  const per = s.per ?? PAGE_SIZES[0];
-  /** The link that stands where a project's rulings were: its Log, rulings only (#621). */
-  const rulingsLink = (zoneId: string) =>
-    `<p class="rulings"><a href="${escapeHtml(projectLogHref(zoneId, 'rulings'))}">Rulings for ${name(zoneId)}</a></p>`;
-  // What this page shows, so a reference to it is an anchor here and to anything else a link away.
-  const shown = { briefings: new Set<number>(), rulings: new Set<number>() };
-  const ctx: BlockContext = {
-    holds: s.holds,
-    name,
-    about: s.about,
-    refs: briefingRefs(s.zones, s.rulings, s.crewKeys, shown),
-    pending: s.pending,
-  };
-  const blocks = (bs: readonly Briefing[], heading: 'h3' | 'h4') =>
-    bs.map((b) => briefingBlock(b, ctx, heading)).join('');
-  // Notices (held promotions) go ahead unless stopped: listed after what needs Command (#449).
-  const noticesSection = (ns: readonly Briefing[]) =>
-    ns.length === 0
-      ? ''
-      : `<section class="notices"><h2 id="notices">Going ahead unless you stop it</h2>${blocks(ns, 'h3')}</section><!--/notices-->`;
-
-  if (s.zone) {
-    const zone = s.zone.id;
-    const all = newestFirst(s.open);
-    const open = all.filter((b) => !isNotice(b));
-    const notices = all.filter(isNotice);
-    for (const x of notices) shown.briefings.add(x.id);
-    const b = paged(open, per, s.page ?? 1, 'Briefing pages', (page) =>
-      briefingsHref({ zone, per, page }),
-    );
-    for (const x of b.rows) shown.briefings.add(x.id);
-    const list =
-      (open.length === 0 ? '<p>Nothing is waiting on you.</p>' : blocks(b.rows, 'h3')) +
-      (open.length > 0 ? b.nav : '') +
-      noticesSection(notices) +
-      (all.length > 0 ? RULE_SCRIPT : '');
-    return page(
-      `<p><a href="/">Back</a> · <a href="/briefings">All briefings</a></p><h2>Briefings of ${name(zone)} <small>(${escapeHtml(s.zone.mode)})</small></h2>` +
-        (all.length > 0 ? dismissAllForm(zone, s.open, s.zones) : '') +
-        sizeSelector(zone, per) +
-        list +
-        rulingsLink(zone),
-      { live: true },
-    );
-  }
-
-  const projects = projectsOf(s.zones, s.open, s.rulings, s.modes);
-  // A held zone keeps its notices with its other held briefings; elsewhere they are listed apart.
-  const notices: Briefing[] = [];
-  for (const p of projects) {
-    if (HELD_MODES.has(p.mode)) continue;
-    notices.push(...p.open.filter(isNotice));
-    p.open = p.open.filter((b) => !isNotice(b));
-  }
-  for (const x of notices) shown.briefings.add(x.id);
-  const held = (p: Project) => HELD_MODES.has(p.mode) && p.open.length > 0;
-  const busy = projects.filter((p) => !held(p) && p.open.length > 0).sort(byWaiting);
-  const quiet = projects.filter((p) => p.open.length === 0).sort(byWaiting);
-  const heldOnes = projects.filter(held).sort(byWaiting);
-  const total = busy.reduce((n, p) => n + p.open.length, 0);
-  for (const p of projects) {
-    for (const x of p.open.slice(0, per)) shown.briefings.add(x.id);
-  }
-
-  const showAll = (p: Project) =>
-    p.open.length > per
-      ? `<p><a href="${escapeHtml(briefingsHref({ zone: p.id, per }))}">Show all ${p.open.length} in ${name(p.id)}</a></p>`
-      : '';
-  const rulingsOf = (p: Project) => rulingsLink(p.id);
-  // Each section ends with a marker, so a section can be told from the next in tests.
-  const sections = [
-    ...busy.map(
-      (p) =>
-        `<section class="project" data-zone="${escapeHtml(p.id)}"><h3>${name(p.id)} ${badge(p.mode)} <small>${p.open.length} waiting</small></h3>${blocks(p.open.slice(0, per), 'h4')}${showAll(p)}${rulingsOf(p)}</section><!--/project-->`,
-    ),
-    ...quiet.map(
-      (p) =>
-        `<section class="project quiet" data-zone="${escapeHtml(p.id)}"><p>${name(p.id)} ${badge(p.mode)} Nothing waiting</p>${rulingsOf(p)}</section><!--/project-->`,
-    ),
-    ...heldOnes.map(
-      (p) =>
-        `<details class="project held" data-zone="${escapeHtml(p.id)}"><summary>${name(p.id)}: ${p.open.length} held while ${escapeHtml(p.mode)}</summary>${blocks(p.open.slice(0, per), 'h4')}${showAll(p)}${rulingsOf(p)}</details><!--/project-->`,
-    ),
-  ].join('');
-  const anyBlock = busy.length > 0 || heldOnes.length > 0 || notices.length > 0;
-  return page(
-    '<p><a href="/">Back</a></p><h2>Briefings (decisions waiting on you)</h2>' +
-      (total === 0
-        ? '<p>Nothing is waiting on you.</p>'
-        : `<p>${plural(total, 'decision')} waiting.</p>`) +
-      sizeSelector(undefined, per) +
-      sections +
-      noticesSection(newestFirst(notices)) +
-      (anyBlock ? RULE_SCRIPT : ''),
-    { live: true },
-  );
 }
 
 /**
@@ -788,7 +498,7 @@ function briefingRefs(
   const rulingHref = (n: number) => {
     if (shown.rulings.has(n)) return `#ruling-${n}`;
     const b = briefingOf.get(n);
-    return b === undefined ? `/briefings#ruling-${n}` : `/briefings/${b}#ruling-${n}`;
+    return b === undefined ? undefined : `/briefings/${b}#ruling-${n}`;
   };
   return (zoneId) => {
     const repo = repos.get(zoneId);
@@ -906,7 +616,7 @@ export function renderBriefing(s: {
     )
     .join('');
   return page(
-    `<p><a href="/briefings">All briefings</a>${s.zones.some((z) => z.id === b.zoneId) ? ` · <a href="${escapeHtml(zoneBriefingsHref(b.zoneId))}">Briefings of ${name(b.zoneId)}</a>` : ''}</p><h2>Briefing ${escapeHtml(b.id)}</h2>` +
+    `<p><a href="/#waiting-on-you">Needs you</a>${s.zones.some((z) => z.id === b.zoneId) ? ` · <a href="${escapeHtml(zoneBriefingsHref(b.zoneId))}">Briefings of ${name(b.zoneId)}</a>` : ''}</p><h2>Briefing ${escapeHtml(b.id)}</h2>` +
       askButton({ kind: 'briefing', zoneId: b.zoneId, ref: String(b.id) }) +
       briefingBlock(b, ctx, 'h3') +
       (b.state === 'open' ? RULE_SCRIPT : '') +
@@ -1131,7 +841,7 @@ export const STORE_NAV_SLOT = '<!--jm-store-nav-->';
 export const STORE_NAV = `<a href="${PROJECTS_HREF}">Projects</a>`;
 
 /** The pages every install has, in the order the operator reaches for them. */
-const NAV = `<a href="/">Floor</a><a href="${ACTIVITY_HREF}">Activity</a><a href="/briefings">Briefings</a><a href="/chat">Chat</a>${STORE_NAV_SLOT}<a href="${SYSTEM_HREF}">System</a>`;
+const NAV = `<a href="/">Home</a><a href="${ACTIVITY_HREF}">Activity</a><a href="/chat">Chat</a>${STORE_NAV_SLOT}<a href="${SYSTEM_HREF}">System</a>`;
 
 /** The System area's pages (#623), in its sub-nav's order; all but Health and Sticks are a store install's. */
 export type SystemPage =
@@ -1298,22 +1008,6 @@ function gateMarks(drop: Drop): string {
     )
     .join('<br>');
 }
-
-/** How a drop's gates stand so far, or nothing when it has reported none. */
-function gateCount(drop: Drop): { total: number; passed: number; failed: number } | null {
-  if (!drop.resultJson) return null;
-  try {
-    const gates =
-      (JSON.parse(drop.resultJson) as { gates?: { exitCode: number | null; timedOut: boolean }[] })
-        .gates ?? [];
-    if (gates.length === 0) return null;
-    const passed = gates.filter((g) => !g.timedOut && g.exitCode === 0).length;
-    return { total: gates.length, passed, failed: gates.length - passed };
-  } catch {
-    return null;
-  }
-}
-
 /** The work-item ledger's header row, on Activity's Work. */
 export const WORK_HEAD =
   '<tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>';
@@ -1693,58 +1387,65 @@ export function renderHome(state: HomeState): string {
         `<p class="warn"><strong>Starter mode in ${name(z.id)}.</strong> ${escapeHtml(STARTER_WARNING)}</p>`,
     )
     .join('');
-  const itemById = new Map(state.items.map((i) => [i.id, i]));
-
-  // The slots (§10.1): what each trooper is doing right now, one card per live drop.
-  // Everything active but still queued, which nothing has started; a pending push still holds its slot.
-  const live = state.drops.filter(
-    (d) => (ACTIVE_DROP_STATES as readonly string[]).includes(d.state) && d.state !== 'queued',
-  );
-  const slotCard = (d: Drop): string => {
-    const wi = d.workItemId === null ? undefined : itemById.get(d.workItemId);
-    const what = `${name(wi ? wi.dropZoneId : d.dropZoneId)} ${dropTarget(d, itemById)}`;
-    const title = wi ? `<span class="muted">${escapeHtml(wi.title)}</span>` : '';
-    const g = gateCount(d);
-    const gates = g
-      ? ` · gates ${g.passed}/${g.total} passed${g.failed ? `, ${g.failed} failed` : ''}`
-      : '';
-    return `<article class="card slot"><div>${badge(d.state)} <small>${escapeHtml(d.role)}</small></div><a class="what" href="/drops/${encodeURIComponent(d.id)}">${what}</a>${title}<span class="meta">${volatile(escapeHtml(elapsed(d, now)))}${gates} · ${escapeHtml(d.id)}</span></article>`;
-  };
-  const slots =
-    live.length === 0
-      ? '<p class="empty">No drop is running.</p>'
-      : `<div class="grid">${live.map(slotCard).join('')}</div>`;
-
   const setupFrame = state.setup?.active
     ? `<div class="warn setup-frame"><p><strong>Finish setting up Jumpmaster.</strong> <a href="/setup/next">Continue where you left off</a>: connect Claude and GitHub, check the runner, add a project and run the doctor.</p><form method="post" action="/setup/dismiss"><button>Dismiss</button></form></div>`
     : '';
   const addProject = state.setup?.addProject
     ? `<p class="quick"><a href="${PROJECTS_HREF}/new">Add a project</a></p>`
     : '';
-  // The dashboard (#120): every number from floorCounts.
-  const counts = floorCounts(state, now);
-  const dashboard =
-    state.zones.length === 0
-      ? `<div class="grid">${card('Projects', '<h2>No project yet</h2>', addProject)}</div>`
-      : totalsStrip(counts) + zoneCards(counts, state.zones) + addProject;
+  const needs = needsRows({
+    zones: state.zones,
+    ...(state.modes ? { modes: state.modes } : {}),
+    ...(state.doctorFails ? { fails: state.doctorFails } : {}),
+    ...(state.pending ? { pending: state.pending } : {}),
+    ...(state.briefings ? { briefings: state.briefings } : {}),
+    items: state.items,
+    now,
+  });
   return page(
     (state.killed ? KILLED_NOTICE : '') +
-      `<div class="floor-head">${statusBanner(state.status) || '<div class="status" data-waiting-on="nothing"><p><strong>Factory floor</strong></p></div>'}${killSection(state.killed ?? false)}</div>` +
+      `<h2 class="page-h">Home</h2>` +
+      `<div class="floor-head">${statusBanner(state.status)}${killSection(state.killed ?? false)}</div>` +
       tokenAgeBanner(state.claudeTokenDays) +
       setupFrame +
       starterBanner +
-      dashboard +
-      (state.briefings || (state.pending && state.pending.length > 0)
-        ? `<div class="grid">${waitingOnYou(state.briefings ?? [], state.heldBriefings, state.zones, state.pending, now)}</div>`
-        : '') +
-      `<h2 class="section-h">Running now <small class="muted">Troopers: one job slot each</small></h2>${slots}` +
-      `<div class="grid">${usageSection(state.usage) || card('Claude subscription', '<h2>Usage</h2>', '<p class="empty">No usage reported yet.</p>')}</div>` +
-      (state.crew && state.crew.length > 0
-        ? `<div class="grid">${crewSection(state.crew, name)}</div>`
-        : '') +
-      sticksSection(state.sticks, name, now),
-    { live: true, ...(state.status ? { title: state.status.headline } : {}) },
+      needsYouSection(needs, state.heldBriefings, state.zones, state.needsAll ?? false) +
+      projectsSection(floorCounts(state, now), state.zones, addProject) +
+      capacitySection(state, now) +
+      pipelineSection(state, now),
+    { live: true, title: 'Home' },
   );
+}
+
+/** Home's Pipeline numbers: the Activity board's column counts, linking to its lists. */
+const PIPELINE_HREF: Record<BoardColumn, string> = {
+  ready: listHref(ACTIVITY_WORK_HREF, undefined, 'ready'),
+  running: listHref(ACTIVITY_DROPS_HREF, undefined, 'active'),
+  'in-review': listHref(ACTIVITY_WORK_HREF, undefined, 'pr_open'),
+  parked: listHref(ACTIVITY_WORK_HREF, undefined, 'parked'),
+  merged: listHref(ACTIVITY_WORK_HREF, undefined, 'done'),
+};
+
+/**
+ * Home's Pipeline (#625): five numbers, Ready, Running, In review, Parked and Merged 24 h, each
+ * the count the Activity board shows in that column (`boardColumns`), linking to Activity's list
+ * filtered to it. A merge count that could not be read is "–", never 0.
+ */
+function pipelineSection(state: HomeState, now: Date): string {
+  const cols = boardColumns({
+    items: state.items,
+    drops: state.drops,
+    ...(state.merges24h ? { merges: state.merges24h } : {}),
+    now,
+  }).cols;
+  const tiles = BOARD_COLUMNS.map((c) => {
+    const n =
+      c === 'merged' && state.merges24h === undefined
+        ? '<b title="unavailable">–</b>'
+        : `<b>${cols.get(c)?.length ?? 0}</b>`;
+    return `<a class="tile" data-tile="${c}" href="${escapeHtml(PIPELINE_HREF[c])}">${n}<span>${BOARD_LABEL[c]}</span></a>`;
+  }).join('');
+  return `<section id="pipeline" class="card"><h2>Pipeline</h2><nav class="totals" aria-label="Pipeline">${tiles}</nav></section>`;
 }
 
 /** Plain status text as HTML: escaped, with `code` in backticks rendered as <code>. */
@@ -2347,6 +2048,45 @@ export function boardColumn(
 }
 
 /**
+ * The board's columns (#622): every item in the column `boardColumn` places it, Merged newest
+ * first, the rest in the list's order. Home's Pipeline counts these same columns (#625).
+ */
+export function boardColumns(s: {
+  items: readonly WorkItem[];
+  drops: readonly Drop[];
+  merges?: readonly { workItemId?: number | null; at: string }[];
+  now: Date;
+}): {
+  cols: Map<BoardColumn, WorkItem[]>;
+  dropOf: Map<number, Drop>;
+  mergedAt: Map<number, string>;
+} {
+  const dropOf = new Map<number, Drop>();
+  for (const d of s.drops)
+    if (d.workItemId !== null && (ACTIVE_DROP_STATES as readonly string[]).includes(d.state))
+      dropOf.set(d.workItemId, d);
+  const mergedAt = new Map<number, string>();
+  for (const m of s.merges ?? [])
+    if (
+      m.workItemId !== undefined &&
+      m.workItemId !== null &&
+      (mergedAt.get(m.workItemId) ?? '') < m.at
+    )
+      mergedAt.set(m.workItemId, m.at);
+  const cols = new Map<BoardColumn, WorkItem[]>(BOARD_COLUMNS.map((c) => [c, []]));
+  const active = new Set(dropOf.keys());
+  for (const i of s.items) {
+    const c = boardColumn(i, active, mergedAt, s.now);
+    if (c) cols.get(c)?.push(i);
+  }
+  // Merged newest first; the rest keep the list's order.
+  cols
+    .get('merged')
+    ?.sort((a, b) => (mergedAt.get(b.id) ?? '').localeCompare(mergedAt.get(a.id) ?? ''));
+  return { cols, dropOf, mergedAt };
+}
+
+/**
  * `/activity` (#622): the Activity sub-nav, project filter links, and the lifecycle board: five
  * columns of work-item cards across projects, each with its count, at most BOARD_COLUMN_LIMIT
  * cards, and "and N more" linking to the filtered list.
@@ -2366,23 +2106,7 @@ export function renderBoard(s: {
 }): string {
   const name = zoneNamer(s.zones);
   const repoOf = new Map(s.zones.map((z) => [z.id, z.repo]));
-  const dropOf = new Map<number, Drop>();
-  for (const d of s.drops)
-    if (d.workItemId !== null && (ACTIVE_DROP_STATES as readonly string[]).includes(d.state))
-      dropOf.set(d.workItemId, d);
-  const mergedAt = new Map<number, string>();
-  for (const m of s.merges ?? [])
-    if (m.workItemId !== null && (mergedAt.get(m.workItemId) ?? '') < m.at)
-      mergedAt.set(m.workItemId, m.at);
-  const cols = new Map<BoardColumn, WorkItem[]>(BOARD_COLUMNS.map((c) => [c, []]));
-  for (const i of s.items) {
-    const c = boardColumn(i, new Set(dropOf.keys()), mergedAt, s.now);
-    if (c) cols.get(c)?.push(i);
-  }
-  // Merged newest first; the rest keep the list's order.
-  cols
-    .get('merged')
-    ?.sort((a, b) => (mergedAt.get(b.id) ?? '').localeCompare(mergedAt.get(a.id) ?? ''));
+  const { cols, dropOf, mergedAt } = boardColumns(s);
   const detail = (c: BoardColumn, i: WorkItem): string => {
     const parts: string[] = [];
     const d = dropOf.get(i.id);

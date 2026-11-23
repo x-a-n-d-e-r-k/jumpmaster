@@ -95,8 +95,9 @@ describe('a drop on usage credits stops dispatch', () => {
     expect(more).toEqual([]);
     expect(b?.subject).toBe(`credits:stop:${d1.dropId}`);
     const home = await h.view('/');
-    expect(home.body).toContain(`stopped: drop ${d1.dropId} ran on usage credits`);
-    expect(home.body).toContain('Overage status');
+    expect(home.body).toContain('Dispatch paused until');
+    expect(home.body).toContain(`drop ${d1.dropId} ran on usage credits`);
+    expect(home.body).not.toContain('Overage status');
 
     const rule = await h.app.inject({
       method: 'POST',
@@ -118,7 +119,9 @@ describe('a drop on usage credits stops dispatch', () => {
     expect(await postEvents(h, next.dropId, next.epoch, [creditsEvent(h)])).toBe(204);
     expect(getUsageState(h.db).overageStoppedAt).toBeNull();
     const page = await h.view('/');
-    expect(page.body).toContain('resumed on credits until 2026-01-01T05:03:00.000Z; 1 drop');
+    expect(page.body).toContain('Dispatch open on credits until');
+    expect(page.body).toContain('datetime="2026-01-01T05:03:00.000Z"');
+    expect(page.body).toContain('for the resumed work only; 1 drop used credits since');
   });
 
   test('the result alone stops when the live events were lost', async () => {

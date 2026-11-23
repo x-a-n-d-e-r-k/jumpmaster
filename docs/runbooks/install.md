@@ -868,8 +868,8 @@ limits where it can send it (see [Egress](#egress)).
 
 `claude.plan` in the config declares your plan (`pro`, `max`, `ultra`, `team_standard`,
 `team_premium` or `enterprise`; default `pro`); `init --plan max` sets it. It isn't detected.
-`ultra` is the $200/mo plan: it has no 5-hour window, so the floor shows no 5-hour meter for it.
-The Usage card shows a Fable meter on every plan, and a meter for any other model window Claude
+`ultra` is the $200/mo plan: it has no 5-hour window, so Home shows no 5-hour meter for it.
+Home's Capacity section shows a Fable meter on every plan, and a meter for any other model window Claude
 reports. Jumpmaster runs Fable
 only on a plan that includes it and only with `claude.fableModel` set; `claude.plan` flags a
 `fableModel` your plan doesn't include.
@@ -1123,7 +1123,7 @@ verify cache in the `jm-stick` volume, and runs `JM_SLOTS` drops at once to star
 ### Troopers per stick
 
 How many troopers (drops) a stick runs at once is set on the **Sticks** page (`/system/sticks`, linked
-from the navigation and the floor's Sticks summary), or with `jumpmaster ctl sticks slots
+from the navigation and the Sticks list in Home's Capacity section), or with `jumpmaster ctl sticks slots
 <name-or-id> <n>`; `jumpmaster ctl sticks` lists each stick's counts. A change applies on the
 stick's next lease answer, with no restart. Lowering it stops nothing: the stick takes no new drop
 until fewer than the new count are running. The server enforces the count itself, so it holds for
@@ -1445,7 +1445,7 @@ that user (`ls -ln secrets`). Doctor check: `config.uid`.
 
 Jumpmaster watches your Claude usage. Near the limit it runs only finishing work (review, heal,
 resolve) and doctor drops you asked for; at the limit it pauses until the window resets; if a drop runs on extra-usage credits it
-stops dispatch and raises a briefing for you to rule on (`/briefings`). Doctor check: `usage.gate`.
+stops dispatch and raises a briefing for you to rule on (Home's **Needs you**). Doctor check: `usage.gate`.
 
 ## Crew
 
@@ -1473,7 +1473,7 @@ is on, `forge.labels` reports either one missing, and its action creates them.
 - **split:** the issue becomes one or more drop-ready child issues, filed staged (`agent-staged`)
   under objective `triage:#N`. They go through refute and promotion like any crew issue: none
   starts until it is reviewed and promoted.
-- **questions:** the crew needs a decision first. It raises a briefing on `/briefings`; once you
+- **questions:** the crew needs a decision first. It raises a briefing on Home's **Needs you**; once you
   rule on it, triage runs again with your ruling.
 - **not-agent-work:** the issue isn't a task for an agent (a question, a duplicate, work for a
   person). Nothing is filed.
@@ -1494,7 +1494,7 @@ A failed triage, or one replaced because you edited the issue's text, leaves no 
 is built from the outcome, the child numbers, the briefing subject and the reason only: it never
 quotes the issue. Each ends with a hidden marker, so a retry or a restart never posts it twice. In
 an observe-mode zone nothing is written. Jumpmaster doesn't read replies to its comment: answer a
-question on `/briefings`, or edit the issue to have it triaged again.
+question on Home's **Needs you**, or edit the issue to have it triaged again.
 
 ## Troubleshooting by check id
 

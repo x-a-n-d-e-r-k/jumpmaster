@@ -91,6 +91,9 @@ export const REDIRECTS: readonly Redirect[] = [
   { from: '/settings/mcp-tokens', to: to(SYSTEM_MCP_TOKENS_HREF) },
   { from: '/settings/history', to: to(SYSTEM_HISTORY_HREF) },
   { from: '/settings/flags', to: to(SYSTEM_ADVANCED_HREF) },
+  // The briefings list is Home's Needs you (#625), a zone's is its project; `/briefings/:id` stays.
+  { from: '/briefings', query: 'zone', to: project() },
+  { from: '/briefings', to: to('/', 'waiting-on-you') },
 ];
 
 /** The raw query string of a request, without the `?`. */
