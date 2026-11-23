@@ -27,6 +27,7 @@ import { ScrubSet } from '../forge/scrub-set.js';
 import { scrub } from '../scrub.js';
 import { plus, t0, tmpDbFile } from '../test/helpers.js';
 import { appEntryName, serializeAppEntry } from '../vault/github-app-entries.js';
+import { gitlabPatEntryName } from '../vault/gitlab-pat-entries.js';
 import { openVault } from '../vault/vault.js';
 import { type BootConfig, loadBoot, RESTART_PATHS } from './boot.js';
 import { mergeConfigPatch, mergePatch } from './diff.js';
@@ -1473,6 +1474,26 @@ describe('GitHub App entries in the store (§4.4)', () => {
       w.open({ env: e, boot: loadBoot(e, w.file), vault, scrubSet: new ScrubSet() });
     return { w, vault, secrets, open };
   }
+
+  test("resolvedGitlabPats() reflects a GitLab zone's gitlab-pat vault entries after refreshSecrets() (issue #719)", () => {
+    const glZone = zone('web', {
+      repo: 'group/sub/web',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    });
+    const { vault, open } = withVault({ dropZones: [glZone, zone('main')] });
+    const store = open();
+    expect([...store.resolvedGitlabPats()]).toEqual([['web', {}]]);
+    const GL = 'plain-gitlab-author-value-000001';
+    vault.put(gitlabPatEntryName('web', 'author'), GL, { now: t0 });
+    expect(store.resolvedGitlabPats().get('web')).toEqual({});
+    expect(store.refreshSecrets().ok).toBe(true);
+    expect([...store.resolvedGitlabPats()]).toEqual([['web', { author: GL }]]);
+    expect(JSON.stringify(store.current())).not.toContain(GL);
+    vault.delete(gitlabPatEntryName('web', 'author'));
+    expect(store.refreshSecrets().ok).toBe(true);
+    expect(store.resolvedGitlabPats().get('web')).toEqual({});
+  });
 
   test("a vault app entry for a two-bot zone's owner is in resolvedApps(), on load and on each revision", () => {
     const { vault, open } = withVault({ dropZones: [zone('main', { repo: 'Acme/main' })] });

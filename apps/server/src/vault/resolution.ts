@@ -1,3 +1,4 @@
+import { type ForgeKind, forgeKind } from '../forge/kind.js';
 import { type ScrubSet, serverScrubSet } from '../forge/scrub-set.js';
 import type { InstallCredential } from './credentials.js';
 import {
@@ -8,7 +9,8 @@ import {
   ownerOfRepo,
   readAppEntry,
 } from './github-app-entries.js';
-import type { Vault } from './vault.js';
+import { GITLAB_PAT_ROLES, gitlabPatEntryName } from './gitlab-pat-entries.js';
+import { type Vault, VaultKeyError } from './vault.js';
 
 /**
  * App-first credential resolution (§4.4): per zone and role, a two-bot zone uses its repository
@@ -159,4 +161,53 @@ function isAppZoneFor(
     r.problem === undefined &&
     appInstallationFor(zone, role) !== undefined
   );
+}
+
+/** The zone fields `resolveGitlabPatEntries` reads. */
+export type ZoneForGitlabPats = Pick<ZoneForCredentials, 'identity'> & {
+  id: string;
+  forge?: ForgeKind | undefined;
+};
+
+/** Each GitLab zone's present `gitlab-pat` values, by zone id; a missing role is absent. */
+export type ResolvedGitlabPats = ReadonlyMap<
+  string,
+  Readonly<{ author?: string; reviewer?: string }>
+>;
+
+/**
+ * The `gitlab-pat/<zoneId>/<role>` vault entries of every GitLab zone (§9): the author always, the
+ * reviewer for a two-bot zone only. A disabled vault, an absent entry and one that won't decrypt
+ * all read as missing, without a throw or a log line. Each present value is pinned in the scrub
+ * set before resolution returns: configured, long-lived credentials are never evicted.
+ */
+export function resolveGitlabPatEntries(
+  zones: readonly ZoneForGitlabPats[],
+  o: { vault: Vault | 'disabled'; scrubSet?: ScrubSet },
+): ResolvedGitlabPats {
+  const set = o.scrubSet ?? serverScrubSet;
+  const out = new Map<string, { author?: string; reviewer?: string }>();
+  for (const z of zones) {
+    if (forgeKind(z) !== 'gitlab' || out.has(z.id)) continue;
+    const roles: { author?: string; reviewer?: string } = {};
+    for (const role of GITLAB_PAT_ROLES) {
+      if (role === 'reviewer' && !isTwoBot(z)) continue;
+      const v = readGitlabPat(o.vault, gitlabPatEntryName(z.id, role));
+      if (v === undefined) continue;
+      set.pin(v);
+      roles[role] = v;
+    }
+    out.set(z.id, roles);
+  }
+  return out;
+}
+
+function readGitlabPat(vault: Vault | 'disabled', name: string): string | undefined {
+  if (vault === 'disabled') return undefined;
+  try {
+    return vault.get(name);
+  } catch (e) {
+    if (!(e instanceof VaultKeyError)) throw e;
+    return undefined;
+  }
 }

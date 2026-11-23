@@ -8,8 +8,8 @@ import { fingerprintOf } from './vault.js';
 
 /**
  * A GitLab zone's bot-user personal access tokens (§9, credential kind `gitlab-pat`), one per role
- * per zone: the vault entry `gitlab-pat/<zoneId>/<role>`. Nothing here is wired into credential
- * resolution yet.
+ * per zone: the vault entry `gitlab-pat/<zoneId>/<role>`. `resolveGitlabPatEntries`
+ * (vault/resolution.ts) reads them for the config store.
  *
  * No error and no result holds the token, a refused zone id or role, the base URL or the project
  * path (a token passed in the wrong slot would leak).
@@ -94,8 +94,8 @@ export async function testGitlabPatEntry(
 }
 
 /**
- * `gitlab-pat/<zoneId>/<role>=<fingerprint>` for each present value, sorted; no secret. Nothing
- * calls it yet: credential resolution wires it in.
+ * `gitlab-pat/<zoneId>/<role>=<fingerprint>` for each present value, sorted; no secret. What
+ * `credentialFingerprint` adds for the resolved GitLab entries.
  */
 export function gitlabPatEntryFingerprints(
   entries: Readonly<Record<string, { author?: string; reviewer?: string }>>,

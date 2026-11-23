@@ -14,6 +14,7 @@ import {
   readAppEntry,
   serializeAppEntry,
 } from './github-app-entries.js';
+import { gitlabPatEntryName } from './gitlab-pat-entries.js';
 import {
   appInstallationFor,
   credentialFor,
@@ -21,6 +22,7 @@ import {
   isAppReviewerZone,
   type ResolvedApps,
   resolveAppEntries,
+  resolveGitlabPatEntries,
 } from './resolution.js';
 import { openVault, type Vault } from './vault.js';
 
@@ -365,5 +367,97 @@ describe('isAppAuthorZone (issue #249)', () => {
       ),
     ).toBe(false);
     expect(isAppAuthorZone({ repo: 'octo/web' }, apps(present))).toBe(false);
+  });
+});
+
+describe('resolveGitlabPatEntries (§9, issue #719)', () => {
+  const AUTHOR = 'plain-author-value-0000000001';
+  const REVIEWER = 'plain-reviewer-value-000000002';
+  const gitlab = (id: string, identity?: 'starter' | 'two-bot') => ({
+    id,
+    forge: 'gitlab' as const,
+    ...(identity ? { identity } : {}),
+  });
+  const putBoth = (vault: Vault, id: string) => {
+    vault.put(gitlabPatEntryName(id, 'author'), AUTHOR, { now: t0 });
+    vault.put(gitlabPatEntryName(id, 'reviewer'), REVIEWER, { now: t0 });
+  };
+
+  test('a two-bot GitLab zone gives both present values', () => {
+    const { vault } = setup();
+    putBoth(vault, 'web');
+    const r = resolveGitlabPatEntries([gitlab('web')], { vault, scrubSet: new ScrubSet() });
+    expect([...r]).toEqual([['web', { author: AUTHOR, reviewer: REVIEWER }]]);
+    expect(
+      resolveGitlabPatEntries([gitlab('web', 'two-bot')], { vault, scrubSet: new ScrubSet() }),
+    ).toEqual(r);
+  });
+
+  test('a starter GitLab zone reads the author only', () => {
+    const { vault } = setup();
+    putBoth(vault, 'web');
+    const get = vi.spyOn(vault, 'get');
+    const r = resolveGitlabPatEntries([gitlab('web', 'starter')], {
+      vault,
+      scrubSet: new ScrubSet(),
+    });
+    expect([...r]).toEqual([['web', { author: AUTHOR }]]);
+    expect(get.mock.calls).toEqual([[gitlabPatEntryName('web', 'author')]]);
+  });
+
+  test('a GitHub zone is not read for', () => {
+    const { vault } = setup();
+    putBoth(vault, 'web');
+    const get = vi.spyOn(vault, 'get');
+    const zones = [{ id: 'web' }, { id: 'web', forge: 'github' as const }];
+    expect(resolveGitlabPatEntries(zones, { vault, scrubSet: new ScrubSet() }).size).toBe(0);
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  test('a disabled vault gives missing roles', () => {
+    const r = resolveGitlabPatEntries([gitlab('web')], {
+      vault: 'disabled',
+      scrubSet: new ScrubSet(),
+    });
+    expect([...r]).toEqual([['web', {}]]);
+  });
+
+  test('a missing entry gives a missing role', () => {
+    const { vault } = setup();
+    vault.put(gitlabPatEntryName('web', 'reviewer'), REVIEWER, { now: t0 });
+    const r = resolveGitlabPatEntries([gitlab('web')], { vault, scrubSet: new ScrubSet() });
+    expect([...r]).toEqual([['web', { reviewer: REVIEWER }]]);
+  });
+
+  test('an undecryptable entry gives a missing role, with no throw and no log line', () => {
+    const { vault, dbFile } = setup();
+    putBoth(vault, 'web');
+    const other = openVault(keyFile(), openDb(dbFile));
+    if (other === 'disabled') throw new Error('expected a vault');
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warn = vi.fn();
+    try {
+      const r = resolveGitlabPatEntries([gitlab('web')], {
+        vault: other,
+        scrubSet: new ScrubSet(64, warn),
+      });
+      expect([...r]).toEqual([['web', {}]]);
+      expect(err).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      err.mockRestore();
+    }
+  });
+
+  test('each present value is pinned: it outlives eviction and a log line is scrubbed', () => {
+    const { vault } = setup();
+    putBoth(vault, 'web');
+    const set = new ScrubSet(2, () => {});
+    resolveGitlabPatEntries([gitlab('web')], { vault, scrubSet: set });
+    for (let i = 0; i < 5; i += 1) set.add(`minted-token-value-${i}-0000000000`);
+    expect(set.values()).toEqual(expect.arrayContaining([AUTHOR, REVIEWER]));
+    expect(scrub(`a ${AUTHOR} r ${REVIEWER}`, undefined, [], set)).toBe(
+      'a [redacted] r [redacted]',
+    );
   });
 });

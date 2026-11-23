@@ -46,7 +46,12 @@ import {
   serializeAppEntry,
 } from '../vault/github-app-entries.js';
 import { type CredentialProblem, credentialProblems } from '../vault/problems.js';
-import { type ResolvedApps, resolveAppEntries } from '../vault/resolution.js';
+import {
+  type ResolvedApps,
+  type ResolvedGitlabPats,
+  resolveAppEntries,
+  resolveGitlabPatEntries,
+} from '../vault/resolution.js';
 import {
   createVaultKey,
   fingerprintOf,
@@ -209,6 +214,7 @@ type Valid = {
   editable: EditableConfig;
   resolved: Resolved;
   apps: ResolvedApps;
+  gitlabPats: ResolvedGitlabPats;
   secrets: Config['secrets'];
   warnings?: string[];
 };
@@ -238,6 +244,7 @@ export class ConfigStore implements ConfigSource {
   readonly confirmations: Confirmations;
   private resolvedValue!: Resolved;
   private appsValue: ResolvedApps = new Map();
+  private gitlabPatsValue: ResolvedGitlabPats = new Map();
   /** The loaded app entries' fingerprints, for `onAppsChanged`. */
   private appsSignature = '';
   private readonly appsListeners = new Set<() => void>();
@@ -614,6 +621,14 @@ export class ConfigStore implements ConfigSource {
   /** The GitHub App entries of the two-bot zones' owners, as they resolved (§4.4). */
   resolvedApps(): ResolvedApps {
     return this.appsValue;
+  }
+
+  /**
+   * Each GitLab zone's `gitlab-pat/<zone>/<role>` vault entries, by zone id, as they resolved (§9):
+   * vault only, and empty when `secretsFor` supplies the secrets.
+   */
+  resolvedGitlabPats(): ResolvedGitlabPats {
+    return this.gitlabPatsValue;
   }
 
   /**
@@ -1136,6 +1151,7 @@ export class ConfigStore implements ConfigSource {
       const zones = parsed.config.dropZones;
       let resolved: Resolved;
       let apps: ResolvedApps = new Map();
+      let gitlabPats: ResolvedGitlabPats = new Map();
       let secrets: Config['secrets'];
       if (this.o.secretsFor) {
         secrets = this.o.secretsFor(zones);
@@ -1153,12 +1169,17 @@ export class ConfigStore implements ConfigSource {
           preferVault,
           ...(this.o.scrubSet ? { scrubSet: this.o.scrubSet } : {}),
         });
+        gitlabPats = resolveGitlabPatEntries(zones, {
+          vault: this.vault(),
+          ...(this.o.scrubSet ? { scrubSet: this.o.scrubSet } : {}),
+        });
         secrets = assembleSecrets(resolved, loadMachineSecrets(this.o.env, resolved), zones);
       }
       return {
         editable: parsed.config,
         resolved,
         apps,
+        gitlabPats,
         secrets,
         ...(parsed.warnings ? { warnings: parsed.warnings } : {}),
       };
@@ -1194,6 +1215,7 @@ export class ConfigStore implements ConfigSource {
     }
     this.resolvedValue = v.resolved;
     this.appsValue = v.apps;
+    this.gitlabPatsValue = v.gitlabPats;
     const signature = appEntryFingerprints(v.apps).join('\n');
     const appsChanged = this.cfg !== undefined && signature !== this.appsSignature;
     this.appsSignature = signature;
