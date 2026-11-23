@@ -1637,3 +1637,64 @@ describe('pairFor by credential kind (spec §4.4)', () => {
     });
   });
 });
+
+describe('a GitLab zone gets no forge pair until GitLabForge lands (issue #667)', () => {
+  const alnum = (n: number) => 'aB3'.repeat(Math.ceil(n / 3)).slice(0, n);
+  const tokens = {
+    githubAuthorToken: `ghp_${alnum(36)}`,
+    githubReviewerToken: `ghp_${alnum(35)}x`,
+  };
+  const gitlab = {
+    id: 'lab',
+    repo: 'acme/app',
+    authorMayBeAdmin: false,
+    identity: 'two-bot' as const,
+    forge: 'gitlab' as const,
+  };
+  const github = { ...gitlab, id: 'hub', repo: 'o/r', forge: undefined };
+
+  beforeAll(() => {
+    nock.disableNetConnect();
+  });
+  afterEach(() => {
+    nock.cleanAll();
+  });
+
+  test('pairFor throws the fixed message before it builds a forge or asks for app tokens', () => {
+    const appTokens = vi.fn();
+    const appIdentity = vi.fn();
+    const refs = {
+      author: { kind: 'github-app', owner: 'acme' },
+      reviewer: { kind: 'github-app', owner: 'acme' },
+    } as const;
+    for (const zone of [gitlab, { ...gitlab, identity: 'starter' as const }]) {
+      let thrown: unknown;
+      try {
+        pairFor(zone, tokens, { refs, appTokens, appIdentity });
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(Error);
+      expect((thrown as Error).message).toBe('GitLab zones are not supported yet');
+      expect(JSON.stringify(thrown)).not.toContain('acme');
+    }
+    expect(appTokens).not.toHaveBeenCalled();
+    expect(appIdentity).not.toHaveBeenCalled();
+    // No interceptor for api.github.com and the network is shut: none was attempted.
+    expect(nock.pendingMocks()).toEqual([]);
+  });
+
+  test('ForgePairs.for throws for the GitLab zone and caches nothing; a GitHub zone still gets its pair', () => {
+    const pairs = new ForgePairs();
+    expect(() => pairs.for(gitlab, tokens)).toThrow('GitLab zones are not supported yet');
+    expect(() => pairs.for(gitlab, tokens)).toThrow('GitLab zones are not supported yet');
+    expect(pairs.for(github, tokens).author).toBeInstanceOf(GitHubForge);
+  });
+
+  test("a GitHub zone's key is unchanged by forge: github; a GitLab zone's differs", () => {
+    const PINNED = `["o/r","two-bot",false,"${JSON.parse(pairKey(github, tokens))[3]}"]`;
+    expect(pairKey({ ...github, forge: 'github' as const }, tokens)).toBe(PINNED);
+    expect(pairKey(github, tokens)).toBe(PINNED);
+    expect(pairKey({ ...gitlab, repo: 'o/r' }, tokens)).not.toBe(PINNED);
+  });
+});

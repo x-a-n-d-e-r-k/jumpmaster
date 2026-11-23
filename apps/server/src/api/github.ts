@@ -4,6 +4,7 @@ import type { ConfigStore } from '../config/store.js';
 import { type Config, DEFAULT_PROTECTED_PATHS, type DropZoneConfig } from '../config.js';
 import type { AppTokenSource } from '../forge/app-tokens.js';
 import { type Forge, GitHubForge } from '../forge/github.js';
+import { forgeKind, GITLAB_UNSUPPORTED } from '../forge/kind.js';
 import {
   collaboratorChecklist,
   type GuidanceApps,
@@ -334,6 +335,10 @@ export async function guidanceFor(
     appTokens?: Pick<AppTokenSource, 'provider'>;
   } = {},
 ): Promise<GuidanceResult> {
+  // Issue #667: GitHub guidance for a GitLab project would read a GitHub repository that is not
+  // the zone's. Checked here so every caller (the route, the Setup page, the doctor) is covered.
+  // Fixed words: never the base URL or the project path.
+  if (forgeKind(zone) === 'gitlab') return { ok: false, status: 400, error: GITLAB_UNSUPPORTED };
   // A name the config allows but GitHub's does not (owner/name only): said as such, not as a
   // network failure.
   if (!REPO.test(zone.repo)) return { ok: false, status: 400, error: new RepoNameError().message };
@@ -481,6 +486,9 @@ export function registerGuidanceRoutes(
     const config = req.jmConfig ?? store.current();
     const zone = config.dropZones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).send({ error: 'unknown zone' });
+    // Issue #667: GitHub guidance for a GitLab project would read a GitHub repository that is not
+    // the zone's. Fixed words: never the base URL or the project path.
+    if (forgeKind(zone) === 'gitlab') return reply.code(400).send({ error: GITLAB_UNSUPPORTED });
     const q = GuideQuery.safeParse(req.query ?? {});
     const reviewers = q.success
       ? Reviewers.safeParse(

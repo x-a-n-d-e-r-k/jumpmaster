@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import {
   ContainerLimitsSchema,
   GateSpecSchema,
+  isGitLabProjectPath,
   isRepoFullName,
   PresetSchema,
   protectedPathMatches,
@@ -13,6 +14,7 @@ import {
 } from '@jumpmaster/protocol';
 import { z } from 'zod';
 import { ZONE_MODES } from './db/repo.js';
+import { FORGE_KINDS, forgeKind, isHttpsOrigin } from './forge/kind.js';
 import { IMAGE_LOCK_PATH, loadImageLock, resolveImage } from './presets.js';
 import { publicUrlProblem } from './reach.js';
 import { readSecret } from './secrets.js';
@@ -214,191 +216,265 @@ const CrewSchema = z
 /** A GitHub numeric id: a positive safe integer. */
 const GitHubId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 
-/** A zone's fields with their defaults, without the cross-field rules (the add baseline parses with it). */
-export const DropZoneObject = z.object({
-  id: z.string().min(1),
-  // The one owner/name rule (issue #265); the message names the field, never the value.
-  repo: z.string().refine(isRepoFullName, {
-    message: 'repo must be "owner/name" with a valid GitHub owner and repository name',
-  }),
-  readyLabel: z.string().default(DEFAULT_READY_LABEL),
-  gates: z.array(GateSpecSchema),
-  services: z
-    .array(ServiceSpecSchema)
-    .default([])
-    .superRefine((list, ctx) => {
-      const names = list.map((s) => s.name);
-      const repeated = names.find((n, i) => names.indexOf(n) !== i);
-      if (repeated) ctx.addIssue({ code: 'custom', message: `duplicate service: ${repeated}` });
+/** A zone's raw fields as a refinement sees them: the other fields may have failed. */
+type ZoneInput = { repo?: unknown; forge?: unknown; gitlab?: unknown; githubApp?: unknown };
+const zoneInput = (v: unknown): ZoneInput =>
+  typeof v === 'object' && v !== null ? (v as ZoneInput) : {};
+/** `when`: run even if another field failed, as a field refinement would (the forge is known). */
+const whenForge =
+  (kind: 'github' | 'gitlab') =>
+  (p: { value: unknown }): boolean => {
+    const zone = zoneInput(p.value);
+    if (zone.forge !== undefined && zone.forge !== 'github' && zone.forge !== 'gitlab')
+      return false;
+    return forgeKind(zone as { forge?: 'github' | 'gitlab' }) === kind;
+  };
+
+/**
+ * The rules that depend on a zone's forge (issue #667), on `DropZoneObject` itself so every parse
+ * of a zone, the add baseline's and the catalog's included, keeps them. Each message names the
+ * field, never the value.
+ */
+function zoneForgeRules() {
+  const github = whenForge('github');
+  const gitlab = whenForge('gitlab');
+  return [
+    // The one owner/name rule (issue #265), with its path and message as before.
+    z.refine((v: unknown) => isRepoFullName(String(zoneInput(v).repo)), {
+      path: ['repo'],
+      message: 'repo must be "owner/name" with a valid GitHub owner and repository name',
+      when: (p) => github(p) && typeof zoneInput(p.value).repo === 'string',
     }),
-  verification: z.array(VerificationSpecSchema).default([]),
-  limits: ContainerLimitsSchema.default({ pids: DEFAULT_PIDS_LIMIT }),
-  /**
-   * Open agent PRs to take over at cutover, even without the server's marker. Listed by number
-   * because a person may author both these and hand-opened PRs, so the login can't tell them apart.
-   */
-  adoptPulls: z.array(z.number().int().positive()).default([]),
-  maxConcurrentImplement: z.number().int().positive().default(1),
-  /**
-   * The most items the zone has in `pr_open` before it starts no new implement drop (#291).
-   * Absent: no cap. Resolve, heal, review, resume and crew drops are never held by it.
-   */
-  maxOpenPrs: z.number().int().min(1).max(50).optional(),
-  /** How long an unresolved forge write may stay unknown; defaults to ciDeadlineMinutes. */
-  outboxDeadlineMinutes: z.number().positive().optional(),
-  /** Names of secrets for gate steps; values come from JM_ZONE_SECRET_<ZONE>_<NAME>[_FILE]. */
-  gateSecrets: z.array(z.string()).default([]),
-  /** The starting mode, used only until an operator stores one. */
-  mode: z.enum(ZONE_MODES).default('active'),
-  /** The trooper image. Optional when `preset` is set: the preset's image is used. */
-  image: z.string().min(1).optional(),
-  /** A prebuilt stack image (see presets.ts). Gates stay explicit config either way. */
-  preset: PresetSchema.optional(),
-  /**
-   * Egress control. Absent or `off` (the default) keeps M3 behaviour. Any other mode needs a stick
-   * that advertises `egress-v1`: until one does, the zone's drops stay queued.
-   */
-  egress: z
-    .object({
-      mode: z.enum(EGRESS_MODES).default('off'),
-      /**
-       * Hosts beyond the base and preset lists: a name, or `*.` plus a name (subdomains only).
-       * Never an IP literal, a port, a path or a URL.
-       */
-      allow: z
-        .array(
-          z.string().refine(validAllowEntry, {
-            message: 'egress.allow entries are host names or *.name, never an IP, port or path',
-          }),
-        )
-        .default([]),
-    })
-    .optional(),
-  /**
-   * `true` requires signed images for this zone even when the install doesn't. A zone can't
-   * weaken the install-wide setting: `false` under a top-level `true` is a config error.
-   */
-  requireSignedImages: z.boolean().optional(),
-  model: z.string().default('claude-opus-5-5'),
-  maxTurns: z.number().int().positive().default(200),
-  models: z.partialRecord(RoleSchema, z.string()).default({}),
-  budgets: z
-    .object({
-      maxHeal: z.number().int().nonnegative().default(3),
-      maxResolve: z.number().int().nonnegative().default(2),
-      maxResolveTotal: z.number().int().nonnegative().default(6),
-      maxResume: z.number().int().nonnegative().default(2),
-      maxReviewRepeat: z.number().int().nonnegative().default(2),
-      maxNoChange: z.number().int().nonnegative().default(1),
-      /** Resolves that end in a carried approval (the base merged in cleanly, nothing else). */
-      maxBaseSync: z.number().int().min(1).default(12),
-    })
-    .default({
-      maxHeal: 3,
-      maxResolve: 2,
-      maxResolveTotal: 6,
-      maxResume: 2,
-      maxReviewRepeat: 2,
-      maxNoChange: 1,
-      maxBaseSync: 12,
+    z.refine((v: unknown) => isGitLabProjectPath(String(zoneInput(v).repo)), {
+      path: ['repo'],
+      message:
+        'repo must be a GitLab project path: two or more segments of letters, digits, _, - and .',
+      when: (p) => gitlab(p) && typeof zoneInput(p.value).repo === 'string',
     }),
-  ciRequired: z.boolean().default(true),
-  ciDeadlineMinutes: z.number().positive().default(45),
-  /**
-   * The oldest approved PR reserves the zone's next merge for this long after its approval, so
-   * younger items that are ready wait for it instead of moving main under it. 0 turns it off.
-   */
-  mergeReservationMinutes: z.number().int().min(0).max(240).default(30),
-  retryLabel: z.string().min(1).default('agent-retry'),
-  /**
-   * Where a trusted human's ready issue that fails the drop-ready format is sent instead of to
-   * an implementer (with the crew on and `triage.gate`). Must differ from the other labels.
-   */
-  triageLabel: z.string().min(1).default('jm-triage'),
-  /** Put on an issue triage has finished with (split, or not agent work), replacing the triage label. */
-  triagedLabel: z.string().min(1).default('jm-triaged'),
-  /** `gate: false` admits every trusted human ready issue, formatted or not, as before #183. */
-  triage: z.object({ gate: z.boolean().default(true) }).default({ gate: true }),
-  /**
-   * Transcript retention (issue #197): a finished drop's events are pruned `retainDays` after it
-   * finished (0 keeps them forever), archived first as gzipped JSONL under the data directory
-   * unless `archive` is false. The drop row, its result and its artifacts are always kept.
-   */
-  transcripts: z
-    .object({
-      retainDays: z.number().int().min(0).default(90),
-      archive: z.boolean().default(true),
-    })
-    .default({ retainDays: 90, archive: true }),
-  mergeMethod: z.literal('squash').default('squash'),
-  requireBranchProtection: z.boolean().default(true),
-  /**
-   * Allow the author token's account to be a repository admin, as when the owner of a personal
-   * repository authors the PRs. The reviewer must still not be an admin, and neither may bypass.
-   */
-  authorMayBeAdmin: z.boolean().default(false),
-  /**
-   * `starter` runs with the author token alone (opt-in): no review is posted, and the author
-   * merges on the reviewer drop's verdict and green CI. See STARTER_WARNING.
-   */
-  identity: z.enum(IDENTITIES).default('two-bot'),
-  /**
-   * The zone's GitHub App installations (spec §4.2): config, not a secret. One repository id, and
-   * one installation id per role, since the author and reviewer apps are separate apps. Guarded:
-   * the ids decide which installation and repository minted tokens reach. Nothing mints from them
-   * until `verifiedInstallation` (forge/installation-verifier.ts, issue #267) has checked both
-   * against `repo` on GitHub; the server never trusts an id it is handed.
-   */
-  githubApp: z
-    .object({
-      repositoryId: GitHubId,
-      installations: z.object({ author: GitHubId.optional(), reviewer: GitHubId.optional() }),
-    })
-    .optional(),
-  protectedPaths: z.array(z.string()).default(DEFAULT_PROTECTED_PATHS),
-  /**
-   * Globs (matched like protectedPaths) where the trooper's pre-push check lets a real private key
-   * through: for projects that keep throwaway keys as test fixtures. Empty: refused everywhere.
-   */
-  privateKeyPaths: z.array(z.string()).default([]),
-  /**
-   * Logins (with write access) whose approval of the exact head lets a gate script or gate tool
-   * change through, besides anyone with maintain or admin. Protected paths are never overridden.
-   */
-  overrideApprovers: z.array(z.string()).default([]),
-  /**
-   * Accept new registry packages in pnpm-lock.yaml when the root package.json pins pnpm 10 or
-   * later, which runs no install script unless allow-listed. Turn on only when the image really
-   * runs that pnpm: an older pnpm runs install scripts with only a warning.
-   */
-  trustPnpmBuildBlocking: z.boolean().default(false),
-  /**
-   * Gates run with CI=true (frozen pnpm, immutable yarn berry and bun installs, jest --ci, no
-   * watch mode). `false` runs them with CI=false instead. A plain setting, not a gate secret:
-   * the values that turn CI off are too short to be secrets, and secrets are redacted from logs.
-   * Turning it off weakens the guard's lockfile review, since a gate install may then resolve
-   * afresh and run what it resolved.
-   */
-  gateCi: z.boolean().default(true),
-  reviewReadToken: z.boolean().default(false),
-  /** `false`: the agent adds no Claude co-author trailer or PR attribution. */
-  attribution: z.boolean().default(true),
-  crew: CrewSchema,
-  /** Logins whose ready issues count as crew-filed (never the only provenance signal). */
-  botLogins: z.array(z.string()).default([]),
-  /**
-   * Logins besides the author's own whose agent-branch PRs are adopted as the author's (spec
-   * §4.3): an old PAT bot's login, or an app's old slug after a rename. Guarded on additions.
-   */
-  authorLoginAliases: z
-    .array(
-      // The message never echoes the entry: a mistyped token must not land in a log.
-      z.string().regex(LOGIN_PATTERN, {
-        message: 'authorLoginAliases entries are GitHub logins (an app login ends in [bot])',
+    z.refine((v: unknown) => zoneInput(v).gitlab !== undefined, {
+      path: ['gitlab'],
+      message: 'a zone with forge: gitlab needs gitlab.baseUrl',
+      when: gitlab,
+    }),
+    z.refine((v: unknown) => zoneInput(v).gitlab === undefined, {
+      path: ['gitlab'],
+      message: 'gitlab applies only to a zone with forge: gitlab',
+      when: github,
+    }),
+    z.refine((v: unknown) => zoneInput(v).githubApp === undefined, {
+      path: ['githubApp'],
+      message: 'githubApp applies to GitHub zones only',
+      when: gitlab,
+    }),
+  ];
+}
+
+/**
+ * A zone's fields with their defaults and its forge rules (`zoneForgeRules`), without the other
+ * cross-field rules (the add baseline parses with it).
+ */
+export const DropZoneObject = z
+  .object({
+    id: z.string().min(1),
+    /**
+     * The repository: `owner/name` on GitHub, the project path on GitLab. Its rule depends on
+     * `forge`, so it is checked below, on the object (`zoneForgeRules`).
+     */
+    repo: z.string(),
+    /**
+     * The forge the zone lives on (spec §5.5). Absent means `github`, and nothing fills it in: a
+     * GitHub zone's document stays as it was (`forgeKind` reads it).
+     */
+    forge: z.enum(FORGE_KINDS).optional(),
+    /** A GitLab zone's instance: required with `forge: gitlab`, refused otherwise. */
+    gitlab: z
+      .object({
+        // The message names the field, never the value.
+        baseUrl: z.string().refine(isHttpsOrigin, {
+          message:
+            'gitlab.baseUrl must be an https:// origin, with no credentials, path, query or fragment',
+        }),
+      })
+      .optional(),
+    readyLabel: z.string().default(DEFAULT_READY_LABEL),
+    gates: z.array(GateSpecSchema),
+    services: z
+      .array(ServiceSpecSchema)
+      .default([])
+      .superRefine((list, ctx) => {
+        const names = list.map((s) => s.name);
+        const repeated = names.find((n, i) => names.indexOf(n) !== i);
+        if (repeated) ctx.addIssue({ code: 'custom', message: `duplicate service: ${repeated}` });
       }),
-    )
-    .default([]),
-});
+    verification: z.array(VerificationSpecSchema).default([]),
+    limits: ContainerLimitsSchema.default({ pids: DEFAULT_PIDS_LIMIT }),
+    /**
+     * Open agent PRs to take over at cutover, even without the server's marker. Listed by number
+     * because a person may author both these and hand-opened PRs, so the login can't tell them apart.
+     */
+    adoptPulls: z.array(z.number().int().positive()).default([]),
+    maxConcurrentImplement: z.number().int().positive().default(1),
+    /**
+     * The most items the zone has in `pr_open` before it starts no new implement drop (#291).
+     * Absent: no cap. Resolve, heal, review, resume and crew drops are never held by it.
+     */
+    maxOpenPrs: z.number().int().min(1).max(50).optional(),
+    /** How long an unresolved forge write may stay unknown; defaults to ciDeadlineMinutes. */
+    outboxDeadlineMinutes: z.number().positive().optional(),
+    /** Names of secrets for gate steps; values come from JM_ZONE_SECRET_<ZONE>_<NAME>[_FILE]. */
+    gateSecrets: z.array(z.string()).default([]),
+    /** The starting mode, used only until an operator stores one. */
+    mode: z.enum(ZONE_MODES).default('active'),
+    /** The trooper image. Optional when `preset` is set: the preset's image is used. */
+    image: z.string().min(1).optional(),
+    /** A prebuilt stack image (see presets.ts). Gates stay explicit config either way. */
+    preset: PresetSchema.optional(),
+    /**
+     * Egress control. Absent or `off` (the default) keeps M3 behaviour. Any other mode needs a stick
+     * that advertises `egress-v1`: until one does, the zone's drops stay queued.
+     */
+    egress: z
+      .object({
+        mode: z.enum(EGRESS_MODES).default('off'),
+        /**
+         * Hosts beyond the base and preset lists: a name, or `*.` plus a name (subdomains only).
+         * Never an IP literal, a port, a path or a URL.
+         */
+        allow: z
+          .array(
+            z.string().refine(validAllowEntry, {
+              message: 'egress.allow entries are host names or *.name, never an IP, port or path',
+            }),
+          )
+          .default([]),
+      })
+      .optional(),
+    /**
+     * `true` requires signed images for this zone even when the install doesn't. A zone can't
+     * weaken the install-wide setting: `false` under a top-level `true` is a config error.
+     */
+    requireSignedImages: z.boolean().optional(),
+    model: z.string().default('claude-opus-5-5'),
+    maxTurns: z.number().int().positive().default(200),
+    models: z.partialRecord(RoleSchema, z.string()).default({}),
+    budgets: z
+      .object({
+        maxHeal: z.number().int().nonnegative().default(3),
+        maxResolve: z.number().int().nonnegative().default(2),
+        maxResolveTotal: z.number().int().nonnegative().default(6),
+        maxResume: z.number().int().nonnegative().default(2),
+        maxReviewRepeat: z.number().int().nonnegative().default(2),
+        maxNoChange: z.number().int().nonnegative().default(1),
+        /** Resolves that end in a carried approval (the base merged in cleanly, nothing else). */
+        maxBaseSync: z.number().int().min(1).default(12),
+      })
+      .default({
+        maxHeal: 3,
+        maxResolve: 2,
+        maxResolveTotal: 6,
+        maxResume: 2,
+        maxReviewRepeat: 2,
+        maxNoChange: 1,
+        maxBaseSync: 12,
+      }),
+    ciRequired: z.boolean().default(true),
+    ciDeadlineMinutes: z.number().positive().default(45),
+    /**
+     * The oldest approved PR reserves the zone's next merge for this long after its approval, so
+     * younger items that are ready wait for it instead of moving main under it. 0 turns it off.
+     */
+    mergeReservationMinutes: z.number().int().min(0).max(240).default(30),
+    retryLabel: z.string().min(1).default('agent-retry'),
+    /**
+     * Where a trusted human's ready issue that fails the drop-ready format is sent instead of to
+     * an implementer (with the crew on and `triage.gate`). Must differ from the other labels.
+     */
+    triageLabel: z.string().min(1).default('jm-triage'),
+    /** Put on an issue triage has finished with (split, or not agent work), replacing the triage label. */
+    triagedLabel: z.string().min(1).default('jm-triaged'),
+    /** `gate: false` admits every trusted human ready issue, formatted or not, as before #183. */
+    triage: z.object({ gate: z.boolean().default(true) }).default({ gate: true }),
+    /**
+     * Transcript retention (issue #197): a finished drop's events are pruned `retainDays` after it
+     * finished (0 keeps them forever), archived first as gzipped JSONL under the data directory
+     * unless `archive` is false. The drop row, its result and its artifacts are always kept.
+     */
+    transcripts: z
+      .object({
+        retainDays: z.number().int().min(0).default(90),
+        archive: z.boolean().default(true),
+      })
+      .default({ retainDays: 90, archive: true }),
+    mergeMethod: z.literal('squash').default('squash'),
+    requireBranchProtection: z.boolean().default(true),
+    /**
+     * Allow the author token's account to be a repository admin, as when the owner of a personal
+     * repository authors the PRs. The reviewer must still not be an admin, and neither may bypass.
+     */
+    authorMayBeAdmin: z.boolean().default(false),
+    /**
+     * `starter` runs with the author token alone (opt-in): no review is posted, and the author
+     * merges on the reviewer drop's verdict and green CI. See STARTER_WARNING.
+     */
+    identity: z.enum(IDENTITIES).default('two-bot'),
+    /**
+     * The zone's GitHub App installations (spec §4.2): config, not a secret. One repository id, and
+     * one installation id per role, since the author and reviewer apps are separate apps. Guarded:
+     * the ids decide which installation and repository minted tokens reach. Nothing mints from them
+     * until `verifiedInstallation` (forge/installation-verifier.ts, issue #267) has checked both
+     * against `repo` on GitHub; the server never trusts an id it is handed.
+     */
+    githubApp: z
+      .object({
+        repositoryId: GitHubId,
+        installations: z.object({ author: GitHubId.optional(), reviewer: GitHubId.optional() }),
+      })
+      .optional(),
+    protectedPaths: z.array(z.string()).default(DEFAULT_PROTECTED_PATHS),
+    /**
+     * Globs (matched like protectedPaths) where the trooper's pre-push check lets a real private key
+     * through: for projects that keep throwaway keys as test fixtures. Empty: refused everywhere.
+     */
+    privateKeyPaths: z.array(z.string()).default([]),
+    /**
+     * Logins (with write access) whose approval of the exact head lets a gate script or gate tool
+     * change through, besides anyone with maintain or admin. Protected paths are never overridden.
+     */
+    overrideApprovers: z.array(z.string()).default([]),
+    /**
+     * Accept new registry packages in pnpm-lock.yaml when the root package.json pins pnpm 10 or
+     * later, which runs no install script unless allow-listed. Turn on only when the image really
+     * runs that pnpm: an older pnpm runs install scripts with only a warning.
+     */
+    trustPnpmBuildBlocking: z.boolean().default(false),
+    /**
+     * Gates run with CI=true (frozen pnpm, immutable yarn berry and bun installs, jest --ci, no
+     * watch mode). `false` runs them with CI=false instead. A plain setting, not a gate secret:
+     * the values that turn CI off are too short to be secrets, and secrets are redacted from logs.
+     * Turning it off weakens the guard's lockfile review, since a gate install may then resolve
+     * afresh and run what it resolved.
+     */
+    gateCi: z.boolean().default(true),
+    reviewReadToken: z.boolean().default(false),
+    /** `false`: the agent adds no Claude co-author trailer or PR attribution. */
+    attribution: z.boolean().default(true),
+    crew: CrewSchema,
+    /** Logins whose ready issues count as crew-filed (never the only provenance signal). */
+    botLogins: z.array(z.string()).default([]),
+    /**
+     * Logins besides the author's own whose agent-branch PRs are adopted as the author's (spec
+     * §4.3): an old PAT bot's login, or an app's old slug after a rename. Guarded on additions.
+     */
+    authorLoginAliases: z
+      .array(
+        // The message never echoes the entry: a mistyped token must not land in a log.
+        z.string().regex(LOGIN_PATTERN, {
+          message: 'authorLoginAliases entries are GitHub logins (an app login ends in [bot])',
+        }),
+      )
+      .default([]),
+  })
+  .check(...zoneForgeRules());
 
 /** Every key a zone may carry, for `ctl zones set` to refuse a path the schema does not know. */
 export const ZONE_KEYS: readonly string[] = Object.keys(DropZoneObject.shape);

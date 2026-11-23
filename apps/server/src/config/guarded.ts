@@ -62,8 +62,11 @@ export type ForbiddenPath = {
 
 export type RefusedPath = ForbiddenPath & {
   message: string;
-  /** What the same path means on an added zone, where it is not refused but guarded. */
-  onAdd?: (to: unknown, ctx: GuardCtx) => string;
+  /**
+   * What the same path means on an added zone, where it is not refused but guarded; undefined when
+   * the added zone leaves the path unset (an added GitHub zone's `forge`).
+   */
+  onAdd?: (to: unknown, ctx: GuardCtx) => string | undefined;
 };
 
 export type FreePath = {
@@ -346,6 +349,27 @@ export const REFUSED_PATHS: RefusedPath[] = [
     onAdd: (to) =>
       `A new project, ${String(to)}: its code will run in drops with your Claude credentials, and Jumpmaster will act on its issues and PRs with the forge tokens`,
   },
+  // Issue #667: the forge and its instance decide where the repository is and who the tokens
+  // reach, so like `repo` they change only by removing the zone and adding it again. An absent
+  // forge is `github`, so writing `github` out changes nothing.
+  {
+    path: 'dropZones[].forge',
+    applies: (from, to, ctx) => !ctx.added && (from ?? 'github') !== (to ?? 'github'),
+    message: "the forge of a zone can't change: remove the zone and add a new one",
+    onAdd: (to, ctx) =>
+      to === undefined
+        ? undefined
+        : `Zone ${zoneOf(ctx)} lives on ${to === 'gitlab' ? 'GitLab' : 'GitHub'} (forge: ${String(to)}): Jumpmaster will act on its issues and merge requests there`,
+  },
+  {
+    path: 'dropZones[].gitlab.baseUrl',
+    applies: (from, to, ctx) => !ctx.added && from !== to,
+    message: "the GitLab instance of a zone can't change: remove the zone and add a new one",
+    onAdd: (to, ctx) =>
+      to === undefined
+        ? undefined
+        : `Zone ${zoneOf(ctx)} will use the GitLab instance at ${String(to)} (gitlab.baseUrl): the forge tokens will be sent there`,
+  },
 ];
 
 const free = (path: string, reason: string, note?: string): FreePath => ({
@@ -486,11 +510,21 @@ export function effective(
  * starting point) and the zone's own `preset`, so its base hosts are the starting point and the
  * preset itself is never guarded there.
  */
-export function ADD_BASELINE(zone: { id?: unknown; repo?: unknown; preset?: unknown }): ZoneDoc {
+export function ADD_BASELINE(zone: {
+  id?: unknown;
+  repo?: unknown;
+  preset?: unknown;
+  forge?: unknown;
+  gitlab?: unknown;
+}): ZoneDoc {
+  // The zone's own forge and instance: its repo is read by their rule. Both are guarded on the add
+  // by REFUSED_PATHS' `onAdd`, so the baseline carrying them hides nothing.
   const base = DropZoneObject.parse({
     id: zone.id,
     repo: zone.repo,
     gates: [],
+    ...(zone.forge === undefined ? {} : { forge: zone.forge }),
+    ...(zone.gitlab === undefined ? {} : { gitlab: zone.gitlab }),
     ...(zone.preset === undefined ? {} : { preset: zone.preset }),
   });
   return { ...base, egress: { mode: 'monitor', allow: [] } };
@@ -635,10 +669,13 @@ export function classify(
       for (const r of REFUSED_PATHS)
         if (r.onAdd && r.path.startsWith(ZONE_PREFIX)) {
           const leaf = r.path.slice(ZONE_PREFIX.length);
-          out.guarded.push({
-            path: `dropZones[${id}].${leaf}`,
-            consequence: r.onAdd(zone[leaf], { zoneId: id, install: a, added: true }),
+          const consequence = r.onAdd(effective(zone, leaf, a), {
+            zoneId: id,
+            install: a,
+            added: true,
           });
+          if (consequence !== undefined)
+            out.guarded.push({ path: `dropZones[${id}].${leaf}`, consequence });
         }
     }
     const ctx: GuardCtx = { zoneId: id, install: a, added: isAdded };

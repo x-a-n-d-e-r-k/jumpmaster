@@ -340,3 +340,39 @@ describe('groups and order', () => {
     }
   });
 });
+
+describe('a GitLab zone (issue #667)', () => {
+  const gitlabZone = {
+    id: 'z',
+    repo: 'group/sub/project',
+    gates: [],
+    forge: 'gitlab',
+    gitlab: { baseUrl: 'https://gitlab.example.com' },
+  };
+
+  test('flagRows reads a GitLab zone document with a nested path', () => {
+    const rows = zoneRows(gitlabZone);
+    expect(row(rows, 'repo').value).toBe('group/sub/project');
+    expect(row(rows, 'forge')).toMatchObject({
+      value: 'gitlab',
+      defaultValue: undefined,
+      explicit: true,
+      guard: 'refused',
+      options: ['github', 'gitlab'],
+    });
+    expect(row(rows, 'gitlab.baseUrl')).toMatchObject({
+      value: 'https://gitlab.example.com',
+      explicit: true,
+      guard: 'refused',
+    });
+    expect(row(rows, 'forge').entry.kind).toBe('select');
+    expect(row(rows, 'gitlab.baseUrl').entry.kind).toBe('text');
+  });
+
+  test('a GitHub zone has forge and gitlab.baseUrl unset, and a nested path is refused', () => {
+    const rows = zoneRows();
+    expect(row(rows, 'forge')).toMatchObject({ value: undefined, explicit: false });
+    expect(row(rows, 'gitlab.baseUrl')).toMatchObject({ value: undefined, explicit: false });
+    expect(() => zoneRows({ ...minimalZone, repo: 'group/sub/project' })).toThrow();
+  });
+});
