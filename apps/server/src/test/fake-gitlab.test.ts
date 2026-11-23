@@ -1221,11 +1221,11 @@ describe('merge requests', () => {
     branchesFor(gl);
     await create(call);
     await call('GET', `${P}/merge_requests?private_token=${DEVELOPER}`);
-    const r = await call('PUT', `${P}/merge_requests/1/merge`);
+    const r = await call('PUT', `${P}/merge_requests/1/cancel_merge_when_pipeline_succeeds`);
     expect(r.status).toBe(404);
     expect((await call('GET', `${P}/merge_requests/1/changes`)).status).toBe(404);
     expect(gl.unknown).toEqual([
-      `PUT /api/v4${P}/merge_requests/1/merge`,
+      `PUT /api/v4${P}/merge_requests/1/cancel_merge_when_pipeline_succeeds`,
       `GET /api/v4${P}/merge_requests/1/changes`,
     ]);
     expect(gl.requests.length).toBe(4);
@@ -1718,6 +1718,246 @@ describe('merge request notes and approvals', () => {
       `POST /api/v4${P}/merge_requests/1/approve`,
       `GET /api/v4${P}/merge_requests/1/approvals`,
       `POST /api/v4${P}/merge_requests/1/unapprove`,
+    ]);
+    const text = JSON.stringify(gl.requests);
+    for (const t of ALL_TOKENS) expect(text).not.toContain(t);
+  });
+});
+
+describe('merge request accept and rebase', () => {
+  const P = `/projects/${PROJECT.id}`;
+
+  /** `feature` (two commits off `base`) and `main` (one commit off `base`) touch different
+   *  files; MR `!1` merges `feature` into `main`. With `conflict`, `main` also changes `a`. */
+  function diverged(gl: FakeGitLab, o: { conflict?: boolean; deleteB?: boolean } = {}) {
+    const base = gl.seedCommit({
+      branch: 'main',
+      files: { a: 'a\n', b: 'b\n' },
+      message: 'base',
+    });
+    gl.seedBranch('feature', base);
+    const f1 = gl.seedCommit({
+      branch: 'feature',
+      files: o.deleteB ? { a: 'a\n' } : { a: 'A\n', b: 'b\n' },
+      message: 'feature one',
+    });
+    const f2 = gl.seedCommit({
+      branch: 'feature',
+      files: o.deleteB ? { a: 'a\n', c: 'c\n' } : { a: 'A\n', b: 'b\n', c: 'c\n' },
+      message: 'feature two',
+    });
+    const m1 = gl.seedCommit({
+      branch: 'main',
+      files: { a: o.conflict ? 'x\n' : 'a\n', b: 'B\n' },
+      message: 'main work',
+    });
+    gl.seedMergeRequest({ sourceBranch: 'feature', targetBranch: 'main', title: 'Add c' });
+    return { base, f1, f2, m1 };
+  }
+
+  test('every MR carries the new fields, defaulted', async () => {
+    const { gl, call } = setup();
+    diverged(gl);
+    const defaults = {
+      merge_commit_sha: null,
+      squash_commit_sha: null,
+      merge_error: null,
+      rebase_in_progress: false,
+    };
+    expect(gl.mergeRequest(1)).toMatchObject(defaults);
+    gl.seedBranch('other', gl.branchSha('feature') as string);
+    const made = await call('POST', `${P}/merge_requests`, {
+      body: { source_branch: 'other', target_branch: 'main', title: 'Other' },
+    });
+    expect(made.body).toMatchObject(defaults);
+    expect((await call('GET', `${P}/merge_requests/2`)).body).toMatchObject(defaults);
+  });
+
+  test('a squash accept at the head SHA makes one commit on main and removes the source', async () => {
+    const { gl, call } = setup();
+    const { f2, m1 } = diverged(gl);
+    const r = await call('PUT', `${P}/merge_requests/1/merge`, {
+      body: { sha: f2, squash: true, should_remove_source_branch: true },
+    });
+    expect(r.status).toBe(200);
+    const head = gl.branchSha('main') as string;
+    expect(head).not.toBe(m1);
+    expect(gl.commit(head)).toMatchObject({
+      parent_ids: [m1],
+      message: 'Add c',
+      files: { a: 'A\n', b: 'B\n', c: 'c\n' },
+    });
+    expect(r.body).toMatchObject({
+      state: 'merged',
+      squash_commit_sha: head,
+      merge_commit_sha: null,
+      sha: f2,
+    });
+    expect(r.body.merged_at).toEqual(expect.any(String));
+    expect(gl.branchSha('feature')).toBeUndefined();
+    const got = await call('GET', `${P}/merge_requests/1`);
+    expect(got.body).toMatchObject({ state: 'merged', sha: f2, squash_commit_sha: head });
+    expect(got.body.diff_refs).toMatchObject({ start_sha: m1, head_sha: f2 });
+  });
+
+  test('a squash accept takes squash_commit_message and keeps the source branch by default', async () => {
+    const { gl, call } = setup();
+    const { f2 } = diverged(gl);
+    const r = await call('PUT', `${P}/merge_requests/1/merge`, {
+      body: { squash: true, squash_commit_message: 'Squashed' },
+    });
+    expect(r.status).toBe(200);
+    expect(gl.commit(gl.branchSha('main') as string)?.message).toBe('Squashed');
+    expect(gl.branchSha('feature')).toBe(f2);
+  });
+
+  test('a non-squash accept makes a two-parent merge commit and sets merge_commit_sha', async () => {
+    const { gl, call } = setup();
+    const { f2, m1 } = diverged(gl);
+    const r = await call('PUT', `${P}/merge_requests/1/merge`, {
+      body: { merge_commit_message: 'Merge it' },
+    });
+    expect(r.status).toBe(200);
+    const head = gl.branchSha('main') as string;
+    expect(gl.commit(head)).toMatchObject({
+      parent_ids: [m1, f2],
+      message: 'Merge it',
+      files: { a: 'A\n', b: 'B\n', c: 'c\n' },
+    });
+    expect(r.body).toMatchObject({
+      state: 'merged',
+      merge_commit_sha: head,
+      squash_commit_sha: null,
+    });
+    expect(gl.branchSha('feature')).toBe(f2);
+  });
+
+  test('a stale SHA gives 409 and changes nothing', async () => {
+    const { gl, call } = setup();
+    const { f1, f2, m1 } = diverged(gl);
+    const before = JSON.stringify(gl.mergeRequest(1));
+    const r = await call('PUT', `${P}/merge_requests/1/merge`, {
+      body: { sha: f1, squash: true },
+    });
+    expect(r.status).toBe(409);
+    expect(r.body).toEqual({ message: 'SHA does not match HEAD of source branch' });
+    expect(gl.branchSha('main')).toBe(m1);
+    expect(gl.branchSha('feature')).toBe(f2);
+    expect(JSON.stringify(gl.mergeRequest(1))).toBe(before);
+  });
+
+  test('refusals: 404 unknown, 403 Reporter, 405 closed, 405 not mergeable, 406 conflict', async () => {
+    const { gl, call } = setup();
+    const { f2, m1 } = diverged(gl);
+    const merge = (iid: number, token?: string) =>
+      call('PUT', `${P}/merge_requests/${iid}/merge`, { token, body: { squash: true } });
+    expect((await merge(99)).status).toBe(404);
+    expect((await merge(1, REPORTER)).status).toBe(403);
+    gl.setMergeable(1, false);
+    expect((await merge(1)).status).toBe(405);
+    gl.setMergeable(1, true);
+    gl.closeMergeRequest(1);
+    expect((await merge(1)).status).toBe(405);
+    expect(gl.branchSha('main')).toBe(m1);
+    expect(gl.branchSha('feature')).toBe(f2);
+    expect(() => gl.setMergeable(99, false)).toThrow(/unknown merge request/);
+
+    const second = setup(SELF_MANAGED);
+    const d = diverged(second.gl, { conflict: true });
+    const r = await second.call('PUT', `${P}/merge_requests/1/merge`, { body: { squash: true } });
+    expect(r.status).toBe(406);
+    expect(second.gl.branchSha('main')).toBe(d.m1);
+    expect(second.gl.mergeRequest(1)?.state).toBe('opened');
+  });
+
+  test('checks run in order: 403 before 405, 405 closed before 409, 409 before 405 and 406', async () => {
+    const { gl, call } = setup();
+    const { f1 } = diverged(gl, { conflict: true });
+    gl.setMergeable(1, false);
+    const merge = (body: unknown, token?: string) =>
+      call('PUT', `${P}/merge_requests/1/merge`, { token, body });
+    expect((await merge({ sha: f1 })).status).toBe(409);
+    expect((await merge({})).status).toBe(405);
+    gl.setMergeable(1, true);
+    expect((await merge({})).status).toBe(406);
+    gl.closeMergeRequest(1);
+    expect((await merge({ sha: f1 }, REPORTER)).status).toBe(403);
+    expect((await merge({ sha: f1 })).status).toBe(405);
+  });
+
+  test('a deletion on one side and an edit on the other is a conflict', async () => {
+    const { gl, call } = setup();
+    diverged(gl, { deleteB: true });
+    expect((await call('PUT', `${P}/merge_requests/1/merge`)).status).toBe(406);
+  });
+
+  test('a clean rebase replays the source commits onto the target head', async () => {
+    const { gl, call } = setup();
+    const { f2, m1 } = diverged(gl);
+    const r = await call('PUT', `${P}/merge_requests/1/rebase`);
+    expect(r.status).toBe(202);
+    expect(r.body).toEqual({ rebase_in_progress: true });
+    const head = gl.branchSha('feature') as string;
+    expect(head).not.toBe(f2);
+    const top = gl.commit(head);
+    expect(top).toMatchObject({ message: 'feature two', files: { a: 'A\n', b: 'B\n', c: 'c\n' } });
+    const first = gl.commit(top?.parent_ids[0] as string);
+    expect(top?.parent_ids).toHaveLength(1);
+    expect(first).toMatchObject({
+      message: 'feature one',
+      parent_ids: [m1],
+      files: { a: 'A\n', b: 'B\n' },
+    });
+    expect(gl.branchSha('main')).toBe(m1);
+    const got = await call('GET', `${P}/merge_requests/1?include_rebase_in_progress=true`);
+    expect(got.body).toMatchObject({
+      rebase_in_progress: false,
+      merge_error: null,
+      sha: head,
+      diff_refs: { base_sha: m1, start_sha: m1, head_sha: head },
+    });
+  });
+
+  test('a conflicting rebase leaves the source branch and sets merge_error', async () => {
+    const { gl, call } = setup();
+    const { f2, m1 } = diverged(gl, { conflict: true });
+    const r = await call('PUT', `${P}/merge_requests/1/rebase`);
+    expect(r.status).toBe(202);
+    expect(gl.branchSha('feature')).toBe(f2);
+    expect(gl.branchSha('main')).toBe(m1);
+    const got = await call('GET', `${P}/merge_requests/1?include_rebase_in_progress=true`);
+    expect(got.body).toMatchObject({ rebase_in_progress: false, sha: f2 });
+    expect(got.body.merge_error).toEqual(expect.stringMatching(/\S/));
+  });
+
+  test('rebase refusals: 404 unknown, 403 Reporter, 405 not open', async () => {
+    const { gl, call } = setup();
+    const { f2 } = diverged(gl);
+    expect((await call('PUT', `${P}/merge_requests/99/rebase`)).status).toBe(404);
+    expect((await call('PUT', `${P}/merge_requests/1/rebase`, { token: REPORTER })).status).toBe(
+      403,
+    );
+    gl.closeMergeRequest(1);
+    expect((await call('PUT', `${P}/merge_requests/1/rebase`)).status).toBe(405);
+    expect(gl.branchSha('feature')).toBe(f2);
+  });
+
+  test('merge and rebase requests are recorded without their token', async () => {
+    const { gl, call } = setup();
+    diverged(gl);
+    await call('PUT', `${P}/merge_requests/1/rebase?private_token=${DEVELOPER}`);
+    await call('PUT', `${P}/merge_requests/1/merge?private_token=${DEVELOPER}`, {
+      body: { squash: true, private_token: REPORTER },
+    });
+    expect((await call('PUT', `${P}/merge_requests/1/cancel_merge`)).status).toBe(404);
+    expect(gl.unknown).toEqual([`PUT /api/v4${P}/merge_requests/1/cancel_merge`]);
+    expect(gl.requests.slice(0, 2)).toMatchObject([
+      { method: 'PUT', path: `/api/v4${P}/merge_requests/1/rebase`, user: 'dev', query: {} },
+      {
+        method: 'PUT',
+        path: `/api/v4${P}/merge_requests/1/merge`,
+        body: { squash: true, private_token: '[redacted]' },
+      },
     ]);
     const text = JSON.stringify(gl.requests);
     for (const t of ALL_TOKENS) expect(text).not.toContain(t);
