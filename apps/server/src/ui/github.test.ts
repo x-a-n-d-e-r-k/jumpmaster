@@ -197,7 +197,7 @@ describe('the GitHub page of a zone', () => {
     expect(at('id="ruleset"')).toBeLessThan(at('id="codeowners"'));
     expect(html).toContain('Two bot accounts as GitHub Apps');
     // What the zone runs as now, beside the recommendation.
-    expect(html).toContain('This zone runs as two-bot');
+    expect(html).toContain('This project runs as two-bot');
     expect(html).toContain(RESOURCE_OWNER_NOTE);
     expect(html).toContain('Only select repositories');
     // T10 finding 4: a new token per install, and a later project is added by editing it.
@@ -282,7 +282,7 @@ describe('the GitHub page of a zone', () => {
     expect(starter).toContain('id="tokens"');
     expect(starter).not.toContain('id="use-tokens"');
     expect(starter).not.toContain('The reviewer token');
-    expect(starter).toContain('This zone runs as starter');
+    expect(starter).toContain('This project runs as starter');
     expect(starter).toContain('not the recommendation above');
   });
 

@@ -453,7 +453,7 @@ function briefingBlock(b: Briefing, ctx: BlockContext, heading: 'h3' | 'h4' = 'h
   return (
     `<div class="briefing" id="briefing-${escapeHtml(b.id)}">` +
     `<${heading}>${text(b.decision)}</${heading}>` +
-    `<table><tr><th>Briefing</th><td><a href="/briefings/${escapeHtml(b.id)}">${escapeHtml(b.id)}</a></td></tr><tr><th>Zone</th><td>${ctx.name(b.zoneId)}</td></tr>${row('Kind', b.kind)}<tr><th>About</th><td>${aboutHtml(about)}</td></tr>${pre('Why', b.why)}${pre('Diagnosis', b.diagnosis)}${rich('Recommendation', b.recommendation)}${rich('On hold', b.onHold)}${row('Raised by', b.source === 'mcp' ? 'assistant (MCP)' : b.source)}${row('Raised', b.createdAt)}</table>` +
+    `<table><tr><th>Briefing</th><td><a href="/briefings/${escapeHtml(b.id)}">${escapeHtml(b.id)}</a></td></tr><tr><th>Project</th><td>${ctx.name(b.zoneId)}</td></tr>${row('Kind', b.kind)}<tr><th>About</th><td>${aboutHtml(about)}</td></tr>${pre('Why', b.why)}${pre('Diagnosis', b.diagnosis)}${rich('Recommendation', b.recommendation)}${rich('On hold', b.onHold)}${row('Raised by', b.source === 'mcp' ? 'assistant (MCP)' : b.source)}${row('Raised', b.createdAt)}</table>` +
     (hold ? `<p>Promotes at ${escapeHtml(hold)} unless you reject it.</p>` : '') +
     form +
     '</div>'
@@ -1049,14 +1049,14 @@ export function zoneProblemsSection(
   const name = zoneNamer(zones);
   const list =
     problems.length === 0
-      ? '<p>No zone is missing a credential it needs.</p>'
+      ? '<p>No project is missing a credential it needs.</p>'
       : `<ul class="problems">${problems
           .map(
             (p) =>
               `<li><strong>${name(p.zoneId)}</strong> (${escapeHtml(p.credential)}, ${escapeHtml(p.kind)}): ${escapeHtml(p.message)}</li>`,
           )
           .join('')}</ul>`;
-  return `<h3>Zone problems</h3>${list}`;
+  return `<h3>Project problems</h3>${list}`;
 }
 
 /** The Activity area's pages (#622), in its sub-nav's order. */
@@ -1255,7 +1255,7 @@ function gateMarks(drop: Drop): string {
 }
 /** The work-item ledger's header row, on Activity's Work. */
 export const WORK_HEAD =
-  '<tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>';
+  '<tr><th>Project</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>';
 
 /** The drop ledger's header row, on /drops. */
 export const DROP_HEAD =
@@ -2483,14 +2483,14 @@ export function renderDoctor(
       const ask = askForm(
         { kind: 'doctor', zoneId: c.zoneId ?? INSTALL_ZONE, ref: c.id },
         'Ask',
-        `Doctor: ${escapeHtml(c.id)}`,
+        `Doctor: <code>${escapeHtml(c.id)}</code>`,
         `Ask about ${c.id}`,
       );
-      return `<tr class="${escapeHtml(c.status)}"><td>${escapeHtml(c.status.toUpperCase())}</td><td>${c.zoneId === null ? '' : name(c.zoneId)}</td><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.summary)}${help}</td><td>${ask}</td></tr>`;
+      return `<tr class="${escapeHtml(c.status)}"><td>${escapeHtml(c.status.toUpperCase())}</td><td>${c.zoneId === null ? '' : name(c.zoneId)}</td><td><code>${escapeHtml(c.id)}</code></td><td>${escapeHtml(c.summary)}${help}</td><td>${ask}</td></tr>`;
     })
     .join('');
   return page(
-    `${head}<p>Run ${run.id}, finished ${escapeHtml(run.finishedAt ?? '-')}: ${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('info') > 0 ? `, ${n('info')} info` : ''}.</p>${controls}${zoneProblems}<table><tr><th>Status</th><th>Zone</th><th>Check</th><th>Finding</th><th>Ask</th></tr>${rows}</table>${DOCTOR_SCRIPT}${ASK_SCRIPT}`,
+    `${head}<p>Run ${run.id}, finished ${escapeHtml(run.finishedAt ?? '-')}: ${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('info') > 0 ? `, ${n('info')} info` : ''}.</p>${controls}${zoneProblems}<table><tr><th>Status</th><th>Project</th><th>Check</th><th>Finding</th><th>Ask</th></tr>${rows}</table>${DOCTOR_SCRIPT}${ASK_SCRIPT}`,
     { title: 'Health' },
   );
 }

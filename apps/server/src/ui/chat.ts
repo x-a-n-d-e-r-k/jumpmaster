@@ -56,7 +56,7 @@ export function focusChip(t: ChatThread, zones: readonly ZoneRef[]): string {
         : t.focusKind === 'drop'
           ? `Drop ${escapeHtml((t.focusRef ?? '').slice(0, 8))}`
           : t.focusKind === 'doctor'
-            ? `Doctor: ${escapeHtml(t.focusRef ?? '')}`
+            ? `Doctor: <code>${escapeHtml(t.focusRef ?? '')}</code>`
             : `Briefing ${escapeHtml(t.focusRef ?? '')}`;
   return ` <span class="chip">${text}</span>`;
 }

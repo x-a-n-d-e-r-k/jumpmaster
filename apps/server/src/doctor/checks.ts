@@ -481,7 +481,7 @@ function installCredentialCheck(d: DoctorDeps): DoctorCheck {
       ...base,
       status: 'pass',
       summary:
-        "judged per zone: each zone's credential checks (credential.missing) name what it lacks",
+        "judged per project: each project's credential checks (credential.missing) name what it lacks",
     };
   const set = d.credentials?.install ?? { claudeToken: true, githubAuthorToken: true };
   const missing = [
@@ -513,7 +513,7 @@ function installCredentialCheck(d: DoctorDeps): DoctorCheck {
   return {
     ...base,
     status: 'fail',
-    summary: `not set: ${missing.map((m) => m.what).join(' and ')}; no zone can run without ${missing.length === 1 ? 'it' : 'them'}`,
+    summary: `not set: ${missing.map((m) => m.what).join(' and ')}; no project can run without ${missing.length === 1 ? 'it' : 'them'}`,
     credentials: missing.map((m) => m.name),
     fix: missing.map((m) => `Set ${m.what}: ${m.fix}.`).join('\n'),
   };
@@ -666,7 +666,7 @@ export const liveSticks = (sticks: Stick[], now: Date): Stick[] =>
 export function doctorDropWait(db: Db, config: Config, zone: DropZoneConfig, now: Date): string {
   if (isKilled(db)) return 'held: the kill switch is engaged (jumpmaster ctl unkill)';
   const mode = getZoneMode(db, zone.id, zone.mode);
-  if (mode !== 'active') return `held: the zone is ${mode} (jumpmaster ctl resume ${zone.id})`;
+  if (mode !== 'active') return `held: the project is ${mode} (jumpmaster ctl resume ${zone.id})`;
   const gate = dispatchGate(db, config.usage, now);
   if (!doctorMayLease(gate)) {
     const u = getUsageState(db);
@@ -687,7 +687,7 @@ export function doctorDropWait(db: Db, config: Config, zone: DropZoneConfig, now
   if (live.length === 0) return 'waiting for a stick: no stick is connected (see stick.seen)';
   const need = zoneRequirements(zone, config);
   if (!live.some((s) => missingFor(s, need).length === 0))
-    return `waiting for a stick that can run zone ${zone.id} (see stick.capabilities)`;
+    return `waiting for a stick that can run project ${zone.id} (see stick.capabilities)`;
   return 'waiting for a free stick slot';
 }
 
@@ -745,13 +745,13 @@ function stickCapabilityCheck(d: DoctorDeps, zone: DropZoneConfig, sticks: Stick
     return {
       ...base,
       status: 'pass',
-      summary: `the zone ${what}; ${able.map((j) => j.s.name).join(', ')} can run it`,
+      summary: `the project ${what}; ${able.map((j) => j.s.name).join(', ')} can run it`,
     };
   const lacks = [...new Set(judged.flatMap((j) => j.missing))];
   return {
     ...base,
     status: 'fail',
-    summary: `no live stick can run this zone, so its drops stay queued (the zone ${what}): ${judged.map((j) => `${j.s.name} lacks ${j.missing.join(', ')}`).join('; ')}`,
+    summary: `no live stick can run this project, so its drops stay queued (the project ${what}): ${judged.map((j) => `${j.s.name} lacks ${j.missing.join(', ')}`).join('; ')}`,
     fix: lacks.map((l) => `${l}: ${LACK_FIX[l] ?? 'upgrade the stick'}`).join('. '),
   };
 }
@@ -978,7 +978,7 @@ function killCheck(d: DoctorDeps): DoctorCheck {
     return {
       ...base,
       status: 'fail',
-      summary: 'the kill switch is engaged: no drop runs in any zone',
+      summary: 'the kill switch is engaged: no drop runs in any project',
       fix: 'When it is safe: jumpmaster ctl unkill',
     };
   return { ...base, status: 'pass', summary: 'the kill switch is off' };
@@ -1466,7 +1466,7 @@ async function adminCheck(d: DoctorDeps, zone: DropZoneConfig, r: ZoneReads): Pr
     return {
       ...base,
       status: 'skip',
-      summary: `the zone's GitHub App entries can't be used, so their permissions were not checked; credential checks report why`,
+      summary: `the project's GitHub App entries can't be used, so their permissions were not checked; credential checks report why`,
     };
   const bad = findings.filter((f) => f.status !== 'pass');
   if (bad.length === 0)
@@ -2313,7 +2313,7 @@ async function ciCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck>
     return {
       ...base,
       status: 'warn',
-      summary: `the no-CI-yet path (ciRequired: false): the zone's gates are the only check before a merge; ${seen}`,
+      summary: `the no-CI-yet path (ciRequired: false): the project's gates are the only check before a merge; ${seen}`,
       fix: 'Once CI exists, require its check in the ruleset (select GitHub Actions as the source) and set ciRequired: true.',
     };
   if (required.length > 0 && workflows.length === 0)
@@ -2488,7 +2488,7 @@ async function privateCloneCheck(
     return {
       ...base,
       status: 'fail',
-      summary: `${zone.repo} is private, and ${!hasToken ? 'no read token is configured' : 'the zone does not set reviewReadToken'}: review, crew and doctor drops can't clone it`,
+      summary: `${zone.repo} is private, and ${!hasToken ? 'no read token is configured' : 'the project does not set reviewReadToken'}: review, crew and doctor drops can't clone it`,
       fix: `Create a fine-grained token for ${zone.repo} with Contents: Read-only (and Metadata), store it as JM_GITHUB_READ_TOKEN (or JM_GITHUB_READ_TOKEN_FILE), and set reviewReadToken: true in the zone.`,
     };
   const read = d.readForge?.(zone.id);
@@ -2540,7 +2540,7 @@ async function presetCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCh
   if (zone.image.endsWith(':dev')) {
     status = 'warn';
     notes.push(
-      `the zone runs ${zone.image}, a locally built image (JM_DEV_IMAGES=1 or an explicit :dev tag): a mutable tag, unsigned, that the stick refuses under the signed policy`,
+      `the project runs ${zone.image}, a locally built image (JM_DEV_IMAGES=1 or an explicit :dev tag): a mutable tag, unsigned, that the stick refuses under the signed policy`,
     );
     fixes.push(
       'For a real install run the published server image, which carries the release image lock, or set image to a digest reference (name@sha256:…).',
@@ -2553,7 +2553,7 @@ async function presetCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCh
   if (zone.gates.length === 0) {
     status = 'warn';
     notes.push(
-      'the zone has no gates: drops run no checks of their own, so a change merges on CI alone',
+      'the project has no gates: drops run no checks of their own, so a change merges on CI alone',
     );
     fixes.push(
       "Add the repository's install and test commands to the zone's gates in the config (init writes none with --offline, or when it finds no build file), then restart.",
@@ -2612,7 +2612,7 @@ async function presetCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCh
 function servicesCheck(d: DoctorDeps, zone: DropZoneConfig, sticks: Stick[]): DoctorCheck {
   const base = { id: 'zone.services', zoneId: zone.id, doc: doc('services') };
   if (zone.services.length === 0)
-    return { ...base, status: 'pass', summary: 'the zone declares no services' };
+    return { ...base, status: 'pass', summary: 'the project declares no services' };
   const tagged = zone.services.filter((s) => !DIGEST_REF.test(s.image));
   if (tagged.length > 0)
     return {
@@ -2634,7 +2634,7 @@ function servicesCheck(d: DoctorDeps, zone: DropZoneConfig, sticks: Stick[]): Do
       ...base,
       status: 'skip',
       summary:
-        'signed images are required, and no live stick can run this zone to check its pins against (see stick.capabilities)',
+        'signed images are required, and no live stick can run this project to check its pins against (see stick.capabilities)',
     };
   const unpinned = zone.services.filter(
     (s) => !capable.some((st) => st.pinnedImages.includes(s.image)),
@@ -2803,14 +2803,14 @@ function crewCapCheck(zone: DropZoneConfig, d: DoctorDeps): DoctorCheck {
 function modeCheck(zone: DropZoneConfig, d: DoctorDeps): DoctorCheck {
   const base = { id: 'zone.mode', zoneId: zone.id };
   const mode = getZoneMode(d.db, zone.id, zone.mode);
-  if (mode === 'active') return { ...base, status: 'pass', summary: 'the zone is active' };
+  if (mode === 'active') return { ...base, status: 'pass', summary: 'the project is active' };
   return {
     ...base,
     status: 'warn',
     summary:
       mode === 'paused'
-        ? 'the zone is paused: no new drop starts in it'
-        : 'the zone is in observe mode: it records what it would do and changes nothing',
+        ? 'the project is paused: no new drop starts in it'
+        : 'the project is in observe mode: it records what it would do and changes nothing',
     fix: `When ready: jumpmaster ctl resume ${zone.id}`,
   };
 }
@@ -2825,7 +2825,7 @@ function readyLabelCheck(zone: DropZoneConfig): DoctorCheck {
     zoneId: zone.id,
     doc: doc('labels'),
     status: 'info',
-    summary: `the zone's ready label is ${zone.readyLabel}; the default is now ${DEFAULT_READY_LABEL}`,
+    summary: `the project's ready label is ${zone.readyLabel}; the default is now ${DEFAULT_READY_LABEL}`,
     fix: `To switch: 1. rename the label on GitHub (Issues → Labels → \`${zone.readyLabel}\` → Edit, name it ${DEFAULT_READY_LABEL}), which keeps it on every issue; 2. then run jumpmaster ctl zones set ${zone.id} readyLabel=${DEFAULT_READY_LABEL}. In this order no ready issue is missed in between. Nothing breaks if you keep ${zone.readyLabel}.`,
   };
 }
@@ -2888,7 +2888,7 @@ function doctorDropCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
       ...base,
       status: 'skip',
       summary:
-        'no doctor drop has run in this zone yet, so the Claude token, the clone, services and gates are unproven',
+        'no doctor drop has run in this project yet, so the Claude token, the clone, services and gates are unproven',
       fix: `Run one: ${ask} (it spends one turn of usage), then run the doctor again once it has finished.`,
     };
   const at = { ...base, dropId: row.id };
@@ -2958,7 +2958,7 @@ function doctorDropCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
       `Make the gates pass on ${branch} first: every agent pull request is judged by them, so a gate red on ${branch} parks every item. Run them locally, or fix the gate commands in the zone.`,
     );
   if (f.clone.ok && f.gates.length === 0 && zone.gates.length > 0)
-    problems.push('no gate ran, though the zone declares gates');
+    problems.push('no gate ran, though the project declares gates');
   // What the drop reached, from its own egress events.
   const allow = egressFor(zone)?.allow ?? [];
   const events = d.db
@@ -3001,7 +3001,7 @@ function doctorDropCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
     ...(f.services.length ? [`services up: ${f.services.map((s) => s.name).join(', ')}`] : []),
     f.gates.length
       ? `gates passed: ${f.gates.map((g) => `${g.name} (${(g.durationMs / 1000).toFixed(1)}s)`).join(', ')}`
-      : 'the zone has no gates',
+      : 'the project has no gates',
   ].join(', ');
   if (egressNotes.length > 0)
     return {
@@ -3300,14 +3300,14 @@ function transcriptsCheck(d: DoctorDeps): DoctorCheck {
     const due = countDueDrops(d.db, z, now);
     return `${z.id} keeps ${t.retainDays} days, ${t.archive ? 'archived' : 'not archived'} (${due} drop${due === 1 ? '' : 's'} due)`;
   });
-  const setting = `transcript retention: ${zones.length > 0 ? zones.join('; ') : 'no zones'}; archive directory ${kib(archiveDirBytes(d.config.dataDir))}`;
+  const setting = `transcript retention: ${zones.length > 0 ? zones.join('; ') : 'no projects'}; archive directory ${kib(archiveDirBytes(d.config.dataDir))}`;
   const base = { id: 'transcripts.retention', zoneId: null };
   const f = lastArchiveFailure(d.db);
   if (f && now.getTime() - Date.parse(f.at) < FAILURE_WINDOW_MS)
     return {
       ...base,
       status: 'warn',
-      summary: `an archive write failed at ${f.at} (drop ${f.dropId} in zone ${f.zone}: ${f.error}); its events were kept. ${setting}`,
+      summary: `an archive write failed at ${f.at} (drop ${f.dropId} in project ${f.zone}: ${f.error}); its events were kept. ${setting}`,
       fix: `Make ${d.config.dataDir}/${ARCHIVE_DIR} writable by the server's user (and the disk not full); the next hourly pass archives the drop and prunes it.`,
     };
   return { ...base, status: 'info', summary: setting };

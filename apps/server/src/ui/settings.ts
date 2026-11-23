@@ -276,7 +276,7 @@ function appEntriesSection(store: ConfigStore): string {
   const views = appEntryViews(store);
   const body =
     views.length === 0
-      ? '<p>GitHub Apps are for two-bot mode: starter zones use tokens.</p>'
+      ? '<p>GitHub Apps are for two-bot mode: starter projects use tokens.</p>'
       : `<table><tr><th>Owner</th><th>Role</th><th>Source</th><th>App</th><th>App id</th><th>Imported</th><th>Last test</th><th></th></tr>${views.map(appEntryRow).join('')}</table>`;
   return `<section id="app-entries"><h3>GitHub App entries</h3>${body}</section>`;
 }
@@ -463,7 +463,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (outcome === 'replaced') await jmRefreshAppRow(form.dataset.owner, form.dataset.role);
   });
   for (const b of document.querySelectorAll('button.remove')) b.addEventListener('click', async () => {
-    if (!confirm('Remove ' + b.dataset.name + ' from the vault? Jumpmaster refuses to remove it while a zone still needs it.')) return;
+    if (!confirm('Remove ' + b.dataset.name + ' from the vault? Jumpmaster refuses to remove it while a project still needs it.')) return;
     const s = state(); const outcome = await jmRemoveCredential(b.dataset.name, s, status); after(s, outcome);
     if (outcome === 'removed') location.reload();
   });
@@ -660,7 +660,7 @@ function installSettings(config: Config): Setting[] {
     },
     {
       path: 'mcp.enabled',
-      label: "Command's MCP server at /mcp (zone-scoped tokens, under MCP tokens)",
+      label: "Command's MCP server at /mcp (project-scoped tokens, under MCP tokens)",
       kind: 'bool',
       value: mcp.enabled,
       note: `${RESTART_NOTE}; turning it on asks for confirmation`,
@@ -689,7 +689,7 @@ function installSettings(config: Config): Setting[] {
     },
     {
       path: 'mcp.maxOpenBriefings',
-      label: 'open MCP-raised briefings a zone may hold',
+      label: 'open MCP-raised briefings a project may hold',
       kind: 'number',
       value: mcp.maxOpenBriefings,
       attrs: 'min="0" step="1"',
@@ -878,8 +878,8 @@ export function renderInstallFlags(o: { store: ConfigStore; saved?: number }): s
     `${systemNav('advanced')}<h2>Advanced</h2>
 <h3>Advanced settings · this install</h3>
 <p>Every install-wide setting. Changes apply at the next pass, except those marked for the next restart; one that loosens a safeguard asks you to confirm first.</p>
-<p>Each zone has its own advanced settings:</p>
-${zones.length ? `<ul class="zone-flags">${links}</ul>` : '<p><small>No zones yet.</small></p>'}
+<p>Each project has its own advanced settings:</p>
+${zones.length ? `<ul class="zone-flags">${links}</ul>` : '<p><small>No projects yet.</small></p>'}
 ${savedNote(o.saved)}${readOnly ? fileModeBanner(store) : ''}
 ${form}
 ${FLAGS_SCRIPT}`,
@@ -981,7 +981,7 @@ ${OTHER_MACHINES_SCRIPT}`;
 /** The token table's frame, shared by the server's render and the script's redraw (no quotes). */
 const NO_TOKENS = '<p>No MCP tokens yet.</p>';
 const TOKENS_HEAD =
-  '<table><tr><th>#</th><th>Zone</th><th>Scope</th><th>Label</th><th>Made</th><th>Expires</th><th>Last used</th><th></th></tr>';
+  '<table><tr><th>#</th><th>Project</th><th>Scope</th><th>Label</th><th>Made</th><th>Expires</th><th>Last used</th><th></th></tr>';
 const TOKENS_TAIL =
   '</table><p><small>A last use you do not recognise means the token is in someone else&#39;s hands: revoke it.</small></p>';
 
@@ -1074,7 +1074,7 @@ export function renderMcpTokens(o: {
 }): string {
   const { config, tokens, routes } = o;
   const intro =
-    "<p>An MCP token lets Command (a Claude session you run) reach one zone through Jumpmaster's MCP server at <code>/mcp</code>: <strong>read</strong> looks only, <strong>write</strong> may also raise briefings and file work through its tools. Each token expires; the server keeps only its hash, so the value is shown once, when it is made.</p>";
+    "<p>An MCP token lets Command (a Claude session you run) reach one project through Jumpmaster's MCP server at <code>/mcp</code>: <strong>read</strong> looks only, <strong>write</strong> may also raise briefings and file work through its tools. Each token expires; the server keeps only its hash, so the value is shown once, when it is made.</p>";
   const enabled = mcpConfigOf(config).enabled;
   const off = routes
     ? ''
@@ -1092,9 +1092,9 @@ export function renderMcpTokens(o: {
   const mint = !routes
     ? ''
     : config.dropZones.length === 0
-      ? `<p>A token belongs to a zone: <a href="${PROJECTS_HREF}/new">add a project</a> first.</p>`
+      ? `<p>A token belongs to a project: <a href="${PROJECTS_HREF}/new">add a project</a> first.</p>`
       : `<h3>Make a token</h3>
-<form id="mint"><label>Zone <select name="zoneId">${zones}</select></label> <label>Scope <select name="scope"><option value="read" selected>read</option><option value="write">write</option></select></label> <label>Days <input type="number" name="days" min="1" max="${MAX_TOKEN_DAYS}" value="30" required></label> <label>Label <input name="label" maxlength="80" autocomplete="off"></label> <button>Make a token</button></form>
+<form id="mint"><label>Project <select name="zoneId">${zones}</select></label> <label>Scope <select name="scope"><option value="read" selected>read</option><option value="write">write</option></select></label> <label>Days <input type="number" name="days" min="1" max="${MAX_TOKEN_DAYS}" value="30" required></label> <label>Label <input name="label" maxlength="80" autocomplete="off"></label> <button>Make a token</button></form>
 ${SUDO_PROMPT('making a token')}
 <p id="mint-out" role="status"></p>
 <p><code id="mint-value" hidden></code></p>`;
@@ -1158,7 +1158,7 @@ const HISTORY_LIMIT = 50;
 export const HISTORY_SCRIPT = `<script>
 async function jmRevert(r, status, ask, go) {
   const n = r.readds.length;
-  const readds = n === 0 ? '' : ' It re-adds zone' + (n > 1 ? 's ' : ' ') + r.readds.join(', ') + ' with ' + (n > 1 ? 'their' : 'its') + ' history; ' + (n > 1 ? 'they come' : 'it comes') + ' back paused.';
+  const readds = n === 0 ? '' : ' It re-adds project' + (n > 1 ? 's ' : ' ') + r.readds.join(', ') + ' with ' + (n > 1 ? 'their' : 'its') + ' history; ' + (n > 1 ? 'they come' : 'it comes') + ' back paused.';
   if (!ask('Revert to revision ' + r.id + '? It is applied as a new revision, and the history is kept.' + readds)) return 'cancelled';
   const res = await jmFetch('/api/control/config/rollback', { id: r.id, expectRevision: r.revision, returnTo: '${SYSTEM_HISTORY_HREF}', cancelTo: '${SYSTEM_HISTORY_HREF}' });
   let j = {};
@@ -1215,7 +1215,7 @@ export function renderHistory(o: { store: ConfigStore; revisions: RevisionView[]
     const n = r.revertReadds.length;
     const says =
       n > 0
-        ? ` <small>re-adds zone${n > 1 ? 's' : ''} ${escapeHtml(r.revertReadds.join(', '))} with ${n > 1 ? 'their' : 'its'} history (paused)</small>`
+        ? ` <small>re-adds project${n > 1 ? 's' : ''} ${escapeHtml(r.revertReadds.join(', '))} with ${n > 1 ? 'their' : 'its'} history (paused)</small>`
         : '';
     return `<button type="button" class="revert" data-id="${r.id}" data-readds="${escapeHtml(JSON.stringify(r.revertReadds))}">Revert</button>${says}`;
   };
@@ -1227,7 +1227,7 @@ export function renderHistory(o: { store: ConfigStore; revisions: RevisionView[]
     .join('');
   const intro = fileMode
     ? '<p class="warn">In file mode the config file is the config: each reload that changed it is a revision here, and a revert is made by editing the file (or, after adopting it, here).</p>'
-    : '<p>Every change to the config is a revision, kept for good. Revert applies an old revision’s content as a new revision; one that weakens a guard asks for confirmation first, and one that brings back a removed zone says so before it runs.</p>';
+    : '<p>Every change to the config is a revision, kept for good. Revert applies an old revision’s content as a new revision; one that weakens a guard asks for confirmation first, and one that brings back a removed project says so before it runs.</p>';
   return page(
     `${systemNav('history')}<h2>History</h2>
 <div id="history" data-revision="${current}">

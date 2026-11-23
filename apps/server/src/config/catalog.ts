@@ -179,7 +179,7 @@ const WORDS: Words[] = [
   w(
     'claude.fableReview',
     'Run pull request reviews on Fable',
-    "Run pull request reviews on Fable while its weekly budget has room. Reviews use the zone's model otherwise.",
+    "Run pull request reviews on Fable while its weekly budget has room. Reviews use the project's model otherwise.",
     'bool',
   ),
   w(
@@ -232,8 +232,8 @@ const WORDS: Words[] = [
   ),
   w(
     'mcp.maxOpenBriefings',
-    'Open MCP briefings per zone',
-    'How many briefings raised through MCP a zone may hold open at once. More are refused until some are closed.',
+    'Open MCP briefings per project',
+    'How many briefings raised through MCP a project may hold open at once. More are refused until some are closed.',
     'number',
   ),
   w(
@@ -265,33 +265,33 @@ const WORDS: Words[] = [
   // A zone: the project.
   z_(
     'id',
-    'Zone name',
-    "The zone's key in addresses, the API and jumpmaster ctl. A different name is a new zone.",
+    'Project id',
+    "The project's key in addresses, the API and jumpmaster ctl. A different id is a new project.",
     'elsewhere',
-    'Fixed once the zone exists: remove the zone and add it again to change it.',
+    'Fixed once the project exists: remove the project and add it again to change it.',
   ),
   z_(
     'repo',
     'GitHub repository',
-    "The owner/name of the repository this zone works on. It can't change: remove the zone and add a new one.",
+    "The owner/name of the repository this project works on. It can't change: remove the project and add a new one.",
     'text',
   ),
   z_(
     'forge',
     'Forge the project lives on',
-    "Whether this zone's project is on GitHub (the default when unset) or GitLab. It can't change: remove the zone and add a new one.",
+    "Whether this project is on GitHub (the default when unset) or GitLab. It can't change: remove the project and add a new one.",
     'select',
   ),
   z_(
     'gitlab.baseUrl',
     'GitLab instance address',
-    "A GitLab zone's instance, as an https:// address with no path, such as https://gitlab.com. It can't change: remove the zone and add a new one.",
+    "A GitLab project's instance, as an https:// address with no path, such as https://gitlab.com. It can't change: remove the project and add a new one.",
     'text',
   ),
   z_(
     'mode',
     'Starting mode',
-    'Whether a new zone starts active, paused or observing. It is used only until an operator stores a mode.',
+    'Whether a new project starts active, paused or observing. It is used only until an operator stores a mode.',
     'select',
   ),
   z_(
@@ -494,14 +494,14 @@ const WORDS: Words[] = [
   ),
   z_(
     'requireSignedImages',
-    'Run only signed images in this zone',
-    "Drops of this zone run only signed images. Unset, the install's setting applies; a zone can't be weaker than the install.",
+    'Run only signed images in this project',
+    "Drops of this project run only signed images. Unset, the install's setting applies; a project can't be weaker than the install.",
     'bool',
   ),
   z_(
     'githubApp.repositoryId',
     'GitHub App repository id',
-    "The numeric id of the repository app tokens are minted for. It is checked against the zone's repository before any token is minted.",
+    "The numeric id of the repository app tokens are minted for. It is checked against the project's repository before any token is minted.",
     'number',
   ),
   z_(
@@ -521,13 +521,13 @@ const WORDS: Words[] = [
   z_(
     'maxConcurrentImplement',
     'Implement drops at once',
-    'How many implement drops may run at the same time in this zone. More finishes sooner and uses more of the plan.',
+    'How many implement drops may run at the same time in this project. More finishes sooner and uses more of the plan.',
     'number',
   ),
   z_(
     'maxOpenPrs',
     'Most open pull requests',
-    'No new implement drop starts while the zone has this many open pull requests. Unset, there is no cap.',
+    'No new implement drop starts while the project has this many open pull requests. Unset, there is no cap.',
     'number',
   ),
   z_(
@@ -553,13 +553,13 @@ const WORDS: Words[] = [
   z_(
     'model',
     'Model drops run',
-    'The Claude model drops in this zone run, unless a role has its own. It may not name Fable.',
+    'The Claude model drops in this project run, unless a role has its own. It may not name Fable.',
     'text',
   ),
   z_(
     'models',
     'Model for each role',
-    'A model for each drop role, such as implement or review, in place of the zone model.',
+    'A model for each drop role, such as implement or review, in place of the project model.',
     'record',
   ),
   z_(

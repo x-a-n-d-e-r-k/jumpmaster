@@ -248,8 +248,8 @@ describe('the credentials tab', () => {
     expect(problems.some((p) => p.credential === 'githubReadToken')).toBe(true);
     const health = (await w.get('/system')).body;
     const count = (h: string, s: string) => h.split(s).length - 1;
-    expect(count(health, '<h3>Zone problems</h3>')).toBe(1);
-    expect(count(html, 'Zone problems')).toBe(0);
+    expect(count(health, '<h3>Project problems</h3>')).toBe(1);
+    expect(count(html, 'Project problems')).toBe(0);
     expect(html).not.toContain('<ul class="problems">');
     for (const p of problems) {
       const message = p.message.replaceAll("'", '&#39;');
@@ -260,7 +260,7 @@ describe('the credentials tab', () => {
     expect(health).toContain('<li><strong>octo/demo</strong> (');
     // Above the check table.
     const table = health.indexOf('<th>Status</th>');
-    if (table !== -1) expect(health.indexOf('<h3>Zone problems</h3>')).toBeLessThan(table);
+    if (table !== -1) expect(health.indexOf('<h3>Project problems</h3>')).toBeLessThan(table);
 
     for (const secret of [CLAUDE, AUTHOR, REVIEWER, TOKEN, 'join-secret-value-4'])
       expect(html).not.toContain(secret);
@@ -534,7 +534,7 @@ describe('the credentials tab, round 2', () => {
 
   test('the Remove dialog says the removal is refused while a zone needs the credential', () => {
     expect(CREDENTIALS_SCRIPT).toContain(
-      'Jumpmaster refuses to remove it while a zone still needs it',
+      'Jumpmaster refuses to remove it while a project still needs it',
     );
     expect(CREDENTIALS_SCRIPT).not.toMatch(/park until/);
   });
@@ -941,7 +941,7 @@ describe('settings, part two (Task 13)', () => {
     expect(rev(added)).toMatch(
       /<button type="button" class="revert" data-id="\d+" data-readds="\[&quot;main&quot;\]">Revert<\/button>/,
     );
-    expect(rev(added)).toContain('re-adds zone main');
+    expect(rev(added)).toContain('re-adds project main');
     // The current revision has no Revert.
     expect(rev(removed)).not.toContain('class="revert"');
 
@@ -1005,7 +1005,7 @@ describe('settings, part two (Task 13)', () => {
         went = to;
       },
     );
-    expect(asked).toContain('re-adds zone main');
+    expect(asked).toContain('re-adds project main');
     expect(s.calls).toEqual([
       {
         method: 'POST',
@@ -1597,7 +1597,7 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
     // No zone setting is a row here.
     expect(keys.some((k) => k.startsWith('dropZones'))).toBe(false);
     expect(r.body).toContain('Advanced settings · this install');
-    expect(r.body).toContain('Each zone has its own advanced settings:');
+    expect(r.body).toContain('Each project has its own advanced settings:');
     const links = [...r.body.matchAll(/<a href="(\/projects\/[^"]*\/flags)">/g)].map((m) => m[1]);
     expect(links).toEqual(['/projects/main/flags', '/projects/ref/flags']);
     // pollSeconds: a number input in Pace with the schema's bounds.
@@ -2153,7 +2153,7 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
     });
     const html = (await w.get('/system/credentials')).body;
     const section = sectionOf(html);
-    expect(section).toContain('GitHub Apps are for two-bot mode: starter zones use tokens.');
+    expect(section).toContain('GitHub Apps are for two-bot mode: starter projects use tokens.');
     expect(section).not.toContain('<tr data-app=');
     expect(section).not.toContain('app-test');
   });
@@ -2222,7 +2222,7 @@ const PAT_ROWS: Record<string, string> = {
   githubAuthorToken:
     '<tr data-credential="githubAuthorToken"><td><code>githubAuthorToken</code><br><small>GitHub author token: opens and merges the agent PRs</small></td><td data-col="source">not set</td><td data-col="fingerprint">-</td><td data-col="login">-</td><td data-col="set">-</td><td data-col="created">-</td><td data-col="test">-</td><td data-col="actions"><form class="replace" data-name="githubAuthorToken"><input type="password" name="value" autocomplete="off" spellcheck="false" aria-label="New value for githubAuthorToken"> <button>Replace</button> <span class="replace-out" role="status"></span></form></td>',
   githubReviewerToken:
-    '<tr data-credential="githubReviewerToken"><td><code>githubReviewerToken</code><br><small>GitHub reviewer token: posts reviews (two-bot zones)</small></td><td data-col="source">file <code><secrets>/github_reviewer_token</code></td><td data-col="fingerprint"><code>de6463b3</code></td><td data-col="login">-</td><td data-col="set">-</td><td data-col="created">-</td><td data-col="test">-</td><td data-col="actions"><button type="button" class="use-vault" data-name="githubReviewerToken">Replace</button> <button type="button" class="test" data-name="githubReviewerToken">Test</button> <button type="button" class="copy" data-name="githubReviewerToken">Copy into the vault</button> <small>managed by <secrets>/github_reviewer_token: replace that file and run <code>jumpmaster ctl secrets reload</code> to change it there. Replace stores a new value in the vault, which then wins over variables and files.</small></td>',
+    '<tr data-credential="githubReviewerToken"><td><code>githubReviewerToken</code><br><small>GitHub reviewer token: posts reviews (two-bot projects)</small></td><td data-col="source">file <code><secrets>/github_reviewer_token</code></td><td data-col="fingerprint"><code>de6463b3</code></td><td data-col="login">-</td><td data-col="set">-</td><td data-col="created">-</td><td data-col="test">-</td><td data-col="actions"><button type="button" class="use-vault" data-name="githubReviewerToken">Replace</button> <button type="button" class="test" data-name="githubReviewerToken">Test</button> <button type="button" class="copy" data-name="githubReviewerToken">Copy into the vault</button> <small>managed by <secrets>/github_reviewer_token: replace that file and run <code>jumpmaster ctl secrets reload</code> to change it there. Replace stores a new value in the vault, which then wins over variables and files.</small></td>',
   githubReadToken:
     '<tr data-credential="githubReadToken"><td><code>githubReadToken</code><br><small>GitHub read token: lets review drops read a private repository</small></td><td data-col="source">environment variable <code>JM_GITHUB_READ_TOKEN</code></td><td data-col="fingerprint"><code>7ba50946</code></td><td data-col="login">-</td><td data-col="set">-</td><td data-col="created">-</td><td data-col="test">-</td><td data-col="actions"><button type="button" class="use-vault" data-name="githubReadToken">Replace</button> <button type="button" class="test" data-name="githubReadToken">Test</button> <button type="button" class="copy" data-name="githubReadToken">Copy into the vault</button> <small>set by the environment variable JM_GITHUB_READ_TOKEN: change it where the server\'s environment is set, and restart the server, to change it there. Replace stores a new value in the vault, which then wins over variables and files.</small></td>',
 };

@@ -1939,7 +1939,9 @@ describe('focus chips and relative times', () => {
     );
     const html = renderChatList(listThreads(db), { serviceMissing: false, zones, now });
     expect(rowOf(html, d.id)).toContain('<span class="chip">Drop 01234567</span>');
-    expect(rowOf(html, c.id)).toContain('<span class="chip">Doctor: claude.plan</span>');
+    expect(rowOf(html, c.id)).toContain(
+      '<span class="chip">Doctor: <code>claude.plan</code></span>',
+    );
   });
 
   test('a focus whose zone was removed shows its raw id', () => {

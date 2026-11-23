@@ -486,7 +486,7 @@ function projectPage(store: ConfigStore, wizard: Wizard): string {
     const zones = store.current().dropZones;
     return frame(
       'project',
-      `<h3>Your project</h3><p>Your config file holds ${zones.length} zone${zones.length === 1 ? '' : 's'}${zones.length ? `: ${zones.map((z) => zoneName(z, zones)).join(', ')}` : ''}. In file mode the file is the config: edit it and run <code>jumpmaster ctl config reload</code>.</p>
+      `<h3>Your project</h3><p>Your config file holds ${zones.length} project${zones.length === 1 ? '' : 's'}${zones.length ? `: ${zones.map((z) => zoneName(z, zones)).join(', ')}` : ''}. In file mode the file is the config: edit it and run <code>jumpmaster ctl config reload</code>.</p>
 <p>To manage the config here instead, adopt it: the file's contents become the first revision in the database, and from then on this page and <code>jumpmaster ctl config</code> change it. <code>jumpmaster ctl config mode file</code> goes back.</p>
 <p><button id="adopt">Adopt the config file</button> <span id="adopt-out" role="status"></span></p>
 <script>
@@ -522,7 +522,7 @@ export function projectBody(
 <form id="detect"><p><label>Repository <input name="repo" placeholder="owner/name" pattern="[A-Za-z0-9\\-]+/[A-Za-z0-9._\\-]+" required></label> <button>Detect</button> <span id="detect-out" role="status"></span></p></form>
 <form id="project" hidden>
 <p id="found"></p>
-<p><label>Zone id <input name="id" placeholder="from the repository name" pattern="[a-z0-9](?:[a-z0-9\\-]{0,61}[a-z0-9])?"></label> <small>lower case letters, digits and dashes; blank takes the repository's name</small></p>
+<p><label>Project id <input name="id" placeholder="from the repository name" pattern="[a-z0-9](?:[a-z0-9\\-]{0,61}[a-z0-9])?"></label> <small>lower case letters, digits and dashes; blank takes the repository's name</small></p>
 <p><label>Stack <select name="preset">${presets}</select></label></p>
 <p><small>For information: drops in this project are expected to reach <span id="hosts"></span>. Egress starts in <strong>monitor</strong>: nothing is blocked, and the doctor shows what drops reached before you enforce a list.</small></p>
 <h4>Checks (gates) every change must pass</h4><div id="gates"></div><p><button type="button" id="add-gate">Add a check</button></p>
@@ -646,7 +646,7 @@ function doctorPage(db: Db, zones: readonly ZoneRef[]): string {
 <p><button id="run">Run the doctor</button> <span id="run-out" role="status"></span></p>
 ${run ? `<p>Run ${run.id} (${escapeHtml(run.finishedAt ?? 'unfinished')}): ${fails ? `${fails} to fix` : 'nothing to fix'}.</p><ul>${rows}</ul>` : ''}
 <p>To have Jumpmaster come back after the host restarts: make Docker start at boot, and run it in the background with <code>docker compose up -d</code> (stopping a foreground <code>up</code> with Ctrl+C keeps it down at the next boot). <a href="${DOC}#start-at-boot"${linkTarget(DOC)}>How, on each host</a>.</p>
-<form method="post" action="/setup/dismiss"><button>Go to the factory floor</button></form>
+<form method="post" action="/setup/dismiss"><button>Go to Home</button></form>
 <script>
 document.getElementById('run').addEventListener('click', async () => {
   const out = document.getElementById('run-out'); out.textContent = 'Running…';

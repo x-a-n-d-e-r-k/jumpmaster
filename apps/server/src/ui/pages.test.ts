@@ -1570,8 +1570,8 @@ describe('zones are named by their repository (#99)', () => {
     const html =
       renderBriefing({ briefing: briefing({ zoneId: 'zid-solo' }), rulings: [], zones }) +
       renderBriefing({ briefing: briefing({ id: 5, zoneId: 'zid-a' }), rulings: [], zones });
-    expect(html).toContain('<th>Zone</th><td>acme/widgets</td>');
-    expect(html).toContain('<th>Zone</th><td>acme/shared <small>(zid-a)</small></td>');
+    expect(html).toContain('<th>Project</th><td>acme/widgets</td>');
+    expect(html).toContain('<th>Project</th><td>acme/shared <small>(zid-a)</small></td>');
     expectNoBareId(html.replaceAll(/href="[^"]*"/g, ''));
   });
 

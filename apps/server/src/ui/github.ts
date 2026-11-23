@@ -382,7 +382,7 @@ export function githubSection(
   const g = guidance.guidance;
   return `${head}
 ${recommendationSection(g.recommendation)}
-<p>This zone runs as ${escapeHtml(zone.identity)}${zone.authorMayBeAdmin ? ' (the author account owns the repository, so it can merge)' : ''}${zone.identity === g.recommendation.identity ? '' : ': not the recommendation above. Changing it changes which tokens and rules it needs'}.</p>
+<p>This project runs as ${escapeHtml(zone.identity)}${zone.authorMayBeAdmin ? ' (the author account owns the repository, so it can merge)' : ''}${zone.identity === g.recommendation.identity ? '' : ': not the recommendation above. Changing it changes which tokens and rules it needs'}.</p>
 ${zone.identity === 'starter' ? tokensSection(g.pat, rolesOf(zone)) : useTokensInstead(tokensSection(g.pat, rolesOf(zone)))}
 ${checklistSection(g.checklist, chip('access'))}
 ${rulesetSection(g.ruleset, g.rulesUrl, zone.identity, chip('ruleset'))}

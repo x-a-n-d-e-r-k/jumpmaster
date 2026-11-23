@@ -74,8 +74,8 @@ const ACTION_WORDS: Record<CardKind, string> = {
   file_issues: 'Filing staged issues',
   briefing: 'Raising a briefing',
   rule: 'Ruling on a briefing',
-  pause: 'Pausing a zone',
-  resume: 'Resuming a zone',
+  pause: 'Pausing a project',
+  resume: 'Resuming a project',
   crew_cycle: 'Running a crew cycle',
   objective_done: 'Marking an objective done',
   queue: 'Work on it',
@@ -226,6 +226,13 @@ const ruleBriefingTool: ChatToolDef = {
 
 const ModeArgs = z.strictObject({ zoneId: ZoneId, mode: z.enum(['active', 'paused']) });
 
+/** A pause or resume card's text, as the chat shows it. */
+export function modeCardSummary(mode: 'active' | 'paused', zoneId: string): string {
+  return mode === 'paused'
+    ? `Paused project ${zoneId}: no new drops start, running ones finish.`
+    : `Resumed project ${zoneId}: it is active again.`;
+}
+
 const setZoneModeTool: ChatToolDef = {
   name: 'set_zone_mode',
   scope: 'chat-write',
@@ -239,13 +246,9 @@ const setZoneModeTool: ChatToolDef = {
       if (!zone) return { out: refused('unknown zone', 'unknown zone') };
       const r = zoneModeAction(actionCtx(ctx, p), zone.id, args.mode);
       if (!r.ok) return failed(r);
-      const words = args.mode === 'paused' ? 'Paused' : 'Resumed';
       return {
         out: ok(`Zone ${zone.id} is now ${r.value.mode}.`),
-        summary:
-          args.mode === 'paused'
-            ? `${words} zone ${zone.id}: no new drops start, running ones finish.`
-            : `${words} zone ${zone.id}: it is active again.`,
+        summary: modeCardSummary(args.mode, zone.id),
         target: zone.id,
         link: zoneLink(zone.id),
       };
@@ -269,7 +272,7 @@ const runCrewCycleTool: ChatToolDef = {
       if (!r.ok) return failed(r);
       return {
         out: ok(`Zone ${zone.id}: a crew cycle is due now.`),
-        summary: `Asked zone ${zone.id}'s crew lead for a cycle now.`,
+        summary: `Asked project ${zone.id}'s crew lead for a cycle now.`,
         target: zone.id,
         link: zoneLink(zone.id),
       };
@@ -341,7 +344,7 @@ const markObjectiveDoneTool: ChatToolDef = {
         out: ok(
           `Objective ${objective.key} is ruled done (briefing ${briefingId}, ruling ${r.value.rulingId}). It applies on the next pass.`,
         ),
-        summary: `Marked objective "${objective.title}" done in zone ${zone.id}. It applies on the next pass.`,
+        summary: `Marked objective "${objective.title}" done in project ${zone.id}. It applies on the next pass.`,
         target: `${OBJECTIVE_PREFIX}${objective.key}`,
         link: briefingLink(briefingId),
       };
@@ -386,7 +389,7 @@ const changeSettingTool: ChatToolDef = {
       if (!store)
         return { out: refused('settings cannot be changed on this install', 'no config store') };
       const zoneId = ctx.zone?.id;
-      const where = zoneId === undefined ? 'for the install' : `in zone ${zoneId}`;
+      const where = zoneId === undefined ? 'for the install' : `in project ${zoneId}`;
       const target = zoneId ?? 'install';
       const before = store.document();
       let patch: unknown;
@@ -564,7 +567,7 @@ const queueIssueTool: ChatToolDef = {
         out: ok(
           `Issue #${args.issue} in zone ${zone.id} now carries ${zone.readyLabel}: intake picks it up on its next pass.`,
         ),
-        summary: `Put ${zone.readyLabel} on issue #${args.issue} in zone ${zone.id}: intake picks it up on its next pass.`,
+        summary: `Put ${zone.readyLabel} on issue #${args.issue} in project ${zone.id}: intake picks it up on its next pass.`,
         target: `issue:${args.issue}`,
         link: issueLink(zone, args.issue),
         undo: { op: 'labels', number: args.issue, label: zone.readyLabel },
@@ -624,7 +627,7 @@ const retryParkedTool: ChatToolDef = {
         out: ok(
           `Issue #${n} (work item ${item.id}) now carries ${zone.retryLabel}: the next pass retries it.`,
         ),
-        summary: `Put ${zone.retryLabel} on issue #${n} in zone ${zone.id}: the next pass retries work item ${item.id}.`,
+        summary: `Put ${zone.retryLabel} on issue #${n} in project ${zone.id}: the next pass retries work item ${item.id}.`,
         target: `issue:${n}`,
         link: issueLink(zone, n),
         undo: { op: 'labels', number: n, label: zone.retryLabel },
@@ -675,7 +678,7 @@ const closeIssueTool: ChatToolDef = {
       auditAction(actionCtx(ctx, p), 'issue.close', { issue: n, opKey }, zone.id);
       return {
         out: ok(`Issue #${n} in zone ${zone.id} is closed.`),
-        summary: `Closed issue #${n} in zone ${zone.id}.`,
+        summary: `Closed issue #${n} in project ${zone.id}.`,
         target: `issue:${n}`,
         link: issueLink(zone, n),
         undo: { op: 'reopen', number: n },
@@ -730,7 +733,7 @@ const proposeGoalChangeTool: ChatToolDef = {
           `Goal change ${r.id} is proposed for zone ${zone.id}. The server opens its pull request on the next pass; it merges only after the owner confirms it in the browser.`,
         ),
         summary:
-          `Proposed a change to ${path} in zone ${zone.id} (goal change ${r.id}): ` +
+          `Proposed a change to ${path} in project ${zone.id} (goal change ${r.id}): ` +
           `${added} lines added, ${removed} removed. A pull request opens on the next pass, and ` +
           `it merges only after you confirm it.\n\n${shown.join('\n')}`,
         target: `goal_change:${r.id}`,
