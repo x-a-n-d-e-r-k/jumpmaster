@@ -49,11 +49,13 @@ import {
 import { plus, t0 } from '../test/helpers.js';
 import { applyCrewActions } from './actions.js';
 import { crewBodySha, flushCrewOps } from './flush.js';
+import { lastHealFeedback } from './inputs.js';
 import {
   applyArbitrations,
   applyCrewResult,
   applyCrewRetries,
   crewMayRetry,
+  crewParkKind,
   foundByAudit,
 } from './results.js';
 import { enqueueCrew, nextCrewWork } from './schedule.js';
@@ -2207,7 +2209,10 @@ describe('the crew acts once on a parked PR on its own diagnosis (#420)', () => 
     | 'no_changes'
     | 'review disagreement'
     | 'heal made no changes (review)'
-    | 'heal blocked (review)';
+    | 'heal blocked (review)'
+    | 'heal failed a gate (CI)'
+    | 'heal failed a gate (review)'
+    | 'heal failed a gate (human)';
 
   const item = (h: Harness) => listWorkItems(h.db, 'main').find((i) => i.id === 1);
   const briefings = (h: Harness) =>
@@ -2274,6 +2279,30 @@ describe('the crew acts once on a parked PR on its own diagnosis (#420)', () => 
     expect(h.queuedRoles()).toEqual(['heal']);
   }
 
+  /** PR at head 1, changes requested by a trusted person: a heal on human feedback. */
+  async function toHumanHeal(h: Harness): Promise<void> {
+    await toPrOpen(h, headN(1));
+    h.forge.state.review({
+      author: 'alice',
+      state: 'CHANGES_REQUESTED',
+      body: 'cover the empty list',
+      commitId: headN(1),
+    });
+    for (let n = 0; n < 5 && !h.queuedRoles().includes('heal'); n++) await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['heal']);
+  }
+
+  const GATE_FAILED = 'gate test failed';
+  /** The heal commits locally, its `test` gate fails, and it pushes nothing (#675). */
+  async function healFailsGate(h: Harness, reason = GATE_FAILED): Promise<void> {
+    await h.finishDrop('heal', {
+      status: 'failed',
+      reason,
+      gates: [{ ...gateOk, exitCode: 1 }],
+    });
+    expect(item(h)).toMatchObject({ state: 'parked', reason });
+  }
+
   /** Two heals that change nothing on the same findings park the item. */
   async function healsNoChanges(h: Harness): Promise<void> {
     await h.finishDrop('heal', { status: 'no_changes', gates: [gateOk] });
@@ -2337,6 +2366,21 @@ describe('the crew acts once on a parked PR on its own diagnosis (#420)', () => 
         await toReviewHeal(h);
         await h.finishDrop('heal', { status: 'blocked', reason: 'blocked', gates: [gateOk] });
         break;
+      case 'heal failed a gate (CI)':
+        h = await ciHarness();
+        await toCiHeal(h);
+        await healFailsGate(h);
+        break;
+      case 'heal failed a gate (review)':
+        h = await plain();
+        await toReviewHeal(h);
+        await healFailsGate(h);
+        break;
+      case 'heal failed a gate (human)':
+        h = await plain();
+        await toHumanHeal(h);
+        await healFailsGate(h);
+        break;
       case 'gate script changed':
         h = await plain();
         await toPrOpen(h, headN(1));
@@ -2377,6 +2421,9 @@ describe('the crew acts once on a parked PR on its own diagnosis (#420)', () => 
     'budget exhausted: base-sync',
     'heal made no changes (CI)',
     'heal blocked (CI)',
+    'heal failed a gate (CI)',
+    'heal failed a gate (review)',
+    'heal failed a gate (human)',
   ];
   const REFUSED: Park[] = [
     'human hold',
@@ -2476,6 +2523,114 @@ describe('the crew acts once on a parked PR on its own diagnosis (#420)', () => 
     const { payload } = await h.lease();
     const prompt = payload.role === 'heal' ? (payload.prompt ?? '') : '';
     expect(prompt).toContain('Pin the registry mirror in images.yml.');
+  });
+
+  describe('a heal that failed a gate without pushing (#675)', () => {
+    const FAILED_GATE: [Park, string][] = [
+      ['heal failed a gate (CI)', 'ci'],
+      ['heal failed a gate (review)', 'review'],
+      ['heal failed a gate (human)', 'human'],
+    ];
+
+    test.each(FAILED_GATE)('%s on an unchanged head → pr', async (park, source) => {
+      const h = await parkedOn(park);
+      expect(lastHealFeedback(h.db, 1)?.source).toBe(source);
+      expect(getPullRequest(h.db, 1)?.headSha).toBe(headN(1));
+      expect(crewParkKind(h.db, h.zone, 1)).toBe('pr');
+    });
+
+    test('the PR head moved since the heal started → null', async () => {
+      const h = await parkedOn('heal failed a gate (review)');
+      const pr = getPullRequest(h.db, 1);
+      upsertPullRequest(h.db, { ...(pr as never), headSha: headN(2) }, h.now());
+      expect(crewParkKind(h.db, h.zone, 1)).toBeNull();
+    });
+
+    test('a crew retry already recorded → null', async () => {
+      const h = await parkedOn('heal failed a gate (review)');
+      insertCrewRetry(h.db, {
+        zoneId: 'main',
+        itemId: 1,
+        briefingId: openBriefing(h)?.id ?? -1,
+        dropId: 'x',
+        diagnosis: 'd',
+        instruction: 'i',
+        createdAt: h.now(),
+      });
+      expect(crewParkKind(h.db, h.zone, 1)).toBeNull();
+    });
+
+    test('the item parked for the heal budget instead → null', async () => {
+      const h = await parkedOn('heal failed a gate (review)');
+      setWorkItemState(h.db, 1, 'parked', 'budget exhausted: heal', h.now());
+      expect(crewParkKind(h.db, h.zone, 1)).toBeNull();
+    });
+
+    test.each(['review', 'human'] as const)(
+      'a %s heal failed on "claude exit 1" → null',
+      async (source) => {
+        const h = await plain();
+        await (source === 'review' ? toReviewHeal(h) : toHumanHeal(h));
+        await healFailsGate(h, 'claude exit 1');
+        expect(crewParkKind(h.db, h.zone, 1)).toBeNull();
+      },
+    );
+
+    test('the PR closed → null', async () => {
+      const h = await parkedOn('heal failed a gate (review)');
+      const pr = getPullRequest(h.db, 1);
+      upsertPullRequest(h.db, { ...(pr as never), state: 'closed' }, h.now());
+      expect(crewParkKind(h.db, h.zone, 1)).toBeNull();
+    });
+
+    test('a diagnose recommending retry → one retry applied, back to pr_open, a new heal queued', async () => {
+      const h = await parkedOn('heal failed a gate (CI)');
+      const raised = openBriefing(h);
+      const instruction = 'Run the empty-list test locally before committing; it fails on [].';
+      await diagnose(h, completed(diag({ instruction })));
+      expect(getCrewRetry(h.db, 1)).toMatchObject({ kind: 'retry', instruction, appliedAt: null });
+      expect(briefings(h).find((b) => b.id === raised?.id)?.state).toBe('withdrawn');
+      await h.reconcile();
+      expect(getCrewRetry(h.db, 1)).toMatchObject({ outcome: 'retried' });
+      expect(item(h)?.state).toBe('pr_open');
+      expect(h.queuedRoles()).toEqual(['heal']);
+      const { payload } = await h.lease();
+      const prompt = payload.role === 'heal' ? (payload.prompt ?? '') : '';
+      expect(prompt).toContain(instruction);
+      expect(openBriefing(h)).toBeUndefined();
+      expect(rows(h)).toBe(1);
+      noRulings(h);
+    });
+
+    test('on review feedback (#628): the retry reviews the head afresh, then heals; no second retry', async () => {
+      const h = await parkedOn('heal failed a gate (review)');
+      const raised = openBriefing(h);
+      await diagnose(h, completed(diag()));
+      expect(getCrewRetry(h.db, 1)).toMatchObject({ kind: 'retry', appliedAt: null });
+      expect(briefings(h).find((b) => b.id === raised?.id)?.state).toBe('withdrawn');
+      await h.reconcile();
+      expect(getCrewRetry(h.db, 1)).toMatchObject({ outcome: 'retried' });
+      expect(item(h)?.state).toBe('pr_open');
+      // As any retry: the stored request-changes on the head is cleared, so it is reviewed again.
+      expect(h.queuedRoles()).toEqual(['review']);
+      await h.finishDrop('review', {
+        status: 'completed',
+        gates: [gateOk],
+        verdict: {
+          decision: 'request_changes',
+          summary: 'no',
+          findings: [{ severity: 'major', detail: 'cover the empty list' }],
+        },
+      });
+      for (let n = 0; n < 5 && !h.queuedRoles().includes('heal'); n++) await h.reconcile();
+      expect(h.queuedRoles()).toEqual(['heal']);
+      expect(openBriefing(h)).toBeUndefined();
+      // The heal fails its gate again: the item parks, and the crew may not retry it a second time.
+      await healFailsGate(h);
+      expect(crewParkKind(h.db, h.zone, 1)).toBeNull();
+      expect(rows(h)).toBe(1);
+      noRulings(h);
+    });
   });
 
   describe('gate changes stay the owner’s', () => {
