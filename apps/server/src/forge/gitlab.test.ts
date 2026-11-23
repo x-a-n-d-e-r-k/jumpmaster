@@ -1,8 +1,8 @@
 import nock from 'nock';
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { ACCESS, type FakeGitLab, fakeGitLab } from '../test/fake-gitlab.js';
-import type { TokenProvider } from './github.js';
-import { GitLabForge, GitLabUnsupportedError } from './gitlab.js';
+import { gitBlobSha, type TokenProvider } from './github.js';
+import { GitLabForge, GitLabForgeError, GitLabUnsupportedError } from './gitlab.js';
 
 const GITLAB = 'https://gitlab.example.com';
 const PROJECT = { id: 77, path: 'group/sub/project', defaultBranch: 'trunk' };
@@ -40,12 +40,12 @@ afterAll(() => {
   nock.enableNetConnect();
 });
 
-function setup() {
+function setup(opts: { fetch?: typeof fetch } = {}) {
   const gl = fakeGitLab({ baseUrl: GITLAB, project: PROJECT });
   fakes.push(gl);
   gl.addUser({ username: 'agent', token: AGENT, accessLevel: ACCESS.developer });
   gl.addUser({ username: 'other', token: OTHER, accessLevel: ACCESS.developer });
-  const forge = new GitLabForge(GITLAB, PROJECT.path, AGENT);
+  const forge = new GitLabForge(GITLAB, PROJECT.path, AGENT, opts);
   return { gl, forge };
 }
 
@@ -313,6 +313,371 @@ describe('no-op and refusals', () => {
     await expect(forge.getPull(1)).rejects.toBeInstanceOf(GitLabUnsupportedError);
     await expect(forge.repoAccess()).rejects.toBeInstanceOf(GitLabUnsupportedError);
     expect(gl.requests).toEqual([]);
+  });
+});
+
+/** A fetch that runs `after` once the first request matching `when` has been answered. */
+function hookedFetch(when: (method: string, url: URL) => boolean, after: () => void): typeof fetch {
+  let fired = false;
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const res = await fetch(input, init);
+    if (!fired && when(init?.method ?? 'GET', new URL(String(input)))) {
+      fired = true;
+      after();
+    }
+    return res;
+  }) as typeof fetch;
+}
+
+const FILES = `${API}/repository/files/`;
+
+describe('repository: branches', () => {
+  test('branchSha returns the head of an existing branch and null for a missing one', async () => {
+    const { gl, forge } = setup();
+    const head = gl.seedCommit({ branch: 'trunk', files: { a: '1' }, message: 'a' });
+    gl.seedBranch('feat/x y', head);
+    expect(await forge.branchSha('trunk')).toBe(head);
+    expect(await forge.branchSha('feat/x y')).toBe(head);
+    expect(await forge.branchSha('nope')).toBeNull();
+    expect(gl.requests.map((r) => r.path)).toEqual([
+      `${API}/repository/branches/trunk`,
+      `${API}/repository/branches/${encodeURIComponent('feat/x y')}`,
+      `${API}/repository/branches/nope`,
+    ]);
+  });
+
+  test('createBranch: new, idempotent on the same SHA, throws on another SHA', async () => {
+    const { gl, forge } = setup();
+    const one = gl.seedCommit({ branch: 'trunk', files: { a: '1' }, message: 'one' });
+    const two = gl.seedCommit({ branch: 'trunk', files: { a: '2' }, message: 'two' });
+    await forge.createBranch('agent/issue-1', one);
+    expect(gl.branchSha('agent/issue-1')).toBe(one);
+    expect(gl.requests.at(-1)).toMatchObject({
+      method: 'POST',
+      path: `${API}/repository/branches`,
+      body: { branch: 'agent/issue-1', ref: one },
+    });
+    await forge.createBranch('agent/issue-1', one);
+    expect(gl.branchSha('agent/issue-1')).toBe(one);
+    expect(gl.commit(one)?.parent_ids).toHaveLength(1);
+    expect(gl.branchSha('trunk')).toBe(two);
+    await expect(forge.createBranch('agent/issue-1', two)).rejects.toThrow(
+      /already exists on another commit/,
+    );
+    expect(gl.branchSha('agent/issue-1')).toBe(one);
+  });
+});
+
+describe('repository: putFile', () => {
+  test('creates a new file and returns the new head', async () => {
+    const { gl, forge } = setup();
+    const before = gl.branchSha('trunk') as string;
+    const { commitSha } = await forge.putFile({
+      branch: 'trunk',
+      path: 'docs/new file.md',
+      content: 'héllo\n',
+      message: 'add',
+      expectBlobSha: null,
+    });
+    expect(commitSha).toBe(gl.branchSha('trunk'));
+    expect(gl.commit(commitSha)?.parent_ids).toEqual([before]);
+    expect(gl.fileAt('trunk', 'docs/new file.md')).toBe('héllo\n');
+    const post = gl.requests.find((r) => r.method === 'POST');
+    expect(post).toMatchObject({
+      path: `${FILES}${encodeURIComponent('docs/new file.md')}`,
+      body: {
+        branch: 'trunk',
+        commit_message: 'add',
+        encoding: 'base64',
+        content: Buffer.from('héllo\n').toString('base64'),
+      },
+    });
+  });
+
+  test('updates with the right expectBlobSha; the SHA is the branch head', async () => {
+    const { gl, forge } = setup();
+    gl.seedCommit({ branch: 'trunk', files: { 'a.txt': 'old' }, message: 'seed' });
+    const { commitSha } = await forge.putFile({
+      branch: 'trunk',
+      path: 'a.txt',
+      content: 'new',
+      message: 'edit',
+      expectBlobSha: gitBlobSha('old'),
+    });
+    expect(commitSha).toBe(await forge.branchSha('trunk'));
+    expect(gl.fileAt('trunk', 'a.txt')).toBe('new');
+    const put = gl.requests.find((r) => r.method === 'PUT');
+    expect((put?.body as { last_commit_id?: string }).last_commit_id).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  test('a wrong expectBlobSha is refused without a PUT', async () => {
+    const { gl, forge } = setup();
+    const head = gl.seedCommit({ branch: 'trunk', files: { 'a.txt': 'old' }, message: 'seed' });
+    await expect(
+      forge.putFile({
+        branch: 'trunk',
+        path: 'a.txt',
+        content: 'new',
+        message: 'edit',
+        expectBlobSha: gitBlobSha('something else'),
+      }),
+    ).rejects.toThrow(/changed/);
+    expect(gl.requests.filter((r) => r.method !== 'GET')).toEqual([]);
+    expect(gl.branchSha('trunk')).toBe(head);
+  });
+
+  test('a file changed between the read and the write is refused by last_commit_id', async () => {
+    let gl: FakeGitLab | undefined;
+    const fetch = hookedFetch(
+      (m, u) => m === 'GET' && u.pathname.startsWith(FILES),
+      () => gl?.seedCommit({ branch: 'trunk', files: { 'a.txt': 'theirs' }, message: 'race' }),
+    );
+    const s = setup({ fetch });
+    gl = s.gl;
+    gl.seedCommit({ branch: 'trunk', files: { 'a.txt': 'old' }, message: 'seed' });
+    const err = (await s.forge
+      .putFile({
+        branch: 'trunk',
+        path: 'a.txt',
+        content: 'mine',
+        message: 'edit',
+        expectBlobSha: gitBlobSha('old'),
+      })
+      .catch((e: unknown) => e)) as GitLabForgeError;
+    expect(err).toBeInstanceOf(GitLabForgeError);
+    expect(err.status).toBe(400);
+    expect(gl.fileAt('trunk', 'a.txt')).toBe('theirs');
+  });
+
+  test('a push between the write and the head read makes putFile throw', async () => {
+    let gl: FakeGitLab | undefined;
+    const fetch = hookedFetch(
+      (m, u) => m === 'PUT' && u.pathname.startsWith(FILES),
+      () => gl?.seedCommit({ branch: 'trunk', files: { 'a.txt': 'new', b: '1' }, message: 'push' }),
+    );
+    const s = setup({ fetch });
+    gl = s.gl;
+    gl.seedCommit({ branch: 'trunk', files: { 'a.txt': 'old' }, message: 'seed' });
+    await expect(
+      s.forge.putFile({
+        branch: 'trunk',
+        path: 'a.txt',
+        content: 'new',
+        message: 'edit',
+        expectBlobSha: gitBlobSha('old'),
+      }),
+    ).rejects.toThrow(/another push/);
+  });
+
+  test('a push before a create also makes putFile throw', async () => {
+    let gl: FakeGitLab | undefined;
+    const fetch = hookedFetch(
+      (m, u) => m === 'GET' && u.pathname.includes('/repository/branches/'),
+      () => gl?.seedCommit({ branch: 'trunk', files: { b: '1' }, message: 'push' }),
+    );
+    const s = setup({ fetch });
+    gl = s.gl;
+    await expect(
+      s.forge.putFile({
+        branch: 'trunk',
+        path: 'a.txt',
+        content: 'new',
+        message: 'add',
+        expectBlobSha: null,
+      }),
+    ).rejects.toThrow(/another push/);
+  });
+
+  test('a missing branch or a missing file to update throws', async () => {
+    const { forge } = setup();
+    const o = { path: 'a.txt', content: 'x', message: 'm' };
+    await expect(forge.putFile({ ...o, branch: 'nope', expectBlobSha: null })).rejects.toThrow(
+      /branch/,
+    );
+    await expect(
+      forge.putFile({ ...o, branch: 'trunk', expectBlobSha: gitBlobSha('x') }),
+    ).rejects.toThrow(/changed/);
+  });
+});
+
+describe('repository: getFileAt and listDir', () => {
+  function seed(gl: FakeGitLab) {
+    return gl.seedCommit({
+      branch: 'trunk',
+      files: {
+        'README.md': 'readme\n',
+        'src/a.ts': 'a',
+        'src/lib/c.ts': 'c',
+        'dir with space/#hash file.txt': 'odd ✓',
+      },
+      message: 'tree',
+    });
+  }
+
+  test("getFileAt: a file's text at a ref, null for a missing file and a directory", async () => {
+    const { gl, forge } = setup();
+    const sha = seed(gl);
+    gl.seedCommit({ branch: 'trunk', files: { 'README.md': 'later' }, message: 'later' });
+    expect(await forge.getFileAt(sha, 'README.md')).toBe('readme\n');
+    expect(await forge.getFileAt('trunk', 'README.md')).toBe('later');
+    expect(await forge.getFileAt(sha, 'nope.md')).toBeNull();
+    expect(await forge.getFileAt(sha, 'src')).toBeNull();
+    expect(await forge.getFileAt(sha, 'dir with space/#hash file.txt')).toBe('odd ✓');
+    expect(gl.requests.at(-1)).toMatchObject({
+      path: `${FILES}${encodeURIComponent('dir with space/#hash file.txt')}`,
+      query: { ref: sha },
+    });
+  });
+
+  test('listDir: names at the root and in a subdirectory, null for a file and a missing path', async () => {
+    const { gl, forge } = setup();
+    const sha = seed(gl);
+    expect(await forge.listDir(sha, '')).toEqual(['dir with space', 'src', 'README.md']);
+    expect(await forge.listDir('trunk', 'src')).toEqual(['lib', 'a.ts']);
+    expect(await forge.listDir(sha, 'dir with space')).toEqual(['#hash file.txt']);
+    expect(await forge.listDir(sha, 'src/a.ts')).toBeNull();
+    expect(await forge.listDir(sha, 'nope')).toBeNull();
+    expect(await forge.listDir('no-such-ref', 'src')).toBeNull();
+    expect(gl.requests[1]).toMatchObject({
+      method: 'GET',
+      path: `${API}/repository/tree`,
+      query: { path: 'src', ref: 'trunk' },
+    });
+    expect(gl.requests[0]?.query).not.toHaveProperty('path');
+  });
+
+  test('listDir: a directory spanning two pages returns every entry', async () => {
+    const { gl, forge } = setup();
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 150; i++) files[`big/f${String(i).padStart(3, '0')}`] = String(i);
+    gl.seedCommit({ branch: 'trunk', files, message: 'big' });
+    const names = await forge.listDir('trunk', 'big');
+    expect(names).toHaveLength(150);
+    expect(names?.[149]).toBe('f149');
+    expect(gl.requests.map((r) => r.query.page)).toEqual(['1', '2']);
+  });
+});
+
+/** trunk: r - m1 - m2 - M(m2, s2) - h ; side: m1 - s1 - s2 ; feature: m1 - f1 - f2 */
+function history(gl: FakeGitLab) {
+  const r = gl.seedCommit({ branch: 'trunk', files: { a: '0' }, message: 'r' });
+  const m1 = gl.seedCommit({ branch: 'trunk', files: { a: '1' }, message: 'm1' });
+  gl.seedBranch('feature', m1);
+  const f1 = gl.seedCommit({ branch: 'feature', files: { a: '1', f: '1' }, message: 'f1' });
+  const f2 = gl.seedCommit({ branch: 'feature', files: { a: '1', f: '2' }, message: 'f2' });
+  const m2 = gl.seedCommit({ branch: 'trunk', files: { a: '2' }, message: 'm2' });
+  const s1 = gl.seedCommit({ parent: m1, files: { a: '1', s: '1' }, message: 's1' });
+  const s2 = gl.seedCommit({ parent: s1, files: { a: '1', s: '2' }, message: 's2' });
+  const merge = gl.seedCommit({
+    branch: 'trunk',
+    parents: [m2, s2],
+    files: { a: '2', s: '2' },
+    message: 'Merge side',
+  });
+  const h = gl.seedCommit({ branch: 'trunk', files: { a: '3', s: '2' }, message: 'h' });
+  return { r, m1, f1, f2, m2, s1, s2, merge, h };
+}
+
+describe('repository: compare and firstParentCommits', () => {
+  test('compare: a branch ahead 2 and behind 1 of the base', async () => {
+    const { gl, forge } = setup();
+    const r = gl.seedCommit({ branch: 'trunk', files: { a: '0' }, message: 'r' });
+    gl.seedBranch('feature', r);
+    gl.seedCommit({ branch: 'feature', files: { a: '0', f: '1' }, message: 'f1' });
+    gl.seedCommit({ branch: 'feature', files: { a: '0', f: '2' }, message: 'f2' });
+    const main = gl.seedCommit({ branch: 'trunk', files: { a: '1' }, message: 'm' });
+    expect(await forge.compare('trunk', 'feature')).toEqual({
+      aheadBy: 2,
+      behindBy: 1,
+      baseSha: main,
+      mergeBaseSha: r,
+    });
+    expect(await forge.compare(main, 'trunk')).toEqual({
+      aheadBy: 0,
+      behindBy: 0,
+      baseSha: main,
+      mergeBaseSha: main,
+    });
+  });
+
+  test('compare on a history with a merge', async () => {
+    const { gl, forge } = setup();
+    const c = history(gl);
+    expect(await forge.compare('feature', 'trunk')).toEqual({
+      aheadBy: 5,
+      behindBy: 2,
+      baseSha: c.f2,
+      mergeBaseSha: c.m1,
+    });
+  });
+
+  test("firstParentCommits: oldest first, skipping a merge's second parent, cut at max", async () => {
+    const { gl, forge } = setup();
+    const c = history(gl);
+    const all = await forge.firstParentCommits(c.m1, c.h, 10);
+    expect(all).toEqual({
+      commits: [
+        { sha: c.m2, message: 'm2' },
+        { sha: c.merge, message: 'Merge side' },
+        { sha: c.h, message: 'h' },
+      ],
+      complete: true,
+    });
+    expect(await forge.firstParentCommits(c.m1, c.h, 2)).toEqual({
+      commits: all.commits.slice(0, 2),
+      complete: true,
+    });
+    expect(await forge.firstParentCommits(c.s1, c.h, 10)).toEqual({ commits: [], complete: false });
+  });
+
+  test('firstParentCommits: base equal to head, an unknown base, and a non-ancestor base', async () => {
+    const { gl, forge } = setup();
+    const c = history(gl);
+    const before = gl.requests.length;
+    expect(await forge.firstParentCommits(c.h, c.h, 10)).toEqual({ commits: [], complete: true });
+    expect(gl.requests.length).toBe(before);
+    expect(await forge.firstParentCommits('0'.repeat(40), c.h, 10)).toEqual({
+      commits: [],
+      complete: false,
+    });
+    expect(await forge.firstParentCommits(c.f2, c.h, 10)).toEqual({
+      commits: [],
+      complete: false,
+    });
+  });
+});
+
+describe('repository: secrets', () => {
+  test('no recorded request carries the token, and a thrown error does not either', async () => {
+    const { gl, forge } = setup();
+    const c = history(gl);
+    await forge.branchSha('trunk');
+    await forge.createBranch('agent/x', c.h);
+    await forge.putFile({
+      branch: 'agent/x',
+      path: 'n.txt',
+      content: 'n',
+      message: 'n',
+      expectBlobSha: null,
+    });
+    await forge.getFileAt('trunk', 'a');
+    await forge.listDir('trunk', '');
+    await forge.compare('feature', 'trunk');
+    await forge.firstParentCommits(c.m1, c.h, 5);
+    for (const r of gl.requests) {
+      expect(r.path).not.toContain(AGENT);
+      expect(JSON.stringify(r.query)).not.toContain(AGENT);
+    }
+    const errors = await Promise.all([
+      forge.createBranch('agent/x', c.m1).catch((e: unknown) => e),
+      new GitLabForge(GITLAB, PROJECT.path, WRONG).branchSha('trunk').catch((e: unknown) => e),
+      new GitLabForge(GITLAB, PROJECT.path, WRONG).compare('a', 'b').catch((e: unknown) => e),
+    ]);
+    for (const e of errors) {
+      expect(e).toBeInstanceOf(GitLabForgeError);
+      expect((e as Error).message).not.toContain(AGENT);
+      expect((e as Error).message).not.toContain(WRONG);
+    }
   });
 });
 

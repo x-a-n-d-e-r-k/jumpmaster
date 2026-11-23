@@ -1,6 +1,7 @@
-// GitLabForge, first slice (issue #676; design spec §5.5, spec §9): the GitLab REST v4 client and
-// the issue, label, comment and viewer methods of `Forge`. Not wired in: GitLab zones are still
-// refused with GITLAB_UNSUPPORTED wherever a forge is built.
+// GitLabForge (design spec §5.5, spec §9): the GitLab REST v4 client with the issue, label, comment
+// and viewer methods of `Forge` (first slice, #676) and the branch, file, directory, compare and
+// first-parent methods (second slice, #683). Not wired in: GitLab zones are still refused with
+// GITLAB_UNSUPPORTED wherever a forge is built.
 //
 // GitLab mapping notes:
 // - An issue's `number` is its project-scoped `iid`, and its body is the `description`.
@@ -9,6 +10,29 @@
 // - `addBlockedBy` is refused with GitLabUnsupportedError and sends no request.
 // - `updateIssue`'s `stateReason` has no GitLab counterpart and is dropped.
 // - `getIssue` never sets `pullRequest`: GitLab numbers issues and merge requests separately.
+// - `branchSha` is `GET repository/branches/:name` (404 gives null). `createBranch` is
+//   `POST repository/branches`; GitLab's 400 for an existing branch is success only when the branch
+//   is already on `fromSha`.
+// - `putFile` differs from GitHub's one compare-and-swap PUT. A new file (`expectBlobSha` null) is
+//   `POST repository/files/:path` after reading the branch head. An update first reads the file at
+//   `branch` (`GET repository/files/:path`), refuses it unwritten when its `blob_id` is not
+//   `expectBlobSha`, then `PUT`s with that read's `last_commit_id`, which GitLab checks so a change
+//   between the read and the write is refused. Content goes base64. The files API does not return
+//   the commit it made, so the branch head is read after the write and returned only when its
+//   first parent is the head seen before the write; otherwise another push landed in between, and
+//   putFile throws (the write may have landed).
+// - `getFileAt` decodes `GET repository/files/:path?ref=` (a directory or a missing file is 404,
+//   giving null).
+// - `listDir` pages `GET repository/tree?path=&ref=`. GitLab answers a path that is a file with an
+//   empty list rather than an error; git has no empty directories, so an empty list (like a 404)
+//   gives null.
+// - `compare` builds GitHub's three-dot compare from `repository/merge_base` (the merge base), two
+//   `repository/compare` calls (each lists the commits on its `to` side since the merge base:
+//   `aheadBy` and `behindBy`) and `repository/commits/:sha` (the resolved base commit).
+// - `firstParentCommits` maps `repository/compare`'s commits (`id`, `message`, `parent_ids`) into
+//   `walkFirstParents`; a 404 (unknown base) gives `complete: false`, as does a base that is not a
+//   first-parent ancestor of head. GitLab's compare is not capped at 250 commits like GitHub's.
+// - Every path segment (branch, file path, ref) is URL-encoded; refs otherwise go in the query.
 // Every other `Forge` method throws GitLabUnsupportedError, naming the method, until a later slice.
 //
 // Secrets: the token goes only in the PRIVATE-TOKEN header, a redirect is never followed, and no
@@ -32,6 +56,7 @@ import {
   type RepoAccess,
   staticTokenProvider,
   type TokenProvider,
+  walkFirstParents,
 } from './github.js';
 import { isHttpsOrigin } from './kind.js';
 
@@ -70,6 +95,14 @@ type RawIssue = {
   labels?: string[];
   author?: RawUser;
   created_at: string;
+};
+type RawCommit = { id: string; parent_ids?: string[]; message?: string };
+type RawFile = {
+  content: string;
+  encoding?: string;
+  blob_id: string;
+  commit_id: string;
+  last_commit_id: string;
 };
 type RawNote = {
   id: number;
@@ -360,6 +393,194 @@ export class GitLabForge implements Forge {
     }
   }
 
+  // --- Repository ----------------------------------------------------------------------------
+
+  /** A branch's head commit, or null when GitLab answers 404. */
+  private async branchHead(branch: string): Promise<RawCommit | null> {
+    try {
+      const b = await this.request<{ commit?: RawCommit }>(
+        'reading a branch',
+        'GET',
+        `/repository/branches/${encodeURIComponent(branch)}`,
+      );
+      if (typeof b?.commit?.id !== 'string')
+        throw new GitLabForgeError('GitLabForge: reading a branch failed: no head commit');
+      return b.commit;
+    } catch (err) {
+      if ((err as GitLabForgeError).status === 404) return null;
+      throw err;
+    }
+  }
+
+  async branchSha(branch: string): Promise<string | null> {
+    return (await this.branchHead(branch))?.id ?? null;
+  }
+
+  /** GitLab answers 400 for a branch that exists: success only when it is on `fromSha`. */
+  async createBranch(name: string, fromSha: string): Promise<void> {
+    try {
+      await this.request('creating a branch', 'POST', '/repository/branches', {
+        branch: name,
+        ref: fromSha,
+      });
+    } catch (err) {
+      if ((err as GitLabForgeError).status !== 400) throw err;
+      if ((await this.branchSha(name)) === fromSha) return;
+      throw new GitLabForgeError(`GitLabForge: branch ${name} already exists on another commit`);
+    }
+  }
+
+  /**
+   * Read-then-write: an update reads the file at `branch`, refuses a blob that is not
+   * `expectBlobSha`, and PUTs with the read's `last_commit_id`, which GitLab checks. The files API
+   * does not return its commit, so the branch head is read after the write and returned only when
+   * its first parent is the head seen before it; otherwise another push landed in between.
+   */
+  async putFile(o: {
+    branch: string;
+    path: string;
+    content: string;
+    message: string;
+    expectBlobSha: string | null;
+  }): Promise<{ commitSha: string }> {
+    const filePath = `/repository/files/${encodeURIComponent(o.path)}`;
+    const body: Record<string, string> = {
+      branch: o.branch,
+      commit_message: o.message,
+      encoding: 'base64',
+      content: Buffer.from(o.content, 'utf8').toString('base64'),
+    };
+    let before: string;
+    if (o.expectBlobSha === null) {
+      const head = await this.branchSha(o.branch);
+      if (head === null)
+        throw new GitLabForgeError(`GitLabForge: branch ${o.branch} not found`, 404);
+      before = head;
+      await this.request('creating a file', 'POST', filePath, body);
+    } else {
+      const file = await this.readFile(o.branch, o.path);
+      if (file === null || file.blob_id !== o.expectBlobSha)
+        throw new GitLabForgeError(`GitLabForge: ${o.path} has changed on ${o.branch}`, 409);
+      before = file.commit_id;
+      await this.request('updating a file', 'PUT', filePath, {
+        ...body,
+        last_commit_id: file.last_commit_id,
+      });
+    }
+    const after = await this.branchHead(o.branch);
+    if (!after || after.parent_ids?.[0] !== before)
+      throw new GitLabForgeError(
+        `GitLabForge: the write to ${o.branch} cannot be confirmed: another push landed on it`,
+      );
+    return { commitSha: after.id };
+  }
+
+  /** The file at `ref` (the JSON form, content base64), or null on 404. */
+  private async readFile(ref: string, path: string): Promise<RawFile | null> {
+    try {
+      const f = await this.request<RawFile>(
+        'reading a file',
+        'GET',
+        `/repository/files/${encodeURIComponent(path)}?${new URLSearchParams({ ref })}`,
+      );
+      if (typeof f?.content !== 'string' || typeof f.commit_id !== 'string')
+        throw new GitLabForgeError('GitLabForge: reading a file failed: unexpected response');
+      return f;
+    } catch (err) {
+      if ((err as GitLabForgeError).status === 404) return null;
+      throw err;
+    }
+  }
+
+  /** A directory is a 404 on GitLab's files API, as is a missing file. */
+  async getFileAt(ref: string, path: string): Promise<string | null> {
+    const f = await this.readFile(ref, path);
+    if (f === null) return null;
+    return f.encoding === 'base64' ? Buffer.from(f.content, 'base64').toString('utf8') : f.content;
+  }
+
+  /** GitLab's tree lists nothing for a file path; git has no empty directories, so empty is null. */
+  async listDir(ref: string, path: string): Promise<string[] | null> {
+    let entries: { name?: unknown }[];
+    try {
+      entries = await this.list<{ name?: unknown }>('listing a directory', '/repository/tree', {
+        ref,
+        path: path === '' ? undefined : path,
+      });
+    } catch (err) {
+      if ((err as GitLabForgeError).status === 404) return null;
+      throw err;
+    }
+    if (entries.length === 0) return null;
+    return entries.map((e) => String(e.name ?? ''));
+  }
+
+  /** GitLab's compare (from the merge base, like GitHub's three dots), or null on 404. */
+  private async compareCommits(from: string, to: string): Promise<RawCommit[] | null> {
+    try {
+      const c = await this.request<{ commits?: unknown }>(
+        'comparing commits',
+        'GET',
+        `/repository/compare?${new URLSearchParams({ from, to, straight: 'false' })}`,
+      );
+      if (!Array.isArray(c?.commits))
+        throw new GitLabForgeError('GitLabForge: comparing commits failed: no commit list');
+      return c.commits as RawCommit[];
+    } catch (err) {
+      if ((err as GitLabForgeError).status === 404) return null;
+      throw err;
+    }
+  }
+
+  /**
+   * GitHub's `base...head` from three GitLab reads: the merge base, the two compares (each lists
+   * the commits on its `to` side since the merge base), and the base commit itself.
+   */
+  async compare(base: string, head: string): Promise<CompareFacts> {
+    const q = new URLSearchParams();
+    q.append('refs[]', base);
+    q.append('refs[]', head);
+    const [mb, ahead, behind, baseCommit] = await Promise.all([
+      this.request<RawCommit>('reading the merge base', 'GET', `/repository/merge_base?${q}`),
+      this.compareCommits(base, head),
+      this.compareCommits(head, base),
+      this.request<RawCommit>(
+        'reading a commit',
+        'GET',
+        `/repository/commits/${encodeURIComponent(base)}`,
+      ),
+    ]);
+    if (ahead === null || behind === null)
+      throw new GitLabForgeError('GitLabForge: comparing commits failed: HTTP 404', 404);
+    return {
+      aheadBy: ahead.length,
+      behindBy: behind.length,
+      baseSha: baseCommit.id,
+      mergeBaseSha: mb.id,
+    };
+  }
+
+  async firstParentCommits(
+    base: string,
+    head: string,
+    max: number,
+  ): Promise<{ commits: { sha: string; message: string }[]; complete: boolean }> {
+    if (base === head) return { commits: [], complete: true };
+    // A 404: the base commit is unknown (history rewritten and collected), nothing to walk.
+    const listed = await this.compareCommits(base, head);
+    if (listed === null) return { commits: [], complete: false };
+    return walkFirstParents(
+      listed.map((c) => ({
+        sha: c.id,
+        commit: { message: c.message ?? '' },
+        parents: (c.parent_ids ?? []).map((sha) => ({ sha })),
+      })),
+      base,
+      head,
+      max,
+    );
+  }
+
   // --- Blocked-by: a no-op and a refusal -----------------------------------------------------
 
   /** GitLab Free has no "blocked by" links: none, nothing unreadable, and no request. */
@@ -387,18 +608,6 @@ export class GitLabForge implements Forge {
   }): Promise<{ number: number; url: string; created: boolean }> {
     throw new GitLabUnsupportedError('findOrCreatePullRequest');
   }
-  async createBranch(_name: string, _fromSha: string): Promise<void> {
-    throw new GitLabUnsupportedError('createBranch');
-  }
-  async putFile(_o: {
-    branch: string;
-    path: string;
-    content: string;
-    message: string;
-    expectBlobSha: string | null;
-  }): Promise<{ commitSha: string }> {
-    throw new GitLabUnsupportedError('putFile');
-  }
   async getPull(_number: number): Promise<PullFacts | null> {
     throw new GitLabUnsupportedError('getPull');
   }
@@ -407,19 +616,6 @@ export class GitLabForge implements Forge {
   }
   async listOpenAgentPulls(_prefix: string): Promise<PullFacts[]> {
     throw new GitLabUnsupportedError('listOpenAgentPulls');
-  }
-  async branchSha(_branch: string): Promise<string | null> {
-    throw new GitLabUnsupportedError('branchSha');
-  }
-  async compare(_base: string, _head: string): Promise<CompareFacts> {
-    throw new GitLabUnsupportedError('compare');
-  }
-  async firstParentCommits(
-    _base: string,
-    _head: string,
-    _max: number,
-  ): Promise<{ commits: { sha: string; message: string }[]; complete: boolean }> {
-    throw new GitLabUnsupportedError('firstParentCommits');
   }
   async listPullFiles(_number: number): Promise<PullFiles> {
     throw new GitLabUnsupportedError('listPullFiles');
@@ -442,9 +638,6 @@ export class GitLabForge implements Forge {
   }
   async getBranchRules(_branch: string): Promise<BranchRulesRead> {
     throw new GitLabUnsupportedError('getBranchRules');
-  }
-  async getFileAt(_ref: string, _path: string): Promise<string | null> {
-    throw new GitLabUnsupportedError('getFileAt');
   }
   async listReviews(_number: number): Promise<ForgeReview[]> {
     throw new GitLabUnsupportedError('listReviews');
@@ -472,9 +665,6 @@ export class GitLabForge implements Forge {
   }
   async ownerType(): Promise<'User' | 'Organization'> {
     throw new GitLabUnsupportedError('ownerType');
-  }
-  async listDir(_ref: string, _path: string): Promise<string[] | null> {
-    throw new GitLabUnsupportedError('listDir');
   }
   async probeReads(_sha: string): Promise<ReadProbe[]> {
     throw new GitLabUnsupportedError('probeReads');
