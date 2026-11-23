@@ -682,6 +682,49 @@ export function fakeGitLab(opts: { baseUrl: string; project: FakeGitLabProject }
   route('POST', /^\/repository\/files\/([^/]+)$/, writeFile(true));
   route('PUT', /^\/repository\/files\/([^/]+)$/, writeFile(false));
 
+  /** `GET repository/tree`: the entries directly under `path` at `ref` (the default branch when
+   *  absent), trees first then blobs, each by name. A missing ref or path is 404; like GitLab, a
+   *  path that names a file lists nothing. */
+  route('GET', /^\/repository\/tree$/, (c) => {
+    const sha = resolve(c.query.get('ref') ?? project.defaultBranch);
+    if (!sha) return err(404, '404 Tree Not Found');
+    const dir = (c.query.get('path') ?? '').replace(/^\/+|\/+$/g, '');
+    const files = commitOf(sha).files;
+    if (dir !== '' && Object.hasOwn(files, dir)) return paged([], c.query);
+    const prefix = dir === '' ? '' : `${dir}/`;
+    const trees = new Set<string>();
+    const blobs: string[] = [];
+    for (const p of Object.keys(files)) {
+      if (!p.startsWith(prefix)) continue;
+      const rest = p.slice(prefix.length);
+      const slash = rest.indexOf('/');
+      if (slash === -1) blobs.push(rest);
+      else trees.add(rest.slice(0, slash));
+    }
+    if (dir !== '' && trees.size === 0 && blobs.length === 0) return err(404, '404 Tree Not Found');
+    const treeId = (path: string) =>
+      createHash('sha1')
+        .update(JSON.stringify({ tree: sha, path }))
+        .digest('hex');
+    const entries = [
+      ...[...trees].sort(byPath).map((name) => ({
+        id: treeId(prefix + name),
+        name,
+        type: 'tree',
+        path: prefix + name,
+        mode: '040000',
+      })),
+      ...blobs.sort(byPath).map((name) => ({
+        id: gitBlobSha(files[prefix + name] as string),
+        name,
+        type: 'blob',
+        path: prefix + name,
+        mode: '100644',
+      })),
+    ];
+    return paged(entries, c.query);
+  });
+
   route('GET', /^\/repository\/commits\/([^/]+)$/, (_c, m) => {
     const sha = resolve(decodeSegment(m[1]));
     return sha ? [200, commitJson(sha)] : err(404, '404 Commit Not Found');
@@ -839,19 +882,28 @@ export function fakeGitLab(opts: { baseUrl: string; project: FakeGitLabProject }
     },
     seedNote: addNote,
     /** Make a commit with the full file snapshot `files`, and return its SHA. With `branch` the
-     *  branch moves to it, and `parent` defaults to the branch's head. */
+     *  branch moves to it, and `parent` defaults to the branch's head; `parents` makes a merge. */
     seedCommit(c: {
       branch?: string;
       parent?: string;
+      /** Every parent, first parent first (a merge commit); overrides `parent`. */
+      parents?: string[];
       files: Record<string, string>;
       message: string;
     }): string {
-      let parent: string | undefined;
-      if (c.parent !== undefined) {
-        parent = resolve(c.parent);
-        if (!parent) throw new Error(`unknown parent ${c.parent}`);
-      } else if (c.branch !== undefined) parent = branches.get(c.branch);
-      const sha = makeCommit(parent ? [parent] : [], c.message, c.files);
+      let parents: string[];
+      const known = (ref: string) => {
+        const sha = resolve(ref);
+        if (!sha) throw new Error(`unknown parent ${ref}`);
+        return sha;
+      };
+      if (c.parents !== undefined) parents = c.parents.map(known);
+      else if (c.parent !== undefined) parents = [known(c.parent)];
+      else {
+        const head = c.branch === undefined ? undefined : branches.get(c.branch);
+        parents = head ? [head] : [];
+      }
+      const sha = makeCommit(parents, c.message, c.files);
       if (c.branch !== undefined) branches.set(c.branch, sha);
       return sha;
     },
