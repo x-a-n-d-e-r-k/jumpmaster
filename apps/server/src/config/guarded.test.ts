@@ -135,7 +135,7 @@ describe('guarded scalar paths', () => {
       { authorMayBeAdmin: true },
       'The author token for web may belong to an admin, who can bypass branch rules',
     ],
-    ['identity', {}, { identity: 'starter' }, `zone web: ${STARTER_WARNING}`],
+    ['identity', {}, { identity: 'starter' }, `project web: ${STARTER_WARNING}`],
     ['ciRequired', {}, { ciRequired: false }, 'Agent PRs in web will merge without CI'],
     [
       'requireBranchProtection',
@@ -563,15 +563,15 @@ describe('githubApp ids (spec §4.2): not secret, but guarded', () => {
     expect(edit({}, app(123, { author: 11, reviewer: 22 })).guarded).toEqual([
       {
         path: 'dropZones[web].githubApp.installations.author',
-        consequence: 'Author tokens for zone web will be minted from installation id 11',
+        consequence: 'Author tokens for project web will be minted from installation id 11',
       },
       {
         path: 'dropZones[web].githubApp.installations.reviewer',
-        consequence: 'Reviewer tokens for zone web will be minted from installation id 22',
+        consequence: 'Reviewer tokens for project web will be minted from installation id 22',
       },
       {
         path: 'dropZones[web].githubApp.repositoryId',
-        consequence: 'Tokens for zone web will be minted for repository id 123',
+        consequence: 'Tokens for project web will be minted for repository id 123',
       },
     ]);
   });
@@ -580,13 +580,13 @@ describe('githubApp ids (spec §4.2): not secret, but guarded', () => {
     expect(edit(app(123, { author: 11 }), app(456, { author: 11 })).guarded).toEqual([
       {
         path: 'dropZones[web].githubApp.repositoryId',
-        consequence: 'Tokens for zone web will be minted for repository id 456',
+        consequence: 'Tokens for project web will be minted for repository id 456',
       },
     ]);
     expect(edit(app(123, { author: 11 }), app(123, { author: 12 })).guarded).toEqual([
       {
         path: 'dropZones[web].githubApp.installations.author',
-        consequence: 'Author tokens for zone web will be minted from installation id 12',
+        consequence: 'Author tokens for project web will be minted from installation id 12',
       },
     ]);
     // An installation id removed on its own.
@@ -594,7 +594,7 @@ describe('githubApp ids (spec §4.2): not secret, but guarded', () => {
       {
         path: 'dropZones[web].githubApp.installations.reviewer',
         consequence:
-          'Reviewer tokens for zone web will no longer be minted from installation id 22: it is removed',
+          'Reviewer tokens for project web will no longer be minted from installation id 22: it is removed',
       },
     ]);
     // The same ids again: nothing to confirm.
@@ -606,12 +606,12 @@ describe('githubApp ids (spec §4.2): not secret, but guarded', () => {
       {
         path: 'dropZones[web].githubApp.installations.author',
         consequence:
-          'Author tokens for zone web will no longer be minted from installation id 11: it is removed',
+          'Author tokens for project web will no longer be minted from installation id 11: it is removed',
       },
       {
         path: 'dropZones[web].githubApp.repositoryId',
         consequence:
-          'Tokens for zone web will no longer be minted for repository id 123: it is removed',
+          'Tokens for project web will no longer be minted for repository id 123: it is removed',
       },
     ]);
   });
@@ -678,12 +678,12 @@ describe('a zone forge (issue #667)', () => {
       {
         path: 'dropZones[new].forge',
         consequence:
-          'Zone new lives on GitLab (forge: gitlab): Jumpmaster will act on its issues and merge requests there',
+          'Project new lives on GitLab (forge: gitlab): Jumpmaster will act on its issues and merge requests there',
       },
       {
         path: 'dropZones[new].gitlab.baseUrl',
         consequence:
-          'Zone new will use the GitLab instance at https://gitlab.example.com (gitlab.baseUrl): the forge tokens will be sent there',
+          'Project new will use the GitLab instance at https://gitlab.example.com (gitlab.baseUrl): the forge tokens will be sent there',
       },
     ]);
   });

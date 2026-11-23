@@ -174,7 +174,7 @@ describe('the advanced settings page, /projects/:id/flags', () => {
     expect(rows.some((row) => row.entry.kind === 'elsewhere')).toBe(true);
     expect(r.body).toContain('Advanced settings · octo/jm');
     expect(r.body).toContain(
-      'Every setting for this zone. Changes apply at the next pass; one that loosens a safeguard asks you to confirm first.',
+      'Every setting for this project. Changes apply at the next pass; one that loosens a safeguard asks you to confirm first.',
     );
     // Group headings in order, only the non-empty ones.
     const heads = [...r.body.matchAll(/<h3 data-group-head="[^"]*">([^<]*)<\/h3>/g)].map(
@@ -185,8 +185,8 @@ describe('the advanced settings page, /projects/:id/flags', () => {
     expect(heads[0]).toBe('Crew');
     expect(r.body).toContain('id="flag-search"');
     // Links both ways.
-    expect(r.body).toContain('<a href="/projects/jm/setup#advanced">View the zone as JSON</a>');
-    expect(r.body).not.toContain('Edit the zone as JSON');
+    expect(r.body).toContain('<a href="/projects/jm/setup#advanced">View the project as JSON</a>');
+    expect(r.body).not.toContain('Edit the project as JSON');
     expect(r.body).not.toContain('the JSON editor');
     expect((await w.get('/projects/jm/setup')).body).toContain(
       'All settings, one per row: <a href="/projects/jm/flags">advanced settings</a>',
@@ -248,13 +248,13 @@ describe('the advanced settings page, /projects/:id/flags', () => {
     // An elsewhere row whose sentence names no section links nowhere.
     expect(rowHtml(html, 'id')).not.toContain('<a ');
     expect(rowHtml(html, 'id')).toContain(
-      'Fixed once the zone exists: remove the zone and add it again to change it.',
+      'Fixed once the project exists: remove the project and add it again to change it.',
     );
     for (const k of ['id', 'repo', 'gates']) expect(rowHtml(html, k)).not.toContain('Reset');
     // Locked: repo refused; image and requireSignedImages browser-forbidden.
     const repo = rowHtml(html, 'repo');
     expect(repo).toMatch(/data-path="repo"[^>]* disabled/);
-    expect(repo).toContain('fixed once the zone exists');
+    expect(repo).toContain('fixed once the project exists');
     for (const k of ['image', 'requireSignedImages']) {
       expect(rowHtml(html, k), k).toMatch(new RegExp(`data-path="${k}"[^>]* disabled`));
       expect(rowHtml(html, k)).toContain(
@@ -282,7 +282,7 @@ describe('the advanced settings page, /projects/:id/flags', () => {
   test('in file mode every control is disabled, there is no Save and the adopt banner shows', async () => {
     const w = await world({ file: true });
     const html = (await w.get('/projects/jm/flags')).body;
-    expect(html).toContain('Your config file holds these zones');
+    expect(html).toContain('Your config file holds these projects');
     expect(html).not.toContain('Save changes');
     expect(html).not.toContain('class="reset"');
     const controls = [...html.matchAll(/<(input|select|textarea)[^>]*data-path="[^"]*"[^>]*>/g)];

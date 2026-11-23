@@ -274,7 +274,7 @@ export async function fileIntakeIssue(
   if (mode !== 'active')
     return {
       status: 409,
-      error: `zone ${zone.id} is ${mode === 'observe' ? 'in observe mode' : mode}: nothing is filed until it is active again`,
+      error: `project ${zone.id} is ${mode === 'observe' ? 'in observe mode' : mode}: nothing is filed until it is active again`,
     };
   let row = existing;
   if (!row) {

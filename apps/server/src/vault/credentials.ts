@@ -55,7 +55,7 @@ export const CREDENTIAL_VARS: Record<InstallCredential, string> = {
 export const CREDENTIAL_ROLES: Record<InstallCredential, string> = {
   claudeToken: 'Claude token (claude setup-token): runs the agent in every drop',
   githubAuthorToken: 'GitHub author token: opens and merges the agent PRs',
-  githubReviewerToken: 'GitHub reviewer token: posts reviews (two-bot zones)',
+  githubReviewerToken: 'GitHub reviewer token: posts reviews (two-bot projects)',
   githubReadToken: 'GitHub read token: lets review drops read a private repository',
   registryReadToken:
     'Registry read token: lets the server mirror the release images from a private registry',

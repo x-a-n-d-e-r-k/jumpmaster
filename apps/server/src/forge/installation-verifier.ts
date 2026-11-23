@@ -120,7 +120,9 @@ export function createInstallationVerifier(deps: InstallationVerifierDeps): Inst
     async verifiedInstallation(zone, role) {
       const refuse = (why: string) => new InstallationCheckError(`${zone.id}: ${why}`, true);
       if ((zone.identity ?? 'two-bot') !== 'two-bot')
-        throw refuse(`${zone.repo} is a starter zone: it uses personal access tokens, not an app`);
+        throw refuse(
+          `${zone.repo} is a starter project: it uses personal access tokens, not an app`,
+        );
       const apps = deps.resolvedApps();
       const resolution = credentialFor(zone, role, apps);
       if (resolution.ref.kind !== 'github-app')
@@ -130,7 +132,8 @@ export function createInstallationVerifier(deps: InstallationVerifierDeps): Inst
       const owner = resolution.ref.owner;
       // Absence is not proof: nothing recorded is nothing verified.
       const recorded = appInstallationFor(zone, role);
-      if (!recorded) throw refuse(`the zone records no ${role} app installation for ${zone.repo}`);
+      if (!recorded)
+        throw refuse(`the project records no ${role} app installation for ${zone.repo}`);
       const slot = deps.brokerFor(owner, role);
       if (!slot) throw refuse(`the owner of ${zone.repo} has no ${role} GitHub App`);
 

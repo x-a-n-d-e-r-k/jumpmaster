@@ -33,7 +33,7 @@ import {
 } from './github.js';
 import { linkTarget, SYSTEM_HREF } from './links.js';
 import { breadcrumb, escapeHtml, page } from './pages.js';
-import { type ZoneRef, zoneName, zoneNamer } from './zone-name.js';
+import { projectWords, type ZoneRef, zoneName, zoneNamer } from './zone-name.js';
 
 /**
  * The setup wizard (§10.3, M4.5): after the passphrase, five steps, each a thin frame over a
@@ -486,7 +486,7 @@ function projectPage(store: ConfigStore, wizard: Wizard): string {
     const zones = store.current().dropZones;
     return frame(
       'project',
-      `<h3>Your project</h3><p>Your config file holds ${zones.length} zone${zones.length === 1 ? '' : 's'}${zones.length ? `: ${zones.map((z) => zoneName(z, zones)).join(', ')}` : ''}. In file mode the file is the config: edit it and run <code>jumpmaster ctl config reload</code>.</p>
+      `<h3>Your project</h3><p>Your config file holds ${zones.length} project${zones.length === 1 ? '' : 's'}${zones.length ? `: ${zones.map((z) => zoneName(z, zones)).join(', ')}` : ''}. In file mode the file is the config: edit it and run <code>jumpmaster ctl config reload</code>.</p>
 <p>To manage the config here instead, adopt it: the file's contents become the first revision in the database, and from then on this page and <code>jumpmaster ctl config</code> change it. <code>jumpmaster ctl config mode file</code> goes back.</p>
 <p><button id="adopt">Adopt the config file</button> <span id="adopt-out" role="status"></span></p>
 <script>
@@ -522,7 +522,7 @@ export function projectBody(
 <form id="detect"><p><label>Repository <input name="repo" placeholder="owner/name" pattern="[A-Za-z0-9\\-]+/[A-Za-z0-9._\\-]+" required></label> <button>Detect</button> <span id="detect-out" role="status"></span></p></form>
 <form id="project" hidden>
 <p id="found"></p>
-<p><label>Zone id <input name="id" placeholder="from the repository name" pattern="[a-z0-9](?:[a-z0-9\\-]{0,61}[a-z0-9])?"></label> <small>lower case letters, digits and dashes; blank takes the repository's name</small></p>
+<p><label>Project id <input name="id" placeholder="from the repository name" pattern="[a-z0-9](?:[a-z0-9\\-]{0,61}[a-z0-9])?"></label> <small>lower case letters, digits and dashes; blank takes the repository's name</small></p>
 <p><label>Stack <select name="preset">${presets}</select></label></p>
 <p><small>For information: drops in this project are expected to reach <span id="hosts"></span>. Egress starts in <strong>monitor</strong>: nothing is blocked, and the doctor shows what drops reached before you enforce a list.</small></p>
 <h4>Checks (gates) every change must pass</h4><div id="gates"></div><p><button type="button" id="add-gate">Add a check</button></p>
@@ -628,6 +628,23 @@ async function createZone(zone, resume, out) {
 </script>`;
 }
 
+/**
+ * A doctor fix as HTML: escaped, with each ctl command (`jumpmaster ctl …`, up to the end of its
+ * sentence or a bracket) and each API call (`POST /api/…`) set as code, since those keep their own
+ * words. It matches on the raw text and escapes each piece, so an entity is never cut in half.
+ */
+export const fixHtml = (fix: string): string => {
+  const pattern =
+    /\bjumpmaster ctl [^\n;()]*?(?=\.(?:\s|$)|[;\n()]|$)|\b(?:(?:GET|POST|PUT|PATCH|DELETE) )?\/api\/[^\s()]*[^\s().,;:]/g;
+  let out = '';
+  let last = 0;
+  for (const m of fix.matchAll(pattern)) {
+    out += `${escapeHtml(fix.slice(last, m.index))}<code>${escapeHtml(m[0])}</code>`;
+    last = m.index + m[0].length;
+  }
+  return out + escapeHtml(fix.slice(last));
+};
+
 function doctorPage(db: Db, zones: readonly ZoneRef[]): string {
   const name = zoneNamer(zones);
   const run = latestDoctorRun(db);
@@ -636,7 +653,7 @@ function doctorPage(db: Db, zones: readonly ZoneRef[]): string {
   const rows = checks
     .map(
       (c) =>
-        `<li class="${c.status}"><strong>${c.status.toUpperCase()}</strong> ${c.zoneId ? name(c.zoneId) : ''} <code>${escapeHtml(c.id)}</code>: ${escapeHtml(c.summary)}${c.status !== 'pass' && c.fix ? `<br><small>Fix: ${escapeHtml(c.fix)}</small>` : ''}${c.status !== 'pass' && c.doc ? ` <a href="${escapeHtml(c.doc)}"${linkTarget(c.doc)}>how</a>` : ''}</li>`,
+        `<li class="${c.status}"><strong>${c.status.toUpperCase()}</strong> ${c.zoneId ? name(c.zoneId) : ''} <code>${escapeHtml(c.id)}</code>: ${escapeHtml(c.summary)}${c.status !== 'pass' && c.fix ? `<br><small>Fix: ${fixHtml(c.id === 'config.file' ? projectWords(c.fix) : c.fix)}</small>` : ''}${c.status !== 'pass' && c.doc ? ` <a href="${escapeHtml(c.doc)}"${linkTarget(c.doc)}>how</a>` : ''}</li>`,
     )
     .join('');
   const fails = checks.filter((c) => c.status === 'fail').length;
@@ -646,7 +663,7 @@ function doctorPage(db: Db, zones: readonly ZoneRef[]): string {
 <p><button id="run">Run the doctor</button> <span id="run-out" role="status"></span></p>
 ${run ? `<p>Run ${run.id} (${escapeHtml(run.finishedAt ?? 'unfinished')}): ${fails ? `${fails} to fix` : 'nothing to fix'}.</p><ul>${rows}</ul>` : ''}
 <p>To have Jumpmaster come back after the host restarts: make Docker start at boot, and run it in the background with <code>docker compose up -d</code> (stopping a foreground <code>up</code> with Ctrl+C keeps it down at the next boot). <a href="${DOC}#start-at-boot"${linkTarget(DOC)}>How, on each host</a>.</p>
-<form method="post" action="/setup/dismiss"><button>Go to the factory floor</button></form>
+<form method="post" action="/setup/dismiss"><button>Go to Home</button></form>
 <script>
 document.getElementById('run').addEventListener('click', async () => {
   const out = document.getElementById('run-out'); out.textContent = 'Running…';

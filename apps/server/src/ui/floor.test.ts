@@ -134,7 +134,7 @@ test("a stored doctor run's failing project check reaches Home's Needs you; a wa
   const checks = needs.match(/<li class="needs-row" data-kind="check">.*?<\/li>/g) ?? [];
   expect(checks).toEqual([
     expect.stringContaining(
-      'octo/shadow: 1 failing check (zone.labels) <a href="/system">Fix in System</a>',
+      'octo/shadow: 1 failing check (<code>zone.labels</code>) <a href="/system">Fix in System</a>',
     ),
   ]);
   expect(needs).not.toContain('zone.warned');
@@ -646,8 +646,8 @@ describe('Home (#625)', () => {
     );
     const rows = needsOf(html).match(/<li class="needs-row".*?<\/li>/g) ?? [];
     expect(rows).toHaveLength(2);
-    expect(rows[0]).toContain('octo/A: 2 failing checks (one, three)');
-    expect(rows[1]).toContain('octo/B: 1 failing check (two)');
+    expect(rows[0]).toContain('octo/A: 2 failing checks (<code>one</code>, <code>three</code>)');
+    expect(rows[1]).toContain('octo/B: 1 failing check (<code>two</code>)');
   });
 
   test('Needs you lists the first NEEDS_CAP rows, ranked, then "Show all"; with needsAll, every row', () => {

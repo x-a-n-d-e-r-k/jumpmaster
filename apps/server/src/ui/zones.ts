@@ -111,7 +111,7 @@ const scriptJson = (v: unknown): string =>
 const html = (req: FastifyRequest, reply: FastifyReply, body: string, code = 200) =>
   reply.code(code).type('text/html; charset=utf-8').send(withCsrf(req, body));
 
-const ADOPT_BANNER = `<div class="warn"><p><strong>Your config file holds these zones.</strong> In file mode the file is the config: edit it and run <code>jumpmaster ctl config reload</code>. To change zones here instead, adopt it into the database (<code>jumpmaster ctl config mode file</code> goes back).</p><p><button id="adopt">Adopt the config file</button> <span id="adopt-out" role="status"></span></p></div>
+const ADOPT_BANNER = `<div class="warn"><p><strong>Your config file holds these projects.</strong> In file mode the file is the config: edit it and run <code>jumpmaster ctl config reload</code>. To change projects here instead, adopt it into the database (<code>jumpmaster ctl config mode file</code> goes back).</p><p><button id="adopt">Adopt the config file</button> <span id="adopt-out" role="status"></span></p></div>
 <script>
 document.getElementById('adopt').addEventListener('click', async () => {
   const r = await jmFetch('/api/control/config/adopt', {});
@@ -186,7 +186,7 @@ function listPage(store: ConfigStore, db: Db): string {
   return page(
     `<h2>Projects</h2><p>A project is one repository Jumpmaster works on.</p>
 ${fileMode ? ADOPT_BANNER : `<p><a href="${PROJECTS_HREF}/new">Add a project</a></p>`}
-<table><tr><th>Project</th><th>Mode</th><th>Stack</th><th>Egress</th><th>Accounts</th><th>Last drop</th><th>Doctor fails</th><th>Needs</th><th></th></tr>${rows || '<tr><td colspan="9">No zones yet.</td></tr>'}</table>
+<table><tr><th>Project</th><th>Mode</th><th>Stack</th><th>Egress</th><th>Accounts</th><th>Last drop</th><th>Doctor fails</th><th>Needs</th><th></th></tr>${rows || '<tr><td colspan="9">No projects yet.</td></tr>'}</table>
 <p id="mode-out" role="status"></p><p id="stop-out" role="status"></p>
 <script>
 ${STOP_SCRIPT}
@@ -239,7 +239,7 @@ const SETUP_SECTIONS = [
   ['egress', 'Egress'],
   ['merging', 'Merging'],
   ['advanced', 'Advanced'],
-  ['danger', 'Danger zone'],
+  ['danger', 'Danger area'],
 ] as const;
 
 const SETUP_STYLE = `<style>.setup-layout{display:grid;grid-template-columns:13rem minmax(0,1fr);gap:2rem;align-items:start}.setup-nav{position:sticky;top:4.5rem}.setup-nav ul{list-style:none;padding:0;margin:0}.setup-nav a{display:block;padding:.25rem .5rem}.setup-jump{display:none}.setup-section{scroll-margin-top:4.5rem}#setup-form>fieldset{border:0;padding:0;margin:0;min-width:0}.save-bar{position:sticky;bottom:0;z-index:1;display:flex;flex-wrap:wrap;gap:.75rem;align-items:center;padding:.75rem 0;background:var(--bg-white-0);border-top:1px solid var(--stroke-soft-200)}.save-bar #save-out{flex:1}.danger-zone{margin-top:2rem;padding:0 1rem 1rem;border-radius:12px;box-shadow:inset 0 0 0 1px var(--error-base)}@media (max-width:899.98px){.setup-layout{display:block}.setup-nav{display:none}.setup-jump{display:block;position:sticky;top:4.5rem;z-index:1;margin:0 0 1rem}}</style>`;
@@ -516,7 +516,8 @@ function overviewPage(
         `<li><a href="/briefings/${encodeURIComponent(String(b.id))}">${escapeHtml(b.decision)}</a></li>`,
     ),
     ...failing.map(
-      (c) => `<li><a href="${SYSTEM_HREF}">${escapeHtml(c.id)}</a>: ${escapeHtml(c.summary)}</li>`,
+      (c) =>
+        `<li><a href="${SYSTEM_HREF}"><code>${escapeHtml(c.id)}</code></a>: ${escapeHtml(c.summary)}</li>`,
     ),
   ];
   const needsYou = `<section id="needs-you"><h3>Needs you</h3>${
@@ -626,19 +627,19 @@ function setupPage(
     if (resolved.preset && PRESET_EGRESS[resolved.preset].includes(host))
       return `the ${resolved.preset} preset`;
     if (own.some((e) => e === host || (e.startsWith('*.') && host.endsWith(e.slice(1)))))
-      return "this zone's allow list";
+      return "this project's allow list";
     return undefined;
   };
   const adoptControls = readOnly
     ? ''
     : egressMode === 'off'
-      ? '<p><small>Egress is off for this zone, so no allow list is used: set the mode to monitor or enforce before adopting hosts.</small></p>'
-      : '<p><button type="button" id="adopt-ticked">Adopt ticked</button> <small>Each host you tick is added to the allow list: drops will be able to send data to it, so it asks for confirmation. Each host was reached by one of this zone\'s drops, and a drop that misbehaved may have reached it: adopt only hosts you recognise.</small></p>';
+      ? '<p><small>Egress is off for this project, so no allow list is used: set the mode to monitor or enforce before adopting hosts.</small></p>'
+      : '<p><button type="button" id="adopt-ticked">Adopt ticked</button> <small>Each host you tick is added to the allow list: drops will be able to send data to it, so it asks for confirmation. Each host was reached by one of this project\'s drops, and a drop that misbehaved may have reached it: adopt only hosts you recognise.</small></p>';
   const observed = seen.length
     ? `<table><tr><th>Host</th><th>Decision</th><th>Connections</th><th>Drops</th><th>Listed</th><th>Adopt</th></tr>${seen
         .map((h) => {
           const by = listedBy(h.host);
-          return `<tr><td>${escapeHtml(h.host)}</td><td>${escapeHtml(h.decision)}</td><td>${formatCount(h.count)}</td><td>${dropsCell(id, h.drops)}</td><td>${by ? `listed by ${escapeHtml(by)}` : `<strong>${escapeHtml("not in this zone's lists")}</strong>`}</td><td>${by ? '-' : `<input type="checkbox" name="adopt" value="${escapeHtml(h.host)}">`}</td></tr>`;
+          return `<tr><td>${escapeHtml(h.host)}</td><td>${escapeHtml(h.decision)}</td><td>${formatCount(h.count)}</td><td>${dropsCell(id, h.drops)}</td><td>${by ? `listed by ${escapeHtml(by)}` : `<strong>${escapeHtml("not in this project's lists")}</strong>`}</td><td>${by ? '-' : `<input type="checkbox" name="adopt" value="${escapeHtml(h.host)}">`}</td></tr>`;
         })
         .join('')}</table>${adoptControls}`
     : '<p>Nothing observed yet.</p>';
@@ -689,12 +690,12 @@ ${field('overrideApprovers', 'Override approvers (logins)', textarea(f, 'overrid
   const advanced = setupSection(
     'advanced',
     'Advanced',
-    `<p>Zone id: <code>${escapeHtml(id)}</code> <small>(the zone's key in URLs, the API and <code>jumpmaster ctl</code>)</small></p><p>The zone as stored, as JSON: models, budgets, crew and every other setting. It is read-only here.</p><p>All settings, one per row: <a href="${projectHref(id, 'flags')}">advanced settings</a> <small>(edit them there)</small></p><div id="goals"></div><div id="crew"></div><textarea id="zone-json" readonly rows="24" cols="90" aria-label="The zone as JSON">${escapeHtml(JSON.stringify(raw, null, 2))}</textarea><span class="issue" data-issues="advanced"></span>`,
+    `<p>Project id: <code>${escapeHtml(id)}</code> <small>(the project's key in URLs, the API and <code>jumpmaster ctl</code>)</small></p><p>The project as stored, as JSON: models, budgets, crew and every other setting. It is read-only here.</p><p>All settings, one per row: <a href="${projectHref(id, 'flags')}">advanced settings</a> <small>(edit them there)</small></p><div id="goals"></div><div id="crew"></div><textarea id="zone-json" readonly rows="24" cols="90" aria-label="The project as JSON">${escapeHtml(JSON.stringify(raw, null, 2))}</textarea><span class="issue" data-issues="advanced"></span>`,
   );
   const repo = String(raw.repo);
   const name = zoneNameText(resolved, all);
   const confirmText = `Jumpmaster takes no new work for ${escapeHtml(name)} and sets it to observe, then removes it as soon as its running drops, pending pushes and outbox writes have finished. Open pull requests are left as they are. Its history is kept, for a later Resume.`;
-  const danger = `<section id="danger" class="setup-section danger-zone"><h3>Danger zone</h3>${
+  const danger = `<section id="danger" class="setup-section danger-zone"><h3>Danger area</h3>${
     stopping
       ? `<p><strong>${escapeHtml(stopping)}</strong> <small>Resume or Pause from the Projects list withdraws it.</small></p>`
       : readOnly
@@ -765,7 +766,7 @@ export function registerZonesPages(
   app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id`, async (req, reply) => {
     const at = now();
     const body = overviewPage(store, db, req.params.id, at, deps.floor?.(at));
-    if (!body) return reply.code(404).type('text/plain').send('no such zone');
+    if (!body) return reply.code(404).type('text/plain').send('no such project');
     return html(req, reply, body);
   });
   app.get<{ Params: { id: string } }>(`${PROJECTS_HREF}/:id/setup`, async (req, reply) => {
@@ -777,7 +778,7 @@ export function registerZonesPages(
         ? await deps.github(config, zone, req.query, run ? run.checks : null)
         : '';
     const body = setupPage(store, db, req.params.id, now(), github);
-    if (!body) return reply.code(404).type('text/plain').send('no such zone');
+    if (!body) return reply.code(404).type('text/plain').send('no such project');
     return html(req, reply, body);
   });
   // A zone's advanced settings: every setting of the catalog, one per row (issue #322).
@@ -792,7 +793,7 @@ export function registerZonesPages(
         forbiddenNote: FORBIDDEN_NOTE,
         ...(saved === undefined ? {} : { saved }),
       });
-      if (!body) return reply.code(404).type('text/plain').send('no such zone');
+      if (!body) return reply.code(404).type('text/plain').send('no such project');
       return html(req, reply, body);
     },
   );

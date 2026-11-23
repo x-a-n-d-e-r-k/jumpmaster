@@ -607,7 +607,7 @@ describe('usage holds (round 2, I1 and I2)', () => {
       NOW,
     );
     expect(capability.headline).toBe(
-      'Queued: 1 issue; no stick can run zone main: no live stick has egress-v1',
+      'Queued: 1 issue; no stick can run project main: no live stick has egress-v1',
     );
     expect(capability.waitingOn).toBe('stick');
     const busy = statusOf(
@@ -844,7 +844,7 @@ describe('zones named by a namer (#99)', () => {
       [base({ outboxRetrying: [outbox()] }), /^Retrying a GitHub call: merge in octo\/demo$/],
       [
         base({ zones: [zone({ items, drops: queued, cannotRun: 'no live stick has x' })] }),
-        /no stick can run zone octo\/demo:/,
+        /no stick can run project octo\/demo:/,
       ],
     ];
     for (const [input, headline] of cases)

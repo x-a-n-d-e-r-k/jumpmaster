@@ -151,8 +151,8 @@ function appId(path: string, minted: string, preposition: string): GuardedPath {
     weakens: (from, to) => from !== to,
     consequence: (from, to, ctx) =>
       to === undefined
-        ? `${minted} for zone ${zoneOf(ctx)} will no longer be minted ${preposition} ${String(from)}: it is removed`
-        : `${minted} for zone ${zoneOf(ctx)} will be minted ${preposition} ${String(to)}`,
+        ? `${minted} for project ${zoneOf(ctx)} will no longer be minted ${preposition} ${String(from)}: it is removed`
+        : `${minted} for project ${zoneOf(ctx)} will be minted ${preposition} ${String(to)}`,
   };
 }
 
@@ -172,7 +172,7 @@ export const GUARDED_PATHS: GuardedPath[] = [
     (ctx) =>
       `The author token for ${zoneOf(ctx)} may belong to an admin, who can bypass branch rules`,
   ),
-  becomes('dropZones[].identity', 'starter', (ctx) => `zone ${zoneOf(ctx)}: ${STARTER_WARNING}`),
+  becomes('dropZones[].identity', 'starter', (ctx) => `project ${zoneOf(ctx)}: ${STARTER_WARNING}`),
   becomes(
     'dropZones[].ciRequired',
     false,
@@ -359,7 +359,7 @@ export const REFUSED_PATHS: RefusedPath[] = [
     onAdd: (to, ctx) =>
       to === undefined
         ? undefined
-        : `Zone ${zoneOf(ctx)} lives on ${to === 'gitlab' ? 'GitLab' : 'GitHub'} (forge: ${String(to)}): Jumpmaster will act on its issues and merge requests there`,
+        : `Project ${zoneOf(ctx)} lives on ${to === 'gitlab' ? 'GitLab' : 'GitHub'} (forge: ${String(to)}): Jumpmaster will act on its issues and merge requests there`,
   },
   {
     path: 'dropZones[].gitlab.baseUrl',
@@ -368,7 +368,7 @@ export const REFUSED_PATHS: RefusedPath[] = [
     onAdd: (to, ctx) =>
       to === undefined
         ? undefined
-        : `Zone ${zoneOf(ctx)} will use the GitLab instance at ${String(to)} (gitlab.baseUrl): the forge tokens will be sent there`,
+        : `Project ${zoneOf(ctx)} will use the GitLab instance at ${String(to)} (gitlab.baseUrl): the forge tokens will be sent there`,
   },
 ];
 

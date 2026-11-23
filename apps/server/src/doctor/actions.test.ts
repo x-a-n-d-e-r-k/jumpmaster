@@ -83,6 +83,9 @@ describe('where each fail leads', () => {
     });
     expect(actionFor(fail('zone.mode'), { zone, pages: all })?.href).toBe('/projects');
     expect(actionFor(fail('zone.mode'), { zone, pages: PAGES_M45A })?.href).toBe('/');
+    expect(actionFor(fail('zone.mode'), { zone, pages: PAGES_M45A })?.label).toBe(
+      'Open Home (project modes)',
+    );
     const odd = makeZone({ id: 'a b<c', repo: 'octo/x' });
     expect(actionFor(fail('zone.preset'), { zone: odd, pages: all })?.href).toBe(
       // The zone page's Stack section holds the preset (Task 11).

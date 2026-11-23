@@ -25,7 +25,7 @@ import type {
   WorkItemState,
 } from '../db/repo.js';
 import { ACTIVE_DROP_STATES } from '../db/repo.js';
-import type { DoctorAction } from '../doctor/checks.js';
+import { CHECK_IDS, type DoctorAction } from '../doctor/checks.js';
 import { fableWindow, isFableWindow, modelFamily, PER_MODEL_WINDOWS } from '../fable.js';
 import type { GoalChange } from '../goal-change.js';
 import { currentObjective, type GoalRow } from '../goals.js';
@@ -63,7 +63,14 @@ import {
 } from './links.js';
 import { STYLE } from './theme.js';
 import { relativeTime } from './time.js';
-import { type ZoneRef, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
+import {
+  projectWords,
+  type ZoneRef,
+  zoneName,
+  zoneNamer,
+  zoneNameText,
+  zoneTextNamer,
+} from './zone-name.js';
 
 export const escapeHtml = (v: unknown): string =>
   String(v)
@@ -453,7 +460,7 @@ function briefingBlock(b: Briefing, ctx: BlockContext, heading: 'h3' | 'h4' = 'h
   return (
     `<div class="briefing" id="briefing-${escapeHtml(b.id)}">` +
     `<${heading}>${text(b.decision)}</${heading}>` +
-    `<table><tr><th>Briefing</th><td><a href="/briefings/${escapeHtml(b.id)}">${escapeHtml(b.id)}</a></td></tr><tr><th>Zone</th><td>${ctx.name(b.zoneId)}</td></tr>${row('Kind', b.kind)}<tr><th>About</th><td>${aboutHtml(about)}</td></tr>${pre('Why', b.why)}${pre('Diagnosis', b.diagnosis)}${rich('Recommendation', b.recommendation)}${rich('On hold', b.onHold)}${row('Raised by', b.source === 'mcp' ? 'assistant (MCP)' : b.source)}${row('Raised', b.createdAt)}</table>` +
+    `<table><tr><th>Briefing</th><td><a href="/briefings/${escapeHtml(b.id)}">${escapeHtml(b.id)}</a></td></tr><tr><th>Project</th><td>${ctx.name(b.zoneId)}</td></tr>${row('Kind', b.kind)}<tr><th>About</th><td>${aboutHtml(about)}</td></tr>${pre('Why', b.why)}${pre('Diagnosis', b.diagnosis)}${rich('Recommendation', b.recommendation)}${rich('On hold', b.onHold)}${row('Raised by', b.source === 'mcp' ? 'assistant (MCP)' : b.source)}${row('Raised', b.createdAt)}</table>` +
     (hold ? `<p>Promotes at ${escapeHtml(hold)} unless you reject it.</p>` : '') +
     form +
     '</div>'
@@ -1049,14 +1056,14 @@ export function zoneProblemsSection(
   const name = zoneNamer(zones);
   const list =
     problems.length === 0
-      ? '<p>No zone is missing a credential it needs.</p>'
+      ? '<p>No project is missing a credential it needs.</p>'
       : `<ul class="problems">${problems
           .map(
             (p) =>
               `<li><strong>${name(p.zoneId)}</strong> (${escapeHtml(p.credential)}, ${escapeHtml(p.kind)}): ${escapeHtml(p.message)}</li>`,
           )
           .join('')}</ul>`;
-  return `<h3>Zone problems</h3>${list}`;
+  return `<h3>Project problems</h3>${list}`;
 }
 
 /** The Activity area's pages (#622), in its sub-nav's order. */
@@ -1255,7 +1262,7 @@ function gateMarks(drop: Drop): string {
 }
 /** The work-item ledger's header row, on Activity's Work. */
 export const WORK_HEAD =
-  '<tr><th>Zone</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>';
+  '<tr><th>Project</th><th>Issue</th><th>Title</th><th>State</th><th>Reason</th><th>PR</th><th>Head</th><th>Verdict</th><th>Attempts</th></tr>';
 
 /** The drop ledger's header row, on /drops. */
 export const DROP_HEAD =
@@ -1698,9 +1705,28 @@ function pipelineSection(state: HomeState, now: Date): string {
   return `<section id="pipeline" class="card"><h2>Pipeline</h2><nav class="totals" aria-label="Pipeline">${tiles}</nav></section>`;
 }
 
-/** Plain status text as HTML: escaped, with `code` in backticks rendered as <code>. */
-const codeHtml = (text: string): string =>
-  escapeHtml(text).replace(/`([^`]+)`/g, '<code>$1</code>');
+/** A doctor check id as a whole word (the longest first, so no id stops inside a longer one). */
+const CHECK_ID_WORD = new RegExp(
+  `(?<![\\w.-])(${[...CHECK_IDS]
+    .sort((a, b) => b.length - a.length)
+    .map((id) => id.replace(/[\\^$.*+?()[\]{}|-]/g, '\\$&'))
+    .join('|')})(?![\\w-]|\\.\\w)`,
+  'g',
+);
+
+/**
+ * Plain status text as HTML: escaped, with `code` in backticks rendered as <code>, and each doctor
+ * check id (an identifier such as `zone.mode`, as `ctl status` prints it) set as code too.
+ */
+export const codeHtml = (text: string): string =>
+  escapeHtml(text)
+    .split(/(`[^`]+`)/)
+    .map((part) =>
+      part.startsWith('`') && part.endsWith('`') && part.length > 1
+        ? `<code>${part.slice(1, -1)}</code>`
+        : part.replace(CHECK_ID_WORD, '<code>$1</code>'),
+    )
+    .join('');
 
 /**
  * The status line: the headline, the detail behind it, every other blocker as a short item with
@@ -2490,19 +2516,19 @@ export function renderDoctor(
       const help =
         c.status === 'pass'
           ? ''
-          : `${c.action ? renderAction(c.action) : ''}${c.fix ? `<pre>${escapeHtml(c.fix)}</pre>` : ''}${c.doc ? `<div>See ${escapeHtml(c.doc)}</div>` : ''}`;
+          : `${c.action ? renderAction(c.action) : ''}${c.fix ? `<pre>${escapeHtml(c.id === 'config.file' ? projectWords(c.fix) : c.fix)}</pre>` : ''}${c.doc ? `<div>See ${escapeHtml(c.doc)}</div>` : ''}`;
       // Ask (#627): a thread focused on this finding of this run.
       const ask = askForm(
         { kind: 'doctor', zoneId: c.zoneId ?? INSTALL_ZONE, ref: c.id },
         'Ask',
-        `Doctor: ${escapeHtml(c.id)}`,
+        `Doctor: <code>${escapeHtml(c.id)}</code>`,
         `Ask about ${c.id}`,
       );
-      return `<tr class="${escapeHtml(c.status)}"><td>${escapeHtml(c.status.toUpperCase())}</td><td>${c.zoneId === null ? '' : name(c.zoneId)}</td><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.summary)}${help}</td><td>${ask}</td></tr>`;
+      return `<tr class="${escapeHtml(c.status)}"><td>${escapeHtml(c.status.toUpperCase())}</td><td>${c.zoneId === null ? '' : name(c.zoneId)}</td><td><code>${escapeHtml(c.id)}</code></td><td>${escapeHtml(c.summary)}${help}</td><td>${ask}</td></tr>`;
     })
     .join('');
   return page(
-    `${head}<p>Run ${run.id}, finished ${escapeHtml(run.finishedAt ?? '-')}: ${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('info') > 0 ? `, ${n('info')} info` : ''}.</p>${controls}${zoneProblems}<table><tr><th>Status</th><th>Zone</th><th>Check</th><th>Finding</th><th>Ask</th></tr>${rows}</table>${DOCTOR_SCRIPT}${ASK_SCRIPT}`,
+    `${head}<p>Run ${run.id}, finished ${escapeHtml(run.finishedAt ?? '-')}: ${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('info') > 0 ? `, ${n('info')} info` : ''}.</p>${controls}${zoneProblems}<table><tr><th>Status</th><th>Project</th><th>Check</th><th>Finding</th><th>Ask</th></tr>${rows}</table>${DOCTOR_SCRIPT}${ASK_SCRIPT}`,
     { title: 'Health' },
   );
 }

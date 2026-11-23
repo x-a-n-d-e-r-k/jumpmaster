@@ -267,7 +267,7 @@ describe('refute results', () => {
         'reviewed it against the code and the spec, looking for criteria that are wrong, vague ' +
         'or untestable, and found none. Promote gives it the ready label; Reject closes it. To ' +
         'let a passing review promote on its own, with a notice you can still reject, set ' +
-        'crew.refutePromotes for this zone: ' +
+        'crew.refutePromotes for this project: ' +
         `jumpmaster ctl zones set ${w.zone.id} crew.refutePromotes=true`,
     );
     expect(b?.options.map((o) => o.effect)).toEqual(['promote_issue', 'reject_issue']);
@@ -288,7 +288,7 @@ describe('refute results', () => {
     expect(b?.decision).not.toContain('next pass');
     expect(b?.why).toBe(
       'The crew filed crew issue #40 as staged, and a second agent reviewed it against the code ' +
-        'and the spec and found nothing wrong, vague or untestable. This zone lets a passing ' +
+        'and the spec and found nothing wrong, vague or untestable. This project lets a passing ' +
         'review promote (crew.refutePromotes is on), so you only need to act to stop it.',
     );
     expect(b?.why).not.toContain('jumpmaster ctl zones set');

@@ -351,7 +351,7 @@ export function needsRows(s: NeedsInputs): NeedsRow[] {
   for (const [zoneId, fails] of byZone)
     rows.push({
       kind: 'check',
-      what: `${name(zoneId)}: ${plural(fails.length, 'failing check')} (${fails.map((f) => esc(f.id)).join(', ')})`,
+      what: `${name(zoneId)}: ${plural(fails.length, 'failing check')} (${fails.map((f) => `<code>${esc(f.id)}</code>`).join(', ')})`,
       action: { label: 'Fix in System', href: SYSTEM_HREF },
     });
 

@@ -5,6 +5,7 @@ import type { AppBrokers } from '../forge/app-brokers.js';
 import { GitHubAppError } from '../forge/github-app.js';
 import { SYSTEM_HREF } from '../ui/links.js';
 import { breadcrumb, escapeHtml, page } from '../ui/pages.js';
+import { projectWords } from '../ui/zone-name.js';
 import { APP_ROLES, type AppRole, ownerOfRepo } from '../vault/github-app-entries.js';
 import type { ResolvedApps } from '../vault/resolution.js';
 
@@ -180,9 +181,9 @@ function roleLine(repo: string, o: RoleOutcome | undefined, refused?: string): s
   }
 }
 
-function applyRefusal(r: Exclude<ApplyResult, { ok: true }>): string | undefined {
+export function applyRefusal(r: Exclude<ApplyResult, { ok: true }>): string | undefined {
   if ('needsConfirmation' in r) return undefined;
-  if ('issues' in r) return r.issues.map((i) => i.message).join('; ');
+  if ('issues' in r) return projectWords(r.issues.map((i) => i.message).join('; '));
   if ('conflict' in r) return 'the config changed meanwhile: find the installations again';
   if ('sessionForbidden' in r)
     return `a browser session may not change ${r.sessionForbidden.join(', ')}`;
@@ -206,7 +207,7 @@ export function registerGitHubAppInstalledRoutes(
         page(
           '<h2>The GitHub App is installed</h2>' +
             para(
-              "Jumpmaster asks GitHub for each zone's installation and repository ids, and proposes them as a change you confirm with your passphrase.",
+              "Jumpmaster asks GitHub for each project's installation and repository ids, and proposes them as a change you confirm with your passphrase.",
             ) +
             `<form method="post" action="${DISCOVER_PATH}">` +
             '<button type="submit">Find the installations</button></form>',
@@ -267,7 +268,7 @@ export function registerGitHubAppInstalledRoutes(
       .map(
         (z) =>
           `<h3>${escapeHtml(z.id)} (${escapeHtml(z.repo)})</h3>` +
-          (z.refused ? para(`Zone ${z.id} refused: ${z.refused}`, 'warn') : '') +
+          (z.refused ? para(`Project ${z.id} refused: ${z.refused}`, 'warn') : '') +
           '<ul>' +
           APP_ROLES.map(
             (role) => `<li>${escapeHtml(role)}: ${roleLine(z.repo, z.roles[role], z.refused)}</li>`,
@@ -280,7 +281,7 @@ export function registerGitHubAppInstalledRoutes(
       reply,
       200,
       '<h2>GitHub App installations</h2>' +
-        (zones.length ? list : para('No zone uses GitHub Apps.')) +
+        (zones.length ? list : para('No project uses GitHub Apps.')) +
         result,
     );
   });

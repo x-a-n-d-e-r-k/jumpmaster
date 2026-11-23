@@ -461,7 +461,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
     return said(
       {
         headline: `Blocked: ${name(problem.zoneId)} needs ${problem.credential}: ${problem.message}`,
-        detail: 'The zone stays parked until it is fixed.',
+        detail: 'The project stays parked until it is fixed.',
         waitingOn: 'credentials',
         action: {
           label: pages.credentials ? 'Open System, Credentials' : 'Set it (setup step)',
@@ -522,7 +522,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
       waitingOn: 'you',
       action: pages.zones
         ? { label: 'Open Projects', href: PROJECTS_HREF }
-        : { label: 'Open home (zone modes)', href: '/' },
+        : { label: 'Open Home (project modes)', href: '/' },
     });
   }
 
@@ -558,7 +558,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
     const slots = input.sticks.slots ?? 0;
     const busy = input.sticks.busy ?? 0;
     const hold = cannot
-      ? `no stick can run zone ${name(cannot.id)}: ${cannot.cannotRun}`
+      ? `no stick can run project ${name(cannot.id)}: ${cannot.cannotRun}`
       : slots > 0 && busy >= slots
         ? 'every slot is busy'
         : 'it starts when a stick next asks for work';
@@ -587,7 +587,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
     return said(
       {
         headline: `${wait(n, 'ready issue')}: ${capped.map((c) => `${name(c.z.id)} is ${c.cap}`).join('; ')}`,
-        detail: 'The zone starts no new implement drop until an open PR merges or closes.',
+        detail: 'The project starts no new implement drop until an open PR merges or closes.',
         waitingOn: 'nothing',
       },
       { cap: true },
@@ -625,7 +625,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
   if (firstHeld)
     return said({
       headline: `Nothing will start: ${heldReady.map((h) => `${wait(h.n, 'ready issue')} in ${HELD_WORD[h.z.mode] ?? h.z.mode} ${name(h.z.id)}`).join(', ')}`,
-      detail: 'A paused or observing zone starts nothing; resume it to start its ready issues.',
+      detail: 'A paused or observing project starts nothing; resume it to start its ready issues.',
       waitingOn: 'you',
       action: { label: `Open ${name(firstHeld.id)}`, href: zoneHref(firstHeld.id) },
     });

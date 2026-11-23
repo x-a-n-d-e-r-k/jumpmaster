@@ -192,6 +192,28 @@ describe('the confirmation page', () => {
     expect(w.store.revision()).toBe(3);
   });
 
+  test("Not applied lists the validator's issues in project words, keys and ids as they are", async () => {
+    const w = await world();
+    const id = await w.propose(weaken);
+    const token = w.tokenIn((await w.page(id)).body);
+    vi.spyOn(w.store, 'apply').mockReturnValueOnce({
+      ok: false,
+      issues: [
+        {
+          path: 'dropZones.0.ciRequired',
+          message: 'a starter zone requires ciRequired: true',
+        },
+        { path: 'dropZones.1.id', message: 'duplicate zone id: drop-zone' },
+      ],
+    });
+    const r = await w.confirm(id, { token, passphrase: PASS });
+    expect(r.statusCode).toBe(400);
+    expectHomeCrumbs(r.body, 'Not applied');
+    expect(r.body).toContain(
+      'dropZones.0.ciRequired: a starter project requires ciRequired: true; dropZones.1.id: duplicate project id: drop-zone',
+    );
+  });
+
   test('returnTo sends the browser on after applying, and only to a path on this host', async () => {
     const w = await world();
     const id = await w.propose(weaken, w.one, { returnTo: '/setup/doctor' });
