@@ -41,7 +41,8 @@ const CHIP_STYLE = `<style>.chip{display:inline-block;margin-left:.5rem;padding:
 
 /**
  * What a focused thread is about, as a chip: the project for `zone`, `<project> · goals` for
- * `goals`, `Briefing <ref>` for `briefing`. A zone no longer configured goes by its id; an
+ * `goals`, `Briefing <ref>` for `briefing`, `Drop <8-char id>` for `drop`, `Doctor: <check id>`
+ * for `doctor`. A zone no longer configured goes by its id; an
  * unfocused thread has no chip.
  */
 export function focusChip(t: ChatThread, zones: readonly ZoneRef[]): string {
@@ -52,7 +53,11 @@ export function focusChip(t: ChatThread, zones: readonly ZoneRef[]): string {
       ? name
       : t.focusKind === 'goals'
         ? `${name} · goals`
-        : `Briefing ${escapeHtml(t.focusRef ?? '')}`;
+        : t.focusKind === 'drop'
+          ? `Drop ${escapeHtml((t.focusRef ?? '').slice(0, 8))}`
+          : t.focusKind === 'doctor'
+            ? `Doctor: ${escapeHtml(t.focusRef ?? '')}`
+            : `Briefing ${escapeHtml(t.focusRef ?? '')}`;
   return ` <span class="chip">${text}</span>`;
 }
 

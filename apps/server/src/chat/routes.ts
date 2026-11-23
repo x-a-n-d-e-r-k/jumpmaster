@@ -27,6 +27,7 @@ import {
   listMessages,
   listThreads,
   resultStepsUpTo,
+  SESSION_BOUND_FOCUS,
   setThreadTitle,
   threadBusy,
 } from './store.js';
@@ -105,7 +106,7 @@ function afterSeqOf(req: FastifyRequest): number {
 }
 
 const FocusBody = z.strictObject({
-  kind: z.enum(['zone', 'goals', 'briefing']),
+  kind: z.enum(['zone', 'goals', 'briefing', 'drop', 'doctor']),
   zoneId: z.string().min(1).max(200),
   ref: z.string().min(1).max(200),
 });
@@ -145,32 +146,51 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
   const config = configReader(deps.config);
 
   app.get('/api/chat/threads', async (req, reply) => {
-    if (!sessionOf(req, reply)) return reply;
-    return { threads: listThreads(db) };
+    const viewer = sessionOf(req, reply);
+    if (!viewer) return reply;
+    return { threads: listThreads(db, 100, viewer) };
   });
 
   app.post('/api/chat/threads', async (req, reply) => {
-    if (!sessionOf(req, reply)) return reply;
+    const session = sessionOf(req, reply);
+    if (!session) return reply;
     const body = NewThreadBody.safeParse(req.body ?? {});
     if (!body.success) {
-      return reply
-        .code(400)
-        .send({ error: 'a title is 1 to 200 characters, and a focus a zone, goals or briefing' });
+      return reply.code(400).send({
+        error:
+          'a title is 1 to 200 characters, and a focus a zone, goals, briefing, drop or doctor check',
+      });
     }
     const { focus } = body.data;
     if (focus && !focusKnown(db, config(), focus)) {
+      // Fixed words: the ref is never echoed.
+      if (focus.kind === 'drop') return reply.code(400).send({ error: 'unknown drop' });
+      if (focus.kind === 'doctor') {
+        return reply
+          .code(400)
+          .send({ error: 'unknown doctor check: it is not in the latest doctor run' });
+      }
       return reply
         .code(404)
         .send({ error: `unknown ${focus.kind === 'briefing' ? 'briefing' : 'zone'}` });
     }
     const title = body.data.title ?? (focus ? focusTitle(db, config(), focus) : DEFAULT_TITLE);
-    return { thread: createThread(db, { title, ...(focus ? { focus } : {}) }, deps.now()) };
+    // A drop or doctor focus carries gate output and findings: its thread is this session's own.
+    const owner = focus && SESSION_BOUND_FOCUS.includes(focus.kind) ? session : undefined;
+    return {
+      thread: createThread(
+        db,
+        { title, ...(focus ? { focus } : {}), ...(owner ? { owner } : {}) },
+        deps.now(),
+      ),
+    };
   });
 
   app.get<{ Params: { id: string } }>('/api/chat/threads/:id', async (req, reply) => {
-    if (!sessionOf(req, reply)) return reply;
+    const viewer = sessionOf(req, reply);
+    if (!viewer) return reply;
     const id = threadIdOf(req.params.id);
-    const thread = id === undefined ? undefined : getThread(db, id);
+    const thread = id === undefined ? undefined : getThread(db, id, viewer);
     if (!thread) return reply.code(404).send({ error: 'unknown thread' });
     return { thread, messages: listMessages(db, thread.id) };
   });
@@ -179,7 +199,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     const sessionHash = sessionOf(req, reply);
     if (!sessionHash) return reply;
     const id = threadIdOf(req.params.id);
-    const thread = id === undefined ? undefined : getThread(db, id);
+    const thread = id === undefined ? undefined : getThread(db, id, sessionHash);
     if (!thread) return reply.code(404).send({ error: 'unknown thread' });
     const body = MessageBody.safeParse(req.body ?? {});
     if (!body.success) {
@@ -211,10 +231,13 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
    * goes to its thread's stream as undone.
    */
   app.post<{ Params: { id: string } }>('/api/chat/cards/:id/undo', async (req, reply) => {
-    if (!sessionOf(req, reply)) return reply;
+    const viewer = sessionOf(req, reply);
+    if (!viewer) return reply;
     const p = req.principal;
     const id = threadIdOf(req.params.id);
-    const card = id === undefined ? undefined : getCard(db, id);
+    const found = id === undefined ? undefined : getCard(db, id);
+    // A card of another session's own thread is as unknown as its thread.
+    const card = found && getThread(db, found.threadId, viewer) ? found : undefined;
     if (!card || !p) return reply.code(404).send({ error: 'unknown card' });
     const cfg = req.jmConfig ?? config();
     const secrets = redactionList(cfg.secrets);
@@ -258,9 +281,10 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
    * Reopening the thread replays what it missed.
    */
   app.get<{ Params: { id: string } }>('/api/chat/threads/:id/events', async (req, reply) => {
-    if (!sessionOf(req, reply)) return reply;
+    const viewer = sessionOf(req, reply);
+    if (!viewer) return reply;
     const id = threadIdOf(req.params.id);
-    const thread = id === undefined ? undefined : getThread(db, id);
+    const thread = id === undefined ? undefined : getThread(db, id, viewer);
     if (!thread) return reply.code(404).send({ error: 'unknown thread' });
     let last = afterSeqOf(req);
 

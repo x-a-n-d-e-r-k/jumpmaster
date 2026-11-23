@@ -339,6 +339,14 @@ describe('dropRows (#497)', () => {
 });
 
 describe('renderDrop', () => {
+  test('#627 Ask on a drop page focuses the drop, its chip Drop and the 8-char id', () => {
+    const html = renderDrop({ ...drop, id: '0123456789abcdef' }, []);
+    expect(html).toContain(
+      '<button type="button" id="ask-open" class="ask-open" aria-controls="ask-panel" aria-expanded="false" data-focus-kind="drop" data-focus-zone="main" data-focus-ref="0123456789abcdef">Ask</button>',
+    );
+    expect(html).toContain('<span class="chip">Drop 01234567</span>');
+  });
+
   test('escapes event data', () => {
     const html = renderDrop(drop, [
       { seq: 1, ts: 't', kind: 'log', data: { msg: '<script>x</script>' } },
@@ -3253,5 +3261,38 @@ describe('the Ask panel (#626)', () => {
       '/system',
     ])
       expect(checked, p).toContain(p);
+  });
+});
+
+describe('renderDoctor Ask (#627)', () => {
+  test('each finding row has an Ask link carrying its check id and zone, install for an install check', () => {
+    const html = renderDoctor(
+      {
+        id: 3,
+        finishedAt: 't',
+        checks: [
+          { id: 'claude.plan', zoneId: null, status: 'warn', summary: 'w' },
+          { id: 'forge.token', zoneId: 'main', status: 'fail', summary: 'f' },
+          { id: 'x"<b>', zoneId: 'main', status: 'pass', summary: 'p' },
+        ],
+      },
+      [makeZone({ id: 'main', repo: 'acme/demo' })],
+    );
+    const rows = [...html.matchAll(/<tr class="(?:warn|fail|pass)">([\s\S]*?)<\/tr>/g)].map(
+      (m) => m[1] as string,
+    );
+    expect(rows).toHaveLength(3);
+    const ask = (zone: string, ref: string) =>
+      `<form class="ask" data-focus-kind="doctor" data-focus-zone="${zone}" data-focus-ref="${ref}">`;
+    expect(rows[0]).toContain(ask('main', 'forge.token'));
+    expect(rows[1]).toContain(ask('install', 'claude.plan'));
+    expect(rows[2]).toContain(ask('main', 'x&quot;&lt;b&gt;'));
+    for (const r of rows) expect(r).toMatch(/<button title="Ask about [^"]*">Ask<\/button>/);
+    expect(html).not.toContain('<b>');
+    // The rows' forms are bound by the Ask script; the page itself keeps no focus of its own.
+    expect(html).toContain("document.querySelectorAll('form.ask')");
+    expect(html).toContain(
+      '<button type="button" id="ask-open" class="ask-open" aria-controls="ask-panel" aria-expanded="false">Ask</button>',
+    );
   });
 });
