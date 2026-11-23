@@ -1740,6 +1740,23 @@ describe('the Log (#621)', () => {
     expect(rowsOf(all.body)[0]).toContain('<td>octo/demo</td>');
   });
 
+  test('/activity/log words recorded events as done, not as "Would <code>"', async () => {
+    const h = await harness({});
+    await h.sync();
+    const at = h.now();
+    recordObservation(h.db, 'main', null, 'adopt_refused', 'pr #9 <script>x</script>', at);
+    recordObservation(h.db, 'main', null, 'audit_skipped', 'commit abc1234 <b>gone</b>', at);
+    const res = await get(h, '/activity/log');
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toContain(
+      'Refused to adopt a pull request (pr #9 &lt;script&gt;x&lt;/script&gt;)',
+    );
+    expect(res.body).toContain('Skipped audits (commit abc1234 &lt;b&gt;gone&lt;/b&gt;)');
+    expect(res.body).not.toContain('Would adopt_refused');
+    expect(res.body).not.toContain('Would audit_skipped');
+    expect(res.body).not.toContain('<script>x</script>');
+  });
+
   test('an unknown project or kind is a 404', async () => {
     const { h } = await logged();
     for (const url of [

@@ -2031,10 +2031,14 @@ export function renderDrop(
 }
 
 /**
- * The base codes observe mode records today (#621), each before any `:<suffix>`. Every one has
- * words in {@link observationWords}; a test fails when the server writes a `would_` code not here.
+ * The base codes the server records as observations today (#621), each before any `:<suffix>`.
+ * Every one has words in {@link observationWords}; a test fails when the server passes
+ * `recordObservation` a code not here. A `would_` code is a decision observe mode did not carry
+ * out; any other code (`adopt_refused`, `audit_skipped`) is an event that happened.
  */
 export const OBSERVATION_ACTIONS = [
+  'adopt_refused',
+  'audit_skipped',
   'would_carry_verdict',
   'would_done',
   'would_enqueue',
@@ -2068,7 +2072,8 @@ const ENQUEUE_WORDS: Readonly<Record<string, (it: string) => string>> = {
 
 /**
  * The words of each base code, the item (HTML) given or `''`: `told` when the sentence already
- * carries the detail, so the row need not repeat it.
+ * carries the detail, so the row need not repeat it. A `would_` code's words follow "Would "; any
+ * other code's words are the whole sentence, capitalised.
  */
 const OBSERVATION_WORDS: Readonly<
   Record<
@@ -2080,6 +2085,11 @@ const OBSERVATION_WORDS: Readonly<
     ) => { text: string; told: boolean } | undefined
   >
 > = {
+  adopt_refused: (it, d) => ({
+    text: `Refused to adopt a pull request${on(it, ' for ')}${why(d)}`,
+    told: true,
+  }),
+  audit_skipped: (it, d) => ({ text: `Skipped audits${on(it, ' on ')}${why(d)}`, told: true }),
   would_carry_verdict: (it) => ({
     text: `carry the verdict forward${on(it, ' on ')}`,
     told: false,
@@ -2128,13 +2138,15 @@ function observationLine(
     text: `${escapeHtml(row.action)}${on(it, ' on ')}${why(row.detail)}`,
     told: true,
   };
-  return { text: `Would ${text}`, told };
+  // Only a decision observe mode did not carry out is hypothetical.
+  return { text: base.startsWith('would_') ? `Would ${text}` : text, told };
 }
 
 /**
- * Observe mode's decision in words (#621), as HTML: `would_enqueue:implement` on issue #4154 is
- * "Would start implementing #4154", the issue linked to its work item. A code without words is
- * "Would <code>", escaped.
+ * Observe mode's record in words (#621), as HTML: `would_enqueue:implement` on issue #4154 is
+ * "Would start implementing #4154", the issue linked to its work item; `adopt_refused` is
+ * "Refused to adopt a pull request (…)", an event that happened. A code without words is shown
+ * escaped, after "Would " only when it is a `would_` code.
  */
 export function observationWords(
   row: Pick<LogObservation, 'zoneId' | 'itemId' | 'issueNumber' | 'action' | 'detail'>,
