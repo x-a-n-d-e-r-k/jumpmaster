@@ -1,8 +1,8 @@
 // GitLabForge (design spec §5.5, spec §9): the GitLab REST v4 client with the issue, label, comment
 // and viewer methods of `Forge` (first slice, #676) and the branch, file, directory, compare and
 // first-parent methods (second slice, #683), merge requests (third slice, #690), approvals as
-// reviews (fourth slice, #696) and pipelines and jobs as checks (fifth slice, #697). Not wired in: GitLab zones are still refused with
-// GITLAB_UNSUPPORTED wherever a forge is built.
+// reviews (fourth slice, #696) and pipelines and jobs as checks (fifth slice, #697). Not wired
+// in: GitLab zones are still refused with GITLAB_UNSUPPORTED wherever a forge is built.
 //
 // GitLab mapping notes:
 // - An issue's `number` is its project-scoped `iid`, and its body is the `description`.

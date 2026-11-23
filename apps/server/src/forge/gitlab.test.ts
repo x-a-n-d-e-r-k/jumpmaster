@@ -839,6 +839,16 @@ describe('edges, through an injected fetch', () => {
     expect(calls).toHaveLength(1000);
   });
 
+  test('a pipeline id that is not a positive integer is refused before its jobs are read', async () => {
+    const { forge, calls } = stubbed((url) =>
+      new URL(url).pathname.endsWith('/pipelines')
+        ? { body: JSON.stringify([{ id: '1/../2', sha: 'abc', status: 'failed' }]) }
+        : { body: '[]' },
+    );
+    await expect(forge.checksFor('abc')).rejects.toThrow(/not a positive integer/);
+    expect(calls.some((c) => c.url.includes('/jobs'))).toBe(false);
+  });
+
   test('a project with no default branch is an error', async () => {
     const { forge } = stubbed([{ body: '{}' }, { body: JSON.stringify({ default_branch: '' }) }]);
     await expect(forge.getDefaultBranch()).rejects.toThrow(/no default branch/);
@@ -1991,11 +2001,30 @@ describe('checks: checksFor', () => {
     ['created', 'pending'],
     ['running', 'pending'],
     ['success', 'success'],
+    ['skipped', 'success'],
   ] as const)('a pipeline with no jobs and status %s gives %s', async (status, state) => {
     const { gl, forge } = setup();
     const sha = checksRepo(gl);
     gl.seedPipeline({ sha, jobs: [], status });
     expect(await forge.checksFor(sha)).toEqual({ state, names: [], failed: [] });
+  });
+
+  test('waiting_for_resource, preparing and scheduled jobs are pending and queued', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    const { jobs } = gl.seedPipeline({
+      sha,
+      jobs: [
+        { name: 'wait', status: 'success' },
+        { name: 'prep', status: 'success' },
+        { name: 'later', status: 'success' },
+      ],
+    });
+    const states = ['waiting_for_resource', 'preparing', 'scheduled'];
+    jobs.forEach((j, i) => gl.setJobStatus(j.id, states[i] as GitLabJobStatus));
+    const c = await forge.checksFor(sha);
+    expect(c.state).toBe('pending');
+    expect(c.queued).toEqual(['later', 'prep', 'wait']);
   });
 
   test('a failed job-less pipeline fails the result even when another pipeline succeeds', async () => {
