@@ -2633,6 +2633,13 @@ describe('the drop page header and system-event groups (#499)', () => {
 });
 
 describe('the Log: observe decisions in words and rulings (#621)', () => {
+  /** The server's non-test sources, as text. */
+  const serverSources = (): string[] => {
+    const root = join(import.meta.dirname, '..');
+    return (readdirSync(root, { recursive: true }) as string[])
+      .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
+      .map((f) => readFileSync(join(root, f), 'utf8'));
+  };
   const obs = (o: Partial<LogObservation> = {}): LogObservation => ({
     id: 1,
     zoneId: 'jm',
@@ -2675,7 +2682,8 @@ describe('the Log: observe decisions in words and rulings (#621)', () => {
   test.each(codes)('%s maps to a sentence without the raw code', (action) => {
     for (const row of [obs({ action }), obs({ action, itemId: null, issueNumber: null })]) {
       const words = observationWords(row);
-      expect(words.startsWith('Would ')).toBe(true);
+      // Only a decision observe mode did not carry out is worded as hypothetical.
+      expect(words.startsWith('Would ')).toBe(action.startsWith('would_'));
       expect(words).not.toContain('would_');
       expect(words).not.toContain(action);
       // Not the fallback for an unknown code.
@@ -2684,14 +2692,9 @@ describe('the Log: observe decisions in words and rulings (#621)', () => {
   });
 
   test('every would_ code the server writes is in OBSERVATION_ACTIONS', () => {
-    const root = join(import.meta.dirname, '..');
-    const files = (readdirSync(root, { recursive: true }) as string[]).filter(
-      (f) => f.endsWith('.ts') && !f.endsWith('.test.ts'),
-    );
     const found = new Set<string>();
-    for (const f of files)
-      for (const m of readFileSync(join(root, f), 'utf8').matchAll(/['"`](would_[a-z_]+)/g))
-        found.add(m[1] ?? '');
+    for (const src of serverSources())
+      for (const m of src.matchAll(/['"`](would_[a-z_]+)/g)) found.add(m[1] ?? '');
     // Non-vacuous: the codes reconcile and the crew schedule write are found.
     for (const code of ['would_park', 'would_enqueue', 'would_wait', 'would_merge'])
       expect(found).toContain(code);
@@ -2699,17 +2702,48 @@ describe('the Log: observe decisions in words and rulings (#621)', () => {
     expect([...found].filter((code) => !known.includes(code))).toEqual([]);
   });
 
-  test('an unknown code renders "Would " and the code, escaped, never dropped', () => {
+  test('every action literal the server passes recordObservation has words', () => {
+    const found = new Set<string>();
+    for (const src of serverSources())
+      for (const m of src.matchAll(
+        /recordObservation\(\s*[^,()]+,\s*[^,()]+,\s*[^,()]+,\s*['"`]([a-z_]+)/g,
+      ))
+        found.add(m[1] ?? '');
+    // Non-vacuous: the recorded events that are not would_ codes are found, and some would_ ones.
+    for (const code of ['adopt_refused', 'audit_skipped', 'would_park', 'would_enqueue'])
+      expect(found).toContain(code);
+    const known: readonly string[] = OBSERVATION_ACTIONS;
+    expect([...found].filter((code) => !known.includes(code))).toEqual([]);
+  });
+
+  test('a recorded event that is not a would_ code is worded as done, not hypothetical', () => {
+    const row = (action: string) =>
+      observationWords(obs({ action, itemId: null, issueNumber: null, detail: 'pr #9 <b>' }));
+    expect(row('adopt_refused')).toBe('Refused to adopt a pull request (pr #9 &lt;b&gt;)');
+    expect(row('audit_skipped')).toBe('Skipped audits (pr #9 &lt;b&gt;)');
+    for (const action of ['adopt_refused', 'audit_skipped']) {
+      const text = row(action);
+      expect(text).not.toMatch(/^Would /);
+      expect(text).not.toContain(action);
+      expect(text).toContain('pr #9 &lt;b&gt;');
+    }
+  });
+
+  test('an unknown code renders escaped, never dropped, "Would " only for a would_ code', () => {
     expect(
       observationWords(
         obs({ action: 'would_<b>x</b>', itemId: null, issueNumber: null, detail: '' }),
       ),
     ).toBe('Would would_&lt;b&gt;x&lt;/b&gt;');
+    // An unknown code that is not a would_ code is shown escaped, without "Would ".
     expect(
       observationWords(
-        obs({ action: 'adopt_refused', itemId: null, issueNumber: null, detail: 'pr #9' }),
+        obs({ action: 'odd_<i>code</i>', itemId: null, issueNumber: null, detail: 'pr #9' }),
       ),
-    ).toBe('Would adopt_refused (pr #9)');
+    ).toBe('odd_&lt;i&gt;code&lt;/i&gt; (pr #9)');
+    expect(observationWords(obs({ action: 'odd_code', detail: '' }))).toBe(
+      'odd_code on <a href="/projects/jm/work/4154">#4154</a>',
+    );
     // An item without a known issue is named by its id.
     expect(observationWords(obs({ issueNumber: null }))).toBe('Would start implementing item 7');
   });

@@ -96,7 +96,7 @@ And at the top level of the server config:
   is refuted and promoted like any crew issue; one Jumpmaster refuses (protected path, not
   drop-ready) files nothing. It never reverts, reopens or comments. If history was rewritten (the
   cursor isn't a first-parent ancestor of the head within one compare), the cursor moves to the
-  head and an `audit_skipped` observation says so. Each audit is a `crew_audits` row
+  head and the Log says so: "Skipped audits (commit … audits resume from …)", in active mode too. Each audit is a `crew_audits` row
   (`holds`, `filed`, `refused` or `failed`); a failed audit's commit is not audited again.
 - A triage drop gets the issue's images. The server fetches at most 4 image URLs from the
   issue body, only GitHub attachments (`https://github.com/user-attachments/assets/…`,
