@@ -9,7 +9,7 @@ import type { GuidanceForge } from '../api/github.js';
 import { createApp } from '../app.js';
 import { Backoff } from '../auth/backoff.js';
 import { SetupMode, setOperatorPassphrase } from '../auth/operator.js';
-import { raiseBriefing } from '../briefings.js';
+import { listBriefings, raiseBriefing } from '../briefings.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
 import { STARTER_WARNING } from '../config.js';
@@ -1055,6 +1055,38 @@ describe('a project: tabs, header and Overview (#616)', () => {
     // The State sentence is the floor card's: 2 briefings need this project.
     expect(block(body, 'state')).toContain('Needs you: ');
     expect(block(body, 'state')).toContain('2 briefings need you');
+  });
+
+  test("Needs you offers the bulk dismiss of all the project's open briefings, with their ids and count (#625)", async () => {
+    const w = await world();
+    for (const subject of ['crew:a', 'crew:b'])
+      raiseBriefing(
+        w.db,
+        {
+          zoneId: 'main',
+          kind: 'crew',
+          subject,
+          decision: `Decide ${subject}`,
+          why: 'w',
+          options: [{ id: 'ok', label: 'OK', effect: 'none' }],
+          source: 'crew',
+        },
+        t0,
+      );
+    const ids = listBriefings(w.db, { zoneId: 'main', state: 'open' }).map((b) => b.id);
+    const needs = block((await w.get('/projects/main')).body, 'needs-you') ?? '';
+    const form = needs.match(/<form id="dismiss-all"[^>]*>/)?.[0] ?? '';
+    expect(form).toContain('data-zone="main"');
+    expect(form).toContain(`data-ids="${JSON.stringify(ids).replaceAll('"', '&quot;')}"`);
+    expect(needs).toContain('Dismiss all 2 briefings of octo/main');
+    expect(needs).toContain(
+      "jmFetch('/api/control/zones/'+encodeURIComponent(f.dataset.zone)+'/briefings/dismiss'",
+    );
+    // Nothing open, no form.
+    const quiet = await world();
+    expect(block((await quiet.get('/projects/main')).body, 'needs-you')).not.toContain(
+      'id="dismiss-all"',
+    );
   });
 
   test('an empty project: no Objective block, "No work yet" and "Nothing needs you"', async () => {

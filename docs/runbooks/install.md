@@ -868,8 +868,8 @@ limits where it can send it (see [Egress](#egress)).
 
 `claude.plan` in the config declares your plan (`pro`, `max`, `ultra`, `team_standard`,
 `team_premium` or `enterprise`; default `pro`); `init --plan max` sets it. It isn't detected.
-`ultra` is the $200/mo plan: it has no 5-hour window, so the floor shows no 5-hour meter for it.
-The Usage card shows a Fable meter on every plan, and a meter for any other model window Claude
+`ultra` is the $200/mo plan: it has no 5-hour window, so Home shows no 5-hour meter for it.
+Home's Capacity section shows a Fable meter on every plan, and a meter for any other model window Claude
 reports. Jumpmaster runs Fable
 only on a plan that includes it and only with `claude.fableModel` set; `claude.plan` flags a
 `fableModel` your plan doesn't include.
@@ -1123,7 +1123,7 @@ verify cache in the `jm-stick` volume, and runs `JM_SLOTS` drops at once to star
 ### Troopers per stick
 
 How many troopers (drops) a stick runs at once is set on the **Sticks** page (`/system/sticks`, linked
-from the navigation and the floor's Sticks summary), or with `jumpmaster ctl sticks slots
+from the navigation and the Sticks list in Home's Capacity section), or with `jumpmaster ctl sticks slots
 <name-or-id> <n>`; `jumpmaster ctl sticks` lists each stick's counts. A change applies on the
 stick's next lease answer, with no restart. Lowering it stops nothing: the stick takes no new drop
 until fewer than the new count are running. The server enforces the count itself, so it holds for

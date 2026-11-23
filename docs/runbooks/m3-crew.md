@@ -142,7 +142,7 @@ And at the top level of the server config:
    `ctl pause <zone>`, set `crew.enabled: true`, restart.
 
 **Pass:** `/zones/<id>/goals` lists every objective with its status and marks the first open one
-Current objective (a parse error shows there too). The status page's Crew table lists the zone
+Current objective (a parse error shows there too). The project's Goals tab shows the zone's crew line
 with its next cycle and its Fable status (for `pro`: "plan pro does not include Fable"). Then
 `ctl resume <zone>`.
 

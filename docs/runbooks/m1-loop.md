@@ -294,9 +294,10 @@ Start from the M0 config. The zone gains these fields (defaults shown):
   opens fully once a drop reports live that it runs in plan (`isUsingOverage: false`), or the
   probe drop's result says so, or the probe succeeds without being seen on credits. A failed or
   cancelled probe with no such report proves nothing: the next drop probes. A probe on credits
-  stops again. The home page's **Usage** section shows `stopped: drop <id> ran on usage credits
-  at <time>`, the probe, and the account's overage status. A
-  `credits:stop:<drop id>` briefing (Waiting on you) offers **Run on credits now**, which buys
+  stops again. The home page's **Capacity** section says so in words:
+  `Dispatch paused until <time>: drop <id> ran on usage credits`, then `Dispatch probing` while
+  the probe runs. A
+  `credits:stop:<drop id>` briefing (in Home's **Needs you**) offers **Run on credits now**, which buys
   credits for that drop's work item until the five-hour window resets when that is the exhausted
   window (the time is shown), otherwise for five hours; and **Noted**, after which the stop stays
   and the briefing is asked again on the next pass. During that horizon (gate `credits_resume`)
@@ -376,7 +377,7 @@ run below covers the push path.
 ## 5. Scenarios
 
 Create each issue in the test repository with the `drop-ready` label, then watch the
-home page (`http://127.0.0.1:7420`). The new **Usage** section shows the dispatch gate;
+home page (`http://127.0.0.1:7420`). The **Capacity** section shows the dispatch gate in words;
 the work-item table shows the PR, its head SHA, the latest verdict and attempts per
 budget; the **Outbox** section lists any forge write that is `unknown` or `failed`.
 

@@ -22,6 +22,7 @@ import {
   type FloorCounts,
   floorCounts,
   listHref,
+  NEEDS_CAP,
   type NeedsRow,
   rankNeeds,
 } from './floor.js';
@@ -112,6 +113,46 @@ test('bulk dismiss dismisses exactly that zone’s briefings and writes no outbo
     .all() as { target: string }[];
   expect(audited.map((a) => a.target)).toEqual(ids.map((id) => `briefing:${id}`));
   expect((await h.view('/')).body).not.toContain('briefings held');
+});
+
+test("a stored doctor run's failing project check reaches Home's Needs you; a warn, a pass and an install-wide fail do not", async () => {
+  const h = await twoZones();
+  h.db
+    .prepare("INSERT INTO doctor_runs (started_at, finished_at, results_json) VALUES ('a', 'b', ?)")
+    .run(
+      JSON.stringify([
+        { id: 'zone.labels', zoneId: 'shadow', status: 'fail', summary: 'labels missing' },
+        { id: 'zone.warned', zoneId: 'shadow', status: 'warn', summary: 'w' },
+        { id: 'zone.passed', zoneId: 'main', status: 'pass', summary: 'p' },
+        { id: 'install.wide', zoneId: null, status: 'fail', summary: 'i' },
+        { id: 'zone.gone', zoneId: 'removed', status: 'fail', summary: 'g' },
+      ]),
+    );
+  const home = (await h.view('/')).body;
+  const at = home.indexOf('id="waiting-on-you"');
+  const needs = home.slice(at, home.indexOf('</section>', at));
+  const checks = needs.match(/<li class="needs-row" data-kind="check">.*?<\/li>/g) ?? [];
+  expect(checks).toEqual([
+    expect.stringContaining(
+      'octo/shadow: 1 failing check (zone.labels) <a href="/system">Fix in System</a>',
+    ),
+  ]);
+  expect(needs).not.toContain('zone.warned');
+  expect(needs).not.toContain('zone.passed');
+  expect(needs).not.toContain('install.wide');
+  expect(needs).not.toContain('zone.gone');
+});
+
+test('Home lists the first 10 Needs you rows; /?needs=all lists every one', async () => {
+  const h = await twoZones();
+  for (let n = 0; n < 12; n++) raiseBriefing(h.db, brief('main', `crew:b${n}`), h.now());
+  const rows = (body: string) => body.match(/<li class="needs-row"/g)?.length ?? 0;
+  const capped = (await h.view('/')).body;
+  expect(rows(capped)).toBe(10);
+  expect(capped).toContain('5 more. <a href="/?needs=all#waiting-on-you">Show all 15</a>');
+  const all = (await h.view('/?needs=all')).body;
+  expect(rows(all)).toBe(15);
+  expect(all).not.toContain('Show all');
 });
 
 test('bulk dismiss refuses an unknown zone', async () => {
@@ -609,6 +650,32 @@ describe('Home (#625)', () => {
     expect(rows[1]).toContain('octo/B: 1 failing check (two)');
   });
 
+  test('Needs you lists the first NEEDS_CAP rows, ranked, then "Show all"; with needsAll, every row', () => {
+    const backlog = {
+      zones: [zone('A')],
+      items: Array.from({ length: 15 }, () => wi('A', 'parked')),
+      briefings: Array.from({ length: 15 }, () => br('A')),
+      doctorFails: [fail('A')],
+    };
+    const capped = renderHome(home(backlog));
+    // The check outranks the backlog, so it is never cut.
+    expect(kinds(capped)).toEqual(['check', ...Array<string>(NEEDS_CAP - 1).fill('briefing')]);
+    expect(needsOf(capped)).toContain(
+      `<p class="more">${31 - NEEDS_CAP} more. <a href="/?needs=all#waiting-on-you">Show all 31</a></p>`,
+    );
+    // Projects, Capacity and Pipeline still follow.
+    expect(capped).toContain('id="projects"');
+    const all = renderHome(home({ ...backlog, needsAll: true }));
+    expect(kinds(all)).toHaveLength(31);
+    expect(needsOf(all)).not.toContain('class="more"');
+    // At the cap exactly, nothing is cut and no link shows.
+    const exact = renderHome(
+      home({ zones: [zone('A')], briefings: Array.from({ length: NEEDS_CAP }, () => br('A')) }),
+    );
+    expect(kinds(exact)).toHaveLength(NEEDS_CAP);
+    expect(needsOf(exact)).not.toContain('Show all');
+  });
+
   test('"Nothing needs you" shows only when every source is empty', () => {
     const empty = renderHome(home({ zones: [zone('A')] }));
     expect(needsOf(empty)).toContain('<p class="empty">Nothing needs you</p>');
@@ -628,7 +695,10 @@ describe('Home (#625)', () => {
   test('a pending change row: the first guarded item, "and N more", expiry, and the chat it came from; never the patch', () => {
     const one = renderHome(home({ zones: [zone('A')], pending: [{ change: pending() }] }));
     expect(one).toContain('Turns on the MCP server');
-    expect(one).toContain('expires in 7 min');
+    // The expiry is a relativeTime the live script ignores, not minutes written by hand.
+    expect(one).toMatch(
+      /<small class="expiry">expires <span data-live-ignore><time datetime="[^"]+" title="[^"]+">in 7 min<\/time><\/span><\/small>/,
+    );
     expect(one).not.toContain('from chat:');
     expect(one).not.toContain('PATCH-ONLY-VALUE-x9');
     expect(one).not.toContain('secretOnlyInPatch');

@@ -96,7 +96,7 @@ describe('UI routes', () => {
     );
   });
 
-  test("the home page counts each enrolled stick's troopers", async () => {
+  test("the home page counts each enrolled stick's troopers and names a zone one cannot run", async () => {
     const h = await harness({ zone: { egress: { mode: 'enforce' } } });
     insertStick(h.db, { id: 's1', name: 'm3-stick', tokenHash: 'h1', slots: 1 });
     insertStick(h.db, {
@@ -106,10 +106,14 @@ describe('UI routes', () => {
       slots: 1,
       capabilities: ['egress-v1'],
     });
-    // Home's Capacity counts each stick's troopers (#625); the Sticks page says what one lacks.
+    // Home's Capacity counts each stick's troopers (#625) and says what one cannot run.
     const html = (await get(h, '/')).body;
-    expect(html).toContain('m3-stick: 0 of 1 troopers busy');
-    expect(html).toContain('new-stick: 0 of 1 troopers busy');
+    expect(html).toMatch(
+      /m3-stick: 0 of 1 troopers busy( <small class="muted">offline<\/small>)? <small class="cannot-run">cannot run octo\/demo: lacks egress-v1<\/small><\/li>/,
+    );
+    expect(html).toMatch(
+      /new-stick: 0 of 1 troopers busy( <small class="muted">offline<\/small>)?<\/li>/,
+    );
   });
 
   test('/briefings/<n> resolves About and crew keys and shows one briefing (#226)', async () => {
@@ -1380,7 +1384,7 @@ describe("this session's pending guarded changes under Waiting on you (#507)", (
     const mine = (await h.view('/', { cookie: a.cookie })).body;
     expect(mine).toContain('Turns on the MCP server for A');
     expect(mine).toContain(`<a href="/config/confirm/${p.id}">Review and confirm</a>`);
-    expect(mine).toContain('expires in 10 min');
+    expect(mine).toMatch(/expires <span data-live-ignore><time [^>]*>in 10 min<\/time>/);
     expect(mine).not.toContain('PATCH-SECRET-A');
     expect(needsYou(mine)).toBe('1');
     const card = mine.slice(mine.indexOf('id="waiting-on-you"'));

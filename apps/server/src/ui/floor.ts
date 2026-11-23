@@ -328,7 +328,6 @@ export function needsRows(s: NeedsInputs): NeedsRow[] {
 
   for (const { change, chat } of s.pending ?? []) {
     const [first, ...rest] = change.guarded;
-    const left = Math.max(0, Math.ceil((change.expiresAt.getTime() - s.now.getTime()) / 60_000));
     const from = chat
       ? ` <small>from chat: <a href="${esc(`/chat/${chat.threadId}`)}">${esc(chat.title)}</a></small>`
       : '';
@@ -336,7 +335,7 @@ export function needsRows(s: NeedsInputs): NeedsRow[] {
       kind: 'change',
       what:
         `${esc(first?.consequence ?? 'A guarded change')}${rest.length > 0 ? ` and ${rest.length} more` : ''}` +
-        ` <small class="expiry">expires in ${left} min</small>${from}`,
+        ` <small class="expiry">expires ${when(change.expiresAt.toISOString(), s.now)}</small>${from}`,
       action: {
         label: 'Review and confirm',
         href: `/config/confirm/${encodeURIComponent(change.id)}`,
@@ -368,6 +367,15 @@ export interface HeldLine {
 }
 
 /**
+ * How many rows Needs you lists before "Show all" (#625): a backlog of briefings or parked work
+ * must not push Projects, Capacity and Pipeline off the page. The ranking keeps checks and
+ * pending changes, the fewest and most urgent, at the top.
+ */
+export const NEEDS_CAP = 10;
+/** Home with every Needs you row listed. */
+export const NEEDS_ALL_HREF = `/?needs=all#${WAITING_ON_YOU_ID}`;
+
+/**
  * Home's Needs you (`#waiting-on-you`): the ranked rows, each a kind chip, what it is and one
  * action link; "Nothing needs you" when every source is empty. Held briefings follow, muted.
  */
@@ -375,17 +383,23 @@ export function needsYouSection(
   rows: readonly NeedsRow[],
   held: readonly HeldLine[] = [],
   zones: readonly ZoneRef[] = [],
+  all = false,
 ): string {
   const name = zoneNamer(zones);
+  const shown = all ? rows : rows.slice(0, NEEDS_CAP);
+  const more =
+    rows.length > shown.length
+      ? `<p class="more">${rows.length - shown.length} more. <a href="${NEEDS_ALL_HREF}">Show all ${rows.length}</a></p>`
+      : '';
   const list =
     rows.length === 0
       ? '<p class="empty">Nothing needs you</p>'
-      : `<ul class="needs-list">${rows
+      : `<ul class="needs-list">${shown
           .map(
             (r) =>
               `<li class="needs-row" data-kind="${r.kind}"><span class="chip">${NEEDS_CHIP[r.kind]}</span> ${r.what} <a href="${esc(r.action.href)}">${esc(r.action.label)}</a></li>`,
           )
-          .join('')}</ul>`;
+          .join('')}</ul>${more}`;
   const heldLines =
     held.length === 0
       ? ''

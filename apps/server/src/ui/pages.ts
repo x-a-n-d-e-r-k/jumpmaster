@@ -3,9 +3,7 @@ import {
   type About,
   type Briefing,
   effectText,
-  HELD_MODES,
   type HeldZone,
-  isNotice,
   issueUrl,
   optionsDigest,
   type Ruling,
@@ -119,6 +117,8 @@ export interface HomeState {
    * then says "unavailable", never 0.
    */
   merges24h?: Array<{ zoneId: string; at: string; workItemId?: number | null }>;
+  /** List every Needs you row (`/?needs=all`), not the first NEEDS_CAP. */
+  needsAll?: boolean;
   /** Failing doctor checks of configured projects, for Needs you (#625). */
   doctorFails?: FailingCheck[];
   /** Open briefings, for Needs you: a paused or observing zone's are held back. */
@@ -310,13 +310,21 @@ function capacitySection(state: HomeState, now: Date): string {
   const live = new Set(liveSticks(sticks, now).map((s) => s.id));
   const busy = (id: string): number =>
     state.drops.filter((d) => d.stickId === id && isRunning(d.state)).length;
+  const name = zoneNamer(state.zones);
+  // What a stick cannot run and what it lacks: the diagnostic the sticks table carried.
+  const cannot = (s: StickLine): string =>
+    s.cannotRun.length === 0
+      ? ''
+      : ` <small class="cannot-run">${s.cannotRun
+          .map((c) => `cannot run ${name(c.zoneId)}: lacks ${escapeHtml(c.missing.join(', '))}`)
+          .join('; ')}</small>`;
   const lines =
     sticks.length === 0
       ? '<p class="empty">No stick has enrolled.</p>'
       : `<ul class="stick-capacity">${sticks
           .map(
             (s) =>
-              `<li data-stick="${escapeHtml(s.id)}">${escapeHtml(s.name)}: ${busy(s.id)} of ${s.slots ?? 0} troopers busy${live.has(s.id) ? '' : ' <small class="muted">offline</small>'}</li>`,
+              `<li data-stick="${escapeHtml(s.id)}">${escapeHtml(s.name)}: ${busy(s.id)} of ${s.slots ?? 0} troopers busy${live.has(s.id) ? '' : ' <small class="muted">offline</small>'}${cannot(s)}</li>`,
           )
           .join('')}</ul>`;
   return (
@@ -349,58 +357,8 @@ const githubBlobHref = (repo: string, path: string): string => {
 /** A project's open briefings: its Overview's Needs you (#625: `/briefings?zone=` redirects there). */
 export const zoneBriefingsHref = (zoneId: string): string => `${projectHref(zoneId)}#needs-you`;
 
-/** The page sizes the briefings pages offer (#132); anything else is the first. */
-export const PAGE_SIZES = [10, 20, 50, 100] as const;
-export type PageParams = { per: number; page: number };
-
-const positiveInt = (v: unknown): number =>
-  typeof v === 'string' && /^[1-9][0-9]{0,8}$/.test(v) ? Number(v) : 1;
-
-/**
- * The briefings pages' paging: `per` among PAGE_SIZES, else 10; `page` a positive integer,
- * else 1. Never refused: a stale bookmark still opens a page. Clamping to the last page
- * is the renderer's, which knows the counts.
- */
-export function pageParams(q: { per?: unknown; page?: unknown }): PageParams {
-  const per = PAGE_SIZES.find((n) => String(n) === q.per) ?? PAGE_SIZES[0];
-  return { per, page: positiveInt(q.page) };
-}
-
-/** A project's open briefings (newest first) and rulings, as the briefings pages group them. */
-type Project = { id: string; text: string; mode: string; open: Briefing[]; rulings: Ruling[] };
-
 const newestFirst = <T extends { id: number }>(xs: readonly T[]): T[] =>
   [...xs].sort((x, y) => y.id - x.id);
-
-/** Most open briefings first, ties by repository name: the order of sections and floor lines. */
-const byWaiting = (a: Project, b: Project): number =>
-  b.open.length - a.open.length || (a.text < b.text ? -1 : a.text > b.text ? 1 : 0);
-
-/**
- * One project per configured zone, and per zone still named by a briefing or ruling though no
- * longer configured.
- */
-function projectsOf(
-  zones: readonly (ZoneRef & { mode?: string })[],
-  open: readonly Briefing[],
-  rulings: readonly Ruling[],
-  modes: Readonly<Record<string, string>> = {},
-): Project[] {
-  const text = zoneTextNamer(zones);
-  const byId = new Map<string, Project>();
-  const at = (id: string, mode?: string): Project => {
-    let p = byId.get(id);
-    if (!p) {
-      p = { id, text: text(id), mode: modes[id] ?? mode ?? 'active', open: [], rulings: [] };
-      byId.set(id, p);
-    }
-    return p;
-  };
-  for (const z of zones) at(z.id, z.mode);
-  for (const b of newestFirst(open)) at(b.zoneId).open.push(b);
-  for (const r of newestFirst(rulings)) at(r.zoneId).rulings.push(r);
-  return [...byId.values()];
-}
 
 /** One shared handler for every rule form: it posts with the session's CSRF header. */
 const RULE_SCRIPT = `<script>for(const f of document.querySelectorAll('form.rule'))f.addEventListener('submit',async(e)=>{e.preventDefault();const o=f.querySelector('input[name=option]:checked');if(!o){alert('Choose an option');return;}const r=await jmFetch('/api/control/briefings/'+f.dataset.briefing+'/rule',{optionId:o.value,optionsDigest:f.dataset.options,note:f.querySelector('textarea').value});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});</script>`;
@@ -511,177 +469,18 @@ function briefingBlock(b: Briefing, ctx: BlockContext, heading: 'h3' | 'h4' = 'h
 }
 
 /**
- * Dismisses all the zone's open briefings, every page of them, after a confirmation that states
- * the count. It posts the ids it was rendered with, so a briefing raised since is not dismissed
+ * Dismisses all the zone's open briefings after a confirmation that states the count: on its
+ * project's Overview, under Needs you (#625). It posts the ids it was rendered with, so a briefing raised since is not dismissed
  * unseen.
  */
-function dismissAllForm(zoneId: string, open: Briefing[], zones: readonly ZoneRef[]): string {
+export function dismissAllForm(
+  zoneId: string,
+  open: readonly Briefing[],
+  zones: readonly ZoneRef[],
+): string {
   const what = `${plural(open.length, 'briefing')} of`;
-  const ask = `Dismiss ${what} ${zoneTextNamer(zones)(zoneId)}? Each is taken off the floor without a ruling: nothing it is about is ruled on, and nothing is written to GitHub.`;
+  const ask = `Dismiss ${what} ${zoneTextNamer(zones)(zoneId)}? Each is taken off Needs you without a ruling: nothing it is about is ruled on, and nothing is written to GitHub.`;
   return `<form id="dismiss-all" data-zone="${escapeHtml(zoneId)}" data-ids="${escapeHtml(JSON.stringify(open.map((b) => b.id)))}" data-ask="${escapeHtml(ask)}"><button class="danger">Dismiss all ${escapeHtml(what)} ${zoneNamer(zones)(zoneId)}</button></form><script>{const f=document.getElementById('dismiss-all');f.addEventListener('submit',async(e)=>{e.preventDefault();if(!confirm(f.dataset.ask))return;const r=await jmFetch('/api/control/zones/'+encodeURIComponent(f.dataset.zone)+'/briefings/dismiss',{ids:JSON.parse(f.dataset.ids)});if(r.ok)location.reload();else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});}</script>`;
-}
-
-/** A /briefings URL, unescaped: the zone id is URL-encoded, a page of 1 or less is left out. */
-function briefingsHref(q: { zone?: string; per: number; page?: number }): string {
-  const parts = [
-    ...(q.zone !== undefined ? [`zone=${encodeURIComponent(q.zone)}`] : []),
-    `per=${q.per}`,
-    ...(q.page !== undefined ? [`page=${q.page}`] : []),
-  ];
-  return `/briefings?${parts.join('&')}`;
-}
-
-/** The page-size links; each keeps the zone and starts again at page 1. */
-function sizeSelector(zone: string | undefined, per: number): string {
-  const links = PAGE_SIZES.map(
-    (n) =>
-      `<a href="${escapeHtml(briefingsHref({ ...(zone !== undefined ? { zone } : {}), per: n }))}"${n === per ? ' aria-current="page"' : ''}>${n}</a>`,
-  ).join(' · ');
-  return `<nav class="filters" aria-label="Page size"><p>Per page: ${links}</p></nav>`;
-}
-
-/** One page of `xs`, clamped to the last page, and its Previous / Page X of Y / Next line. */
-function paged<T>(
-  xs: readonly T[],
-  per: number,
-  asked: number,
-  label: string,
-  href: (page: number) => string,
-): { rows: T[]; nav: string } {
-  const pages = Math.max(1, Math.ceil(xs.length / per));
-  const at = Math.min(Math.max(1, asked), pages);
-  const link = (n: number, text: string) => `<a href="${escapeHtml(href(n))}">${text}</a>`;
-  const nav = [
-    ...(at > 1 ? [link(at - 1, 'Previous')] : []),
-    `Page ${at} of ${pages}`,
-    ...(at < pages ? [link(at + 1, 'Next')] : []),
-  ].join(' · ');
-  return {
-    rows: xs.slice((at - 1) * per, at * per),
-    nav: `<nav class="pager" aria-label="${label}"><p>${nav}</p></nav>`,
-  };
-}
-
-/**
- * Briefings waiting on Command, with a rule form each. Rulings are the project's Log (#621): each
- * project links to its rulings there; `rulings` only resolve `Ruling n` references.
- */
-export function renderBriefings(s: {
-  open: Briefing[];
-  rulings: Ruling[];
-  zones: DropZoneConfig[];
-  /** Hold-until per subject, for held refute promotions. */
-  holds?: Map<string, string>;
-  /** One zone's view (`open` and `rulings` are that zone's): paged, with the bulk dismiss. */
-  zone?: { id: string; mode: string };
-  /** Each zone's mode as stored (getZoneMode), for the all-projects view; else its config's. */
-  modes?: Readonly<Record<string, string>>;
-  per?: number;
-  page?: number;
-  /** Each briefing's subject resolved (briefingAbout), by briefing id; else the raw subject. */
-  about?: ReadonlyMap<number, About>;
-  /** Each zone's filed crew issues by key (crewKeyNumbers), by zone id. */
-  crewKeys?: ReadonlyMap<string, ReadonlyMap<string, number>>;
-  /** Open briefings the crew is still to diagnose (`diagnosePending`), by id. */
-  pending?: ReadonlySet<number>;
-}): string {
-  const name = zoneNamer(s.zones);
-  const per = s.per ?? PAGE_SIZES[0];
-  /** The link that stands where a project's rulings were: its Log, rulings only (#621). */
-  const rulingsLink = (zoneId: string) =>
-    `<p class="rulings"><a href="${escapeHtml(projectLogHref(zoneId, 'rulings'))}">Rulings for ${name(zoneId)}</a></p>`;
-  // What this page shows, so a reference to it is an anchor here and to anything else a link away.
-  const shown = { briefings: new Set<number>(), rulings: new Set<number>() };
-  const ctx: BlockContext = {
-    holds: s.holds,
-    name,
-    about: s.about,
-    refs: briefingRefs(s.zones, s.rulings, s.crewKeys, shown),
-    pending: s.pending,
-  };
-  const blocks = (bs: readonly Briefing[], heading: 'h3' | 'h4') =>
-    bs.map((b) => briefingBlock(b, ctx, heading)).join('');
-  // Notices (held promotions) go ahead unless stopped: listed after what needs Command (#449).
-  const noticesSection = (ns: readonly Briefing[]) =>
-    ns.length === 0
-      ? ''
-      : `<section class="notices"><h2 id="notices">Going ahead unless you stop it</h2>${blocks(ns, 'h3')}</section><!--/notices-->`;
-
-  if (s.zone) {
-    const zone = s.zone.id;
-    const all = newestFirst(s.open);
-    const open = all.filter((b) => !isNotice(b));
-    const notices = all.filter(isNotice);
-    for (const x of notices) shown.briefings.add(x.id);
-    const b = paged(open, per, s.page ?? 1, 'Briefing pages', (page) =>
-      briefingsHref({ zone, per, page }),
-    );
-    for (const x of b.rows) shown.briefings.add(x.id);
-    const list =
-      (open.length === 0 ? '<p>Nothing is waiting on you.</p>' : blocks(b.rows, 'h3')) +
-      (open.length > 0 ? b.nav : '') +
-      noticesSection(notices) +
-      (all.length > 0 ? RULE_SCRIPT : '');
-    return page(
-      `<p><a href="/">Back</a> · <a href="/#waiting-on-you">Needs you</a></p><h2>Briefings of ${name(zone)} <small>(${escapeHtml(s.zone.mode)})</small></h2>` +
-        (all.length > 0 ? dismissAllForm(zone, s.open, s.zones) : '') +
-        sizeSelector(zone, per) +
-        list +
-        rulingsLink(zone),
-      { live: true },
-    );
-  }
-
-  const projects = projectsOf(s.zones, s.open, s.rulings, s.modes);
-  // A held zone keeps its notices with its other held briefings; elsewhere they are listed apart.
-  const notices: Briefing[] = [];
-  for (const p of projects) {
-    if (HELD_MODES.has(p.mode)) continue;
-    notices.push(...p.open.filter(isNotice));
-    p.open = p.open.filter((b) => !isNotice(b));
-  }
-  for (const x of notices) shown.briefings.add(x.id);
-  const held = (p: Project) => HELD_MODES.has(p.mode) && p.open.length > 0;
-  const busy = projects.filter((p) => !held(p) && p.open.length > 0).sort(byWaiting);
-  const quiet = projects.filter((p) => p.open.length === 0).sort(byWaiting);
-  const heldOnes = projects.filter(held).sort(byWaiting);
-  const total = busy.reduce((n, p) => n + p.open.length, 0);
-  for (const p of projects) {
-    for (const x of p.open.slice(0, per)) shown.briefings.add(x.id);
-  }
-
-  const showAll = (p: Project) =>
-    p.open.length > per
-      ? `<p><a href="${escapeHtml(briefingsHref({ zone: p.id, per }))}">Show all ${p.open.length} in ${name(p.id)}</a></p>`
-      : '';
-  const rulingsOf = (p: Project) => rulingsLink(p.id);
-  // Each section ends with a marker, so a section can be told from the next in tests.
-  const sections = [
-    ...busy.map(
-      (p) =>
-        `<section class="project" data-zone="${escapeHtml(p.id)}"><h3>${name(p.id)} ${badge(p.mode)} <small>${p.open.length} waiting</small></h3>${blocks(p.open.slice(0, per), 'h4')}${showAll(p)}${rulingsOf(p)}</section><!--/project-->`,
-    ),
-    ...quiet.map(
-      (p) =>
-        `<section class="project quiet" data-zone="${escapeHtml(p.id)}"><p>${name(p.id)} ${badge(p.mode)} Nothing waiting</p>${rulingsOf(p)}</section><!--/project-->`,
-    ),
-    ...heldOnes.map(
-      (p) =>
-        `<details class="project held" data-zone="${escapeHtml(p.id)}"><summary>${name(p.id)}: ${p.open.length} held while ${escapeHtml(p.mode)}</summary>${blocks(p.open.slice(0, per), 'h4')}${showAll(p)}${rulingsOf(p)}</details><!--/project-->`,
-    ),
-  ].join('');
-  const anyBlock = busy.length > 0 || heldOnes.length > 0 || notices.length > 0;
-  return page(
-    '<p><a href="/">Back</a></p><h2>Briefings (decisions waiting on you)</h2>' +
-      (total === 0
-        ? '<p>Nothing is waiting on you.</p>'
-        : `<p>${plural(total, 'decision')} waiting.</p>`) +
-      sizeSelector(undefined, per) +
-      sections +
-      noticesSection(newestFirst(notices)) +
-      (anyBlock ? RULE_SCRIPT : ''),
-    { live: true },
-  );
 }
 
 /**
@@ -1612,7 +1411,7 @@ export function renderHome(state: HomeState): string {
       tokenAgeBanner(state.claudeTokenDays) +
       setupFrame +
       starterBanner +
-      needsYouSection(needs, state.heldBriefings, state.zones) +
+      needsYouSection(needs, state.heldBriefings, state.zones, state.needsAll ?? false) +
       projectsSection(floorCounts(state, now), state.zones, addProject) +
       capacitySection(state, now) +
       pipelineSection(state, now),

@@ -237,7 +237,7 @@ function floorMerges(db: Db, at: Date): { merges24h?: ReturnType<typeof listMerg
 }
 
 /**
- * A zone's crew line, on Floor and on its Goals tab (#620): on or off, when its last lead cycle's
+ * A zone's crew line, on its Goals tab (#620): on or off, when its last lead cycle's
  * drop was created, when the next is due by time (null once due), and Fable's status.
  */
 function crewLine(db: Db, config: Config, z: Config['dropZones'][number], at: Date): CrewLine {
@@ -662,7 +662,7 @@ export function createApp(
       .send(withCsrf(req, html));
   });
 
-  app.get('/', async (req, reply) => {
+  app.get<{ Querystring: { needs?: string } }>('/', async (req, reply) => {
     const { db, now } = deps;
     const config = cfg(req);
     const at = now();
@@ -694,6 +694,7 @@ export function createApp(
       usage: usageView(db, config, at),
       pending,
       doctorFails: projectFails(latestDoctorRun(db)?.checks ?? [], config.dropZones),
+      needsAll: req.query.needs === 'all',
     });
     return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
   });

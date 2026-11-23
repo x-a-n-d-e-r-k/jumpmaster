@@ -6,6 +6,7 @@ import type { DoctorCheck } from './doctor/checks.js';
 import {
   cannotRunText,
   lastPassAt,
+  projectFails,
   recordPass,
   type Status,
   type StatusInput,
@@ -1099,5 +1100,35 @@ describe('goal changes on every other line (#645)', () => {
     expect(s.also ?? []).not.toContainEqual(
       expect.objectContaining({ text: '1 goal change to confirm' }),
     );
+  });
+});
+
+describe('projectFails: the failing checks that block a project, for Home (#625)', () => {
+  const check = (over: Partial<DoctorCheck>): DoctorCheck => ({
+    id: 'c',
+    zoneId: 'main',
+    status: 'fail',
+    summary: 's',
+    ...over,
+  });
+
+  test('keeps a fail of a configured zone; drops a warn, a pass, an install-wide check and an unconfigured zone', () => {
+    const checks: DoctorCheck[] = [
+      check({ id: 'kept', summary: 'labels missing' }),
+      check({ id: 'warned', status: 'warn' }),
+      check({ id: 'passed', status: 'pass' }),
+      check({ id: 'install', zoneId: null }),
+      check({ id: 'gone', zoneId: 'removed' }),
+      check({ id: 'other', zoneId: 'second', summary: 'no token' }),
+    ];
+    expect(projectFails(checks, [{ id: 'main' }, { id: 'second' }])).toEqual([
+      { zoneId: 'main', id: 'kept', summary: 'labels missing' },
+      { zoneId: 'second', id: 'other', summary: 'no token' },
+    ]);
+  });
+
+  test('no checks, or no zones, is no rows', () => {
+    expect(projectFails([], [{ id: 'main' }])).toEqual([]);
+    expect(projectFails([check({})], [])).toEqual([]);
   });
 });
