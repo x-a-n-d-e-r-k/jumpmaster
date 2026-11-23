@@ -1587,6 +1587,32 @@ CREATE UNIQUE INDEX crew_done_claims_one_verifying ON crew_done_claims(item_id)
   WHERE state = 'verifying';
 `;
 
+/**
+ * v57 (#627): a chat thread may focus a drop or a doctor finding. Such a thread belongs to the
+ * browser session that opened it (`owner_session`, the session's hash): another session reads it
+ * as unknown. A thread focused on anything else, or on nothing, has none and stays shared.
+ */
+const V57_SQL = `
+CREATE TABLE new_chat_threads (
+  id                 INTEGER PRIMARY KEY,
+  title              TEXT NOT NULL,
+  focus_kind         TEXT CHECK (focus_kind IN ('zone','goals','briefing','drop','doctor')),
+  focus_zone_id      TEXT,
+  focus_ref          TEXT,
+  claude_session_id  TEXT,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL,
+  owner_session      TEXT
+);
+INSERT INTO new_chat_threads (id, title, focus_kind, focus_zone_id, focus_ref, claude_session_id,
+  created_at, updated_at)
+SELECT id, title, focus_kind, focus_zone_id, focus_ref, claude_session_id, created_at, updated_at
+FROM chat_threads;
+DROP TABLE chat_threads;
+ALTER TABLE new_chat_threads RENAME TO chat_threads;
+CREATE INDEX chat_threads_updated ON chat_threads (updated_at);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1644,6 +1670,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 54, sql: V54_SQL },
   { version: 55, sql: V55_SQL },
   { version: 56, sql: V56_SQL },
+  { version: 57, sql: V57_SQL, foreignKeysOff: true },
 ];
 
 /**

@@ -12,7 +12,7 @@ import { loadBoot } from '../config/boot.js';
 import { ConfigStore } from '../config/store.js';
 import type { Config } from '../config.js';
 import { openDb } from '../db/open.js';
-import { setZoneMode } from '../db/repo.js';
+import { insertDrop, setZoneMode, upsertDropZone } from '../db/repo.js';
 import { usageCfg, zoneWorld } from '../test/fixtures.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 import { listCards, recordCard } from './cards.js';
@@ -214,6 +214,103 @@ describe('/api/chat', () => {
       });
       expect(posted.statusCode, id).toBe(404);
     }
+    expect(w.enqueued).toEqual([]);
+  });
+
+  test('#627 a focus on an unknown drop is 400 and does not echo the ref', async () => {
+    const w = world();
+    const ref = 'drop-<script>-zzq-unknown';
+    const r = await w.app.inject({
+      method: 'POST',
+      url: '/api/chat/threads',
+      headers: w.session,
+      payload: { focus: { kind: 'drop', zoneId: 'main', ref } },
+    });
+    expect(r.statusCode).toBe(400);
+    expect(r.json()).toEqual({ error: 'unknown drop' });
+    expect(r.body).not.toContain('zzq');
+    expect(w.db.prepare('SELECT COUNT(*) AS n FROM chat_threads').get()).toEqual({ n: 0 });
+  });
+
+  test('D1 #627 another session cannot read, post to, stream or list a drop- or doctor-focused thread (404)', async () => {
+    const w = world();
+    upsertDropZone(w.db, {
+      id: 'main',
+      repo: 'acme/demo',
+      defaultBranch: 'main',
+      configJson: '{}',
+    });
+    insertDrop(w.db, {
+      id: 'drop-focus-1',
+      dropZoneId: 'main',
+      workItemId: null,
+      role: 'doctor',
+      state: 'failed',
+      createdAt: t0.toISOString(),
+    });
+    w.db
+      .prepare(
+        'INSERT INTO doctor_runs (started_at, finished_at, results_json, drop_ids_json) VALUES (?, ?, ?, ?)',
+      )
+      .run(
+        t0.toISOString(),
+        t0.toISOString(),
+        JSON.stringify([{ id: 'claude.plan', zoneId: null, status: 'warn', summary: 's' }]),
+        '[]',
+      );
+    const other = { host: HOST, ...operatorSession(w.db, t0).headers };
+    for (const focus of [
+      { kind: 'drop', zoneId: 'main', ref: 'drop-focus-1' },
+      { kind: 'doctor', zoneId: 'install', ref: 'claude.plan' },
+    ]) {
+      const made = await w.app.inject({
+        method: 'POST',
+        url: '/api/chat/threads',
+        headers: w.session,
+        payload: { focus },
+      });
+      expect(made.statusCode).toBe(200);
+      const id = (made.json() as { thread: { id: number } }).thread.id;
+      const mine = await w.app.inject({
+        method: 'GET',
+        url: `/api/chat/threads/${id}`,
+        headers: w.session,
+      });
+      expect(mine.statusCode).toBe(200);
+      for (const url of [
+        `/api/chat/threads/${id}`,
+        `/api/chat/threads/${id}/events`,
+        `/chat/${id}`,
+      ]) {
+        const got = await w.app.inject({ method: 'GET', url, headers: other });
+        expect(got.statusCode, url).toBe(404);
+      }
+      const posted = await w.app.inject({
+        method: 'POST',
+        url: `/api/chat/threads/${id}/messages`,
+        headers: other,
+        payload: { text: 'hi' },
+      });
+      expect(posted.statusCode).toBe(404);
+      const listed = await w.app.inject({
+        method: 'GET',
+        url: '/api/chat/threads',
+        headers: other,
+      });
+      expect(
+        (listed.json() as { threads: { id: number }[] }).threads.map((t) => t.id),
+      ).not.toContain(id);
+      const page = await w.app.inject({ method: 'GET', url: '/chat', headers: other });
+      expect(page.body).not.toContain(`/chat/${id}"`);
+    }
+    // A thread focused on a zone (or nothing) stays shared, as before.
+    const shared = createThread(w.db, { title: 'shared' }, t0);
+    const seen = await w.app.inject({
+      method: 'GET',
+      url: `/api/chat/threads/${shared.id}`,
+      headers: other,
+    });
+    expect(seen.statusCode).toBe(200);
     expect(w.enqueued).toEqual([]);
   });
 });

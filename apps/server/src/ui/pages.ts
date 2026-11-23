@@ -9,7 +9,7 @@ import {
   type Ruling,
   WAITS_FOR_CREW,
 } from '../briefings.js';
-import type { Focus } from '../chat/focus.js';
+import { type Focus, INSTALL_ZONE } from '../chat/focus.js';
 import { type ClaudePlan, type DropZoneConfig, STARTER_WARNING } from '../config.js';
 import type { CrewIssue } from '../crew/store.js';
 import type {
@@ -526,8 +526,14 @@ const ASK_SCRIPT = `<script>for(const f of document.querySelectorAll('form.ask')
  * header's chip shows it (escaped HTML), in an inert template the page shell moves there.
  */
 export function askButton(focus: Focus, chip?: string): string {
+  return `${askForm(focus, 'Ask about this', chip)}${ASK_SCRIPT}`;
+}
+
+/** The Ask about this form alone, its button reading `button`; the page adds ASK_SCRIPT once. */
+function askForm(focus: Focus, button: string, chip?: string, title?: string): string {
   const label = chip === undefined ? '' : `<template class="ask-chip">${chip}</template>`;
-  return `<form class="ask" data-focus-kind="${escapeHtml(focus.kind)}" data-focus-zone="${escapeHtml(focus.zoneId)}" data-focus-ref="${escapeHtml(focus.ref)}">${label}<button>Ask about this</button></form>${ASK_SCRIPT}`;
+  const t = title === undefined ? '' : ` title="${escapeHtml(title)}"`;
+  return `<form class="ask" data-focus-kind="${escapeHtml(focus.kind)}" data-focus-zone="${escapeHtml(focus.zoneId)}" data-focus-ref="${escapeHtml(focus.ref)}">${label}<button${t}>${escapeHtml(button)}</button></form>`;
 }
 
 /** The tabs of a project's pages (#616), in the order the tab bar shows them. */
@@ -955,9 +961,12 @@ export const LIVE_SCRIPT = `<script>/*${LIVE_MARKER}*/(()=>{let base=null,pendin
 /** A value that changes on every render while the page's state does not: no reload for it. */
 const volatile = (html: string): string => `<span data-live-ignore>${html}</span>`;
 
-/** A page's first Ask about this form: its focus, as the form escaped it, and its chip. */
+/**
+ * A page's first Ask about this form: its focus, as the form escaped it, and its chip. A doctor
+ * finding's form is one row's of many on Health, never the page's own focus.
+ */
 const ASK_FORM =
-  /<form class="ask" data-focus-kind="(zone|goals|briefing)" data-focus-zone="([^"]*)" data-focus-ref="([^"]*)">(?:<template class="ask-chip">(.*?)<\/template>)?/;
+  /<form class="ask" data-focus-kind="(zone|goals|briefing|drop)" data-focus-zone="([^"]*)" data-focus-ref="([^"]*)">(?:<template class="ask-chip">(.*?)<\/template>)?/;
 
 /** A page's focus: the escaped values and the chip HTML. */
 type PageFocus = Focus & { chip: string | undefined };
@@ -1843,10 +1852,12 @@ export function renderDrop(
     )
     .join('');
   const id = escapeHtml(drop.id);
+  const short = escapeHtml(drop.id.slice(0, 8));
   return page(
     dropCrumbs(drop, item, project) +
-      `<h2 title="${id}">${escapeHtml(drop.role)} drop ${escapeHtml(drop.id.slice(0, 8))}</h2>` +
+      `<h2 title="${id}">${escapeHtml(drop.role)} drop ${short}</h2>` +
       `<p><small><code>${id}</code></small></p>` +
+      askButton({ kind: 'drop', zoneId: drop.dropZoneId, ref: drop.id }, `Drop ${short}`) +
       dropSummary(drop, item, project, known?.repo, now) +
       egressSection(events) +
       transcriptSection(events, pruned) +
@@ -2305,11 +2316,18 @@ export function renderDoctor(
         c.status === 'pass'
           ? ''
           : `${c.action ? renderAction(c.action) : ''}${c.fix ? `<pre>${escapeHtml(c.fix)}</pre>` : ''}${c.doc ? `<div>See ${escapeHtml(c.doc)}</div>` : ''}`;
-      return `<tr class="${escapeHtml(c.status)}"><td>${escapeHtml(c.status.toUpperCase())}</td><td>${c.zoneId === null ? '' : name(c.zoneId)}</td><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.summary)}${help}</td></tr>`;
+      // Ask (#627): a thread focused on this finding of this run.
+      const ask = askForm(
+        { kind: 'doctor', zoneId: c.zoneId ?? INSTALL_ZONE, ref: c.id },
+        'Ask',
+        `Doctor: ${escapeHtml(c.id)}`,
+        `Ask about ${c.id}`,
+      );
+      return `<tr class="${escapeHtml(c.status)}"><td>${escapeHtml(c.status.toUpperCase())}</td><td>${c.zoneId === null ? '' : name(c.zoneId)}</td><td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.summary)}${help}</td><td>${ask}</td></tr>`;
     })
     .join('');
   return page(
-    `${head}<p>Run ${run.id}, finished ${escapeHtml(run.finishedAt ?? '-')}: ${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('info') > 0 ? `, ${n('info')} info` : ''}.</p>${controls}${zoneProblems}<table><tr><th>Status</th><th>Zone</th><th>Check</th><th>Finding</th></tr>${rows}</table>${DOCTOR_SCRIPT}`,
+    `${head}<p>Run ${run.id}, finished ${escapeHtml(run.finishedAt ?? '-')}: ${n('pass')} pass, ${n('warn')} warn, ${n('fail')} fail, ${n('skip')} skip${n('info') > 0 ? `, ${n('info')} info` : ''}.</p>${controls}${zoneProblems}<table><tr><th>Status</th><th>Zone</th><th>Check</th><th>Finding</th><th>Ask</th></tr>${rows}</table>${DOCTOR_SCRIPT}${ASK_SCRIPT}`,
     { title: 'Health' },
   );
 }

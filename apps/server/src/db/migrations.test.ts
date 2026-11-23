@@ -1791,3 +1791,32 @@ test('v56 adds crew_done_claims: one verifying claim per item, one claim per dro
   put.run('d3', 'refused');
   expect(() => put.run('d4', 'maybe')).toThrow(/CHECK/);
 });
+
+test('v57 widens chat_threads.focus_kind to drop and doctor and adds owner_session, keeping every row', () => {
+  const f = dbAt(56, (raw) => {
+    raw.exec(
+      `INSERT INTO chat_threads (id, title, focus_kind, focus_zone_id, focus_ref, created_at,
+         updated_at) VALUES (1, 't', 'briefing', 'z', '3', 'c', 'u');
+       INSERT INTO chat_messages (thread_id, seq, role, text, state, created_at)
+       VALUES (1, 1, 'owner', 'hi', 'done', 'c')`,
+    );
+  });
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(
+    db
+      .prepare('SELECT id, focus_kind AS k, focus_ref AS r, owner_session AS o FROM chat_threads')
+      .all(),
+  ).toEqual([{ id: 1, k: 'briefing', r: '3', o: null }]);
+  const put = db.prepare(
+    `INSERT INTO chat_threads (title, focus_kind, created_at, updated_at) VALUES ('t', ?, 'c', 'u')`,
+  );
+  put.run('drop');
+  put.run('doctor');
+  expect(() => put.run('issue')).toThrow(/CHECK/);
+  expect(db.pragma('foreign_key_check')).toEqual([]);
+  expect(
+    db.prepare("SELECT name FROM sqlite_master WHERE name = 'chat_threads_updated'").all(),
+  ).toHaveLength(1);
+  db.close();
+});
