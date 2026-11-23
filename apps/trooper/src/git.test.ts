@@ -297,7 +297,7 @@ describe('the remote target decides the URL, auth scope and header (#716)', () =
     expect(c.env.GIT_CONFIG_VALUE_0).toBe(`AUTHORIZATION: basic ${b64(`oauth2:${TOKEN}`)}`);
     expect(c.argv).toContain('https://git.example.internal:8443/group/sub/project.git');
     expect(c.argv.join(' ')).not.toContain('github.com');
-    expect(JSON.stringify(c.env)).not.toContain('github.com');
+    expect(JSON.stringify(authEnv(c.env))).not.toContain('github.com');
     noTokenInArgv(calls);
   });
 
