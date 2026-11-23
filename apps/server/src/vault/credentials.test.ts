@@ -20,7 +20,13 @@ import {
   testCredential,
 } from './credentials.js';
 import { appEntryName, type GitHubAppEntry, serializeAppEntry } from './github-app-entries.js';
-import { type ResolvedApps, resolveAppEntries } from './resolution.js';
+import { gitlabPatEntryName } from './gitlab-pat-entries.js';
+import {
+  type ResolvedApps,
+  type ResolvedGitlabPats,
+  resolveAppEntries,
+  resolveGitlabPatEntries,
+} from './resolution.js';
 import { fingerprintOf, openVault, type Vault } from './vault.js';
 
 const CLAUDE = 'sk-ant-' + 'oat01-CLAUDEVALUE-0001';
@@ -270,6 +276,44 @@ describe('shadowing, fingerprints and dates', () => {
     expect(a).toMatch(/^[0-9a-f]{16}$/);
     expect(a).not.toBe(credentialFingerprint(r));
     expect(a).not.toBe(b);
+  });
+
+  test('credentialFingerprint is unchanged with no or an empty GitLab entry map (issue #719)', () => {
+    const r = resolveCredentials(
+      { JM_GITHUB_AUTHOR_TOKEN: AUTHOR, JM_GITHUB_REVIEWER_TOKEN: REVIEWER },
+      undefined,
+      'disabled',
+    );
+    const PINNED = 'd30acf30e7d73d1f';
+    expect(credentialFingerprint(r, undefined, undefined)).toBe(PINNED);
+    expect(credentialFingerprint(r, new Map(), new Map())).toBe(PINNED);
+    const noRoles: ResolvedGitlabPats = new Map([['web', {}]]);
+    expect(credentialFingerprint(r, undefined, noRoles)).toBe(PINNED);
+  });
+
+  test('credentialFingerprint changes when a gitlab-pat entry is added, rotated or removed, and holds none', () => {
+    const r = resolveCredentials({ JM_GITHUB_AUTHOR_TOKEN: AUTHOR }, undefined, 'disabled');
+    const v = vault();
+    const zones = [{ id: 'web', forge: 'gitlab' as const }];
+    const pats = () => resolveGitlabPatEntries(zones, { vault: v, scrubSet: new ScrubSet() });
+    const GL_AUTHOR = 'gl-author-value-000000001';
+    const GL_ROTATED = 'gl-rotated-value-00000002';
+    const GL_REVIEWER = 'gl-reviewer-value-0000003';
+    const none = credentialFingerprint(r, undefined, pats());
+    expect(none).toBe(credentialFingerprint(r));
+    v.put(gitlabPatEntryName('web', 'author'), GL_AUTHOR, { now: t0 });
+    const added = credentialFingerprint(r, undefined, pats());
+    v.put(gitlabPatEntryName('web', 'author'), GL_ROTATED, { now: t0 });
+    const rotated = credentialFingerprint(r, undefined, pats());
+    v.put(gitlabPatEntryName('web', 'reviewer'), GL_REVIEWER, { now: t0 });
+    const both = credentialFingerprint(r, undefined, pats());
+    v.delete(gitlabPatEntryName('web', 'reviewer'));
+    const removed = credentialFingerprint(r, undefined, pats());
+    for (const f of [added, rotated, both, removed]) expect(f).toMatch(/^[0-9a-f]{16}$/);
+    expect(new Set([none, added, rotated, both]).size).toBe(4);
+    expect(removed).toBe(rotated);
+    for (const f of [added, rotated, both])
+      for (const t of [GL_AUTHOR, GL_ROTATED, GL_REVIEWER]) expect(f).not.toContain(t);
   });
 
   test("credentialCreatedAt: a vault credential's date (declared, else set) in either mode; claude.tokenCreatedAt for one the vault does not hold", () => {

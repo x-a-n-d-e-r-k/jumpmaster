@@ -11,7 +11,8 @@ import {
   appEntryName,
   type GitHubAppEntry,
 } from './github-app-entries.js';
-import type { ResolvedApps } from './resolution.js';
+import { gitlabPatEntryFingerprints } from './gitlab-pat-entries.js';
+import type { ResolvedApps, ResolvedGitlabPats } from './resolution.js';
 import { fingerprintOf, type Vault, VaultKeyError, type VaultMeta } from './vault.js';
 
 /**
@@ -332,13 +333,20 @@ export function shadowedAppEntries(
  * A hash over the forge credentials' fingerprints (the forge pair cache's key for a zone with an
  * app role, `pairKey` in outbox.ts; a PAT-only zone keeps its key from before): it changes with
  * any of them, and with any present app entry (by entry name, sorted), and holds none. With no
- * present app entry it is the PAT-only value.
+ * present app entry it is the PAT-only value. `gitlabPats` (`ConfigStore.resolvedGitlabPats()`)
+ * adds each present `gitlab-pat` entry the same way; absent or empty, the value is unchanged.
  */
-export function credentialFingerprint(resolved: Resolved, apps?: ResolvedApps): string {
+export function credentialFingerprint(
+  resolved: Resolved,
+  apps?: ResolvedApps,
+  gitlabPats?: ResolvedGitlabPats,
+): string {
   const parts = (['githubAuthorToken', 'githubReviewerToken', 'githubReadToken'] as const).map(
     (n) => `${n}=${resolved[n]?.fingerprint ?? ''}`,
   );
   parts.push(...appEntryFingerprints(apps));
+  // Absent or empty adds nothing, so a GitHub zone's value is as it was before GitLab entries.
+  if (gitlabPats) parts.push(...gitlabPatEntryFingerprints(Object.fromEntries(gitlabPats)));
   return createHash('sha256').update(parts.join('\n')).digest('hex').slice(0, 16);
 }
 
