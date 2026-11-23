@@ -482,7 +482,15 @@ describe('diagnose input: CI failure annotations of the last ci heal (#720)', ()
       feedback: ci,
       ciAnnotations: [{ check: 'ci', annotations: [failing] }],
     });
-    healDrop(item, 'h2', { feedback: { source: 'review', text: 'Fix it' } }, plus(t0, 60_000));
+    healDrop(
+      item,
+      'h2',
+      {
+        feedback: { source: 'review', text: 'Fix it' },
+        ciAnnotations: [{ check: 'ci', annotations: [failing] }],
+      },
+      plus(t0, 60_000),
+    );
     setWorkItemState(w.db, item, 'parked', 'heal budget exhausted', t0);
     const input = diagnoseInput(w.db, w.zone, item, DROP);
     expect(input).not.toContain('ci-failures');
@@ -508,14 +516,33 @@ describe('diagnose input: CI failure annotations of the last ci heal (#720)', ()
     expect(input).not.toContain(secret);
   });
 
-  test('a ci heal on an earlier head than the PR now has: no section (stale)', () => {
+  test('a ci heal that pushed, then a budget park on the new head: the section, with the head it was read on', () => {
     const item = w.prItem(1, 'h2');
     healDrop(item, 'h1', {
       feedback: ci,
       ciAnnotations: [{ check: 'ci', annotations: [failing] }],
     });
-    setWorkItemState(w.db, item, 'parked', 'stuck on something else', t0);
-    expect(diagnoseInput(w.db, w.zone, item, DROP)).not.toContain('ci-failures');
+    setWorkItemState(w.db, item, 'parked', 'budget exhausted: heal', t0);
+    const input = diagnoseInput(w.db, w.zone, item, DROP);
+    expect(input).toContain(begin);
+    const body = input.slice(input.indexOf(begin) + begin.length + 1, input.indexOf(end) - 1);
+    expect(body.split('\n')).toEqual([
+      'Read on head h1; the PR head is now h2.',
+      "ci: apps/trooper/src/git.test.ts:300 scrubs the environment: AssertionError: expected '{\"GITHUB_STATE\":…' not to contain 'github.com'",
+    ]);
+  });
+
+  test('an item with no PR: the section, without a head note', () => {
+    const item = w.item(1);
+    healDrop(item, 'h1', {
+      feedback: ci,
+      ciAnnotations: [{ check: 'ci', annotations: [failing] }],
+    });
+    setWorkItemState(w.db, item, 'parked', 'budget exhausted: heal', t0);
+    const input = diagnoseInput(w.db, w.zone, item, DROP);
+    const body = input.slice(input.indexOf(begin) + begin.length + 1, input.indexOf(end) - 1);
+    expect(body.split('\n')).toHaveLength(1);
+    expect(body).toContain('git.test.ts:300');
   });
 
   test('a heal drop with malformed input_json: no section, and the rest of the input', () => {

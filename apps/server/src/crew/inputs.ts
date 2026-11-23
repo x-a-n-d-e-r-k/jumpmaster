@@ -588,10 +588,11 @@ export function diagnoseInput(
 
 /**
  * The `ci-failures` section of a diagnose input (#720): the GitHub Actions failure annotations the
- * item's newest heal stored, when that heal was a `ci` heal on the PR's current head, redacted
- * here with the configured secrets and the scrub set (as the heal's `redactionList` does), and
- * neutralised and fenced by `assemble`. None for any other heal, a heal on an earlier head (its
- * failures are stale), or no annotations.
+ * item's newest heal stored, when that heal was a `ci` heal, redacted here with the configured
+ * secrets and the scrub set (as the heal's `redactionList` does), and neutralised and fenced by
+ * `assemble`. A ci heal that pushed leaves the PR on a newer head than the one its failures were
+ * read on (the usual heal-budget park), so the section then names both heads. None for any other
+ * heal or no annotations.
  */
 function ciFailuresSection(
   db: Db,
@@ -606,7 +607,7 @@ function ciFailuresSection(
        ORDER BY created_at DESC, rowid DESC LIMIT 1`,
     )
     .get(itemId) as { inputJson: string | null; headSha: string | null } | undefined;
-  if (!row || headSha === null || row.headSha !== headSha) return [];
+  if (!row) return [];
   let input: { feedback?: Feedback | null; ciAnnotations?: unknown } | null;
   try {
     input = JSON.parse(row.inputJson ?? 'null');
@@ -618,7 +619,12 @@ function ciFailuresSection(
     ...secrets,
     ...serverScrubSet.values(),
   ]);
-  return text === '' ? [] : [{ title: 'CI failures', name: 'ci-failures', kind: 'data', text }];
+  if (text === '') return [];
+  const note =
+    headSha !== null && row.headSha !== null && row.headSha !== headSha
+      ? `Read on head ${row.headSha}; the PR head is now ${headSha}.\n`
+      : '';
+  return [{ title: 'CI failures', name: 'ci-failures', kind: 'data', text: note + text }];
 }
 
 /** How the item's newest implement drop failed or was lost, as an implement retry reads it. */
