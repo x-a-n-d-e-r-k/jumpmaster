@@ -196,7 +196,7 @@ implement drop is queued. Near the usage limit only finishing work and doctor dr
   the section's inline code spans that look like repository paths (they contain `/` or end in a
   file extension); one ending in `/` is a directory and overlaps every file under it. The held
   issue's reason reads `waiting: overlaps #<pr> on <path>` on the Work page and in the status
-  line, and observe mode records `would_wait:overlap`. Each pass stores the open PR's file list
+  line, and observe mode's Log shows "Would hold #N (waiting: overlaps #<pr> on <path>)". Each pass stores the open PR's file list
   when GitHub returns it complete; an incomplete or unread list holds nothing back, and an issue
   whose Placement names no path is never held. Neither rule touches work already running or open.
 - **Attribution:** `"attribution": false` stops the agent adding Claude's co-author trailer and
@@ -229,26 +229,29 @@ Before stage 5, rollback is: stop Jumpmaster. Nothing was written.
 
 Configure the zone as above with `"mode": "observe"`. For a private repository, set
 `JM_GITHUB_READ_TOKEN` and `"reviewReadToken": true`. List open agent PRs in `adoptPulls`, so
-observe sees PR decisions too. Each one's issue must carry the ready label, or it appears as
-`adopt_refused`.
+observe sees PR decisions too. Each one's issue must carry the ready label, or the Log shows
+"Refused to adopt a pull request (#N has no work item: …)".
 
 **Pass:** the server starts, and the Log (`/activity/log`) fills up within a few passes.
 
 ### 2. Observe
 
 Run this alongside the old system for at least a day. Compare the Log (`/activity/log`) to what it really
-does, and investigate each difference.
+does, and investigate each difference. The Log words each entry; the bullets below quote them, with
+`#N` for the issue or PR.
 
-- `would_enqueue:review` is the steady state for a PR, because observe never produces a verdict.
-  Later decisions (post, merge, heal) only appear for PRs with verdicts from an earlier active run.
-- `would_park` is the most useful signal: protected paths, changed gate scripts and tools, and
+- "Would start reviewing #N" is the steady state for a PR, because observe never produces a verdict.
+  Later decisions ("Would post the review on #N", "Would merge #N", "Would start healing #N")
+  only appear for PRs with verdicts from an earlier active run.
+- "Would park #N (reason)" is the most useful signal: protected paths, changed gate scripts and tools, and
   branch protection problems all show up here. A `gate tool changed: dependency added` on every
   dependency PR means pnpm is not pinned to 10 or later, or `trustPnpmBuildBlocking` is off
   (see Zone settings).
-- `would_enqueue:resume` means a ready issue has an old `agent/issue-N` branch that would be
+- "Would resume #N" means a ready issue has an old `agent/issue-N` branch that would be
   continued. Delete the branch or accept it for each one.
-- `adopt_refused` lists PRs that won't be adopted, and why.
-- `would_wait:blocked` means a ready issue has an open GitHub "blocked by" link, so it won't
+- "Refused to adopt a pull request (reason)" lists PRs that won't be adopted, and why. It
+  happened, so it has no "Would".
+- "Would hold #N (blocked by …)" means a ready issue has an open GitHub "blocked by" link, so it won't
   start until every blocker closes. A change to the blocker set adds a new row, so count issues,
   not rows. `unreadable blocker` means the link points at an issue the author token can't see;
   the issue waits rather than guess.

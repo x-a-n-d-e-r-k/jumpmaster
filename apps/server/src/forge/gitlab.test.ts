@@ -1,6 +1,6 @@
 import nock from 'nock';
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
-import { ACCESS, type FakeGitLab, fakeGitLab } from '../test/fake-gitlab.js';
+import { ACCESS, type FakeGitLab, fakeGitLab, type GitLabJobStatus } from '../test/fake-gitlab.js';
 import { gitBlobSha, type TokenProvider } from './github.js';
 import { GitLabForge, GitLabForgeError, GitLabUnsupportedError } from './gitlab.js';
 
@@ -310,7 +310,6 @@ describe('no-op and refusals', () => {
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GitLabUnsupportedError);
     expect((err as Error).message).toContain('merge');
-    await expect(forge.checksFor('abc')).rejects.toBeInstanceOf(GitLabUnsupportedError);
     await expect(forge.getBranchRules('trunk')).rejects.toBeInstanceOf(GitLabUnsupportedError);
     await expect(forge.repoAccess()).rejects.toBeInstanceOf(GitLabUnsupportedError);
     expect(gl.requests).toEqual([]);
@@ -838,6 +837,16 @@ describe('edges, through an injected fetch', () => {
     });
     await expect(forge.listLabels()).rejects.toThrow(/more than 1000 pages/);
     expect(calls).toHaveLength(1000);
+  });
+
+  test('a pipeline id that is not a positive integer is refused before its jobs are read', async () => {
+    const { forge, calls } = stubbed((url) =>
+      new URL(url).pathname.endsWith('/pipelines')
+        ? { body: JSON.stringify([{ id: '1/../2', sha: 'abc', status: 'failed' }]) }
+        : { body: '[]' },
+    );
+    await expect(forge.checksFor('abc')).rejects.toThrow(/not a positive integer/);
+    expect(calls.some((c) => c.url.includes('/jobs'))).toBe(false);
   });
 
   test('a project with no default branch is an error', async () => {
@@ -1834,5 +1843,276 @@ describe('reviews: secrets', () => {
       expect((e as Error).message).not.toMatch(/SHA does not match|Unauthorized/);
     }
     for (const e of errors) expect((e as GitLabForgeError).status).toBe(401);
+  });
+});
+
+const PIPELINES = `${API}/pipelines`;
+
+function checksRepo(gl: FakeGitLab): string {
+  return gl.seedCommit({ branch: 'trunk', files: { a: '1' }, message: 'a' });
+}
+
+describe('checks: checksFor', () => {
+  test('no pipeline and no status gives none', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    expect(await forge.checksFor(sha)).toEqual({ state: 'none', names: [], failed: [] });
+    expect(gl.requests.find((r) => r.path === PIPELINES)?.query).toMatchObject({
+      sha,
+      order_by: 'id',
+      sort: 'desc',
+    });
+  });
+
+  test('an all-success pipeline gives success with every job name', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    gl.seedPipeline({
+      sha,
+      jobs: [
+        { name: 'build', status: 'success' },
+        { name: 'lint', status: 'success' },
+        { name: 'deploy', status: 'skipped' },
+        { name: 'optional', status: 'manual', allowFailure: true },
+      ],
+    });
+    const c = await forge.checksFor(sha);
+    expect(c).toEqual({ state: 'success', names: c.names, failed: [] });
+    expect([...c.names].sort()).toEqual(['build', 'deploy', 'lint', 'optional']);
+  });
+
+  test('a failed job fails with conclusion failure, a canceled one cancelled, no checkRunId', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    gl.seedPipeline({
+      sha,
+      jobs: [
+        { name: 'test', status: 'failed' },
+        { name: 'e2e', status: 'canceled' },
+        { name: 'build', status: 'success' },
+      ],
+    });
+    const c = await forge.checksFor(sha);
+    expect(c.state).toBe('failure');
+    expect(c.failed).toEqual([
+      { name: 'e2e', conclusion: 'cancelled' },
+      { name: 'test', conclusion: 'failure' },
+    ]);
+    expect(c.queued).toBeUndefined();
+  });
+
+  test('a failed job with allow_failure does not fail the result', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    gl.seedPipeline({
+      sha,
+      jobs: [
+        { name: 'flaky', status: 'failed', allowFailure: true },
+        { name: 'build', status: 'success' },
+      ],
+    });
+    expect(await forge.checksFor(sha)).toMatchObject({ state: 'success', failed: [] });
+  });
+
+  test('pending, created and running jobs give pending; only created and pending are queued', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    gl.seedPipeline({
+      sha,
+      jobs: [
+        { name: 'zeta', status: 'pending' },
+        { name: 'alpha', status: 'created' },
+        { name: 'run', status: 'running' },
+        { name: 'gate', status: 'manual' },
+      ],
+    });
+    const c = await forge.checksFor(sha);
+    expect(c.state).toBe('pending');
+    expect(c.queued).toEqual(['alpha', 'zeta']);
+    expect(c.failed).toEqual([]);
+  });
+
+  test('an unknown job state is pending, never success', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    const { jobs } = gl.seedPipeline({ sha, jobs: [{ name: 'test', status: 'success' }] });
+    gl.setJobStatus(jobs[0]?.id as number, 'canceling' as GitLabJobStatus);
+    const c = await forge.checksFor(sha);
+    expect(c.state).toBe('pending');
+    expect(c.queued).toBeUndefined();
+  });
+
+  test('a pending external status gives pending but is never queued', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    gl.seedCommitStatus({ sha, name: 'external/ci', status: 'pending' });
+    const c = await forge.checksFor(sha);
+    expect(c).toEqual({ state: 'pending', names: ['external/ci'], failed: [] });
+  });
+
+  test('a retried job counts only as its newest attempt', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    const { pipeline } = gl.seedPipeline({ sha, jobs: [{ name: 'test', status: 'failed' }] });
+    expect((await forge.checksFor(sha)).state).toBe('failure');
+    await forge.rerunFailedChecks(1, sha, ['test']);
+    const c = await forge.checksFor(sha);
+    expect(c).toEqual({ state: 'pending', names: ['test'], failed: [], queued: ['test'] });
+    // The current attempt, read as the API lists it (the retried one is excluded).
+    const latest = (await fetch(`${GITLAB}${PIPELINES}/${pipeline.id}/jobs`, {
+      headers: { 'PRIVATE-TOKEN': AGENT },
+    }).then((r) => r.json())) as { id: number }[];
+    gl.setJobStatus(latest[0]?.id as number, 'success');
+    expect(await forge.checksFor(sha)).toEqual({ state: 'success', names: ['test'], failed: [] });
+  });
+
+  test("a newer pipeline's job shadows the older pipeline's job of the same name", async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    gl.seedPipeline({
+      sha,
+      jobs: [
+        { name: 'test', status: 'failed' },
+        { name: 'old-only', status: 'success' },
+      ],
+    });
+    gl.seedPipeline({ sha, jobs: [{ name: 'test', status: 'success' }] });
+    const c = await forge.checksFor(sha);
+    expect(c.state).toBe('success');
+    expect([...c.names].sort()).toEqual(['old-only', 'test']);
+  });
+
+  test('a failed external status fails the result; one named like a job is not counted twice', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    gl.seedPipeline({ sha, jobs: [{ name: 'build', status: 'success' }] });
+    gl.seedCommitStatus({ sha, name: 'build', status: 'failed' });
+    gl.seedCommitStatus({ sha, name: 'external/scan', status: 'failed' });
+    gl.seedCommitStatus({ sha, name: 'external/ok', status: 'success' });
+    const c = await forge.checksFor(sha);
+    expect(c.state).toBe('failure');
+    expect(c.failed).toEqual([{ name: 'external/scan', conclusion: 'failure' }]);
+    expect([...c.names].sort()).toEqual(['build', 'external/ok', 'external/scan']);
+  });
+
+  test.each([
+    ['failed', 'failure'],
+    ['canceled', 'failure'],
+    ['created', 'pending'],
+    ['running', 'pending'],
+    ['success', 'success'],
+    ['skipped', 'success'],
+  ] as const)('a pipeline with no jobs and status %s gives %s', async (status, state) => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    gl.seedPipeline({ sha, jobs: [], status });
+    expect(await forge.checksFor(sha)).toEqual({ state, names: [], failed: [] });
+  });
+
+  test('waiting_for_resource, preparing and scheduled jobs are pending and queued', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    const { jobs } = gl.seedPipeline({
+      sha,
+      jobs: [
+        { name: 'wait', status: 'success' },
+        { name: 'prep', status: 'success' },
+        { name: 'later', status: 'success' },
+      ],
+    });
+    const states = ['waiting_for_resource', 'preparing', 'scheduled'];
+    jobs.forEach((j, i) => gl.setJobStatus(j.id, states[i] as GitLabJobStatus));
+    const c = await forge.checksFor(sha);
+    expect(c.state).toBe('pending');
+    expect(c.queued).toEqual(['later', 'prep', 'wait']);
+  });
+
+  test('a failed job-less pipeline fails the result even when another pipeline succeeds', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    gl.seedPipeline({ sha, jobs: [{ name: 'build', status: 'success' }] });
+    gl.seedPipeline({ sha, jobs: [], status: 'failed' });
+    expect(await forge.checksFor(sha)).toEqual({ state: 'failure', names: ['build'], failed: [] });
+  });
+
+  test('pages through more than 100 jobs', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    gl.seedPipeline({
+      sha,
+      jobs: Array.from({ length: 130 }, (_, i) => ({ name: `j${i}`, status: 'success' as const })),
+    });
+    const c = await forge.checksFor(sha);
+    expect(c.names).toHaveLength(130);
+    expect(gl.requests.filter((r) => r.path.endsWith('/jobs'))).toHaveLength(2);
+  });
+});
+
+describe('checks: checkAnnotations', () => {
+  test('returns [] and sends no request', async () => {
+    const { gl, forge } = setup();
+    expect(await forge.checkAnnotations(123)).toEqual([]);
+    expect(gl.requests).toEqual([]);
+  });
+});
+
+describe('checks: rerunFailedChecks', () => {
+  const retries = (gl: FakeGitLab) =>
+    gl.requests.filter((r) => r.method === 'POST').map((r) => r.path);
+
+  test('retries only pipelines with an effective failed job named in names, once each, newest first', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    const a = gl.seedPipeline({
+      sha,
+      jobs: [
+        { name: 'test', status: 'failed' },
+        { name: 'lint', status: 'failed' },
+      ],
+    }).pipeline;
+    const b = gl.seedPipeline({ sha, jobs: [{ name: 'e2e', status: 'canceled' }] }).pipeline;
+    gl.seedPipeline({ sha, jobs: [{ name: 'other', status: 'failed' }] });
+    const { runIds } = await forge.rerunFailedChecks(1, sha, ['test', 'lint', 'e2e']);
+    expect(runIds).toEqual([b.id, a.id]);
+    expect(retries(gl)).toEqual([`${PIPELINES}/${b.id}/retry`, `${PIPELINES}/${a.id}/retry`]);
+  });
+
+  test('does not retry an older pipeline whose failed job is shadowed', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    gl.seedPipeline({ sha, jobs: [{ name: 'test', status: 'failed' }] });
+    gl.seedPipeline({ sha, jobs: [{ name: 'test', status: 'success' }] });
+    expect(await forge.rerunFailedChecks(1, sha, ['test'])).toEqual({ runIds: [] });
+    expect(retries(gl)).toEqual([]);
+  });
+
+  test('does not retry a pipeline whose only named failure has allow_failure', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    gl.seedPipeline({ sha, jobs: [{ name: 'flaky', status: 'failed', allowFailure: true }] });
+    expect(await forge.rerunFailedChecks(1, sha, ['flaky'])).toEqual({ runIds: [] });
+    expect(retries(gl)).toEqual([]);
+  });
+
+  test('with no match sends no retry and returns []', async () => {
+    const { gl, forge } = setup();
+    const sha = checksRepo(gl);
+    gl.seedPipeline({ sha, jobs: [{ name: 'test', status: 'failed' }] });
+    expect(await forge.rerunFailedChecks(1, sha, ['nope'])).toEqual({ runIds: [] });
+    expect(retries(gl)).toEqual([]);
+  });
+
+  test('a reporter-level token is refused with a 403 that carries no token', async () => {
+    const { gl } = setup();
+    const REPORTER = glpat('R');
+    gl.addUser({ username: 'reader', token: REPORTER, accessLevel: ACCESS.reporter });
+    const sha = checksRepo(gl);
+    gl.seedPipeline({ sha, jobs: [{ name: 'test', status: 'failed' }] });
+    const forge = new GitLabForge(GITLAB, PROJECT.path, REPORTER);
+    const err = await forge.rerunFailedChecks(1, sha, ['test']).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GitLabForgeError);
+    expect((err as GitLabForgeError).status).toBe(403);
+    expect((err as Error).message).not.toContain(REPORTER);
+    expect((err as Error).message).not.toMatch(/Forbidden|privileges/);
   });
 });
