@@ -3323,8 +3323,21 @@ describe('the top bar (#628)', () => {
     );
     return /<nav class="topnav" aria-label="Main">([\s\S]*?)<\/nav>/.exec(full)?.[1] ?? '';
   };
-  /** An element's text: tags dropped, and any stray angle bracket with them, so no tag survives. */
-  const textOf = (html: string) => html.replace(/<[^>]+>/g, '').replace(/[<>]/g, '');
+  /**
+   * An element's text, read by walking the markup one character at a time:
+   * everything from a `<` to its `>` is a tag and is skipped, and an angle
+   * bracket is never copied, so no tag can survive into the text.
+   */
+  const textOf = (html: string) => {
+    let text = '';
+    let inTag = false;
+    for (const ch of html) {
+      if (ch === '<') inTag = true;
+      else if (ch === '>') inTag = false;
+      else if (!inTag) text += ch;
+    }
+    return text;
+  };
   const labels = (nav: string) =>
     [...nav.matchAll(/<a [^>]*>([\s\S]*?)<\/a>/g)].map((m) =>
       textOf((m[1] as string).replace(/<span class="nav-badge"[\s\S]*?<\/span><\/span>/, '')),
