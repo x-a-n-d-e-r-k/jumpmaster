@@ -141,6 +141,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     compare: cmp(),
     checks: pending,
     codeScanning: [],
+    ciAnnotations: [],
     lastCiHealKey: null,
     forgeUnavailable: null,
     forgeDenied: null,
@@ -684,6 +685,46 @@ describe('rules in order', () => {
       },
       codeScanning,
     });
+  });
+
+  test('24: an Actions failure heals with its failure annotations, empty lists dropped (#720)', () => {
+    const line = { path: 'a.test.ts', startLine: 300, level: 'failure', title: 'T', message: 'M' };
+    const failed = [
+      { name: 'ci', conclusion: 'failure', checkRunId: 8, app: 'github-actions' },
+      { name: 'lint', conclusion: 'failure', checkRunId: 9, app: 'github-actions' },
+    ];
+    const checks = { state: 'failure' as const, names: ['ci', 'lint'], failed };
+    expect(
+      decide(
+        mergeable({
+          checks,
+          ciAnnotations: [
+            { check: 'ci', annotations: [line] },
+            { check: 'lint', annotations: [] },
+          ],
+        }),
+      ),
+    ).toMatchObject({ kind: 'enqueue', ciAnnotations: [{ check: 'ci', annotations: [line] }] });
+    // A failed read (an empty list): today's action, no annotations, no park.
+    const today = decide(mergeable({ checks }));
+    expect(
+      decide(mergeable({ checks, ciAnnotations: [{ check: 'ci', annotations: [] }] })),
+    ).toEqual(today);
+    expect(today).not.toHaveProperty('ciAnnotations');
+  });
+
+  test('24: the same Actions annotations after a ci heal still heal: no loop break (#720)', () => {
+    const line = { path: 'a.test.ts', startLine: 300, level: 'failure', title: 'T', message: 'M' };
+    const failed = [{ name: 'ci', conclusion: 'failure', checkRunId: 8, app: 'github-actions' }];
+    expect(
+      decide(
+        mergeable({
+          checks: { state: 'failure', names: ['ci'], failed },
+          ciAnnotations: [{ check: 'ci', annotations: [line] }],
+          lastCiHealKey: ['T|a.test.ts'],
+        }),
+      ),
+    ).toMatchObject({ kind: 'enqueue', role: 'heal' });
   });
 
   describe('24: code scanning flags the same alerts after a ci heal (#653)', () => {
