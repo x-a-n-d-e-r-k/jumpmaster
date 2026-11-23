@@ -23,6 +23,8 @@ export type FakeGitLabProject = {
   visibility?: 'private' | 'internal' | 'public';
   /** The project's `namespace.kind` (default `user`); any string, so tests can seed an unknown one. */
   namespaceKind?: string;
+  /** The project's `only_allow_merge_if_pipeline_succeeds` (default false). */
+  onlyAllowMergeIfPipelineSucceeds?: boolean;
 };
 
 export type RecordedRequest = {
@@ -434,6 +436,7 @@ export function fakeGitLab(opts: {
     defaultBranch: opts.project.defaultBranch ?? 'main',
     visibility: opts.project.visibility ?? 'private',
     namespaceKind: opts.project.namespaceKind ?? 'user',
+    onlyAllowMergeIfPipelineSucceeds: opts.project.onlyAllowMergeIfPipelineSucceeds ?? false,
   };
 
   const requests: RecordedRequest[] = [];
@@ -560,6 +563,7 @@ export function fakeGitLab(opts: {
       default_branch: project.defaultBranch,
       visibility: project.visibility,
       namespace: { kind: project.namespaceKind },
+      only_allow_merge_if_pipeline_succeeds: project.onlyAllowMergeIfPipelineSucceeds,
     },
   ]);
 

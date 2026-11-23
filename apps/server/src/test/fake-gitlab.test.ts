@@ -103,6 +103,7 @@ describe('project addressing', () => {
           default_branch: 'main',
           visibility: 'private',
           namespace: { kind: 'user' },
+          only_allow_merge_if_pipeline_succeeds: false,
         });
         expect((await call('GET', `/projects/${id}/issues`)).status).toBe(200);
       }
@@ -111,6 +112,24 @@ describe('project addressing', () => {
       const otherId = await call('GET', '/projects/999/issues');
       expect(otherId).toMatchObject({ status: 404, body: { message: '404 Project Not Found' } });
     });
+
+  test('the project read returns only_allow_merge_if_pipeline_succeeds, false by default', async () => {
+    const { call } = setup();
+    const off = await call('GET', `/projects/${PROJECT.id}`);
+    expect(off.body.only_allow_merge_if_pipeline_succeeds).toBe(false);
+    const gl = fakeGitLab({
+      baseUrl: SELF_MANAGED,
+      project: { ...PROJECT, onlyAllowMergeIfPipelineSucceeds: true },
+    });
+    fakes.push(gl);
+    gl.addUser({ username: 'dev', token: DEVELOPER, accessLevel: ACCESS.developer });
+    const res = await fetch(`${SELF_MANAGED}/api/v4/projects/${PROJECT.id}`, {
+      headers: { 'PRIVATE-TOKEN': DEVELOPER },
+    });
+    expect(
+      ((await res.json()) as Record<string, unknown>).only_allow_merge_if_pipeline_succeeds,
+    ).toBe(true);
+  });
 
   test('GET /user answers the caller', async () => {
     const { call } = setup();

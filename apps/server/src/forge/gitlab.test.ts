@@ -1,6 +1,8 @@
 import nock from 'nock';
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
+import { branchProtectionProblems } from '../flow/guards.js';
 import { ACCESS, type FakeGitLab, fakeGitLab, type GitLabJobStatus } from '../test/fake-gitlab.js';
+import { makeZone } from '../test/fixtures.js';
 import { gitBlobSha, type TokenProvider } from './github.js';
 import { GitLabForge, GitLabForgeError, GitLabUnsupportedError } from './gitlab.js';
 
@@ -305,9 +307,9 @@ describe('no-op and refusals', () => {
 
   test('a later-slice method throws GitLabUnsupportedError and sends no request', async () => {
     const { gl, forge } = setup();
-    const err = await forge.getBranchRules('trunk').catch((e: unknown) => e);
+    const err = await forge.probeAdministration().catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GitLabUnsupportedError);
-    expect((err as Error).message).toContain('getBranchRules');
+    expect((err as Error).message).toContain('probeAdministration');
     expect(gl.requests).toEqual([]);
   });
 });
@@ -2502,5 +2504,362 @@ describe('access', () => {
       expect((e as Error).message).not.toContain(WRONG);
       expect(String((e as Error).stack)).not.toContain(WRONG);
     }
+  });
+});
+
+describe('branch rules: getBranchRules', () => {
+  /** A fake project with the token's user `agent` at `level` (none: not a member). */
+  function rulesSetup(
+    o: {
+      level?: number;
+      visibility?: 'private' | 'public';
+      pipeline?: boolean;
+      fetch?: typeof fetch;
+    } = {},
+  ) {
+    const gl = fakeGitLab({
+      baseUrl: GITLAB,
+      project: {
+        ...PROJECT,
+        visibility: o.visibility ?? 'private',
+        onlyAllowMergeIfPipelineSucceeds: o.pipeline ?? false,
+      },
+    });
+    fakes.push(gl);
+    gl.addUser({
+      username: 'agent',
+      token: AGENT,
+      accessLevel: 'level' in o ? o.level : ACCESS.developer,
+    });
+    gl.addUser({ username: 'other', token: OTHER, accessLevel: ACCESS.developer });
+    const forge = new GitLabForge(GITLAB, PROJECT.path, AGENT, { fetch: o.fetch });
+    return { gl, forge };
+  }
+
+  /** A fetch that answers from `override` where it returns a reply, else from the fake. */
+  function overrideFetch(
+    override: (path: string) => { status: number; body: unknown } | undefined,
+  ): typeof fetch {
+    return (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const r = override(url.pathname);
+      if (!r) return fetch(input, init);
+      return new Response(JSON.stringify(r.body), {
+        status: r.status,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+  }
+
+  const BASE_RULES = {
+    requiredApprovals: 0,
+    dismissStaleOnPush: true,
+    requiredChecks: [],
+    unpinnedChecks: [],
+    viewerCanBypass: false,
+    viewerIsAdmin: false,
+    requiresPullRequest: true,
+    requireCodeOwnerReview: false,
+  };
+
+  test('an unprotected branch reads none', async () => {
+    const { gl, forge } = rulesSetup();
+    gl.protectBranch({ name: 'release/*' });
+    expect(await forge.getBranchRules('trunk')).toEqual({ kind: 'none' });
+  });
+
+  test('an exact protected branch reads ok with the expected fields', async () => {
+    const { gl, forge } = rulesSetup();
+    gl.protectBranch({ name: 'trunk', pushAccessLevels: [ACCESS.maintainer] });
+    const read = await forge.getBranchRules('trunk');
+    expect(read).toEqual({ kind: 'ok', rules: BASE_RULES });
+    if (read.kind !== 'ok') throw new Error('not ok');
+    for (const k of ['nonActionsChecks', 'bypass', 'asApp', 'unsupportedRules'])
+      expect(k in read.rules).toBe(false);
+  });
+
+  test('a branch matched only by a wildcard uses that entry', async () => {
+    const { gl, forge } = rulesSetup();
+    gl.protectBranch({ name: 'trunk' });
+    gl.protectBranch({
+      name: 'release/*',
+      pushAccessLevels: [ACCESS.developer],
+      codeOwnerApprovalRequired: true,
+    });
+    expect(await forge.getBranchRules('release/v1/hotfix')).toEqual({
+      kind: 'ok',
+      rules: {
+        ...BASE_RULES,
+        requiresPullRequest: false,
+        viewerCanBypass: true,
+        requireCodeOwnerReview: true,
+      },
+    });
+  });
+
+  test('entries combine: main (push 0) and * (push Developers) let a Developer push', async () => {
+    const { gl, forge } = rulesSetup();
+    gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+    gl.protectBranch({ name: '*', pushAccessLevels: [ACCESS.developer] });
+    const read = await forge.getBranchRules('trunk');
+    expect(read).toMatchObject({
+      kind: 'ok',
+      rules: { viewerCanBypass: true, requiresPullRequest: false, viewerIsAdmin: false },
+    });
+  });
+
+  test('a Developer on a Maintainers-push branch must use a merge request', async () => {
+    const { gl, forge } = rulesSetup({ level: ACCESS.developer });
+    gl.protectBranch({ name: 'trunk', pushAccessLevels: [ACCESS.maintainer] });
+    expect(await forge.getBranchRules('trunk')).toMatchObject({
+      kind: 'ok',
+      rules: { requiresPullRequest: true, viewerCanBypass: false, viewerIsAdmin: false },
+    });
+  });
+
+  test('a Maintainer on a Maintainers-push branch can bypass and is an admin', async () => {
+    for (const level of [ACCESS.maintainer, ACCESS.owner]) {
+      const { gl, forge } = rulesSetup({ level });
+      gl.protectBranch({ name: 'trunk', pushAccessLevels: [ACCESS.maintainer] });
+      expect(await forge.getBranchRules('trunk')).toMatchObject({
+        kind: 'ok',
+        rules: { requiresPullRequest: false, viewerCanBypass: true, viewerIsAdmin: true },
+      });
+      gl.stop();
+      nock.cleanAll();
+    }
+  });
+
+  test('push 0 is never push access, even for a non-member at level 0', async () => {
+    const { gl, forge } = rulesSetup({ level: undefined, visibility: 'public' });
+    gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+    expect(await forge.getBranchRules('trunk')).toMatchObject({
+      kind: 'ok',
+      rules: { requiresPullRequest: true, viewerCanBypass: false, viewerIsAdmin: false },
+    });
+    expect(gl.requests.some((r) => /\/members\/all\/\d+$/.test(r.path))).toBe(true);
+  });
+
+  test('a user or group push entry (no numeric access_level) is ignored', async () => {
+    const { forge } = rulesSetup({
+      fetch: overrideFetch((p) =>
+        p === `${API}/protected_branches`
+          ? {
+              status: 200,
+              body: [
+                {
+                  id: 1,
+                  name: 'trunk',
+                  push_access_levels: [{ user_id: 5 }, { group_id: 9, access_level: null }],
+                  allow_force_push: true,
+                  code_owner_approval_required: false,
+                },
+              ],
+            }
+          : undefined,
+      ),
+    });
+    expect(await forge.getBranchRules('trunk')).toMatchObject({
+      kind: 'ok',
+      rules: { requiresPullRequest: true, viewerCanBypass: false },
+    });
+  });
+
+  test('a matching entry and an applicable rule past the first page are used', async () => {
+    const { gl, forge } = rulesSetup();
+    for (let i = 0; i < 120; i++) gl.protectBranch({ name: `other-${i}` });
+    gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+    for (let i = 0; i < 120; i++)
+      gl.seedApprovalRule({ name: `r${i}`, approvalsRequired: 5, protectedBranches: ['other-0'] });
+    gl.seedApprovalRule({ name: 'late', approvalsRequired: 2, protectedBranches: ['trunk'] });
+    expect(await forge.getBranchRules('trunk')).toMatchObject({
+      kind: 'ok',
+      rules: { requiredApprovals: 2, requiresPullRequest: true },
+    });
+    const pages = gl.requests.filter((r) => r.path === `${API}/protected_branches`);
+    expect(pages.map((r) => r.query.page)).toEqual(['1', '2']);
+  });
+
+  test('requiredApprovals is the maximum over applicable regular and any_approver rules', async () => {
+    const { gl, forge } = rulesSetup();
+    gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+    gl.protectBranch({ name: 'tr*', pushAccessLevels: [0] });
+    gl.protectBranch({ name: 'elsewhere' });
+    gl.seedApprovalRule({ name: 'all', approvalsRequired: 1, ruleType: 'any_approver' });
+    gl.seedApprovalRule({ name: 'glob', approvalsRequired: 2, protectedBranches: ['tr*'] });
+    gl.seedApprovalRule({ name: 'far', approvalsRequired: 4, protectedBranches: ['elsewhere'] });
+    gl.seedApprovalRule({ name: 'report', approvalsRequired: 5, ruleType: 'report_approver' });
+    gl.seedApprovalRule({ name: 'owners', approvalsRequired: 6, ruleType: 'code_owner' });
+    gl.setApprovalSettings({ approvals_before_merge: 3 });
+    expect(await forge.getBranchRules('trunk')).toMatchObject({
+      kind: 'ok',
+      rules: { requiredApprovals: 2 },
+    });
+  });
+
+  test('approvals_before_merge with no approval rule gives requiredApprovals 0', async () => {
+    const { gl, forge } = rulesSetup();
+    gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+    gl.setApprovalSettings({ approvals_before_merge: 2 });
+    expect(await forge.getBranchRules('trunk')).toMatchObject({
+      kind: 'ok',
+      rules: { requiredApprovals: 0 },
+    });
+  });
+
+  test('the Free tier (403 on approval_rules) gives requiredApprovals 0 and still reads', async () => {
+    const { gl, forge } = rulesSetup();
+    gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+    gl.seedApprovalRule({ name: 'all', approvalsRequired: 2 });
+    gl.setApprovalSettings({ approvals_before_merge: 2 });
+    gl.setTier('free');
+    expect(await forge.getBranchRules('trunk')).toEqual({ kind: 'ok', rules: BASE_RULES });
+  });
+
+  test('a 404 on approval_rules gives requiredApprovals 0 and still reads', async () => {
+    const { gl, forge } = rulesSetup({
+      fetch: overrideFetch((p) =>
+        p === `${API}/approval_rules` ? { status: 404, body: { message: '404' } } : undefined,
+      ),
+    });
+    gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+    gl.seedApprovalRule({ name: 'all', approvalsRequired: 2 });
+    expect(await forge.getBranchRules('trunk')).toMatchObject({
+      kind: 'ok',
+      rules: { requiredApprovals: 0 },
+    });
+  });
+
+  for (const status of [403, 404])
+    test(`a ${status} on GET approvals gives dismissStaleOnPush false and still reads`, async () => {
+      const { gl, forge } = rulesSetup({
+        fetch: overrideFetch((p) =>
+          p === `${API}/approvals` ? { status, body: { message: `${status}` } } : undefined,
+        ),
+      });
+      gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+      gl.seedApprovalRule({ name: 'all', approvalsRequired: 1 });
+      expect(await forge.getBranchRules('trunk')).toMatchObject({
+        kind: 'ok',
+        rules: { requiredApprovals: 1, dismissStaleOnPush: false },
+      });
+    });
+
+  test('dismissStaleOnPush follows reset_approvals_on_push', async () => {
+    for (const reset of [true, false]) {
+      const { gl, forge } = rulesSetup();
+      gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+      gl.setApprovalSettings({ reset_approvals_on_push: reset });
+      expect(await forge.getBranchRules('trunk')).toMatchObject({
+        kind: 'ok',
+        rules: { dismissStaleOnPush: reset },
+      });
+      gl.stop();
+      nock.cleanAll();
+    }
+  });
+
+  test('requireCodeOwnerReview follows code_owner_approval_required', async () => {
+    for (const required of [true, false]) {
+      const { gl, forge } = rulesSetup();
+      gl.protectBranch({
+        name: 'trunk',
+        pushAccessLevels: [0],
+        codeOwnerApprovalRequired: required,
+      });
+      expect(await forge.getBranchRules('trunk')).toMatchObject({
+        kind: 'ok',
+        rules: { requireCodeOwnerReview: required },
+      });
+      gl.stop();
+      nock.cleanAll();
+    }
+  });
+
+  test('requiredChecks is pipeline only with only_allow_merge_if_pipeline_succeeds', async () => {
+    for (const pipeline of [true, false]) {
+      const { gl, forge } = rulesSetup({ pipeline });
+      gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+      expect(await forge.getBranchRules('trunk')).toMatchObject({
+        kind: 'ok',
+        rules: { requiredChecks: pipeline ? ['pipeline'] : [], unpinnedChecks: [] },
+      });
+      gl.stop();
+      nock.cleanAll();
+    }
+  });
+
+  for (const status of [403, 404])
+    test(`a ${status} on protected_branches reads unreachable`, async () => {
+      const { forge } = rulesSetup({
+        fetch: overrideFetch((p) =>
+          p === `${API}/protected_branches`
+            ? { status, body: { message: `${status}` } }
+            : undefined,
+        ),
+      });
+      expect(await forge.getBranchRules('trunk')).toEqual({ kind: 'unreachable' });
+    });
+
+  test('a 403 on the member read reads unreachable', async () => {
+    const { gl, forge } = rulesSetup({
+      fetch: overrideFetch((p) =>
+        /\/members\/all\/\d+$/.test(p) ? { status: 403, body: { message: '403' } } : undefined,
+      ),
+    });
+    gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+    expect(await forge.getBranchRules('trunk')).toEqual({ kind: 'unreachable' });
+  });
+
+  for (const path of ['/protected_branches', '/approval_rules', '/approvals', '', '/members/all/'])
+    test(`a 500 on ${path || 'the project read'} rejects with only the status`, async () => {
+      const { gl, forge } = rulesSetup({
+        fetch: overrideFetch((p) =>
+          (path.endsWith('/') ? p.startsWith(`${API}${path}`) : p === `${API}${path}`)
+            ? { status: 500, body: { message: `boom-body ${AGENT}` } }
+            : undefined,
+        ),
+      });
+      gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+      const err = (await forge.getBranchRules('trunk').catch((e: unknown) => e)) as Error;
+      expect(err).toBeInstanceOf(GitLabForgeError);
+      expect((err as GitLabForgeError).status).toBe(500);
+      expect(err.message).not.toContain(AGENT);
+      expect(err.message).not.toContain('boom-body');
+      expect(String(err.stack)).not.toContain(AGENT);
+    });
+
+  describe('branchProtectionProblems on GitLab reads', () => {
+    async function twoBotReads(o: { tier: 'free' | 'premium'; pipeline?: boolean }) {
+      const { gl } = rulesSetup({ pipeline: o.pipeline });
+      gl.protectBranch({
+        name: 'trunk',
+        pushAccessLevels: [0],
+        mergeAccessLevels: [ACCESS.developer],
+      });
+      gl.seedApprovalRule({ name: 'review', approvalsRequired: 1, protectedBranches: ['trunk'] });
+      gl.setApprovalSettings({ reset_approvals_on_push: true });
+      gl.setTier(o.tier);
+      const author = await new GitLabForge(GITLAB, PROJECT.path, AGENT).getBranchRules('trunk');
+      const reviewer = await new GitLabForge(GITLAB, PROJECT.path, OTHER).getBranchRules('trunk');
+      return { author, reviewer };
+    }
+
+    test('a correctly protected Premium branch has no problems', async () => {
+      const rules = await twoBotReads({ tier: 'premium' });
+      expect(branchProtectionProblems(rules, makeZone({ ciRequired: false }))).toEqual([]);
+    });
+
+    test('with a required pipeline, a CI-required zone has no problems', async () => {
+      const rules = await twoBotReads({ tier: 'premium', pipeline: true });
+      expect(branchProtectionProblems(rules, makeZone({ ciRequired: true }))).toEqual([]);
+    });
+
+    test('on the Free tier the same set-up reports approvals < 1', async () => {
+      const rules = await twoBotReads({ tier: 'free' });
+      expect(branchProtectionProblems(rules, makeZone({ ciRequired: false }))).toContain(
+        'approvals < 1',
+      );
+    });
   });
 });
