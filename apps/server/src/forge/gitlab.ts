@@ -1,8 +1,8 @@
 // GitLabForge (design spec §5.5, spec §9): the GitLab REST v4 client with the issue, label, comment
 // and viewer methods of `Forge` (first slice, #676) and the branch, file, directory, compare and
-// first-parent methods (second slice, #683), merge requests (third slice, #690) and approvals as
-// reviews (fourth slice, #696). Not wired in: GitLab zones are still refused with
-// GITLAB_UNSUPPORTED wherever a forge is built.
+// first-parent methods (second slice, #683), merge requests (third slice, #690), approvals as
+// reviews (fourth slice, #696) and pipelines and jobs as checks (fifth slice, #697). Not wired
+// in: GitLab zones are still refused with GITLAB_UNSUPPORTED wherever a forge is built.
 //
 // GitLab mapping notes:
 // - An issue's `number` is its project-scoped `iid`, and its body is the `description`.
@@ -90,6 +90,35 @@
 //     A header in a note counts only as that note author's review; trust is the callers' to decide.
 //   - `findReviewByMarker` is the viewer's newest review with a non-zero id whose body's last line
 //     (end trimmed) is the marker, as on GitHub; never a synthetic review.
+// - Pipelines and jobs as checks (fifth slice, #697):
+//   - `checksFor(sha)` pages `GET pipelines?sha=&order_by=id&sort=desc` and, for each pipeline,
+//     its current jobs (`GET pipelines/:id/jobs`, retried attempts excluded, so a retried job
+//     counts only as its newest attempt). Shadowing: a job name seen in a newer pipeline hides the
+//     same name in older pipelines; the jobs left are the effective jobs.
+//   - A pipeline with no current jobs (say one that failed on a .gitlab-ci.yml error) counts by its
+//     own `status`: `success`/`skipped` add nothing, `failed`/`canceled` make the result `failure`
+//     with no named entry in `failed` (there is no job to name), anything else makes it at least
+//     `pending`. It adds nothing to `names` or `queued`, and never makes the result `none`.
+//   - Then the commit's external statuses (`GET repository/commits/:sha/statuses`, newest per
+//     name). Dedupe: real GitLab lists CI jobs there too, so a status named like an effective job
+//     is not counted twice.
+//   - States, for jobs and statuses alike: `success`, `skipped`, `manual` with `allow_failure`,
+//     and `failed` with `allow_failure` (like GitHub's `neutral`) are done; `failed` is a failure
+//     with conclusion `failure`, `canceled` one with conclusion `cancelled`; `created`, `pending`,
+//     `waiting_for_resource`, `preparing`, `scheduled`, `running` and `manual` without
+//     `allow_failure` are pending, and so is any other or unknown state (`canceling`, say): fail
+//     safe, never done.
+//   - `queued` is the effective job names in `created`, `pending`, `waiting_for_resource`,
+//     `preparing` or `scheduled`, sorted, unique; never an external status, as on GitHub.
+//     `state`, `names` and `failed` (sorted, unique) follow GitHubForge.checksFor; the result is
+//     `none` only when there is no pipeline and no status. `checkRunId` and `app` are never set.
+//   - `checkAnnotations` is a no-op that returns [] and sends no request: GitLab has no check-run
+//     annotations (and no failure carries a `checkRunId`, so callers never ask).
+//   - `rerunFailedChecks` reads the pipelines and effective jobs as `checksFor` does and retries
+//     (`POST pipelines/:id/retry`) once each pipeline owning an effective job named in `names` that
+//     is a failure above (so never a shadowed job, nor a failed one with `allow_failure`). It
+//     returns their ids, newest first. A refusal (403, 404) or any other error rejects with the
+//     status; pipelines retried before it stay retried, as on GitHub.
 // - Every path segment (branch, file path, ref) is URL-encoded; refs otherwise go in the query.
 // Every other `Forge` method throws GitLabUnsupportedError, naming the method, until a later slice.
 //
@@ -103,9 +132,11 @@ import {
   type ChangeDigest,
   type CheckAnnotation,
   type ChecksFacts,
+  type ChecksState,
   type CompareFacts,
   type CompareFile,
   digestCompareFiles,
+  type FailedCheck,
   type Forge,
   type ForgeIssue,
   type ForgeReview,
@@ -197,6 +228,9 @@ type RawFile = {
   commit_id: string;
   last_commit_id: string;
 };
+type RawPipeline = { id: number; status: string };
+type RawJob = { name: string; status: string; allow_failure?: boolean };
+type RawCommitStatus = { name: string; status: string; allow_failure?: boolean };
 type RawApprovals = { approved_by?: { user?: RawUser }[] } | null;
 type RawNote = {
   id: number;
@@ -940,6 +974,106 @@ export class GitLabForge implements Forge {
     return hit ? { id: hit.id } : null;
   }
 
+  // --- Pipelines and jobs as checks ---------------------------------------------------------
+
+  /**
+   * The pipelines on `sha`, newest first, with their effective jobs: each pipeline's current
+   * (not retried) jobs whose name no newer pipeline's job already took.
+   */
+  private async pipelineJobs(
+    sha: string,
+  ): Promise<{ pipeline: RawPipeline; jobs: RawJob[]; jobless: boolean }[]> {
+    const pipelines = await this.list<RawPipeline>('listing pipelines', '/pipelines', {
+      sha,
+      order_by: 'id',
+      sort: 'desc',
+    });
+    const seen = new Set<string>();
+    const out: { pipeline: RawPipeline; jobs: RawJob[]; jobless: boolean }[] = [];
+    for (const pipeline of pipelines) {
+      const current = await this.list<RawJob>(
+        `listing the jobs of pipeline ${pipeline.id}`,
+        `/pipelines/${positiveId(pipeline.id)}/jobs`,
+      );
+      const jobs = current.filter((j) => !seen.has(j.name));
+      for (const j of jobs) seen.add(j.name);
+      out.push({ pipeline, jobs, jobless: current.length === 0 });
+    }
+    return out;
+  }
+
+  async checksFor(sha: string): Promise<ChecksFacts> {
+    const [pipelines, statuses] = await Promise.all([
+      this.pipelineJobs(sha),
+      this.list<RawCommitStatus>(
+        'listing commit statuses',
+        `/repository/commits/${encodeURIComponent(sha)}/statuses`,
+      ),
+    ]);
+    const jobs = pipelines.flatMap((p) => p.jobs);
+    const jobNames = new Set(jobs.map((j) => j.name));
+    // Real GitLab lists CI jobs among a commit's statuses too: a job's name is counted once.
+    const external = statuses.filter((s) => !jobNames.has(s.name));
+    const names = [...jobs.map((j) => j.name), ...external.map((s) => s.name)];
+    const failures: FailedCheck[] = [];
+    let failed = false;
+    let pending = false;
+    for (const { pipeline, jobless } of pipelines) {
+      if (!jobless) continue;
+      // No job to name (say a .gitlab-ci.yml error): the pipeline's own status counts.
+      const outcome = pipelineOutcome(pipeline.status);
+      if (outcome === 'failure') failed = true;
+      else if (outcome === 'pending') pending = true;
+    }
+    for (const c of [...jobs, ...external]) {
+      const outcome = checkOutcome(c.status, c.allow_failure === true);
+      if (outcome === 'pending') pending = true;
+      else if (outcome !== 'done') failures.push({ name: c.name, conclusion: outcome.conclusion });
+    }
+    const state: ChecksState =
+      failed || failures.length > 0
+        ? 'failure'
+        : pending
+          ? 'pending'
+          : pipelines.length === 0 && statuses.length === 0
+            ? 'none'
+            : 'success';
+    const queued = [
+      ...new Set(jobs.filter((j) => NOT_STARTED.has(j.status)).map((j) => j.name)),
+    ].sort();
+    const facts = { state, names, failed: uniqueFailures(failures) };
+    return queued.length > 0 ? { ...facts, queued } : facts;
+  }
+
+  /** GitLab has no check-run annotations: none, and no request. */
+  async checkAnnotations(_checkRunId: number): Promise<CheckAnnotation[]> {
+    return [];
+  }
+
+  /**
+   * Retries (`POST pipelines/:id/retry`) each pipeline on `headSha` that owns an effective job
+   * named in `names` that failed (not allowed to) or was canceled; once each, newest first.
+   */
+  async rerunFailedChecks(
+    _prNumber: number,
+    headSha: string,
+    names: string[],
+  ): Promise<{ runIds: number[] }> {
+    const wanted = new Set(names);
+    const runIds = (await this.pipelineJobs(headSha))
+      .filter(({ jobs }) =>
+        jobs.some((j) => {
+          if (!wanted.has(j.name)) return false;
+          const outcome = checkOutcome(j.status, j.allow_failure === true);
+          return outcome !== 'done' && outcome !== 'pending';
+        }),
+      )
+      .map(({ pipeline }) => pipeline.id);
+    for (const id of runIds)
+      await this.request(`retrying pipeline ${id}`, 'POST', `/pipelines/${positiveId(id)}/retry`);
+    return { runIds };
+  }
+
   // --- Blocked-by: a no-op and a refusal -----------------------------------------------------
 
   /** GitLab Free has no "blocked by" links: none, nothing unreadable, and no request. */
@@ -958,19 +1092,6 @@ export class GitLabForge implements Forge {
   }
   async isMaintainer(_login: string): Promise<boolean> {
     throw new GitLabUnsupportedError('isMaintainer');
-  }
-  async checksFor(_sha: string): Promise<ChecksFacts> {
-    throw new GitLabUnsupportedError('checksFor');
-  }
-  async checkAnnotations(_checkRunId: number): Promise<CheckAnnotation[]> {
-    throw new GitLabUnsupportedError('checkAnnotations');
-  }
-  async rerunFailedChecks(
-    _prNumber: number,
-    _headSha: string,
-    _names: string[],
-  ): Promise<{ runIds: number[] }> {
-    throw new GitLabUnsupportedError('rerunFailedChecks');
   }
   async getBranchRules(_branch: string): Promise<BranchRulesRead> {
     throw new GitLabUnsupportedError('getBranchRules');
@@ -996,6 +1117,52 @@ export class GitLabForge implements Forge {
   async probeAdministration(): Promise<ReadProbe> {
     throw new GitLabUnsupportedError('probeAdministration');
   }
+}
+
+/** A pipeline id GitLab gave, as a path segment; anything but a positive integer is refused. */
+function positiveId(id: unknown): string {
+  if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0)
+    throw new GitLabForgeError('GitLabForge: a pipeline id is not a positive integer');
+  return String(id);
+}
+
+/** Job states that mean "not started yet": no runner has picked the job up. */
+const NOT_STARTED = new Set([
+  'created',
+  'pending',
+  'waiting_for_resource',
+  'preparing',
+  'scheduled',
+]);
+
+/**
+ * A job's or commit status's state as a check: done, a failure (with GitHub's conclusion), or
+ * pending. An unknown state (`canceling`, say) is pending: never done.
+ */
+function checkOutcome(
+  status: string,
+  allowFailure: boolean,
+): 'done' | 'pending' | { conclusion: string } {
+  if (status === 'success' || status === 'skipped') return 'done';
+  if (status === 'manual') return allowFailure ? 'done' : 'pending';
+  if (status === 'failed') return allowFailure ? 'done' : { conclusion: 'failure' };
+  if (status === 'canceled') return { conclusion: 'cancelled' };
+  return 'pending';
+}
+
+/** Failures sorted by name then conclusion, without duplicates (as GitHubForge's `uniqueFailures`). */
+function uniqueFailures(failures: FailedCheck[]): FailedCheck[] {
+  const byKey = new Map(failures.map((f) => [JSON.stringify([f.name, f.conclusion]), f]));
+  const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+  return [...byKey.values()].sort((a, b) => cmp(a.name, b.name) || cmp(a.conclusion, b.conclusion));
+}
+
+/** A pipeline with no jobs, by its own status: success or skipped is done, failed or canceled
+ *  a failure, anything else pending. */
+function pipelineOutcome(status: string): 'done' | 'failure' | 'pending' {
+  if (status === 'success' || status === 'skipped') return 'done';
+  if (status === 'failed' || status === 'canceled') return 'failure';
+  return 'pending';
 }
 
 /** An issue number as a path segment; anything but a positive integer is refused unsent. */
