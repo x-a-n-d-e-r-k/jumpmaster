@@ -250,7 +250,7 @@ Saving a credential asks for your passphrase again (sudo, good for five minutes)
    app is not installed there, Detect says so and links its install page
    (`https://github.com/apps/<slug>/installations/new`); install it and press **Detect** again.
    **Create the project** needs no token either. Then **Find the installations** (step 2.5
-   above), and take the ruleset and CODEOWNERS from the zone's GitHub page,
+   above), and take the ruleset and CODEOWNERS from the **GitHub** section of the project's **Setup** tab,
    `/projects/<zone>/setup#github` (step 5), once the zone exists.
 5. **Doctor** (`/setup/doctor`). **Run the doctor**; see step 6.
 
@@ -298,7 +298,7 @@ one is missing, and its **Create the missing labels** button creates them as the
 On `/system` press **Run the doctor** (or
 `docker compose exec jumpmaster jumpmaster ctl doctor`). Each check shows `PASS`, `WARN`,
 `FAIL` or `SKIP`; every one that isn't a pass shows its fix and an action: a link to the page that
-fixes it (System, the zone page, the GitHub page), a GitHub page (with the generated file to
+fixes it (System, the project's **Setup** tab and its **GitHub** section), a GitHub page (with the generated file to
 bring there, as a download), or a button for the two writes (**Create the missing labels**,
 **Run a doctor drop for &lt;zone&gt;**). [Troubleshooting by check id](#troubleshooting-by-check-id)
 lists each check with its action. Fix each `FAIL` and run it again until it shows `0 fail`.
@@ -316,7 +316,7 @@ spends one turn of Claude usage. Press **Doctor drop: &lt;zone&gt;** on `/system
 `ctl doctor <zone> --drop`) and run the doctor again when it has finished; see
 [Doctor drop](#doctor-drop).
 
-**Then enforce egress.** On the zone page's **Egress** section, **Observed in the last 14 days**
+**Then enforce egress.** On the **Egress** section of the project's **Setup** tab, **Observed in the last 14 days**
 lists every host the zone's drops reached, with the drops that reached it. Tick the hosts your
 gates need (a package registry, say), press **Adopt ticked**, confirm, then set **Mode** to
 `enforce` and **Save**. Leave out anything you don't expect. Run another doctor drop: it must pass
@@ -325,7 +325,7 @@ under `enforce`. See [Egress](#egress). Doctor checks: `zone.egress`, `zone.doct
 
 ### Step 7: File the first issue from the New issue page
 
-Open the zone's page from **Projects** and follow its **New issue** link, `/projects/<zone>/issues/new`.
+Open the project from **Projects** and follow its **New issue** link, `/projects/<zone>/issues/new`.
 Give the issue a title, the context, acceptance criteria and the tests that prove it, and **File
 the issue**. It is filed on GitHub as a ready issue (`drop-ready`) at once, and the next pass picks
 it up. Submitting twice never files twice. After a filing the page shows the issue's link and a
@@ -702,7 +702,7 @@ What carries over, and what may go:
   of the protected paths; and any repository whose CODEOWNERS has a `*` line (or lines for other
   paths) without the reviewer bot is caught too. Under the generated two-bot ruleset (code owner
   review on) such a zone parks its items with `code owner review blocks the reviewer bot: …`, and
-  `forge.codeowners` fails. The file the zone's GitHub page generates has the right shape:
+  `forge.codeowners` fails. The file the project's **GitHub** section generates has the right shape:
   `* @<reviewer-bot>` first, then the protected paths, owned by people only (the last match wins).
   Commit it in place of the old one.
 
@@ -811,7 +811,7 @@ Each two-app zone also needs both rulesets ([Branch rules](#branch-rules)) and t
 Tokens are for starter mode, and for two-bot zones that chose tokens ("Use tokens instead")
 instead of [GitHub Apps](#github-apps).
 
-The setup wizard's GitHub step and each zone's GitHub page link GitHub's token page pre-filled with
+The setup wizard's GitHub step and each project's **GitHub** section link GitHub's token page pre-filled with
 these permissions; this is what they ask for. In the browser the tokens are `githubAuthorToken`,
 `githubReviewerToken` and `githubReadToken` under System, Credentials; as files, the names below.
 
@@ -952,7 +952,7 @@ branch, lets only the author app and repository admins update it: without the `*
 CODEOWNERS line (an app can't be a code owner), an approval from anyone else with write access
 would count, so this ruleset keeps every merge with the author app. Its bypass list holds the
 author app (`Integration`) and the repository admin role; adding a write role there re-opens
-merges to anyone with write access. The zone's GitHub page offers it as a file to import, and
+merges to anyone with write access. The project's **GitHub** section offers it as a file to import, and
 `jumpmaster ctl github <zone> merge-ruleset` prints it with the id filled in; by hand with
 `gh`, replace `123456` with the author app's id (its App ID, on the app's settings page):
 
@@ -1048,7 +1048,7 @@ A preset is a prebuilt, signed trooper image for one stack, and the hosts its in
 Detection (the wizard's project step, **Add a project**, or `init`) picks the preset from the
 repository's root files and writes explicit `gates` into the config; the server never re-reads
 them at dispatch. A repository with more than one stack at its root needs a choice of **Stack**
-(`--preset` for `init`). You can change `gates` any time on the zone page's **Stack** section; the
+(`--preset` for `init`). You can change `gates` any time in the **Stack & checks** section of the project's **Setup** tab; the
 next drop uses them, with no restart. The release's server
 resolves a preset to its image by digest from the image lock it carries, so the config never
 names an image tag. Doctor check: `zone.preset`.
@@ -1823,7 +1823,7 @@ When the zone's app entries can't be used it skips; the credential checks say wh
 
 ### `forge.branch-rules`
 
-**Action:** Get the ruleset file for <zone> (the zone's GitHub page). When GitHub answered the doctor's reads, the action is **Import the ruleset file on GitHub** instead: the repository's Rulesets page, with the ruleset file as a download beside it.
+**Action:** Get the ruleset file for <zone> (the **GitHub** section of the project's **Setup** tab). When GitHub answered the doctor's reads, the action is **Import the ruleset file on GitHub** instead: the repository's Rulesets page, with the ruleset file as a download beside it.
 
 The ruleset on the default branch, as the tokens see it; the summary names each problem
 ([Branch rules](#branch-rules)).
@@ -1841,7 +1841,7 @@ with the rulesets to check by hand. A hybrid zone (author app, reviewer token) d
 
 ### `forge.codeowners`
 
-**Action:** Get the CODEOWNERS text for <zone> (the zone's GitHub page). When GitHub answered the doctor's reads, the action is **Create .github/CODEOWNERS on GitHub** instead, with the text as a download beside it.
+**Action:** Get the CODEOWNERS text for <zone> (the **GitHub** section of the project's **Setup** tab). When GitHub answered the doctor's reads, the action is **Create .github/CODEOWNERS on GitHub** instead, with the text as a download beside it.
 
 Two-bot: with Require review from Code Owners on, `.github/CODEOWNERS` must exist; its lines for
 the protected paths must name people, not the reviewer bot (a warn otherwise), and every other line
@@ -1875,7 +1875,7 @@ every pull request wait forever ([CI](#ci)).
 
 **Action:** Create the missing labels (a button: it creates them as the author bot).
 
-Missing labels ([Labels](#labels)). The doctor page's **Create the missing labels** (or
+Missing labels ([Labels](#labels)). The **Create the missing labels** action on System's **Health** page (or
 `jumpmaster ctl labels <zone>`) creates them as the author bot, in observe mode too; the fix also
 prints the `gh label create` commands. If GitHub does not answer, the request is left `unknown`
 and counts as an active forge write, so a mode change or a zone removal waits, until a later pass
@@ -1911,7 +1911,7 @@ first, then run `jumpmaster ctl zones set <zone> readyLabel=drop-ready` ([Labels
 
 ### `zone.preset`
 
-**Action:** Edit the preset of <zone> (the zone page's **Stack** section).
+**Action:** Edit the preset of <zone> (the **Stack & checks** section of the project's **Setup** tab).
 
 The preset against the repository's root files, whether the zone has gates, and whether the image
 is a digest reference. With no gates, drops run no checks of their own: add the repository's
@@ -1921,27 +1921,27 @@ install and test commands to `gates`. A
 
 ### `zone.services`
 
-**Action:** Edit the services of <zone> (the zone page's **Stack** section).
+**Action:** Edit the services of <zone> (the **Stack & checks** section of the project's **Setup** tab).
 
 Each service image must be a digest reference pinned on the stick ([Services](#services)).
 
 ### `zone.egress`
 
-**Action:** Edit the egress of <zone> (the zone page's **Egress** section).
+**Action:** Edit the egress of <zone> (the **Egress** section of the project's **Setup** tab).
 
 The egress mode and the hosts seen; in monitor, the hosts to add before enforcing
 ([Egress](#egress), [step 6](#step-6-run-the-doctor-to-zero-fails)).
 
 ### `zone.identity`
 
-**Action:** Edit the identity of <zone> (the zone page's **Merging** section).
+**Action:** Edit the identity of <zone> (the **Merging** section of the project's **Setup** tab).
 
 `two-bot` passes. Starter mode always warns with its cost ([Starter mode](#starter-mode)). To add
 a reviewer: give a second account Write, enter its token as `githubReviewerToken` under System,
 Credentials (or write `secrets/github_reviewer_token` and run `ctl secrets reload`), set
-**Accounts** to `two-bot` in the zone page's **Merging** section (in file mode, `"identity":
-"two-bot"` in the file and `ctl config reload`), and import the zone's two-bot ruleset from its
-GitHub page (1 approval, stale approvals dismissed, code owner review) and its CODEOWNERS.
+**Accounts** to `two-bot` in the **Merging** section of the project's **Setup** tab (in file mode, `"identity":
+"two-bot"` in the file and `ctl config reload`), and import the zone's two-bot ruleset from the
+project's **GitHub** section (1 approval, stale approvals dismissed, code owner review) and its CODEOWNERS.
 
 ### `zone.doctor-drop`
 
@@ -1952,12 +1952,12 @@ The last doctor drop's result: what it proved, or what failed and the hosts it n
 
 ### `zone.goals`
 
-**Action:** Edit the goals of <zone> (the zone page's **Advanced** section).
+**Action:** Edit the goals of <zone> (the **Advanced** section of the project's **Setup** tab).
 
 With the crew on: whether `GOAL.md` parses ([Crew](#crew)).
 
 ### `zone.crew-cap`
 
-**Action:** Edit the crew of <zone> (the zone page's **Advanced** section).
+**Action:** Edit the crew of <zone> (the **Advanced** section of the project's **Setup** tab).
 
 With the crew on: crew drops in the last day against the cap ([Crew](#crew)).
