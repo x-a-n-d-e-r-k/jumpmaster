@@ -833,7 +833,7 @@ function usageCheck(d: DoctorDeps): DoctorCheck {
         ...base,
         status: 'fail',
         summary: `dispatch is stopped: a drop ran on usage credits (extra usage) at ${u.overageStoppedAt}; nothing new runs${creditsStopInForce(u, now) && u.overageUntil ? ` until ${u.overageUntil}, when the window resets` : ''}`,
-        fix: 'Open /briefings and rule on the credits briefing (Resume lets work run on credits), or wait for the reset. To be told without stopping, set usage.stopOnOverage: false.',
+        fix: 'Open Needs you on Home (/#waiting-on-you) and rule on the credits briefing (Resume lets work run on credits), or wait for the reset. To be told without stopping, set usage.stopOnOverage: false.',
       };
     case 'closed':
       return {

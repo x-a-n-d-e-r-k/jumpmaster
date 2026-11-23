@@ -181,7 +181,7 @@ function itemDetails(db: Db, items: readonly WorkItem[]): Map<number, ItemDetail
 
 /**
  * The list pages' filters: `zone` among the configured zones, `state` among `states`. A missing
- * parameter stays unset; an unknown one (or a repeated one) is refused, answered 404 as /briefings.
+ * parameter stays unset; an unknown one (or a repeated one) is refused, answered 404.
  */
 function listFilter<S extends string>(
   query: { zone?: unknown; state?: unknown },
