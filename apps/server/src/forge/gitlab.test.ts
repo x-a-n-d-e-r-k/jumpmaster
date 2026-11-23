@@ -305,12 +305,9 @@ describe('no-op and refusals', () => {
 
   test('a later-slice method throws GitLabUnsupportedError and sends no request', async () => {
     const { gl, forge } = setup();
-    const err = await forge
-      .merge(1, { sha: 'abc', method: 'squash', title: 't', message: 'm' })
-      .catch((e: unknown) => e);
+    const err = await forge.getBranchRules('trunk').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GitLabUnsupportedError);
-    expect((err as Error).message).toContain('merge');
-    await expect(forge.getBranchRules('trunk')).rejects.toBeInstanceOf(GitLabUnsupportedError);
+    expect((err as Error).message).toContain('getBranchRules');
     await expect(forge.repoAccess()).rejects.toBeInstanceOf(GitLabUnsupportedError);
     expect(gl.requests).toEqual([]);
   });
@@ -2114,5 +2111,199 @@ describe('checks: rerunFailedChecks', () => {
     expect((err as GitLabForgeError).status).toBe(403);
     expect((err as Error).message).not.toContain(REPORTER);
     expect((err as Error).message).not.toMatch(/Forbidden|privileges/);
+  });
+});
+
+/** MR 1 from agent/one into trunk (on mrRepo), and the SHAs. */
+function mergeRepo(gl: FakeGitLab) {
+  const shas = mrRepo(gl);
+  gl.seedMergeRequest({ sourceBranch: 'agent/one', targetBranch: 'trunk', title: 'w' });
+  return shas;
+}
+
+/** Move trunk on by one commit with the snapshot `files` (a conflict with agent/one when `a`
+ *  is not '1\n'), and return its SHA. */
+function moveTrunk(gl: FakeGitLab, files: Record<string, string>) {
+  return gl.seedCommit({ branch: 'trunk', files, message: 'trunk moves' });
+}
+
+const SQUASH = { method: 'squash' as const, title: 'Feat: thing (#1)', message: 'Body line.' };
+const statusOf = (e: unknown) => (e as GitLabForgeError).status;
+
+describe('merges: merge', () => {
+  test('merge on the head squashes into one new commit with title, blank line, message', async () => {
+    const { gl, forge } = setup();
+    const { base, head } = mergeRepo(gl);
+    const out = await forge.merge(1, { sha: head, ...SQUASH });
+    const trunk = gl.branchSha('trunk') as string;
+    expect(out).toEqual({ merged: true, sha: trunk });
+    const commit = gl.commit(trunk);
+    expect(commit?.parent_ids).toEqual([base]);
+    expect(commit?.message).toBe('Feat: thing (#1)\n\nBody line.');
+    expect(gl.fileAt('trunk', 'b')).toBe('new\n');
+    const accept = gl.requests.find((r) => r.method === 'PUT' && r.path === `${MRS}/1/merge`);
+    expect(accept?.body).toMatchObject({ sha: head, squash: true });
+  });
+
+  test('an empty message squashes with just the title', async () => {
+    const { gl, forge } = setup();
+    const { head } = mergeRepo(gl);
+    await forge.merge(1, { sha: head, ...SQUASH, message: '' });
+    expect(gl.commit(gl.branchSha('trunk') as string)?.message).toBe('Feat: thing (#1)');
+  });
+
+  test('a stale SHA rejects with 409 and leaves the target unmoved', async () => {
+    const { gl, forge } = setup();
+    const { base } = mergeRepo(gl);
+    const err = await forge.merge(1, { sha: base, ...SQUASH }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GitLabForgeError);
+    expect(statusOf(err)).toBe(409);
+    expect(gl.branchSha('trunk')).toBe(base);
+    expect(gl.mergeRequest(1)?.state).toBe('opened');
+    expect((err as Error).message).not.toContain(SQUASH.title);
+    expect((err as Error).message).not.toContain(SQUASH.message);
+    expect((err as Error).message).not.toContain('SHA does not match');
+  });
+
+  test('a non-mergeable MR rejects with 405', async () => {
+    const { gl, forge } = setup();
+    const { base, head } = mergeRepo(gl);
+    gl.setMergeable(1, false);
+    const err = await forge.merge(1, { sha: head, ...SQUASH }).catch((e: unknown) => e);
+    expect(statusOf(err)).toBe(405);
+    expect(gl.branchSha('trunk')).toBe(base);
+  });
+
+  test("a conflicting MR (GitLab 406) rejects with 405, without GitLab's text", async () => {
+    const { gl, forge } = setup();
+    const { head } = mergeRepo(gl);
+    const moved = moveTrunk(gl, { a: '3\n', gone: 'x\n', old: 'same\n' });
+    const err = await forge.merge(1, { sha: head, ...SQUASH }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GitLabForgeError);
+    expect(statusOf(err)).toBe(405);
+    expect((err as Error).message).not.toContain('cannot be merged');
+    expect(gl.branchSha('trunk')).toBe(moved);
+  });
+
+  test('a bad iid or a SHA that is not 40-hex is refused unsent', async () => {
+    const { gl, forge } = setup();
+    const { head } = mergeRepo(gl);
+    for (const n of [0, -1, 1.5, Number.NaN])
+      await expect(forge.merge(n, { sha: head, ...SQUASH })).rejects.toBeInstanceOf(
+        GitLabForgeError,
+      );
+    for (const sha of ['', 'abc', head.toUpperCase(), `${head}0`])
+      await expect(forge.merge(1, { sha, ...SQUASH })).rejects.toBeInstanceOf(GitLabForgeError);
+    expect(gl.requests).toEqual([]);
+  });
+});
+
+const REBASE = `${MRS}/1/rebase`;
+
+describe('merges: updateBranch', () => {
+  test('a stale expected SHA gives head_moved and sends no rebase', async () => {
+    const { gl, forge } = setup();
+    const { base, head } = mergeRepo(gl);
+    expect(await forge.updateBranch(1, base)).toEqual({ kind: 'head_moved' });
+    expect(gl.requests.some((r) => r.path === REBASE)).toBe(false);
+    expect(gl.branchSha('agent/one')).toBe(head);
+  });
+
+  test('behind the target: updated, and the source sits on the target head', async () => {
+    const { gl, forge } = setup();
+    const { head } = mergeRepo(gl);
+    const moved = moveTrunk(gl, { a: '1\n', gone: 'x\n', old: 'same\n', c: 'c\n' });
+    expect(await forge.updateBranch(1, head)).toEqual({ kind: 'updated' });
+    const now = gl.branchSha('agent/one') as string;
+    expect(now).not.toBe(head);
+    expect(gl.commit(now)?.parent_ids).toEqual([moved]);
+    expect(gl.fileAt('agent/one', 'c')).toBe('c\n');
+    expect(gl.fileAt('agent/one', 'b')).toBe('new\n');
+    expect(gl.requests.filter((r) => r.method === 'PUT' && r.path === REBASE)).toHaveLength(1);
+    expect(
+      gl.requests.some(
+        (r) => r.path === `${MRS}/1` && r.query.include_rebase_in_progress === 'true',
+      ),
+    ).toBe(true);
+  });
+
+  test('a conflicting rebase gives conflict and leaves the source unchanged', async () => {
+    const { gl, forge } = setup();
+    const { head } = mergeRepo(gl);
+    moveTrunk(gl, { a: '3\n', gone: 'x\n', old: 'same\n' });
+    expect(await forge.updateBranch(1, head)).toEqual({ kind: 'conflict' });
+    expect(gl.branchSha('agent/one')).toBe(head);
+  });
+
+  test('a rebase that never finishes rejects after the bounded reads', async () => {
+    const { gl } = setup();
+    const { head } = mergeRepo(gl);
+    moveTrunk(gl, { a: '1\n', gone: 'x\n', old: 'same\n', c: 'c\n' });
+    const stuck = hookedFetch(
+      (method, url) => method === 'PUT' && url.pathname === REBASE,
+      () => {
+        const mr = gl.mergeRequest(1);
+        if (mr) mr.rebase_in_progress = true;
+      },
+    );
+    const forge = new GitLabForge(GITLAB, PROJECT.path, AGENT, {
+      fetch: stuck,
+      rebasePollDelayMs: 0,
+    });
+    const err = await forge.updateBranch(1, head).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GitLabForgeError);
+    expect((err as Error).message).toContain('still in progress');
+    const polls = gl.requests.filter((r) => r.query.include_rebase_in_progress === 'true');
+    expect(polls).toHaveLength(30);
+  });
+
+  test('a rebase answered with anything but 202 rejects with its status', async () => {
+    const { gl } = setup();
+    const { head } = mergeRepo(gl);
+    const real = fetch;
+    const forge = new GitLabForge(GITLAB, PROJECT.path, AGENT, {
+      fetch: (async (input: string | URL | Request, init?: RequestInit) =>
+        init?.method === 'PUT' && new URL(String(input)).pathname === REBASE
+          ? new Response('{}', { status: 200 })
+          : real(input, init)) as typeof fetch,
+      rebasePollDelayMs: 0,
+    });
+    const err = await forge.updateBranch(1, head).catch((e: unknown) => e);
+    expect(statusOf(err)).toBe(200);
+  });
+
+  test('a bad iid is refused unsent', async () => {
+    const { gl, forge } = setup();
+    const { head } = mergeRepo(gl);
+    for (const n of [0, -2, 2.5])
+      await expect(forge.updateBranch(n, head)).rejects.toBeInstanceOf(GitLabForgeError);
+    expect(gl.requests).toEqual([]);
+  });
+});
+
+describe('merges: secrets', () => {
+  test('no recorded request or thrown error carries the token', async () => {
+    const { gl, forge } = setup();
+    const { base, head } = mergeRepo(gl);
+    await forge.updateBranch(1, head);
+    const now = gl.branchSha('agent/one') as string;
+    await forge.merge(1, { sha: base, ...SQUASH }).catch(() => undefined);
+    await forge.merge(1, { sha: now, ...SQUASH });
+    for (const r of gl.requests) {
+      expect(r.path).not.toContain(AGENT);
+      expect(JSON.stringify(r.query)).not.toContain(AGENT);
+      expect(JSON.stringify(r.body ?? null)).not.toContain(AGENT);
+    }
+    const wrong = new GitLabForge(GITLAB, PROJECT.path, WRONG);
+    const errors = await Promise.all([
+      wrong.merge(1, { sha: now, ...SQUASH }).catch((e: unknown) => e),
+      wrong.updateBranch(1, now).catch((e: unknown) => e),
+    ]);
+    for (const e of errors) {
+      expect(e).toBeInstanceOf(GitLabForgeError);
+      expect(statusOf(e)).toBe(401);
+      for (const s of [AGENT, WRONG, SQUASH.title, SQUASH.message])
+        expect((e as Error).message).not.toContain(s);
+    }
   });
 });
