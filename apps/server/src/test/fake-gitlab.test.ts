@@ -980,3 +980,241 @@ describe('repository: unknown routes', () => {
     expect(gl.unknown).toEqual([`GET /api/v4/projects/${PROJECT.id}/repository/archive`]);
   });
 });
+
+describe('merge requests', () => {
+  const P = `/projects/${PROJECT.id}`;
+
+  /** `main` and `feature` diverged from a common base. */
+  function branchesFor(gl: FakeGitLab) {
+    const base = gl.seedCommit({
+      branch: 'main',
+      files: { 'keep.txt': 'k\n', 'old.txt': 'same\n', 'gone.txt': 'a\n', 'edit.txt': 'one\n' },
+      message: 'base',
+    });
+    gl.seedBranch('feature', base);
+    gl.seedCommit({
+      branch: 'main',
+      files: { 'keep.txt': 'k2\n', 'old.txt': 'same\n', 'gone.txt': 'a\n', 'edit.txt': 'one\n' },
+      message: 'main moves on',
+    });
+    const head = gl.seedCommit({
+      branch: 'feature',
+      files: { 'keep.txt': 'k\n', 'new.txt': 'same\n', 'edit.txt': 'two\n', 'added.txt': 'x\n' },
+      message: 'feature work',
+    });
+    return { base, head };
+  }
+  const create = (call: ReturnType<typeof setup>['call'], extra: object = {}, token?: string) =>
+    call('POST', `${P}/merge_requests`, {
+      token,
+      body: {
+        source_branch: 'feature',
+        target_branch: 'main',
+        title: 'Add things',
+        description: 'Closes #1',
+        labels: 'agent,review',
+        ...extra,
+      },
+    });
+
+  test('create, get by iid, and find it filtered by source_branch and state=opened', async () => {
+    const { gl, call } = setup();
+    const { base, head } = branchesFor(gl);
+    const made = await create(call);
+    expect(made.status).toBe(201);
+    expect(made.body.iid).toBe(1);
+    const got = await call('GET', `${P}/merge_requests/1`);
+    expect(got.status).toBe(200);
+    expect(got.body).toMatchObject({
+      iid: 1,
+      title: 'Add things',
+      description: 'Closes #1',
+      state: 'opened',
+      source_branch: 'feature',
+      target_branch: 'main',
+      sha: head,
+      source_project_id: PROJECT.id,
+      target_project_id: PROJECT.id,
+      author: { username: 'dev' },
+      labels: ['agent', 'review'],
+      web_url: `${GITLAB}/${PROJECT.path}/-/merge_requests/1`,
+      merged_at: null,
+      diff_refs: { base_sha: base, start_sha: gl.branchSha('main'), head_sha: head },
+    });
+    const list = await call(
+      'GET',
+      `${P}/merge_requests?source_branch=feature&target_branch=main&state=opened`,
+    );
+    expect(list.body.map((m: { iid: number }) => m.iid)).toEqual([1]);
+    expect((await call('GET', `${P}/merge_requests?source_branch=other`)).body).toEqual([]);
+    expect((await call('GET', `${P}/merge_requests?state=closed`)).body).toEqual([]);
+    expect((await call('GET', `${P}/merge_requests?labels=agent`)).body).toHaveLength(1);
+    expect((await call('GET', `${P}/merge_requests?labels=agent,nope`)).body).toEqual([]);
+    expect((await call('GET', `${P}/merge_requests/99`)).status).toBe(404);
+  });
+
+  test('a duplicate open MR gives 409, a Reporter gets 403, a missing branch is refused', async () => {
+    const { gl, call } = setup();
+    branchesFor(gl);
+    expect((await create(call)).status).toBe(201);
+    const dup = await create(call, { title: 'again' });
+    expect(dup.status).toBe(409);
+    expect((await create(call, {}, REPORTER)).status).toBe(403);
+    expect((await create(call, { source_branch: 'nope' })).status).toBe(400);
+    expect((await create(call, { target_branch: 'nope' })).status).toBe(400);
+    expect((await create(call, { title: '' })).status).toBe(400);
+    expect((await create(call, { target_branch: 'feature' })).status).toBe(400);
+    const put = await call('PUT', `${P}/merge_requests/1`, {
+      token: REPORTER,
+      body: { title: 'x' },
+    });
+    expect(put.status).toBe(403);
+    // Once the first is closed, a new MR for the same branches is allowed.
+    gl.closeMergeRequest(1);
+    expect((await create(call)).body.iid).toBe(2);
+  });
+
+  test('pushing to the source branch updates sha and diff_refs.head_sha', async () => {
+    const { gl, call } = setup();
+    const { base } = branchesFor(gl);
+    await create(call);
+    const put = await call('PUT', `${P}/repository/files/${encodeURIComponent('added.txt')}`, {
+      body: { branch: 'feature', content: 'changed\n', commit_message: 'push' },
+    });
+    expect(put.status).toBe(200);
+    const head = gl.branchSha('feature');
+    const got = await call('GET', `${P}/merge_requests/1`);
+    expect(got.body.sha).toBe(head);
+    expect(got.body.diff_refs).toMatchObject({ base_sha: base, head_sha: head });
+    const listed = await call('GET', `${P}/merge_requests`);
+    expect(listed.body[0].sha).toBe(head);
+  });
+
+  test('PUT add_labels, remove_labels and state_event close; reopen', async () => {
+    const { gl, call } = setup();
+    branchesFor(gl);
+    await create(call);
+    const r = await call('PUT', `${P}/merge_requests/1`, {
+      body: { add_labels: 'done,agent', remove_labels: 'review', state_event: 'close' },
+    });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ state: 'closed', labels: ['agent', 'done'] });
+    expect(r.body.closed_at).toEqual(expect.any(String));
+    const closed = await call('GET', `${P}/merge_requests?state=closed`);
+    expect(closed.body.map((m: { iid: number }) => m.iid)).toEqual([1]);
+    expect((await call('GET', `${P}/merge_requests?state=opened`)).body).toEqual([]);
+    const edit = await call('PUT', `${P}/merge_requests/1`, {
+      body: { title: 'T2', description: 'D2', labels: 'x', state_event: 'reopen' },
+    });
+    expect(edit.body).toMatchObject({
+      title: 'T2',
+      description: 'D2',
+      labels: ['x'],
+      state: 'opened',
+      closed_at: null,
+    });
+    expect((await call('PUT', `${P}/merge_requests/9`, { body: { title: 'x' } })).status).toBe(404);
+  });
+
+  test('diffs show the three-dot change, with an add, an edit, a rename and a delete', async () => {
+    const { gl, call } = setup();
+    branchesFor(gl);
+    await create(call);
+    const r = await call('GET', `${P}/merge_requests/1/diffs`);
+    expect(r.status).toBe(200);
+    // keep.txt changed only on main, so it is not part of the merge request's change.
+    expect(
+      r.body.map((d: { old_path: string; new_path: string }) => `${d.old_path}>${d.new_path}`),
+    ).toEqual(['added.txt>added.txt', 'edit.txt>edit.txt', 'gone.txt>gone.txt', 'old.txt>new.txt']);
+    const by = (p: string) => r.body.find((d: { new_path: string }) => d.new_path === p);
+    expect(by('added.txt')).toMatchObject({ new_file: true, diff: '@@ -1,0 +1,1 @@\n+x\n' });
+    expect(by('edit.txt')).toMatchObject({
+      new_file: false,
+      renamed_file: false,
+      deleted_file: false,
+      diff: '@@ -1,1 +1,1 @@\n-one\n+two\n',
+    });
+    expect(by('gone.txt')).toMatchObject({ deleted_file: true });
+    expect(by('new.txt')).toMatchObject({ renamed_file: true, old_path: 'old.txt' });
+    for (const d of r.body)
+      expect(Object.keys(d).sort()).toEqual(
+        ['deleted_file', 'diff', 'new_file', 'new_path', 'old_path', 'renamed_file'].sort(),
+      );
+
+    const p1 = await call('GET', `${P}/merge_requests/1/diffs?per_page=3&page=1`);
+    const p2 = await call('GET', `${P}/merge_requests/1/diffs?per_page=3&page=2`);
+    expect(p1.body).toHaveLength(3);
+    expect(p1.headers.get('x-next-page')).toBe('2');
+    expect(p2.body).toHaveLength(1);
+    expect(p2.headers.get('x-total-pages')).toBe('2');
+    expect([...p1.body, ...p2.body]).toEqual(r.body);
+    expect((await call('GET', `${P}/merge_requests/5/diffs`)).status).toBe(404);
+  });
+
+  test('MR iid 1 and issue iid 1 coexist', async () => {
+    const { gl, call } = setup();
+    branchesFor(gl);
+    const issue = await call('POST', `${P}/issues`, { body: { title: 'an issue' } });
+    const mr = await create(call);
+    expect(issue.body.iid).toBe(1);
+    expect(mr.body.iid).toBe(1);
+    expect((await call('GET', `${P}/issues/1`)).body.title).toBe('an issue');
+    expect((await call('GET', `${P}/merge_requests/1`)).body.title).toBe('Add things');
+    expect((await create(call, { source_branch: 'main', target_branch: 'feature' })).body.iid).toBe(
+      2,
+    );
+    expect((await call('POST', `${P}/issues`, { body: { title: 'b' } })).body.iid).toBe(2);
+  });
+
+  test('a seeded merged MR reads state merged with merged_at set, and keeps its sha', async () => {
+    const { gl, call } = setup();
+    const { head } = branchesFor(gl);
+    const mr = gl.seedMergeRequest({
+      sourceBranch: 'feature',
+      targetBranch: 'main',
+      title: 'Merged one',
+      labels: ['agent'],
+      author: 'dev',
+    });
+    gl.markMergeRequestMerged(mr.iid, { mergedAt: '2026-05-01T00:00:00.000Z' });
+    gl.seedCommit({ branch: 'feature', files: { z: '1' }, message: 'after merge' });
+    const got = await call('GET', `${P}/merge_requests/${mr.iid}`);
+    expect(got.body).toMatchObject({
+      state: 'merged',
+      merged_at: '2026-05-01T00:00:00.000Z',
+      sha: head,
+      diff_refs: { head_sha: head },
+      author: { username: 'dev' },
+    });
+    expect((await call('GET', `${P}/merge_requests?state=merged`)).body).toHaveLength(1);
+    expect((await call('GET', `${P}/merge_requests?state=all`)).body).toHaveLength(1);
+    expect((await call('GET', `${P}/merge_requests?state=opened`)).body).toHaveLength(0);
+    // A merged MR doesn't block a new one for the same branches, and can't be reopened.
+    expect((await create(call)).status).toBe(201);
+    const reopen = await call('PUT', `${P}/merge_requests/${mr.iid}`, {
+      body: { state_event: 'reopen' },
+    });
+    expect(reopen.body.state).toBe('merged');
+    expect(() =>
+      gl.seedMergeRequest({ sourceBranch: 'nope', targetBranch: 'main', title: 'x' }),
+    ).toThrow(/unknown branch/);
+  });
+
+  test('requests carry no token; unknown MR routes answer 404 and are listed', async () => {
+    const { gl, call } = setup();
+    branchesFor(gl);
+    await create(call);
+    await call('GET', `${P}/merge_requests?private_token=${DEVELOPER}`);
+    const r = await call('PUT', `${P}/merge_requests/1/merge`);
+    expect(r.status).toBe(404);
+    expect((await call('GET', `${P}/merge_requests/1/changes`)).status).toBe(404);
+    expect(gl.unknown).toEqual([
+      `PUT /api/v4${P}/merge_requests/1/merge`,
+      `GET /api/v4${P}/merge_requests/1/changes`,
+    ]);
+    expect(gl.requests.length).toBe(4);
+    expect(gl.requests[0]?.body).toMatchObject({ source_branch: 'feature' });
+    expect(gl.requests[1]?.query).toEqual({});
+    expect(JSON.stringify(gl.requests)).not.toContain(DEVELOPER);
+  });
+});
