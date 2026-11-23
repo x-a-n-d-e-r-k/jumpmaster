@@ -132,6 +132,7 @@ describe('working copy and helpers', () => {
     const rec = recordSpawn();
     await runGit(undefined, ['rev-parse', '--git-dir'], 't', {
       gitDir: w.mirror,
+      remote: { owner: 'o', name: 'r' },
       extraConfig: [['a.b', 'c']],
     });
     const env = rec.calls[0]?.env ?? {};

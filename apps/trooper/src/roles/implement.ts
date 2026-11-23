@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { type DropPayload, type DropResult, IMPLEMENT_OUTPUT_SCHEMA } from '@jumpmaster/protocol';
+import { repoTarget } from '../git.js';
 import type { TrooperDeps } from '../main.js';
 import {
   acceptOutcome,
@@ -46,7 +47,7 @@ async function implementSteps(
 ): Promise<DropResult> {
   const forgeToken = payload.credentials.forgeToken as string;
   const base = payload.repo.defaultBranch;
-  const target = { owner: payload.repo.owner, name: payload.repo.name };
+  const target = repoTarget(payload.repo);
   const as = ctx.ids?.agent ?? null;
   const resumeSha = payload.resume ? payload.resumeSha : undefined;
   if (payload.resume && resumeSha === undefined) throw new Error('resume requires resumeSha');

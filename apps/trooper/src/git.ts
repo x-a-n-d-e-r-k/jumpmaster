@@ -12,7 +12,10 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import {
+  type DropPayload,
+  type ForgeRemote,
   findPrivateKeys,
+  gitlabBasicAuth,
   type MergeOutcome,
   type PushGrant,
   type PushResult,
@@ -27,7 +30,7 @@ import {
 } from './privilege.js';
 import { containsSecret, redact } from './redact.js';
 
-/** The only URL prefix the forge auth header is ever sent to. */
+/** The only URL prefix a GitHub target's auth header is ever sent to. */
 export const AUTH_SCOPE = 'https://github.com/';
 
 export const PUSH_FETCH_TIMEOUT_MS = 120_000;
@@ -39,11 +42,39 @@ const AGENT_EMAIL = 'jumpmaster-agent@users.noreply.github.com';
 export interface RemoteTarget {
   owner: string;
   name: string;
-  /** Test-only override of the explicit https://github.com/<owner>/<name>.git URL. */
+  /**
+   * A GitLab remote: the URL is `<origin>/<projectPath>.git` and the auth is scoped to
+   * `<origin>/`, built from it alone. `owner` and `name` then name nothing on the wire.
+   */
+  forge?: ForgeRemote;
+  /** Test-only override of the explicit remote URL (the auth scope still follows the target). */
   url?: string;
 }
 
-const remoteUrl = (t: RemoteTarget): string => t.url ?? `${AUTH_SCOPE}${t.owner}/${t.name}.git`;
+/** The target a drop's `repo` names: GitHub `<owner>/<name>`, or its GitLab `forge`. */
+export function repoTarget(repo: DropPayload['repo']): RemoteTarget {
+  return { owner: repo.owner, name: repo.name, ...(repo.forge ? { forge: repo.forge } : {}) };
+}
+
+const remoteUrl = (t: RemoteTarget): string =>
+  t.url ??
+  (t.forge
+    ? `${t.forge.origin}/${t.forge.projectPath}.git`
+    : `${AUTH_SCOPE}${t.owner}/${t.name}.git`);
+
+/** The only URL prefix the target's auth header is sent to. */
+export const authScope = (t: RemoteTarget): string => (t.forge ? `${t.forge.origin}/` : AUTH_SCOPE);
+
+/** The auth header git sends to the target's scope. */
+export const targetAuthHeader = (t: RemoteTarget, token: string): string =>
+  t.forge ? `AUTHORIZATION: basic ${gitlabBasicAuth(token)}` : authHeader(token);
+
+/** The forms of `token` to redact from what git says about the target. */
+export const targetTokenSecrets = (t: RemoteTarget, token: string): string[] => [
+  token,
+  authHeader(token),
+  ...(t.forge ? [gitlabBasicAuth(token)] : []),
+];
 
 // ---- process seam --------------------------------------------------------------------------------
 
@@ -216,6 +247,8 @@ export function assertRootOwnedDir(
 export type RunGitOpts = {
   /** Run as this unprivileged identity (working-copy calls). Never with a token. */
   as?: AgentIdentity | null;
+  /** With a token: the remote whose scope and header the token is sent with. Required then. */
+  remote?: RemoteTarget;
   /** Root call: a root-owned bare repo; sets GIT_DIR / GIT_COMMON_DIR / GIT_CEILING_DIRECTORIES. */
   gitDir?: string;
   extraConfig?: [string, string][];
@@ -259,8 +292,9 @@ export function trustMirror(mirrorDir: string, alsoTrust: string[] = []): string
 
 /**
  * Runs git. Auth rides in the child's env (never argv or config) as GIT_CONFIG_KEY_0, scoped to
- * github.com. Inherited GIT_* variables and global/system config are ignored. A token is only ever
- * used by a root call in a root-owned `gitDir`; working-copy calls carry no token.
+ * `opts.remote`'s origin (github.com, or a GitLab target's origin), which a token requires.
+ * Inherited GIT_* variables and global/system config are ignored. A token is only ever used by a
+ * root call in a root-owned `gitDir`; working-copy calls carry no token.
  */
 export function runGit(
   cwd: string | undefined,
@@ -272,9 +306,14 @@ export function runGit(
   if (token && !opts.gitDir) {
     return Promise.reject(new Error('runGit: a token outside a root-owned git dir'));
   }
+  const remote = opts.remote;
+  if (token && !remote) return Promise.reject(new Error('runGit: a token without a remote'));
   const config: [string, string][] = [
-    ...(token
-      ? ([[`http.${AUTH_SCOPE}.extraheader`, authHeader(token)]] as [string, string][])
+    ...(token && remote
+      ? ([[`http.${authScope(remote)}.extraheader`, targetAuthHeader(remote, token)]] as [
+          string,
+          string,
+        ][])
       : []),
     ...(opts.extraConfig ?? []),
   ];
@@ -365,7 +404,11 @@ export async function mirrorFetch(
       ...(o.extraRefs ?? []).map((r) => `+refs/${r}:refs/${r}`),
     ],
     token,
-    { gitDir: mirrorDir, ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}) },
+    {
+      gitDir: mirrorDir,
+      remote: target,
+      ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}),
+    },
   );
 }
 
@@ -376,6 +419,7 @@ export async function mirrorFetch(
 export async function cloneRepo(o: {
   owner: string;
   name: string;
+  forge?: ForgeRemote;
   token: string;
   dir: string;
   mirrorDir?: string;
@@ -509,7 +553,7 @@ export async function remoteBranchSha(
         `refs/heads/${branch}`,
       ],
       token,
-      { gitDir: scratch, ...(timeoutMs !== undefined ? { timeoutMs } : {}) },
+      { gitDir: scratch, remote: target, ...(timeoutMs !== undefined ? { timeoutMs } : {}) },
     );
     const line = out.split('\n').find((l) => l.endsWith(`\trefs/heads/${branch}`));
     return line ? (line.split('\t')[0] as string) : null;
@@ -968,10 +1012,11 @@ export async function pushStaged(
   const target: RemoteTarget = {
     owner: grant.owner,
     name: grant.name,
+    ...(grant.forge ? { forge: grant.forge } : {}),
     ...(o.remoteUrl !== undefined ? { url: o.remoteUrl } : {}),
   };
   const url = remoteUrl(target);
-  const secrets = [...grant.secrets, token, authHeader(token)];
+  const secrets = [...grant.secrets, ...targetTokenSecrets(target, token)];
   try {
     try {
       await runGit(
@@ -988,7 +1033,7 @@ export async function pushStaged(
           `+refs/heads/${grant.base}:refs/jm/base`,
         ],
         token,
-        { gitDir: pushDir, timeoutMs },
+        { gitDir: pushDir, remote: target, timeoutMs },
       );
     } catch (e) {
       throw failure(e, true);
@@ -1036,7 +1081,7 @@ export async function pushStaged(
           `${ref}:${ref}`,
         ],
         token,
-        { gitDir: pushDir, timeoutMs },
+        { gitDir: pushDir, remote: target, timeoutMs },
       );
     } catch (e) {
       // The remote decides: our own earlier push that died before reporting, a remote that moved

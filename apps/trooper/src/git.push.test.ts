@@ -310,6 +310,87 @@ describe('stageFromAgent', () => {
   });
 });
 
+describe('pushStaged with a GitLab grant (#716)', () => {
+  const GL_BASIC = Buffer.from(`oauth2:${TOKEN}`).toString('base64');
+  const forge = {
+    kind: 'gitlab' as const,
+    origin: 'https://gitlab.example.internal:8443',
+    projectPath: 'group/sub/project',
+  };
+
+  test('fetches <origin>/<projectPath>.git on the GitLab scope; an echoed token and header are redacted', async () => {
+    const w = await world('gitlab-echo');
+    const r = await stage(w);
+    const calls: Call[] = [];
+    // Every call that carries the token stands in for the remote: it echoes what it was sent.
+    setSpawn((cmd, args, opts: SpawnOptions) => {
+      const env = (opts.env ?? {}) as NodeJS.ProcessEnv;
+      calls.push({ argv: [cmd, ...args], cwd: opts.cwd as string | undefined, env });
+      if (env.GIT_CONFIG_KEY_0 === undefined) return spawn(cmd, args, opts);
+      const echo = `echo "fatal: ${TOKEN} sent ${env.GIT_CONFIG_VALUE_0} (${GL_BASIC})" >&2; exit 128`;
+      return spawn('sh', ['-c', echo], opts);
+    });
+    const res = await pushStaged(r.pushDir, grantFor(w, { forge }));
+    expect(res).toMatchObject({ status: 'failed', retryable: true });
+    if (res.status !== 'failed') return;
+    expect(res.reason).toContain('[REDACTED]');
+    expect(JSON.stringify(res)).not.toContain(TOKEN);
+    expect(JSON.stringify(res)).not.toContain(GL_BASIC);
+    const fetch = calls.find((c) => c.env.GIT_CONFIG_KEY_0 !== undefined) as Call;
+    expect(fetch.argv).toContain('https://gitlab.example.internal:8443/group/sub/project.git');
+    expect(fetch.env.GIT_CONFIG_KEY_0).toBe(
+      'http.https://gitlab.example.internal:8443/.extraheader',
+    );
+    expect(fetch.env.GIT_CONFIG_VALUE_0).toBe(`AUTHORIZATION: basic ${GL_BASIC}`);
+    expect(fetch.env.GIT_DIR).toBe(r.pushDir);
+    for (const c of calls) {
+      for (const a of c.argv) {
+        expect(a).not.toContain(TOKEN);
+        expect(a).not.toContain(GL_BASIC);
+      }
+    }
+  });
+
+  test('pushes to <origin>/<projectPath>.git with the GitLab scope; a rejected push is redacted', async () => {
+    const w = await world('gitlab-push');
+    writeFileSync(join(w.dir, 'gl.txt'), 'gl\n');
+    await commitIfDirty(w.dir, 'feat: gl');
+    const r = await stage(w);
+    const calls: Call[] = [];
+    // The fetch of the base goes to the real (file) origin; the push echoes and fails.
+    setSpawn((cmd, args, opts: SpawnOptions) => {
+      const env = (opts.env ?? {}) as NodeJS.ProcessEnv;
+      calls.push({ argv: [cmd, ...args], cwd: opts.cwd as string | undefined, env });
+      if (!args.includes('push')) {
+        if (env.GIT_CONFIG_KEY_0 === undefined) return spawn(cmd, args, opts);
+        const url = `${forge.origin}/${forge.projectPath}.git`;
+        // The stand-in remote is a file URL: let only this transport reach it.
+        const local = args.map((a) =>
+          a === url
+            ? (w.target.url as string)
+            : a === 'protocol.allow=never'
+              ? 'protocol.file.allow=always'
+              : a,
+        );
+        return spawn(cmd, local, opts);
+      }
+      const echo = `echo "! [remote rejected] (${TOKEN} ${GL_BASIC})" >&2; exit 1`;
+      return spawn('sh', ['-c', echo], opts);
+    });
+    const res = await pushStaged(r.pushDir, grantFor(w, { forge }));
+    expect(res.status).toBe('failed');
+    expect(JSON.stringify(res)).toContain('[REDACTED]');
+    expect(JSON.stringify(res)).not.toContain(TOKEN);
+    expect(JSON.stringify(res)).not.toContain(GL_BASIC);
+    const push = calls.find((c) => c.argv.includes('push')) as Call;
+    expect(push.argv).toContain('https://gitlab.example.internal:8443/group/sub/project.git');
+    expect(push.env.GIT_CONFIG_KEY_0).toBe(
+      'http.https://gitlab.example.internal:8443/.extraheader',
+    );
+    expect(push.env.GIT_CONFIG_VALUE_0).toBe(`AUTHORIZATION: basic ${GL_BASIC}`);
+  });
+});
+
 describe('pushStaged', () => {
   test('new branch', async () => {
     const w = await world('newbranch');

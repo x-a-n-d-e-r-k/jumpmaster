@@ -6,7 +6,7 @@ import {
   TriageImageSchema,
   TriageImageSkippedSchema,
 } from './media.js';
-import { isOwnerName, isRepoName } from './names.js';
+import { isGitLabProjectPath, isOwnerName, isRepoName } from './names.js';
 import { RateLimitEventDataSchema } from './usage.js';
 
 export const EVENT_PREFIX = 'JM_EVENT ';
@@ -261,11 +261,53 @@ export const RepoNameSchema = z
   .string()
   .refine(isRepoName, { message: 'name is not a valid GitHub repository name' });
 
+/**
+ * Whether `origin` is a bare `https://` origin: a host and an optional port, with no userinfo,
+ * path, query, fragment or trailing slash. It must equal its own parsed origin, so anything the
+ * URL parser would normalise (case, a default port, a trailing dot of a path) is refused.
+ */
+function isHttpsOrigin(origin: string): boolean {
+  if (!origin.startsWith('https://')) return false;
+  let u: URL;
+  try {
+    u = new URL(origin);
+  } catch {
+    return false;
+  }
+  return (
+    u.protocol === 'https:' &&
+    u.hostname !== '' &&
+    u.username === '' &&
+    u.password === '' &&
+    u.origin === origin
+  );
+}
+
+/**
+ * The forge remote a drop clones from and a push grant pushes to, when it is not GitHub. With it,
+ * the trooper's remote URL is `<origin>/<projectPath>.git` and its auth scope `<origin>/`; the
+ * repo's `owner` and `name` then name nothing on the wire.
+ */
+export const ForgeRemoteSchema = z.strictObject({
+  kind: z.literal('gitlab'),
+  origin: z.string().refine(isHttpsOrigin, { message: 'origin is not a bare https:// origin' }),
+  projectPath: z
+    .string()
+    .refine(isGitLabProjectPath, { message: 'projectPath is not a valid GitLab project path' }),
+});
+export type ForgeRemote = z.infer<typeof ForgeRemoteSchema>;
+
 const dropPayloadBase = {
   protocol: z.literal(1),
   dropId: z.string(),
   epoch: z.number(),
-  repo: z.object({ owner: OwnerNameSchema, name: RepoNameSchema, defaultBranch: z.string() }),
+  repo: z.object({
+    owner: OwnerNameSchema,
+    name: RepoNameSchema,
+    defaultBranch: z.string(),
+    /** A GitLab remote: the clone goes there, not to github.com/<owner>/<name>. */
+    forge: ForgeRemoteSchema.optional(),
+  }),
   issue: z.object({ number: z.number(), title: z.string(), body: z.string() }),
   branch: z.string(),
   gates: z.array(GateSpecSchema),
@@ -799,6 +841,7 @@ export {
   dropSecrets,
   findJwtShape,
   findPrivateKeys,
+  gitlabBasicAuth,
   type PrivateKeyBlock,
   payloadSecrets,
   REAL_KEY_BODY_CHARS,
@@ -920,6 +963,8 @@ export const PushGrantSchema = z
     token: z.string().min(1),
     owner: OwnerNameSchema,
     name: RepoNameSchema,
+    /** A GitLab remote: the push goes there, not to github.com/<owner>/<name>. */
+    forge: ForgeRemoteSchema.optional(),
     branch: BranchNameSchema,
     base: BranchNameSchema,
     /** The SHA the remote branch must still be at, or empty for a new branch. */

@@ -218,3 +218,11 @@ describe('the doctor role', () => {
     expect(w.names()).not.toContain('runGates');
   });
 });
+
+test('a doctor drop with a GitLab repo.forge clones it (#716)', async () => {
+  const forge = { kind: 'gitlab' as const, origin: 'https://gitlab.com', projectPath: 'g/sub/p' };
+  const w = world();
+  const p = payload();
+  await runDoctorRole({ ...p, repo: { ...p.repo, forge } }, w.deps, w.ctx);
+  expect(w.calls.find((c) => c[0] === 'cloneRepo')?.[1]).toMatchObject({ forge, token: READ });
+});

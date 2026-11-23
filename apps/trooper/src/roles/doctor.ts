@@ -10,6 +10,7 @@ import {
   servedModel,
 } from '@jumpmaster/protocol';
 import { scrubEnv } from '../gates.js';
+import { repoTarget } from '../git.js';
 import type { TrooperDeps } from '../main.js';
 import { sweepUid } from '../privilege.js';
 import { redact } from '../redact.js';
@@ -60,8 +61,7 @@ export async function runDoctorRole(
   emitEvent(deps, ctx, 'phase', { phase: 'clone' });
   try {
     await deps.git.cloneRepo({
-      owner: payload.repo.owner,
-      name: payload.repo.name,
+      ...repoTarget(payload.repo),
       token: payload.credentials.readToken ?? '',
       dir,
       mirrorDir: mirrorDirOf(ctx),

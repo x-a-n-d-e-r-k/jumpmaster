@@ -161,19 +161,33 @@ export const withBasicAuth = (token: string | undefined): string[] =>
   token === undefined ? [] : [token, Buffer.from(`x-access-token:${token}`).toString('base64')];
 
 /**
- * Every credential a drop payload carries, including the git basic-auth form of each GitHub token
- * (the forge token of item and crew roles, the read token of a doctor drop).
+ * The base64 of git's basic-auth form of a GitLab token (`oauth2:<token>`), as the trooper sends
+ * it. No token shape matches it, so wherever a GitLab token is redacted this must be too.
+ */
+export const gitlabBasicAuth = (token: string): string =>
+  Buffer.from(`oauth2:${token}`).toString('base64');
+
+/** A token, its GitHub basic-auth form, and with `gitlab` its GitLab basic-auth form too. */
+const tokenForms = (token: string | undefined, gitlab: boolean): string[] =>
+  token === undefined ? [] : [...withBasicAuth(token), ...(gitlab ? [gitlabBasicAuth(token)] : [])];
+
+/**
+ * Every credential a drop payload carries, including the git basic-auth form of each forge token
+ * (the forge token of item and crew roles, the read token of a doctor drop): with a GitLab
+ * `repo.forge`, the `oauth2:` form as well.
  */
 export function payloadSecrets(p: {
   credentials: { claudeToken: string; forgeToken?: string; readToken?: string };
   gateSecrets?: Record<string, string>;
+  repo?: { forge?: { kind: 'gitlab' } };
 }): string[] {
   const { claudeToken, forgeToken, readToken } = p.credentials;
+  const gitlab = p.repo?.forge?.kind === 'gitlab';
   return [
     ...Object.values(p.gateSecrets ?? {}),
     claudeToken,
-    ...withBasicAuth(forgeToken),
-    ...withBasicAuth(readToken),
+    ...tokenForms(forgeToken, gitlab),
+    ...tokenForms(readToken, gitlab),
   ];
 }
 

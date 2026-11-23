@@ -42,6 +42,34 @@ test('payloadSecrets includes credentials.readToken, and its git basic-auth form
   ]);
 });
 
+const b64 = (s: string) => Buffer.from(s).toString('base64');
+const gitlab = { kind: 'gitlab', origin: 'https://gitlab.com', projectPath: 'g/p' } as const;
+
+test('payloadSecrets with a GitLab repo.forge adds the oauth2 basic-auth form of the forge token', () => {
+  const s = payloadSecrets({
+    credentials: { claudeToken: 'c', forgeToken: 'forge-tok' },
+    repo: { forge: gitlab },
+  });
+  expect(s).toContain('forge-tok');
+  expect(s).toContain(b64('oauth2:forge-tok'));
+});
+
+test('payloadSecrets with a GitLab repo.forge adds the oauth2 basic-auth form of a doctor read token', () => {
+  const s = payloadSecrets({
+    credentials: { claudeToken: 'c', readToken: 'read-tok' },
+    repo: { forge: gitlab },
+  });
+  expect(s).toContain('read-tok');
+  expect(s).toContain(b64('oauth2:read-tok'));
+});
+
+test('payloadSecrets without repo.forge is unchanged', () => {
+  const credentials = { claudeToken: 'c', forgeToken: 'f', readToken: 'r' };
+  const want = ['c', 'f', b64('x-access-token:f'), 'r', b64('x-access-token:r')];
+  expect(payloadSecrets({ credentials })).toEqual(want);
+  expect(payloadSecrets({ credentials, repo: {} })).toEqual(want);
+});
+
 // A stateless installation token (F21): `ghs_<app id>_<JWT>`, hundreds of characters with `.`, `-`, `_`.
 const jwtPart = (n: number) =>
   'eyJhbGciOiJSUzI1NiJ9.' + 'aB3-_x'.repeat(n) + '.' + 'Zz9_-q'.repeat(n);
