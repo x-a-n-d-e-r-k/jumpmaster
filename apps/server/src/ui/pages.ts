@@ -63,6 +63,7 @@ import {
 } from './links.js';
 import { STYLE } from './theme.js';
 import { relativeTime } from './time.js';
+import { usageOverrideControl } from './usage-override.js';
 import {
   projectWords,
   type ZoneRef,
@@ -308,7 +309,9 @@ const laterOf = (a?: string | null, b?: string | null): string | null =>
 function capacitySection(state: HomeState, now: Date): string {
   const u = state.usage;
   const bars = u ? usageMeters(u) : '<p class="empty">No usage reported yet.</p>';
-  const gate = u ? `<p class="gate-words">${gateWords(u, now)}.</p>` : '';
+  const gate = u
+    ? `<p class="gate-words">${gateWords(u, now)}.</p>${usageOverrideControl(u, now)}`
+    : '';
   const sticks = state.sticks ?? [];
   const live = new Set(liveSticks(sticks, now).map((s) => s.id));
   const busy = (id: string): number =>
@@ -1098,7 +1101,7 @@ export const LIVE_MARKER = 'jm-live';
  * once when the tab comes back, ignores a failed fetch or a non-200, and stops on a 401 or a
  * redirect to the login page.
  */
-export const LIVE_SCRIPT = `<script>/*${LIVE_MARKER}*/(()=>{let base=null,pending=false,stopped=false,busyFetch=false,timer=null;const stop=()=>{stopped=true;if(timer!==null)clearInterval(timer);};const dirty=(f)=>{const t=f.tagName;if(t==='SELECT'){for(const o of f.options||[])if(o.selected!==o.defaultSelected)return true;return false;}if(t==='INPUT'&&(f.type==='checkbox'||f.type==='radio'))return f.checked!==f.defaultChecked;if(t==='INPUT'||t==='TEXTAREA')return f.value!==f.defaultValue;return false;};const busy=()=>{const k=document.getElementById&&document.getElementById('ask-panel');if(k&&!k.hidden)return true;const kd=document.getElementById&&document.getElementById('kill-dialog');if(kd&&kd.open)return true;const m=document.querySelector('main');if(!m)return false;const a=document.activeElement;if(a&&/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName||'')&&m.contains(a))return true;for(const f of m.querySelectorAll('form'))for(const e of f.elements)if(dirty(e))return true;return false;};const tick=async()=>{if(stopped||busyFetch||document.visibilityState!=='visible')return;busyFetch=true;try{const r=await fetch(location.pathname+location.search,{credentials:'same-origin',cache:'no-store'});if(r.status===401||(r.redirected&&new URL(r.url,location.origin).pathname==='/login')){stop();return;}if(r.status!==200)return;const m=new DOMParser().parseFromString(await r.text(),'text/html').querySelector('main');if(!m)return;for(const e of m.querySelectorAll('[data-live-ignore]'))e.remove();const html=m.innerHTML;if(base!==null&&html!==base)pending=true;base=html;if(pending&&!busy()){stop();location.reload();}}catch{}finally{busyFetch=false;}};timer=setInterval(tick,10000);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')tick();});})();</script>`;
+export const LIVE_SCRIPT = `<script>/*${LIVE_MARKER}*/(()=>{let base=null,pending=false,stopped=false,busyFetch=false,timer=null;const stop=()=>{stopped=true;if(timer!==null)clearInterval(timer);};const dirty=(f)=>{const t=f.tagName;if(t==='SELECT'){for(const o of f.options||[])if(o.selected!==o.defaultSelected)return true;return false;}if(t==='INPUT'&&(f.type==='checkbox'||f.type==='radio'))return f.checked!==f.defaultChecked;if(t==='INPUT'||t==='TEXTAREA')return f.value!==f.defaultValue;return false;};const busy=()=>{const k=document.getElementById&&document.getElementById('ask-panel');if(k&&!k.hidden)return true;const kd=document.getElementById&&document.getElementById('kill-dialog');if(kd&&kd.open)return true;const ud=document.getElementById&&document.getElementById('usage-override-dialog');if(ud&&ud.open)return true;const m=document.querySelector('main');if(!m)return false;const a=document.activeElement;if(a&&/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName||'')&&m.contains(a))return true;for(const f of m.querySelectorAll('form'))for(const e of f.elements)if(dirty(e))return true;return false;};const tick=async()=>{if(stopped||busyFetch||document.visibilityState!=='visible')return;busyFetch=true;try{const r=await fetch(location.pathname+location.search,{credentials:'same-origin',cache:'no-store'});if(r.status===401||(r.redirected&&new URL(r.url,location.origin).pathname==='/login')){stop();return;}if(r.status!==200)return;const m=new DOMParser().parseFromString(await r.text(),'text/html').querySelector('main');if(!m)return;for(const e of m.querySelectorAll('[data-live-ignore]'))e.remove();const html=m.innerHTML;if(base!==null&&html!==base)pending=true;base=html;if(pending&&!busy()){stop();location.reload();}}catch{}finally{busyFetch=false;}};timer=setInterval(tick,10000);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')tick();});})();</script>`;
 
 /** A value that changes on every render while the page's state does not: no reload for it. */
 const volatile = (html: string): string => `<span data-live-ignore>${html}</span>`;
