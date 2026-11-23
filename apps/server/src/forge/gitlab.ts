@@ -3,7 +3,8 @@
 // first-parent methods (second slice, #683), merge requests (third slice, #690), approvals as
 // reviews (fourth slice, #696), pipelines and jobs as checks (fifth slice, #697) and the SHA-pinned
 // squash merge and rebase as the branch update (sixth slice, #698) and member access levels as
-// `isTrusted`, `isMaintainer` and `repoAccess`, the namespace as `ownerType` (#705). Not wired
+// `isTrusted`, `isMaintainer` and `repoAccess`, the namespace as `ownerType` (#705), and
+// protected branches, approval rules and approval settings as `getBranchRules` (#715). Not wired
 // in: GitLab zones are still refused with GITLAB_UNSUPPORTED wherever a forge is built.
 //
 // GitLab mapping notes:
@@ -156,6 +157,33 @@
 //     reject. `grantedPermissions` is never set.
 //   - `ownerType` (also in `repoAccess`) is `namespace.kind`: `user` is User, `group` is
 //     Organization; any other kind is refused with a GitLabForgeError that does not echo it.
+// - Branch rules (#715). The spec (§5.5, §9) asks for "protected branches and approval rules as
+//   branch rules" but gives no field mapping, so this one is chosen: it keeps the operator's work
+//   lowest where safety allows, and where it does not, an approval requirement counts only when
+//   GitLab enforces it.
+//   - Entries: `GET protected_branches` (paged). An entry applies on an exact name or through
+//     GitLab's `*` glob (any run of characters, `/` included). GitLab applies the most permissive
+//     of all matching entries, so they are combined: none matching gives `none`.
+//   - The viewer's level is read as `repoAccess` does (`GET /user`, `GET members/all/:id`, 404 is
+//     level 0). An entry allows a push when its `access_level` is above 0 and the level is at
+//     least that; 0 ("No one") never does, and a user or group entry (no numeric level) is
+//     ignored. `viewerCanBypass` is any matching entry allowing the push (`allow_force_push` makes
+//     that push a force push too), and `requiresPullRequest` is its negation.
+//   - `viewerIsAdmin` is Maintainer (40) or above: a Maintainer can unprotect the branch and edit
+//     approval rules, the reach the "bot is admin" guard exists for (`authorMayBeAdmin` allows it).
+//   - `requireCodeOwnerReview` is any matching entry's `code_owner_approval_required`.
+//   - `requiredApprovals` is the largest `approvals_required` of the `regular` and `any_approver`
+//     rules of `GET approval_rules` (paged) that apply: an empty `protected_branches`, or one
+//     holding a matching entry's `id`. 0 when none applies. The deprecated project-level
+//     `approvals_before_merge` is never counted. Approval rules are a paid feature: on the Free
+//     tier (403 or 404 there) GitLab enforces no approvals, so `requiredApprovals` is 0 and the read
+//     still succeeds; the two-bot guard then reports `approvals < 1`, the safe reading.
+//   - `dismissStaleOnPush` is `reset_approvals_on_push` from `GET approvals` (403 or 404: false).
+//   - `requiredChecks` is `['pipeline']` when the project's `only_allow_merge_if_pipeline_succeeds`
+//     is set, else []; `unpinnedChecks` is []; `nonActionsChecks`, `bypass`, `asApp` and
+//     `unsupportedRules` are left unset.
+//   - A 403 or 404 on `protected_branches`, or a 403 on the member read, gives `unreachable`. Any
+//     other error (the project read's included) rejects with a GitLabForgeError, as on GitHub.
 // Every other `Forge` method throws GitLabUnsupportedError, naming the method, until a later slice.
 //
 // Secrets: the token goes only in the PRIVATE-TOKEN header, a redirect is never followed, and no
@@ -287,6 +315,19 @@ type RawProject = {
   default_branch?: unknown;
   visibility?: unknown;
   namespace?: { kind?: unknown } | null;
+  only_allow_merge_if_pipeline_succeeds?: unknown;
+};
+type RawProtectedBranch = {
+  id?: unknown;
+  name?: unknown;
+  push_access_levels?: { access_level?: unknown }[] | null;
+  allow_force_push?: unknown;
+  code_owner_approval_required?: unknown;
+};
+type RawApprovalRule = {
+  rule_type?: unknown;
+  approvals_required?: unknown;
+  protected_branches?: { id?: unknown }[] | null;
 };
 type RawPipeline = { id: number; status: string };
 type RawJob = { name: string; status: string; allow_failure?: boolean };
@@ -1184,9 +1225,103 @@ export class GitLabForge implements Forge {
 
   // --- Branch rules, merge and rebase ---------------------------------------------------------
 
-  async getBranchRules(_branch: string): Promise<BranchRulesRead> {
-    throw new GitLabUnsupportedError('getBranchRules');
+  /**
+   * The protected-branch entries matching `branch` (exact or `*` glob), combined most permissively
+   * as GitLab applies them, with the approval rules and settings that govern it; see the header.
+   */
+  async getBranchRules(branch: string): Promise<BranchRulesRead> {
+    let entries: RawProtectedBranch[];
+    try {
+      entries = await this.list<RawProtectedBranch>(
+        'listing protected branches',
+        '/protected_branches',
+      );
+    } catch (err) {
+      if (isRefusal(err)) return { kind: 'unreachable' };
+      throw err;
+    }
+    const matching = entries.filter(
+      (e) => typeof e?.name === 'string' && matchesProtectedPattern(e.name, branch),
+    );
+    if (matching.length === 0) return { kind: 'none' };
+
+    const level = await this.viewerLevel();
+    if (level === null) return { kind: 'unreachable' };
+    const canPush = matching.some((e) =>
+      (e.push_access_levels ?? []).some(
+        (a) => typeof a?.access_level === 'number' && a.access_level > 0 && level >= a.access_level,
+      ),
+    );
+
+    let rules: RawApprovalRule[] = [];
+    try {
+      rules = await this.list<RawApprovalRule>('listing approval rules', '/approval_rules');
+    } catch (err) {
+      // The Free tier: GitLab enforces no approvals.
+      if (!isRefusal(err)) throw err;
+    }
+    const ids = new Set<unknown>(matching.map((e) => e.id).filter((id) => typeof id === 'number'));
+    let requiredApprovals = 0;
+    for (const r of rules) {
+      if (r?.rule_type !== 'regular' && r?.rule_type !== 'any_approver') continue;
+      const scoped = r.protected_branches ?? [];
+      if (scoped.length > 0 && !scoped.some((b) => ids.has(b?.id))) continue;
+      if (typeof r.approvals_required === 'number' && r.approvals_required > requiredApprovals)
+        requiredApprovals = r.approvals_required;
+    }
+
+    let dismissStaleOnPush = false;
+    try {
+      const a = await this.request<{ reset_approvals_on_push?: unknown } | null>(
+        'reading the approval settings',
+        'GET',
+        '/approvals',
+      );
+      dismissStaleOnPush = a?.reset_approvals_on_push === true;
+    } catch (err) {
+      if (!isRefusal(err)) throw err;
+    }
+
+    const project = await this.readProject();
+    return {
+      kind: 'ok',
+      rules: {
+        requiredApprovals,
+        dismissStaleOnPush,
+        requiredChecks: project.only_allow_merge_if_pipeline_succeeds === true ? ['pipeline'] : [],
+        unpinnedChecks: [],
+        viewerCanBypass: canPush,
+        viewerIsAdmin: level >= ACCESS_MAINTAINER,
+        requiresPullRequest: !canPush,
+        requireCodeOwnerReview: matching.some((e) => e.code_owner_approval_required === true),
+      },
+    };
   }
+
+  /**
+   * The token's user's access level, as `repoAccess` reads it: `GET /user`, then
+   * `GET members/all/:id` (404: level 0). A 403 on the member read gives null.
+   */
+  private async viewerLevel(): Promise<number | null> {
+    const { json: me } = await this.send('reading the user', 'GET', `${this.api}/user`);
+    const id = (me as { id?: unknown } | null)?.id;
+    if (typeof id !== 'number' || !Number.isSafeInteger(id) || id <= 0)
+      throw new GitLabForgeError('GitLabForge: the user has no id');
+    try {
+      const m = await this.request<RawMember | null>(
+        'reading the user’s access level',
+        'GET',
+        `/members/all/${id}`,
+      );
+      return typeof m?.access_level === 'number' ? m.access_level : 0;
+    } catch (err) {
+      const status = (err as GitLabForgeError).status;
+      if (status === 404) return 0;
+      if (status === 403) return null;
+      throw err;
+    }
+  }
+
   /**
    * Squash-merges MR `number`, pinned to `input.sha` (refused unsent unless 40-hex). 409 (the head
    * moved) rejects with 409; 405 and 406 (not mergeable, a conflict) reject with 405.
@@ -1331,6 +1466,23 @@ export class GitLabForge implements Forge {
   async probeAdministration(): Promise<ReadProbe> {
     throw new GitLabUnsupportedError('probeAdministration');
   }
+}
+
+/** A refusal GitLab gives a token that may not read something (or a tier without it): 403 or 404. */
+function isRefusal(err: unknown): boolean {
+  const status = err instanceof GitLabForgeError ? err.status : 0;
+  return status === 403 || status === 404;
+}
+
+/** Whether `branch` matches protected-branch `pattern`: exact, or GitLab's `*` glob, which matches
+ *  any run of characters, `/` included. */
+function matchesProtectedPattern(pattern: string, branch: string): boolean {
+  if (!pattern.includes('*')) return pattern === branch;
+  const re = pattern
+    .split('*')
+    .map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .join('.*');
+  return new RegExp(`^${re}$`, 's').test(branch);
 }
 
 /** The owner type of a project's `namespace.kind`; any other kind is refused without echoing it. */
