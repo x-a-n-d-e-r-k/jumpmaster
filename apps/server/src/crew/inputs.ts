@@ -10,7 +10,14 @@ import { failureText, newestFailure } from '../gate-output.js';
 import { type GoalChange, listGoalChanges } from '../goal-change.js';
 import { getGoals, objectivesDone, zoneObjective } from '../goals.js';
 import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
-import { crewTemplate, fence, gatherAuthorReports, neutralise } from '../payloads.js';
+import {
+  ciAnnotationsOf,
+  ciFailureLines,
+  crewTemplate,
+  fence,
+  gatherAuthorReports,
+  neutralise,
+} from '../payloads.js';
 import { isCrewFiled } from '../sync.js';
 import { crewIssueSlots } from './actions.js';
 import { getCrewIssue, getTriageRequest, listCrewIssues } from './store.js';
@@ -573,7 +580,31 @@ export function diagnoseInput(
       kind: 'untrusted',
       text: lastFailureText(db, itemId),
     },
+    ...ciFailuresSection(db, itemId),
   ]);
+}
+
+/**
+ * The `ci-failures` section of a diagnose input (#720): the GitHub Actions failure annotations the
+ * item's newest heal stored, when that heal was a `ci` heal, redacted here as `lastFailureText`
+ * is, and neutralised and fenced by `assemble`. None for any other heal, or no annotations.
+ */
+function ciFailuresSection(db: Db, itemId: number): Section[] {
+  const row = db
+    .prepare(
+      `SELECT input_json AS inputJson FROM drops WHERE work_item_id = ? AND role = 'heal'
+       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(itemId) as { inputJson: string | null } | undefined;
+  let input: { feedback?: Feedback | null; ciAnnotations?: unknown } | null;
+  try {
+    input = JSON.parse(row?.inputJson ?? 'null');
+  } catch {
+    return [];
+  }
+  if (input?.feedback?.source !== 'ci') return [];
+  const text = ciFailureLines(ciAnnotationsOf(input.ciAnnotations), [...serverScrubSet.values()]);
+  return text === '' ? [] : [{ title: 'CI failures', name: 'ci-failures', kind: 'data', text }];
 }
 
 /** How the item's newest implement drop failed or was lost, as an implement retry reads it. */

@@ -24,6 +24,7 @@ import {
   type WorkItem,
 } from '../db/repo.js';
 import {
+  ACTIONS_APP,
   type ChangeDigest,
   type CheckAnnotation,
   type ChecksFacts,
@@ -37,6 +38,7 @@ import { log } from '../log.js';
 import { type ForgePair, type OpResult, opKeys } from '../outbox.js';
 import {
   type CarryFacts,
+  type CodeScanning,
   codeScanningKey,
   type Feedback,
   type MergeReservation,
@@ -592,18 +594,20 @@ export function mergeHolder(db: Db, zone: DropZoneConfig, now: Date): MergeReser
 }
 
 /**
- * The annotations of each failed code-scanning check run (#652): read only while the checks are
- * in `failure`, and only for check runs of CODE_SCANNING_APP. A failed read gives that check an
- * empty list and never marks the forge unavailable: the heal runs as it would without them.
+ * The failure annotations of each failed check run of `app`: read only while the checks are in
+ * `failure`, and only for check runs read from the checks API (with a `checkRunId`). A failed read
+ * gives that check an empty list and never marks the forge unavailable: the heal runs as it would
+ * without them. One read per such check run.
  */
-async function codeScanningAlerts(
+async function failedCheckAnnotations(
   forges: ForgePair,
   checks: ChecksFacts,
-): Promise<Snapshot['codeScanning']> {
+  app: string,
+): Promise<CodeScanning[]> {
   if (checks.state !== 'failure') return [];
-  const out: Snapshot['codeScanning'] = [];
+  const out: CodeScanning[] = [];
   for (const f of checks.failed) {
-    if (f.app !== CODE_SCANNING_APP || f.checkRunId === undefined) continue;
+    if (f.app !== app || f.checkRunId === undefined) continue;
     let annotations: CheckAnnotation[] = [];
     try {
       annotations = await forges.author.checkAnnotations(f.checkRunId);
@@ -615,6 +619,24 @@ async function codeScanningAlerts(
     out.push({ check: f.name, annotations });
   }
   return out;
+}
+
+/** The annotation a runner adds to every failed step: it carries nothing a heal can use. */
+const EXIT_CODE_ONLY = /^Process completed with exit code \d+\.$/;
+
+/**
+ * The failure annotations of each failed GitHub Actions check run (#720), less the runner's
+ * "Process completed with exit code N." line.
+ */
+async function ciFailureAnnotations(
+  forges: ForgePair,
+  checks: ChecksFacts,
+): Promise<CodeScanning[]> {
+  const read = await failedCheckAnnotations(forges, checks, ACTIONS_APP);
+  return read.map((c) => ({
+    check: c.check,
+    annotations: c.annotations.filter((a) => !EXIT_CODE_ONLY.test(a.message)),
+  }));
 }
 
 /**
@@ -707,6 +729,7 @@ export async function buildSnapshot(
   let reviews: ForgeReview[] = [];
   let files: PullFiles = { files: [], complete: false };
   let codeScanning: Snapshot['codeScanning'] = [];
+  let ciAnnotations: Snapshot['ciAnnotations'] = [];
   if (pr && headSha) {
     try {
       compare = await forges.author.compare(base, headSha);
@@ -722,7 +745,9 @@ export async function buildSnapshot(
         unavailable('checksFor', err);
       }
     }
-    codeScanning = await codeScanningAlerts(forges, checks);
+    // The annotations of each failed code-scanning check run (#652) and Actions check run (#720).
+    codeScanning = await failedCheckAnnotations(forges, checks, CODE_SCANNING_APP);
+    ciAnnotations = await ciFailureAnnotations(forges, checks);
     try {
       reviews = await forges.author.listReviews(pr.number);
     } catch (err) {
@@ -829,6 +854,7 @@ export async function buildSnapshot(
     compare,
     checks,
     codeScanning,
+    ciAnnotations,
     lastCiHealKey: lastCiHealKey(db, item),
     forgeUnavailable,
     forgeDenied,

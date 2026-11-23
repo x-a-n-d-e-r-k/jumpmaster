@@ -272,6 +272,8 @@ function enqueue(
             feedback: a.feedback ?? null,
             // A `ci` heal's code-scanning alerts (#652), raw: the payload builder fences them.
             ...(a.codeScanning ? { codeScanning: a.codeScanning } : {}),
+            // Its GitHub Actions failure annotations (#720), raw: fenced by the payload builders.
+            ...(a.ciAnnotations ? { ciAnnotations: a.ciAnnotations } : {}),
           }),
           promptVersion: versions[a.role],
           image: zone.image,
