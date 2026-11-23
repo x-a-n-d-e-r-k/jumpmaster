@@ -226,3 +226,11 @@ test('no doctor action for a seeded zone points at a /zones page path (#631)', (
   expect(hrefs.some((h) => h.startsWith('/projects/web'))).toBe(true);
   expect(hrefs).toContain('/projects');
 });
+
+test('the zone.mode action says Projects on the /projects link (#664)', () => {
+  const pages: Pages = { zones: true, settings: true, credentials: true };
+  const a = actionFor(fail('zone.mode'), { zone, guidance, pages });
+  expect(a?.href).toBe('/projects');
+  expect(a?.label).toMatch(/Projects/);
+  expect(a?.label).not.toMatch(/zones/i);
+});

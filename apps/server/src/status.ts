@@ -501,7 +501,9 @@ export function statusOf(input: StatusInput, now: Date): Status {
       headline: `Paused by you: ${zones.map((z) => `${name(z.id)} (${z.mode})`).join(', ')}`,
       detail: draining.join(' '),
       waitingOn: 'you',
-      action: { label: 'Open the zones', href: pages.zones ? PROJECTS_HREF : '/' },
+      action: pages.zones
+        ? { label: 'Open Projects', href: PROJECTS_HREF }
+        : { label: 'Open home (zone modes)', href: '/' },
     });
   }
 

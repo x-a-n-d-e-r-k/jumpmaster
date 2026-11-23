@@ -426,7 +426,7 @@ describe('two-app zones (spec 2026-11-13-github-app-auth §5.2)', () => {
     );
     expect(step4).toContain('https://github.com/apps/<slug>/installations/new');
     expect(step4).toContain('**Create the project** needs no token either');
-    expect(step4).toContain('`/zones/<zone>/github` (step 5), once the zone exists');
+    expect(step4).toContain('`/projects/<zone>/setup#github` (step 5), once the zone exists');
     // Find the installations comes after Create the project.
     expect(step4.indexOf('**Create the project** needs no token')).toBeLessThan(
       step4.indexOf('**Find the installations**'),
