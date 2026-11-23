@@ -1,3 +1,4 @@
+import { containsSecret } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
 import { DropZoneObject } from '../config.js';
 import { makeZone } from '../test/fixtures.js';
@@ -70,6 +71,12 @@ const REFUSED: [string, string[]][] = [
   ['zqxa/zqxb/zqxc', ['zqxa', 'zqxb', 'zqxc']],
   ['not a url at all zqxjunk', ['zqxjunk']],
   ['https://', []],
+  ['https://github.com./zqxowner/zqxrepo', ['zqxowner', 'zqxrepo']],
+  ['https://gist.github.com./zqxowner/zqxrepo', ['zqxowner', 'zqxrepo']],
+  ['https://gitlab.com./zqxgroup/zqxproject', ['zqxgroup', 'zqxproject']],
+  ['https://github.com/zqxow\nner/zqxrepo', ['zqxow', 'zqxrepo']],
+  ['https://github.com/zqxowner/zqx\trepo', ['zqxowner', 'zqx']],
+  ['https://github.com\\zqxowner\\zqxrepo', ['zqxowner', 'zqxrepo']],
   [GLPAT, [GLPAT]],
   [GHP, [GHP]],
   [`zqxowner/${GHP}`, [GHP, 'zqxowner']],
@@ -99,6 +106,26 @@ describe('parseProjectRef', () => {
     const scheme = parseProjectRef('http://gitlab.com/zqxgroup/zqxproject');
     const token = parseProjectRef(`http://gitlab.com/zqxgroup/${GLPAT}`);
     expect(token).not.toEqual(scheme);
+    expect(token).toEqual({ error: expect.stringContaining('token') });
+  });
+
+  test('every token fixture is token-shaped and refused as a token', () => {
+    for (const input of [GLPAT, GHP, `zqxowner/${GHP}`, `https://github.com/zqxowner/${GHP}`]) {
+      expect(containsSecret(input, [])).toBe(true);
+      expect(parseProjectRef(input)).toEqual({ error: expect.stringContaining('token') });
+    }
+  });
+
+  test('refuses empty input as empty, not as a bad repository', () => {
+    const empty = parseProjectRef('');
+    expect(parseProjectRef('   ')).toEqual(empty);
+    expect(empty).not.toEqual(parseProjectRef('zqxjustone'));
+  });
+
+  test('refuses a non-string input', () => {
+    expect(parseProjectRef(undefined as unknown as string)).toEqual({
+      error: expect.any(String),
+    });
   });
 
   test.each(ACCEPTED)('the zone schema accepts the result of %j', (input) => {

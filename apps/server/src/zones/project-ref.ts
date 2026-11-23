@@ -19,6 +19,7 @@ const ERRORS = {
   unreadable: 'enter owner/name, a github.com URL or a GitLab project URL',
   scheme: 'a project URL must use https',
   credentials: 'a project URL must not carry a username or password',
+  hostDot: 'a project URL host must not end with a dot',
   githubPort: 'a github.com URL must not name a port other than 443',
   githubHost: 'only github.com is supported as a GitHub host',
   githubPath: 'a github.com URL must name an owner and a repository',
@@ -44,6 +45,9 @@ const fail = (error: string): ProjectRef => ({ error });
  * GitHub one. Hosts under `github.com` other than `www` (`gist.`, `api.`) are refused, not read as
  * GitLab.
  *
+ * A host ending in a dot (`github.com.`) is refused, and so is a URL with whitespace or a
+ * backslash in it, which `URL` would otherwise quietly rewrite.
+ *
  * Token-shaped input is refused before anything else is read. No error text echoes the input or
  * any part of it. Every accepted result passes the zone schema as `forge`, `gitlab.baseUrl` and
  * `repo`. Pure: no network, filesystem or logging.
@@ -58,6 +62,9 @@ export function parseProjectRef(input: string): ProjectRef {
     return isRepoFullName(text) ? { forge: 'github', repo: text } : fail(ERRORS.githubRepo);
   }
 
+  // `URL` would silently drop tabs and newlines and read backslashes as slashes; refuse them.
+  if (/[\s\\]/.test(text)) return fail(ERRORS.unreadable);
+
   let url: URL;
   try {
     url = new URL(text);
@@ -66,9 +73,10 @@ export function parseProjectRef(input: string): ProjectRef {
   }
   if (url.protocol !== 'https:') return fail(ERRORS.scheme);
   if (url.username !== '' || url.password !== '') return fail(ERRORS.credentials);
-  if (url.hostname === '') return fail(ERRORS.unreadable);
 
   const host = url.hostname.toLowerCase();
+  // `github.com.` names github.com yet would slip past the host checks below.
+  if (host.endsWith('.')) return fail(ERRORS.hostDot);
   if (GITHUB_HOSTS.has(host)) {
     // `URL` drops the default port, so a port left here is a non-default one.
     if (url.port !== '') return fail(ERRORS.githubPort);
