@@ -33,7 +33,7 @@ import {
 } from './github.js';
 import { linkTarget, SYSTEM_HREF } from './links.js';
 import { breadcrumb, escapeHtml, page } from './pages.js';
-import { type ZoneRef, zoneName, zoneNamer } from './zone-name.js';
+import { projectWords, type ZoneRef, zoneName, zoneNamer } from './zone-name.js';
 
 /**
  * The setup wizard (§10.3, M4.5): after the passphrase, five steps, each a thin frame over a
@@ -636,7 +636,7 @@ function doctorPage(db: Db, zones: readonly ZoneRef[]): string {
   const rows = checks
     .map(
       (c) =>
-        `<li class="${c.status}"><strong>${c.status.toUpperCase()}</strong> ${c.zoneId ? name(c.zoneId) : ''} <code>${escapeHtml(c.id)}</code>: ${escapeHtml(c.summary)}${c.status !== 'pass' && c.fix ? `<br><small>Fix: ${escapeHtml(c.fix)}</small>` : ''}${c.status !== 'pass' && c.doc ? ` <a href="${escapeHtml(c.doc)}"${linkTarget(c.doc)}>how</a>` : ''}</li>`,
+        `<li class="${c.status}"><strong>${c.status.toUpperCase()}</strong> ${c.zoneId ? name(c.zoneId) : ''} <code>${escapeHtml(c.id)}</code>: ${escapeHtml(c.summary)}${c.status !== 'pass' && c.fix ? `<br><small>Fix: ${escapeHtml(c.id === 'config.file' ? projectWords(c.fix) : c.fix)}</small>` : ''}${c.status !== 'pass' && c.doc ? ` <a href="${escapeHtml(c.doc)}"${linkTarget(c.doc)}>how</a>` : ''}</li>`,
     )
     .join('');
   const fails = checks.filter((c) => c.status === 'fail').length;

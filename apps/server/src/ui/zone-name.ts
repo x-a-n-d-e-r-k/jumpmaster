@@ -56,3 +56,14 @@ export function zoneTextNamer(zones: readonly ZoneRef[]): (id: string, repo?: st
     return z ? zoneNameText(z, zones) : (repo ?? id);
   };
 }
+
+/**
+ * Validator prose (config issues and warnings, kept as they are for the API, ctl and the log) in
+ * the UI's words: "zone" and "zones" read "project" and "projects". Keys such as `dropZones.0.id`
+ * and names such as `JM_ZONE_SECRET_…` are left alone (no word boundary around "zone" in them).
+ */
+export const projectWords = (text: string): string =>
+  text.replace(
+    /\b([Zz])one(s?)\b/g,
+    (_, z: string, s: string) => `${z === 'Z' ? 'P' : 'p'}roject${s}`,
+  );

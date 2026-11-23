@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
+import { projectWords, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
 
 const main = { id: 'main', repo: 'octo/demo' };
 const ref = { id: 'ref', repo: 'octo/reference' };
@@ -37,5 +37,20 @@ describe('zone display name', () => {
     expect(name('gone', 'octo/<old>')).toBe('octo/&lt;old&gt;');
     expect(name('gone')).toBe('gone');
     expect(zoneTextNamer([main])('gone', 'octo/old')).toBe('octo/old');
+  });
+});
+
+describe('projectWords', () => {
+  test('says project for zone in validator prose, and leaves keys and names alone', () => {
+    expect(
+      projectWords(
+        'a starter zone requires ciRequired: true; githubApp applies to two-bot zones only; Zone ids clash',
+      ),
+    ).toBe(
+      'a starter project requires ciRequired: true; githubApp applies to two-bot projects only; Project ids clash',
+    );
+    expect(projectWords('dropZones.1.id shares JM_ZONE_SECRET_A_<NAME>')).toBe(
+      'dropZones.1.id shares JM_ZONE_SECRET_A_<NAME>',
+    );
   });
 });

@@ -3,6 +3,7 @@ import { raiseBriefing } from '../briefings.js';
 import { recordCard } from '../chat/cards.js';
 import { appendMessage, createThread } from '../chat/store.js';
 import { GUARDED_PATHS, type GuardCtx, REFUSED_PATHS } from '../config/guarded.js';
+import { type ConfigIssue, parseEditable } from '../config.js';
 import { type Drop, insertDrop, setZoneMode, stampStick, type WorkItem } from '../db/repo.js';
 import type { DoctorCheck } from '../doctor/checks.js';
 import { GITLAB_UNSUPPORTED } from '../forge/kind.js';
@@ -72,6 +73,34 @@ const PATCH_NEEDING_CONFIRMATION = {
  * Real doctor findings, not hand-written ones: the doctor run on installs set up so that each
  * check whose fix names the project's own settings fails or warns.
  */
+/** A project as a config file states it, valid but for what a test sets. */
+const fileZone = (id: string, o: Record<string, unknown> = {}) => ({
+  id,
+  repo: `octo/${id}`,
+  image: 'ghcr.io/octo/drop:1',
+  gates: [],
+  protectedPaths: PROTECTED,
+  ...o,
+});
+
+/** The validator's own issues for an invalid file: a starter without CI, a duplicate id. */
+function invalidFileIssues(): ConfigIssue[] {
+  const starter = parseEditable(
+    { dropZones: [fileZone('a', { identity: 'starter', ciRequired: false })] },
+    { devImages: true },
+  );
+  const twin = parseEditable({ dropZones: [fileZone('a'), fileZone('a')] }, { devImages: true });
+  const issues = [
+    ...('issues' in starter ? starter.issues : []),
+    ...('issues' in twin ? twin.issues : []),
+  ];
+  // Non-vacuous: these are the messages that say zone.
+  expect(issues.map((i) => i.message).join('\n')).toMatch(
+    /starter zone requires ciRequired[\s\S]*duplicate zone id/,
+  );
+  return issues;
+}
+
 async function doctorFindings(): Promise<DoctorCheck[]> {
   const worlds = [
     // No gates (zone.preset), authorMayBeAdmin for a non-admin (forge.admin).
@@ -134,6 +163,31 @@ async function doctorFindings(): Promise<DoctorCheck[]> {
       };
       return w;
     })(),
+    // A config file the last reload refused, with the validator's own messages (config.file).
+    (() => {
+      const w = world();
+      w.deps.configStatus = {
+        mode: 'file',
+        filePath: '/config/jm.json',
+        revision: 4,
+        restartPending: [],
+        fileProblem: invalidFileIssues(),
+      };
+      return w;
+    })(),
+    // A config file that runs only after an adjustment (config.file, warn).
+    (() => {
+      const w = world();
+      const v = parseEditable({ pollSeconds: 1, dropZones: [fileZone('a')] }, { devImages: true });
+      w.deps.configStatus = {
+        mode: 'file',
+        filePath: '/config/jm.json',
+        revision: 4,
+        restartPending: [],
+        warnings: v.ok ? (v.warnings ?? []) : [],
+      };
+      return w;
+    })(),
     // A doctor drop whose Claude call, service and gate all failed (zone.doctor-drop).
     (() => {
       const w = world();
@@ -178,6 +232,7 @@ const DOCTOR_REACHED = [
   'forge.private-clone',
   'credential.missing',
   'zone.doctor-drop',
+  'config.file',
 ];
 
 async function seeded(doctor: DoctorCheck[] = []) {
