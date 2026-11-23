@@ -108,6 +108,6 @@ describe('createAppBrokers', () => {
     const b = createAppBrokers({ apps: () => apps, onSecret: () => {} });
     await expect(
       b.verifiedInstallation({ id: 'z', repo: 'octo/demo', identity: 'two-bot' }, 'author'),
-    ).rejects.toThrow('z: the zone records no author app installation for octo/demo');
+    ).rejects.toThrow('z: the project records no author app installation for octo/demo');
   });
 });

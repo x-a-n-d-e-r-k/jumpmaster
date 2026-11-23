@@ -319,7 +319,7 @@ describe('the zones page', () => {
     const w = await world({ file: true });
     const r = await w.get('/projects/main/setup');
     expect(r.statusCode).toBe(200);
-    expect(r.body).toContain('Your config file holds these zones');
+    expect(r.body).toContain('Your config file holds these projects');
     expect(r.body).toContain("'/api/control/config/adopt'");
     for (const id of ['project', 'stack', 'egress', 'merging', 'advanced']) section(r.body, id);
     const form = r.body.slice(r.body.indexOf('<form id="setup-form"'));
@@ -383,7 +383,7 @@ describe('the zones page', () => {
     const egress = section((await w.get('/projects/main/setup')).body, 'egress');
     expect(egress).toContain('Observed in the last 14 days');
     expect(egress).toMatch(
-      /new\.example\.com[\s\S]*?href="\/drops\/d1"[\s\S]*?not in this zone&#39;s lists/,
+      /new\.example\.com[\s\S]*?href="\/drops\/d1"[\s\S]*?not in this project&#39;s lists/,
     );
     expect(egress).toMatch(/registry\.npmjs\.org[\s\S]*?listed by the node preset/);
     expect(egress).toContain('name="adopt" value="new.example.com"');
@@ -564,7 +564,7 @@ describe('the zones page', () => {
     expect(egress).toContain('name="adopt" value="registry.npmjs.org"');
     expect(egress).toMatch(/repo\.maven\.apache\.org[\s\S]*?listed by the jvm preset/);
     expect(egress).not.toContain('name="adopt" value="repo.maven.apache.org"');
-    expect(egress).toMatch(/known\.example\.com[\s\S]*?listed by this zone&#39;s allow list/);
+    expect(egress).toMatch(/known\.example\.com[\s\S]*?listed by this project&#39;s allow list/);
     expect(egress).toMatch(/github\.com[\s\S]*?listed by every drop/);
   });
 
@@ -595,7 +595,7 @@ describe('the zones page', () => {
     expect(page.indexOf('<section id="danger"')).toBeGreaterThan(
       page.indexOf('</form>', page.indexOf('<form id="setup-form"')),
     );
-    expect(danger).toContain('<h3>Danger zone</h3>');
+    expect(danger).toContain('<h3>Danger area</h3>');
     expect(danger).toContain('Type <code>octo/main</code> to confirm');
     expect(danger).toContain('id="stop-managing" disabled>Stop managing this project</button>');
     expect(danger).toContain('Open pull requests are left as they are');
@@ -748,7 +748,7 @@ describe('zones are named by their repository (#99)', () => {
     expect(page).toContain('<title>Jumpmaster: octo/main</title>');
     expect(page).toContain('<h2>octo/main <span class="badge ok">active</span></h2>');
     expect(page).not.toContain('<h2>Zone main</h2>');
-    expect(section(page, 'advanced')).toContain('Zone id: <code>main</code>');
+    expect(section(page, 'advanced')).toContain('Project id: <code>main</code>');
   });
 });
 
@@ -1031,7 +1031,7 @@ describe('a project: tabs, header and Overview (#616)', () => {
     const needs = block(body, 'needs-you') ?? '';
     expect(needs).toMatch(/<a href="\/briefings\/\d+">Decide crew:a<\/a>/);
     expect(needs).toMatch(/<a href="\/briefings\/\d+">Decide crew:b<\/a>/);
-    expect(needs).toContain('<a href="/system">zone.labels</a>: labels missing');
+    expect(needs).toContain('<a href="/system"><code>zone.labels</code></a>: labels missing');
     expect(needs).not.toContain('not this project');
     expect(needs).not.toContain('Nothing needs you');
 
@@ -1344,7 +1344,7 @@ describe('Setup is one form with one save bar (#617)', () => {
       ['egress', 'Egress'],
       ['merging', 'Merging'],
       ['advanced', 'Advanced'],
-      ['danger', 'Danger zone'],
+      ['danger', 'Danger area'],
     ];
     const nav = html.slice(
       html.indexOf('<nav class="setup-nav"'),

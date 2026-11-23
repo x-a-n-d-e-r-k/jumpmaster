@@ -91,7 +91,7 @@ export function focusTitle(db: Db, config: Config, f: Focus): string {
     return clip(`Drop ${f.ref.slice(0, 8)}${d ? ` (${d.role}, ${d.state})` : ''}`);
   }
   if (f.kind === 'doctor') return clip(`Doctor: ${f.ref}`);
-  if (f.kind === 'zone') return clip(`Zone ${f.zoneId}`);
+  if (f.kind === 'zone') return clip(`Project ${f.zoneId}`);
   if (f.kind === 'goals') return clip(`Goals of ${f.zoneId}`);
   const b = briefingOf(db, f);
   return clip(b ? `Briefing ${b.id}: ${b.decision}` : `Briefing ${f.ref}`);

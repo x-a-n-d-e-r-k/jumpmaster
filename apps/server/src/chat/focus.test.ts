@@ -248,7 +248,7 @@ describe('POST /api/chat/threads with a focus', () => {
       focusZoneId: 'main',
       focusRef: String(briefingId),
     });
-    expect((await post({ kind: 'zone', zoneId: 'main', ref: 'main' })).title).toBe('Zone main');
+    expect((await post({ kind: 'zone', zoneId: 'main', ref: 'main' })).title).toBe('Project main');
     expect((await post({ kind: 'goals', zoneId: 'main', ref: 'main' })).title).toBe(
       'Goals of main',
     );

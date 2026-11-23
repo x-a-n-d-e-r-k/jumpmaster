@@ -11,6 +11,7 @@ import { secretList } from '../config.js';
 import type { Db } from '../db/open.js';
 import { safeNext } from './auth-pages.js';
 import { breadcrumb, type Crumb, escapeHtml, page } from './pages.js';
+import { projectWords } from './zone-name.js';
 
 export interface ConfirmPageDeps {
   db: Db;
@@ -327,7 +328,7 @@ export function registerConfirmPages(app: FastifyInstance, deps: ConfirmPageDeps
       );
     const issues =
       'issues' in r
-        ? r.issues.map((i) => `${i.path || '(root)'}: ${i.message}`).join('; ')
+        ? r.issues.map((i) => `${i.path || '(root)'}: ${projectWords(i.message)}`).join('; ')
         : 'the change could not be applied';
     return html(reply, 400, withCsrf(req, notice('Not applied', escapeHtml(issues))));
   });

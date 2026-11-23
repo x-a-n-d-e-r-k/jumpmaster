@@ -192,7 +192,7 @@ function listFilter<S extends string>(
   states: readonly S[],
 ): { zone?: string; state?: S } | { refuse: string } {
   const { zone, state } = query;
-  if (zone !== undefined && !zones.some((z) => z.id === zone)) return { refuse: 'no such zone' };
+  if (zone !== undefined && !zones.some((z) => z.id === zone)) return { refuse: 'no such project' };
   if (state !== undefined && !(states as readonly unknown[]).includes(state))
     return { refuse: 'no such state' };
   return {

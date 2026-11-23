@@ -113,7 +113,7 @@ describe('kinds, options and bounds from the schema', () => {
       else expect(e.elsewhere, e.path).toBeUndefined();
     }
     expect(FLAGS.find((f) => f.path === 'dropZones[].id')?.elsewhere).toBe(
-      'Fixed once the zone exists: remove the zone and add it again to change it.',
+      'Fixed once the project exists: remove the project and add it again to change it.',
     );
     expect(FLAGS.find((f) => f.path === 'server.publicUrl')?.elsewhere).toBe(
       'Changed under Other machines, on System, Server.',
@@ -296,7 +296,7 @@ describe('reviews on Fable (#605)', () => {
     expect(on.entry.group).toBe('models');
     expect(on.entry.kind).toBe('bool');
     expect(on.entry.help).toBe(
-      "Run pull request reviews on Fable while its weekly budget has room. Reviews use the zone's model otherwise.",
+      "Run pull request reviews on Fable while its weekly budget has room. Reviews use the project's model otherwise.",
     );
     const r = row(installRows(), 'claude.fableReviewMaxUtilization');
     expect(r.guard).toBe('free');

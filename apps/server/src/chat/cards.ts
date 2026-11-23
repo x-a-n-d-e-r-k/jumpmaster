@@ -396,7 +396,7 @@ export async function undoCard(
   if (isKilled(db))
     return refuse(409, 'the kill switch is engaged: nothing is written to the forge');
   if (getZoneMode(db, zoneId, opts.zoneMode ?? 'active') === 'observe')
-    return refuse(409, `zone ${zoneId} is in observe mode: nothing is written to the forge`);
+    return refuse(409, `project ${zoneId} is in observe mode: nothing is written to the forge`);
 
   const op = undoOp(zoneId, current.id, u);
   // A press whose write is already recorded goes on to the outbox, which answers from that row;

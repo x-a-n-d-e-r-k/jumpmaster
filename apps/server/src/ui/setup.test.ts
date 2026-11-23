@@ -374,7 +374,7 @@ describe('the setup wizard', () => {
     expect(done.headers.location).toBe('/setup/doctor');
     const doctor = await w.get('/setup/doctor');
     expect(doctor.statusCode).toBe(200);
-    expect(doctor.body).toContain('Go to the factory floor');
+    expect(doctor.body).toContain('Go to Home');
     // The last step says how the install survives a reboot.
     expect(doctor.body).toContain(`${DOC}#start-at-boot`);
     expect(doctor.body).toContain('docker compose up -d');
@@ -431,7 +431,7 @@ describe('the setup wizard', () => {
     const w = await world({ file: { dropZones: [zoneDoc('a'), zoneDoc('b')] } });
     expect(w.store.mode()).toBe('file');
     const r = await w.get('/setup/project');
-    expect(r.body).toContain('Your config file holds 2 zones: octo/a, octo/b.');
+    expect(r.body).toContain('Your config file holds 2 projects: octo/a, octo/b.');
     expect(r.body).toContain("'/api/control/config/adopt'");
     expect(r.body).not.toContain("'/api/control/detect'");
   });

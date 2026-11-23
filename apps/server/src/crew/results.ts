@@ -134,7 +134,7 @@ export function promoteAfterReview(
         subject,
         decision: `${why.found} ${label}. It goes ahead in about a minute unless you reject it.`,
         why:
-          `The crew filed ${label} as staged, and ${why.held} This zone lets a passing review ` +
+          `The crew filed ${label} as staged, and ${why.held} This project lets a passing review ` +
           'promote (crew.refutePromotes is on), so you only need to act to stop it.',
         options: [
           { id: 'reject', label: 'Reject', effect: 'reject_issue' },
@@ -159,7 +159,7 @@ export function promoteAfterReview(
         `The crew filed ${label} as staged, so no agent works on it yet. ${capitalise(why.reviewed)} ` +
         'Promote gives it the ready label; Reject closes it. To let a passing ' +
         'review promote on its own, with a notice you can still reject, set crew.refutePromotes ' +
-        `for this zone: jumpmaster ctl zones set ${zone.id} crew.refutePromotes=true` +
+        `for this project: jumpmaster ctl zones set ${zone.id} crew.refutePromotes=true` +
         (attended === undefined ? '' : `\n${attended}`),
       options: PROMOTE_OPTIONS,
       onHold: label,

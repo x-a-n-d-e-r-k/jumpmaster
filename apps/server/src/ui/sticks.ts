@@ -160,7 +160,7 @@ export function renderSticks(s: {
     .map((st) => {
       const runs =
         st.cannotRun.length === 0
-          ? 'all zones'
+          ? 'all projects'
           : st.cannotRun
               .map((c) => `cannot run ${name(c.zoneId)}: lacks ${escapeHtml(c.missing.join(', '))}`)
               .join('<br>');
@@ -200,7 +200,7 @@ export function renderSticks(s: {
   const table =
     s.sticks.length === 0
       ? '<p class="empty">No stick has enrolled. Add one below, or see <code>docs/runbooks/install.md</code>.</p>'
-      : `<table><tr><th>Stick</th><th>Status</th><th>Version</th><th>Capabilities</th><th>Zones</th><th>Troopers</th><th></th></tr>${rows}</table>`;
+      : `<table><tr><th>Stick</th><th>Status</th><th>Version</th><th>Capabilities</th><th>Projects</th><th>Troopers</th><th></th></tr>${rows}</table>`;
   return page(
     `${systemNav('sticks')}${sticksTabs('sticks')}<h2>Sticks</h2><p>How many troopers each stick runs at once. A change applies on the stick's next lease, with no restart; lowering it stops nothing that runs. <code>jumpmaster ctl sticks</code> does the same.</p>${reach}` +
       `<div id="sticks-live">${table}${waiting}</div>${addForm(s.publicUrl)}${STICKS_SCRIPT}`,

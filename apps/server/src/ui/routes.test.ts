@@ -665,12 +665,12 @@ describe('the status line (Task 12)', () => {
     });
     const status = (await h.view('/api/control/status')).json() as { headline: string };
     expect(status.headline).toBe(
-      'Queued: 1 issue; no stick can run zone main: no live stick has egress-v1',
+      'Queued: 1 issue; no stick can run project main: no live stick has egress-v1',
     );
     // The floor names the zone by its repository (#99); the API, read by `ctl status`, keeps the id.
     const home = (await h.view('/')).body;
     expect(home).toContain(
-      '<strong>Queued: 1 issue; no stick can run zone octo/demo: no live stick has egress-v1</strong>',
+      '<strong>Queued: 1 issue; no stick can run project octo/demo: no live stick has egress-v1</strong>',
     );
     expect(home).toContain('<title>Jumpmaster: Home</title>');
     expect(home).not.toContain('zone main');
@@ -1091,7 +1091,7 @@ describe('/work and /drops list pages (#119)', () => {
   });
 
   test.each([
-    ['/activity/drops?zone=nope', 'no such zone'],
+    ['/activity/drops?zone=nope', 'no such project'],
     ['/activity/work?state=bogus', 'no such state'],
     ['/activity/drops?state=bogus', 'no such state'],
     ['/activity/drops?kind=', 'bad kind'],
@@ -2000,8 +2000,8 @@ describe('the System area (#623)', () => {
     const count = (html: string, s: string) => html.split(s).length - 1;
     const health = (await h.view('/system')).body;
     const credentials = (await h.view('/system/credentials')).body;
-    expect(count(health, 'Zone problems')).toBe(1);
-    expect(count(credentials, 'Zone problems')).toBe(0);
+    expect(count(health, 'Project problems')).toBe(1);
+    expect(count(credentials, 'Project problems')).toBe(0);
     // Above the check table, once a run has one.
     h.db
       .prepare(
@@ -2011,9 +2011,9 @@ describe('the System area (#623)', () => {
     const ran = (await h.view('/system')).body;
     const table = ran.indexOf('<th>Status</th>');
     expect(table).toBeGreaterThan(-1);
-    expect(ran.indexOf('<h3>Zone problems</h3>')).toBeGreaterThan(-1);
-    expect(ran.indexOf('<h3>Zone problems</h3>')).toBeLessThan(table);
-    expect(count(ran, 'Zone problems')).toBe(1);
+    expect(ran.indexOf('<h3>Project problems</h3>')).toBeGreaterThan(-1);
+    expect(ran.indexOf('<h3>Project problems</h3>')).toBeLessThan(table);
+    expect(count(ran, 'Project problems')).toBe(1);
   });
 
   test('Server is the install settings followed by Other machines', async () => {

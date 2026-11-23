@@ -1112,7 +1112,7 @@ starts a credits stop. It waits
 while usage is paused at the limit, during a credits stop, while the kill switch is on, and until a
 stick that can run the zone is free. The reply to `--drop`, and the `zone.doctor-drop` line while it
 is queued, say which: `held: usage paused until …`, `held: credits stop`, `waiting for a stick: no
-stick is connected`, `waiting for a stick that can run zone …`, or `waiting for a free stick slot`. Doctor check: `zone.doctor-drop`.
+stick is connected`, `waiting for a stick that can run project …`, or `waiting for a free stick slot`. Doctor check: `zone.doctor-drop`.
 
 ## Stick
 
@@ -1702,7 +1702,7 @@ did not come back, Docker is not starting at boot, or the services were last sto
 
 **Action:** See the sticks on home (`/`).
 
-No live stick can run this zone: the fix names what it lacks (`egress-v1`, `image-verify-v1`, the
+No live stick can run this project: the fix names what it lacks (`egress-v1`, `image-verify-v1`, the
 signed policy). See [Stick](#stick).
 
 ### `stick.image-policy`

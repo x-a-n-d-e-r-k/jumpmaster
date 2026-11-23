@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
+import { projectWords, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
 
 const main = { id: 'main', repo: 'octo/demo' };
 const ref = { id: 'ref', repo: 'octo/reference' };
@@ -37,5 +37,34 @@ describe('zone display name', () => {
     expect(name('gone', 'octo/<old>')).toBe('octo/&lt;old&gt;');
     expect(name('gone')).toBe('gone');
     expect(zoneTextNamer([main])('gone', 'octo/old')).toBe('octo/old');
+  });
+});
+
+describe('projectWords', () => {
+  test('says project for zone in validator prose, and leaves keys and names alone', () => {
+    expect(
+      projectWords(
+        'a starter zone requires ciRequired: true; githubApp applies to two-bot zones only; Zone ids clash',
+      ),
+    ).toBe(
+      'a starter project requires ciRequired: true; githubApp applies to two-bot projects only; Project ids clash',
+    );
+    expect(projectWords('dropZones.1.id shares JM_ZONE_SECRET_A_<NAME>')).toBe(
+      'dropZones.1.id shares JM_ZONE_SECRET_A_<NAME>',
+    );
+  });
+
+  test('leaves an id shown as a value alone, even an id that is or holds the word zone', () => {
+    expect(projectWords('duplicate zone id: drop-zone')).toBe('duplicate project id: drop-zone');
+    expect(projectWords('duplicate zone id: zone')).toBe('duplicate project id: zone');
+    expect(projectWords('zone zone: preset python needs the lock')).toBe(
+      'project zone: preset python needs the lock',
+    );
+    expect(projectWords('zone ids zone-a and zone share JM_ZONE_SECRET_ZONE_<NAME>')).toBe(
+      'project ids zone-a and zone share JM_ZONE_SECRET_ZONE_<NAME>',
+    );
+    expect(projectWords('a zone id may not be zone_x; not zone')).toBe(
+      'a project id may not be zone_x; not zone',
+    );
   });
 });

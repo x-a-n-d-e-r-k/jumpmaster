@@ -1205,7 +1205,7 @@ describe('zone.doctor-drop', () => {
     withDrop(w, { state: 'queued', at: ago(5 * 60_000) });
     setZoneMode(w.db, 'main', 'paused', NOW);
     const summary = one(await w.run(), 'zone.doctor-drop').summary;
-    expect(summary).toContain('held: the zone is paused (jumpmaster ctl resume main)');
+    expect(summary).toContain('held: the project is paused (jumpmaster ctl resume main)');
     expect(summary).not.toContain('zone main');
   });
 
@@ -1251,7 +1251,7 @@ describe('zone.doctor-drop', () => {
     );
     withDrop(w, { state: 'queued', at: ago(5 * 60_000) });
     expect(one(await w.run(), 'zone.doctor-drop').summary).toContain(
-      'waiting for a stick that can run zone main',
+      'waiting for a stick that can run project main',
     );
   });
 
@@ -2044,7 +2044,7 @@ describe('install-wide credentials', () => {
     w.deps.credentials = creds({ claude: false });
     const c = one(await w.run(), 'credential.install');
     expect(c.status).toBe('pass');
-    expect(c.summary).toMatch(/each zone's credential checks/);
+    expect(c.summary).toMatch(/each project's credential checks/);
   });
 
   test("claude.token-age names the Claude step's Made on field, with its link", async () => {
@@ -2230,7 +2230,7 @@ describe('transcripts.retention (issue #197)', () => {
     const c = one(await w.run(), 'transcripts.retention');
     expect(c.status).toBe('warn');
     expect(c.summary).toContain('an archive write failed at 2026-11-09T11:00:00.000Z');
-    expect(c.summary).toContain('drop old in zone main: EACCES: permission denied');
+    expect(c.summary).toContain('drop old in project main: EACCES: permission denied');
     expect(c.summary).toContain('main keeps 90 days, archived (1 drop due)');
     expect(c.fix).toContain('transcripts');
     w.deps.now = () => new Date(NOW.getTime() + 24 * 3_600_000);

@@ -32,7 +32,7 @@ const GROUP_HEADS: [FlagGroup, string][] = [
 const NO_RESET = ['id', 'repo', 'gates'];
 
 const GUARDED_NOTE = 'asks to confirm a change that loosens it';
-const REFUSED_NOTE = 'fixed once the zone exists';
+const REFUSED_NOTE = 'fixed once the project exists';
 
 /** Where Save sends a page's patch, and where the answer returns to. */
 export interface FlagsTarget {
@@ -325,15 +325,15 @@ export function renderFlags(
   return page(
     `${
       o.header
-        ? `${o.header(resolved, all)}<p><a href="${base}/setup#advanced">View the zone as JSON</a></p>`
+        ? `${o.header(resolved, all)}<p><a href="${base}/setup#advanced">View the project as JSON</a></p>`
         : `${breadcrumb([
             { label: 'Projects', href: PROJECTS_HREF },
             { label: zoneName(resolved, all), href: base },
             { label: 'Advanced settings' },
-          ])}<p><a href="${base}/setup#advanced">View the zone as JSON</a></p>`
+          ])}<p><a href="${base}/setup#advanced">View the project as JSON</a></p>`
     }
 <h2>Advanced settings · ${zoneName(resolved, all)}</h2>
-<p>Every setting for this zone. Changes apply at the next pass; one that loosens a safeguard asks you to confirm first.</p>
+<p>Every setting for this project. Changes apply at the next pass; one that loosens a safeguard asks you to confirm first.</p>
 ${savedNote(o.saved)}${readOnly ? o.adoptBanner : ''}
 ${form}
 ${FLAGS_SCRIPT}`,

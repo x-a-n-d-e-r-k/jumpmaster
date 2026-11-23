@@ -121,7 +121,7 @@ export async function queueIssue(
   const refuse = (error: string): QueueResult => ({ ok: false, status: 409, error });
   if (isKilled(db)) return refuse('the kill switch is engaged: nothing is written to the forge');
   if (getZoneMode(db, zone.id, zone.mode) === 'observe')
-    return refuse(`zone ${zone.id} is in observe mode: nothing is written to the forge`);
+    return refuse(`project ${zone.id} is in observe mode: nothing is written to the forge`);
 
   let issue: IssueFacts | null;
   try {

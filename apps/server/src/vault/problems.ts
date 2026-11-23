@@ -81,13 +81,13 @@ export function credentialProblems(
     add(
       'kind',
       'githubAuthorToken',
-      `zone ${zone.id} is a starter zone, which merges with the author token: it must be a fine-grained token (github_pat_) limited to the repository`,
+      `project ${zone.id} is a starter project, which merges with the author token: it must be a fine-grained token (github_pat_) limited to the repository`,
     );
   else if (zone.authorMayBeAdmin && !fine(author))
     add(
       'kind',
       'githubAuthorToken',
-      `zone ${zone.id} sets authorMayBeAdmin, which needs a fine-grained author token (github_pat_): an admin's classic token could edit the ruleset`,
+      `project ${zone.id} sets authorMayBeAdmin, which needs a fine-grained author token (github_pat_): an admin's classic token could edit the ruleset`,
     );
 
   if (zone.identity !== 'starter') {
@@ -99,7 +99,7 @@ export function credentialProblems(
       add(
         'missing',
         'githubReviewerToken',
-        `zone ${zone.id} uses two bots, and no GitHub reviewer token is set: ${where('github_reviewer_token')}`,
+        `project ${zone.id} uses two bots, and no GitHub reviewer token is set: ${where('github_reviewer_token')}`,
       );
     else if (authorApp === undefined && present(author)) {
       const sameValue = reviewer?.value === author?.value;
@@ -120,7 +120,7 @@ export function credentialProblems(
     add(
       'missing',
       'githubReadToken',
-      `zone ${zone.id} sets reviewReadToken, and no GitHub read token is set: ${where('github_read_token')}`,
+      `project ${zone.id} sets reviewReadToken, and no GitHub read token is set: ${where('github_read_token')}`,
     );
 
   for (const name of zone.gateSecrets) {
