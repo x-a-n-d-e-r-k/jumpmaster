@@ -268,7 +268,7 @@ describe('/chat', () => {
       location: { origin: 'http://127.0.0.1:7420' },
     });
     ctx.window = { parent };
-    vm.runInContext(PANEL_ESCAPE_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+    vm.runInContext(PANEL_ESCAPE_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
     onKey?.({ key: 'Enter' });
     onKey?.({ key: 'Escape', defaultPrevented: true });
     dialog.open = true;

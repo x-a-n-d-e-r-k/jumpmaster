@@ -2880,7 +2880,7 @@ describe('the Ask panel (#626)', () => {
       hold?: Promise<void>;
     } = {},
   ) {
-    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/gi)]
       .map((m) => m[1] as string)
       .find((s) => s.includes("'jm-ask'"));
     if (!script) throw new Error('no Ask panel script on the page');
@@ -3127,7 +3127,7 @@ describe('the Ask panel (#626)', () => {
     (r.ids['ask-close'] as El).fire('click');
     expect(El.focused).toBe(opener);
     // The Ask about this script hands the panel the form's focus rather than leaving the page.
-    const ask = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+    const ask = [...html.matchAll(/<script>([\s\S]*?)<\/script>/gi)]
       .map((m) => m[1] as string)
       .find((s) => s.includes('form.ask'));
     if (!ask) throw new Error('no Ask about this script');
