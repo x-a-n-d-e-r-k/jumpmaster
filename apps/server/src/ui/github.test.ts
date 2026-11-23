@@ -366,12 +366,14 @@ const chipOf = (html: string, step: string): string => {
 };
 
 describe('each step of the GitHub section shows its doctor status (#618)', () => {
-  test('a failing branch-rules check makes the ruleset missing, with the finding; a passing private-clone makes access done', async () => {
+  test('a failing branch-rules check makes the ruleset missing, with the finding; the account and clone checks passing make access done', async () => {
     const w = await world();
     doctorRun(w.db, [
       { id: 'forge.branch-rules', status: 'fail', summary: 'no ruleset <b>protects</b> main' },
       { id: 'forge.ci', status: 'pass', summary: 'ci reports' },
       { id: 'forge.private-clone', status: 'pass', summary: 'public' },
+      { id: 'forge.author', status: 'pass', summary: 'author has write' },
+      { id: 'forge.reviewer', status: 'pass', summary: 'reviewer has write' },
       { id: 'forge.codeowners', status: 'warn', summary: 'no CODEOWNERS file' },
       // Another zone's labels pass: not this zone's.
       { id: 'forge.labels', status: 'pass', zoneId: 'other' },
@@ -419,7 +421,11 @@ describe('each step of the GitHub section shows its doctor status (#618)', () =>
 
   test('with GitHub unreadable the section still lists every step with its status', async () => {
     const w = await world({ fail: 401 });
-    doctorRun(w.db, [{ id: 'forge.private-clone', status: 'pass' }]);
+    doctorRun(w.db, [
+      { id: 'forge.private-clone', status: 'pass' },
+      { id: 'forge.author', status: 'pass' },
+      { id: 'forge.reviewer', status: 'pass' },
+    ]);
     const html = (await w.get('/projects/demo/setup')).body;
     expect(html).toContain('<ul id="github-steps">');
     expect(chipOf(html, 'access')).toContain('data-status="done"');
@@ -433,10 +439,17 @@ describe('stepStatus', () => {
   test('maps pass, fail, warn and absence; an empty result is never done', () => {
     expect(stepStatus(null, 'z', 'access').state).toBe('not-checked');
     expect(stepStatus([], 'z', 'access').state).toBe('not-checked');
-    expect(stepStatus([c('forge.private-clone', 'pass')], 'z', 'access').state).toBe('done');
-    expect(stepStatus([c('forge.private-clone', 'pass', 'y')], 'z', 'access').state).toBe(
-      'not-checked',
+    const access = [c('forge.author', 'pass'), c('forge.reviewer', 'pass')];
+    expect(stepStatus([...access, c('forge.private-clone', 'pass')], 'z', 'access').state).toBe(
+      'done',
     );
+    expect(
+      stepStatus(
+        [...access, c('forge.private-clone', 'pass', 'y')].map((x) => ({ ...x, zoneId: 'y' })),
+        'z',
+        'access',
+      ).state,
+    ).toBe('not-checked');
     expect(stepStatus([c('forge.labels', 'fail')], 'z', 'labels')).toEqual({
       state: 'missing',
       findings: ['forge.labels fail'],
@@ -448,6 +461,76 @@ describe('stepStatus', () => {
     expect(
       stepStatus([c('forge.branch-rules', 'pass'), c('forge.ci', 'pass')], 'z', 'ruleset').state,
     ).toBe('done');
+  });
+});
+
+describe("the access step is judged by the accounts' access (#679)", () => {
+  const c = (id: string, status: DoctorCheck['status'], zoneId: string | null = 'z') =>
+    ({ id, status, zoneId, summary: `${id} ${status}` }) as DoctorCheck;
+
+  test('access is missing when an account lacks the Write role, even on a public repository', () => {
+    const checks = [
+      c('forge.author', 'pass'),
+      c('forge.reviewer', 'fail'),
+      c('forge.private-clone', 'pass'),
+    ];
+    const s = stepStatus(checks, 'z', 'access');
+    expect(s.state).toBe('missing');
+    expect(s.findings).toHaveLength(1);
+    expect(s.findings).toEqual(['forge.reviewer fail']);
+  });
+
+  test('a failing author is missing too, with its finding', () => {
+    const checks = [
+      c('forge.author', 'fail'),
+      c('forge.reviewer', 'pass'),
+      c('forge.private-clone', 'pass'),
+    ];
+    expect(stepStatus(checks, 'z', 'access')).toEqual({
+      state: 'missing',
+      findings: ['forge.author fail'],
+    });
+  });
+
+  test('a warning from either account check is check, with the summary', () => {
+    for (const who of ['forge.author', 'forge.reviewer']) {
+      const checks = ['forge.author', 'forge.reviewer', 'forge.private-clone'].map((id) =>
+        c(id, id === who ? 'warn' : 'pass'),
+      );
+      expect(stepStatus(checks, 'z', 'access')).toEqual({
+        state: 'check',
+        findings: [`${who} warn`],
+      });
+    }
+  });
+
+  test('access is not done from the private-clone check alone', () => {
+    expect(stepStatus([c('forge.private-clone', 'pass')], 'z', 'access').state).toBe('not-checked');
+  });
+
+  test('access is done when all three pass', () => {
+    const checks = [
+      c('forge.author', 'pass'),
+      c('forge.reviewer', 'pass'),
+      c('forge.private-clone', 'pass'),
+    ];
+    expect(stepStatus(checks, 'z', 'access')).toEqual({ state: 'done', findings: [] });
+  });
+
+  test('a starter zone, its reviewer skipped by design, is done when the other two pass', () => {
+    const checks = [
+      c('forge.author', 'pass'),
+      c('forge.reviewer', 'skip'),
+      c('forge.private-clone', 'pass'),
+    ];
+    expect(stepStatus(checks, 'z', 'access', true).state).toBe('done');
+    // Without the starter flag a skipped reviewer is never done.
+    expect(stepStatus(checks, 'z', 'access').state).toBe('not-checked');
+    // A starter zone is still missing when its author fails.
+    expect(
+      stepStatus([c('forge.author', 'fail'), c('forge.private-clone', 'pass')], 'z', 'access', true)
+        .state,
+    ).toBe('missing');
   });
 });
 
