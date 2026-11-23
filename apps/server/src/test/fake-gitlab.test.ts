@@ -378,6 +378,27 @@ describe('unknown routes', () => {
     expect(noMatch).toEqual([]);
   });
 
+  test('HEAD and OPTIONS on an unknown route answer 404 and are recorded', async () => {
+    const { gl } = setup();
+    for (const method of ['HEAD', 'OPTIONS']) {
+      const res = await fetch(`${GITLAB}/api/v4/projects/${PROJECT.id}/repository/files/a`, {
+        method,
+        headers: { 'PRIVATE-TOKEN': DEVELOPER },
+      });
+      await res.text();
+      expect(res.status).toBe(404);
+    }
+    expect(gl.requests.map((x) => x.method)).toEqual(['HEAD', 'OPTIONS']);
+    expect(gl.unknown).toHaveLength(2);
+    expect(noMatch).toEqual([]);
+  });
+
+  test('a project id that is not valid URL encoding answers 404 Project Not Found', async () => {
+    const { call } = setup();
+    const r = await call('GET', '/projects/%E0%A4%A/issues');
+    expect(r).toMatchObject({ status: 404, body: { message: '404 Project Not Found' } });
+  });
+
   test('stop() removes the interceptors', async () => {
     const { gl } = setup();
     gl.stop();
@@ -389,5 +410,91 @@ describe('unknown routes', () => {
     expect(gl.requests).toEqual([]);
     expect(noMatch.length).toBeGreaterThan(0);
     noMatch.length = 0;
+  });
+});
+
+describe('edges beyond the spec', () => {
+  test('a non-member gets 404 on a private project', async () => {
+    const { gl, call } = setup();
+    const outsider = glpat('O');
+    gl.addUser({ username: 'outsider', token: outsider, scopes: ['api'] });
+    const r = await call('GET', `/projects/${PROJECT.id}`, { token: outsider });
+    expect(r).toMatchObject({ status: 404, body: { message: '404 Project Not Found' } });
+    const own = await call('GET', '/user', { token: outsider });
+    expect(own.status).toBe(200);
+    expect(JSON.stringify(gl.requests)).not.toContain(outsider);
+  });
+
+  test('a non-member gets 403 creating an issue or a note on a public project', async () => {
+    const gl = fakeGitLab({ baseUrl: GITLAB, project: { ...PROJECT, visibility: 'public' } });
+    fakes.push(gl);
+    const outsider = glpat('P');
+    gl.addUser({ username: 'outsider', token: outsider, scopes: ['api'] });
+    const issue = gl.seedIssue({ title: 't' });
+    const post = (path: string, body: unknown) =>
+      fetch(`${GITLAB}/api/v4/projects/${PROJECT.id}${path}`, {
+        method: 'POST',
+        headers: { 'PRIVATE-TOKEN': outsider, 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      }).then(async (r) => ({ status: r.status, body: await r.json() }));
+    expect(await post('/issues', { title: 'x' })).toEqual({
+      status: 403,
+      body: { message: '403 Forbidden' },
+    });
+    expect(await post(`/issues/${issue.iid}/notes`, { body: 'x' })).toEqual({
+      status: 403,
+      body: { message: '403 Forbidden' },
+    });
+    expect(JSON.stringify(gl.requests)).not.toContain(outsider);
+  });
+
+  test('missing required fields answer 400', async () => {
+    const { gl, call } = setup();
+    const issue = gl.seedIssue({ title: 't' });
+    expect((await call('POST', `/projects/${PROJECT.id}/issues`, { body: {} })).status).toBe(400);
+    expect(
+      (await call('POST', `/projects/${PROJECT.id}/labels`, { body: { color: '#fff' } })).status,
+    ).toBe(400);
+    expect(
+      (await call('POST', `/projects/${PROJECT.id}/labels`, { body: { name: 'n' } })).status,
+    ).toBe(400);
+    expect(
+      (await call('POST', `/projects/${PROJECT.id}/issues/${issue.iid}/notes`, { body: {} }))
+        .status,
+    ).toBe(400);
+  });
+
+  test('notes on a missing issue answer 404', async () => {
+    const { call } = setup();
+    const get = await call('GET', `/projects/${PROJECT.id}/issues/999/notes`);
+    expect(get).toMatchObject({ status: 404, body: { message: '404 Issue Not Found' } });
+    const post = await call('POST', `/projects/${PROJECT.id}/issues/999/notes`, {
+      body: { body: 'x' },
+    });
+    expect(post.status).toBe(404);
+  });
+
+  test('token-named keys in a body are redacted in the record', async () => {
+    const { gl, call } = setup();
+    const other = glpat('X');
+    await call('POST', `/projects/${PROJECT.id}/issues`, {
+      body: { title: 't', private_token: other, access_token: other },
+    });
+    expect(gl.requests[0]?.body).toMatchObject({
+      private_token: expect.not.stringContaining(other),
+    });
+    expect(JSON.stringify(gl.requests)).not.toContain(other);
+  });
+
+  test('GET /user accepts the read_user scope', async () => {
+    const { gl, call } = setup();
+    const ru = glpat('U');
+    gl.addUser({ username: 'ru', token: ru, accessLevel: ACCESS.developer, scopes: ['read_user'] });
+    expect(await call('GET', '/user', { token: ru })).toMatchObject({
+      status: 200,
+      body: { username: 'ru' },
+    });
+    expect((await call('GET', `/projects/${PROJECT.id}`, { token: ru })).status).toBe(403);
+    expect(JSON.stringify(gl.requests)).not.toContain(ru);
   });
 });

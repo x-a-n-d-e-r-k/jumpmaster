@@ -423,9 +423,10 @@ export function fakeGitLab(opts: { baseUrl: string; project: FakeGitLabProject }
     }
 
     if (!user) return UNAUTHORIZED;
-    const write = req.method !== 'GET';
+    const write = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
     const scopes = user.scopes;
-    if (!scopes.includes('api') && (write || !scopes.includes('read_api')))
+    const readScopes = rel === '/user' ? ['read_api', 'read_user'] : ['read_api'];
+    if (!scopes.includes('api') && (write || !readScopes.some((s) => scopes.includes(s))))
       return INSUFFICIENT_SCOPE;
 
     if (rel === '/user') return [200, publicUser(user)];
@@ -452,7 +453,7 @@ export function fakeGitLab(opts: { baseUrl: string; project: FakeGitLabProject }
   }
 
   const scope = nock(base.origin).persist();
-  const interceptors = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].map((m) => {
+  const interceptors = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'].map((m) => {
     const i = scope.intercept((p: string) => p === prefix || p.startsWith(`${prefix}/`), m);
     i.reply(async (req: Request) => handle(req));
     return i;
