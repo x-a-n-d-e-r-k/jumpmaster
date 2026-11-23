@@ -661,7 +661,7 @@ export const liveSticks = (sticks: Stick[], now: Date): Stick[] =>
 /**
  * Why a queued doctor drop in `zone` has not started, from what the lease route goes by: the kill
  * switch, the zone's mode, the usage gate (dispatchGate) and the live sticks' capabilities. A doctor
- * drop leases under `open` and `finishing_only`, never as the usage probe.
+ * drop leases under `open`, `finishing_only` and `override`, never as the usage probe.
  */
 export function doctorDropWait(db: Db, config: Config, zone: DropZoneConfig, now: Date): string {
   if (isKilled(db)) return 'held: the kill switch is engaged (jumpmaster ctl unkill)';

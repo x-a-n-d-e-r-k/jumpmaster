@@ -21,8 +21,8 @@ const isUniqueViolation = (e: unknown): boolean =>
 
 /**
  * The single path for new implement drops (Task 9's interrupted / rate-limited replacements are the
- * only other implement inserts). Refuses unless the usage gate is `open` or `probe` and no implement
- * drop is active in the zone; an item that already has an active drop returns null.
+ * only other implement inserts). Refuses unless the usage gate is `open`, `override` or `probe` and no
+ * implement drop is active in the zone; an item that already has an active drop returns null.
  */
 export function enqueueImplement(
   db: Db,

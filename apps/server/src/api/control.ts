@@ -120,8 +120,8 @@ import { safeNext } from '../ui/auth-pages.js';
 import { MODE_LABELS } from '../ui/pages.js';
 import {
   clearUsageOverride,
+  OVERRIDE_CEILING,
   OVERRIDE_DEFAULTS,
-  overrideCeiling,
   setUsageOverride,
   throttleHolds,
   usageOverride,
@@ -1221,14 +1221,14 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
       const by = req.principal?.via === 'session' ? 'session' : 'token';
       const set = db.transaction(() => {
         setUsageOverride(db, { starts, hours, by }, now());
-        const inForce = usageOverride(db, usage, now());
+        const inForce = usageOverride(db, now());
         // Usage already at the ceiling: say so, rather than store one that can never act.
         if (!inForce) clearUsageOverride(db, now());
         return inForce;
       })();
       if (!set)
         return reply.code(409).send({
-          error: `usage is at ${Math.round(overrideCeiling(usage) * 100)}% or more of its window: an override cannot go past that`,
+          error: `usage is at ${Math.round(OVERRIDE_CEILING * 100)}% or more of its window: an override cannot go past that`,
         });
       audit(req, 'usage.override', { starts, hours });
       return set;

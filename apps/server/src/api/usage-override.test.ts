@@ -6,7 +6,13 @@ import { registerGuard } from '../auth/guard.js';
 import type { Config } from '../config.js';
 import { ctlRequest } from '../ctl.js';
 import { openDb } from '../db/open.js';
-import { getUsageState, setUsageState, upsertDropZone } from '../db/repo.js';
+import {
+  getUsageState,
+  setKilled,
+  setUsageState,
+  setZoneMode,
+  upsertDropZone,
+} from '../db/repo.js';
 import { mintMcpToken } from '../mcp/tokens.js';
 import { statusInputOf, statusOf } from '../status.js';
 import { makeZone } from '../test/fixtures.js';
@@ -69,7 +75,7 @@ describe('POST and DELETE /api/control/usage/override (#728)', () => {
     expect(dispatchGate(db, config.usage, t0)).toBe('override');
     expect(listAudit(db)).toHaveLength(1);
     expect(listAudit(db)[0]).toMatchObject({ via: 'token', action: 'usage.override' });
-    expect(JSON.stringify(listAudit(db)[0])).toContain('starts');
+    expect(listAudit(db)[0]?.detail).toEqual({ starts: 5, hours: 3 });
   });
 
   test('its own starts and hours; a second one replaces the first', async () => {
@@ -218,7 +224,16 @@ describe('the status says an override is on (#728)', () => {
     expect(said()).toContain(
       `Usage override: 3 of 5 starts left, until ${iso(3 * H).slice(11, 16)} UTC`,
     );
-    setUsageState(db, { overrideStartsLeft: 0 }, t0);
+    // Where it lifts nothing it is not said: every project paused, the kill switch, or no throttle.
+    setZoneMode(db, 'main', 'paused', t0);
+    expect(said()).not.toContain('Usage override');
+    setZoneMode(db, 'main', 'active', t0);
+    setKilled(db, true, t0);
+    expect(said()).not.toContain('Usage override');
+    setKilled(db, false, t0);
+    setUsageState(db, { status: 'allowed' }, t0);
+    expect(said()).not.toContain('Usage override');
+    setUsageState(db, { status: 'allowed_warning', overrideStartsLeft: 0 }, t0);
     expect(said()).not.toContain('Usage override');
   });
 });

@@ -22,6 +22,7 @@ import {
   gateQueuesImplement,
   ingestRateLimit,
   OVERRIDE_CEILING,
+  refundOverrideStart,
   setUsageOverride,
   throttleHolds,
   usageOverride,
@@ -124,29 +125,39 @@ describe('the usage override and the gate (#728)', () => {
   test('stored usage at the ceiling is not overridden; a window that has reset does not count', () => {
     warned({ sevenDayUtil: OVERRIDE_CEILING });
     grant();
-    expect(usageOverride(db, cfg, t0)).toBeNull();
+    expect(usageOverride(db, t0)).toBeNull();
     expect(dispatchGate(db, cfg, t0)).toBe('finishing_only');
     warned({ sevenDayUtil: 0.5, fiveHourUtil: 0.97, fiveHourResetsAt: iso(H) });
     expect(dispatchGate(db, cfg, t0)).toBe('finishing_only');
     // The five-hour window is over: its old figure holds nothing back.
     warned({ sevenDayUtil: 0.5, fiveHourUtil: 0.97, fiveHourResetsAt: iso(-1) });
     expect(dispatchGate(db, cfg, t0)).toBe('override');
+    // So too the seven-day one, once its reset has passed.
+    warned({ sevenDayUtil: 0.97, sevenDayResetsAt: iso(-1), fiveHourUtil: null });
+    expect(dispatchGate(db, cfg, t0)).toBe('override');
+  });
+
+  test('the ceiling is fixed: raising the throttle setting, as chat can, does not raise it', () => {
+    warned({ sevenDayUtil: 0.95 });
+    grant();
+    for (const throttleUtilization of [0.96, 1])
+      expect(dispatchGate(db, { ...cfg, throttleUtilization }, t0)).toBe('finishing_only');
   });
 
   test('an unreadable override is not in force', () => {
     warned();
     grant();
     setUsageState(db, { overrideUntil: 'not a time' }, t0);
-    expect(usageOverride(db, cfg, t0)).toBeNull();
+    expect(usageOverride(db, t0)).toBeNull();
     expect(dispatchGate(db, cfg, t0)).toBe('finishing_only');
   });
 
   test('it reports what is left, and clearing ends it', () => {
     grant(5, 3);
-    expect(usageOverride(db, cfg, t0)).toEqual({ startsLeft: 5, starts: 5, until: iso(3 * H) });
+    expect(usageOverride(db, t0)).toEqual({ startsLeft: 5, starts: 5, until: iso(3 * H) });
     expect(getUsageState(db).overrideBy).toBe('token');
     clearUsageOverride(db, t0);
-    expect(usageOverride(db, cfg, t0)).toBeNull();
+    expect(usageOverride(db, t0)).toBeNull();
     expect(getUsageState(db)).toMatchObject({
       overrideUntil: null,
       overrideStarts: null,
@@ -169,6 +180,18 @@ describe('counting starts (#728)', () => {
     expect(leaseNextDrop(db, 's1', t0, 'override')?.dropId).toBe('c1');
     expect(left()).toBe(1);
   });
+
+  test.each(['refute', 'triage', 'diagnose', 'arbitrate', 'audit'])(
+    'a %s drop takes one',
+    (role) => {
+      warned();
+      grant(2);
+      db.prepare("UPDATE drops SET state = 'succeeded' WHERE id = 'd1'").run();
+      queue('c1', role, 10);
+      expect(leaseNextDrop(db, 's1', t0, 'override')?.dropId).toBe('c1');
+      expect(left()).toBe(1);
+    },
+  );
 
   test('review, heal, resolve and doctor drops take none', () => {
     warned();
@@ -205,8 +228,10 @@ describe('counting starts (#728)', () => {
     setUsageState(db, { overrideStartsLeft: 0 }, t0);
     queue('doc', 'doctor', 20);
     expect(leaseNextDrop(db, 's1', t0, 'override')?.dropId).toBe('doc');
-    queue('r1', 'review', 30);
-    expect(leaseNextDrop(db, 's1', t0, 'override')?.dropId).toBe('r1');
+    for (const [i, role] of ['review', 'heal', 'resolve'].entries()) {
+      queue(`f${i}`, role, 30 + i);
+      expect(leaseNextDrop(db, 's1', t0, 'override')?.dropId, role).toBe(`f${i}`);
+    }
     expect(getDrop(db, 'd1')?.state).toBe('queued');
   });
 
@@ -215,6 +240,35 @@ describe('counting starts (#728)', () => {
     grant(5, 1);
     expect(leaseNextDrop(db, 's1', at(H), 'override')).toBeNull();
     expect(left()).toBe(5);
+  });
+
+  test('a start is given back to the grant it came from, and to no other, never past the grant', () => {
+    warned();
+    grant(2);
+    const taken = leaseNextDrop(db, 's1', t0, 'override');
+    expect(taken?.overrideUntil).toBe(iso(3 * H));
+    expect(left()).toBe(1);
+    refundOverrideStart(db, taken?.overrideUntil, t0);
+    expect(left()).toBe(2);
+    refundOverrideStart(db, taken?.overrideUntil, t0);
+    expect(left()).toBe(2);
+    // A newer grant is not topped up by an older one's drop, nor a cleared one brought back.
+    setUsageOverride(db, { starts: 5, hours: 6, by: 'token' }, t0);
+    setUsageState(db, { overrideStartsLeft: 1 }, t0);
+    refundOverrideStart(db, taken?.overrideUntil, t0);
+    expect(left()).toBe(1);
+    clearUsageOverride(db, t0);
+    refundOverrideStart(db, iso(3 * H), t0);
+    expect(left()).toBeNull();
+    // A drop that took no start has none to give.
+    grant(2);
+    setUsageState(db, { overrideStartsLeft: 1 }, t0);
+    refundOverrideStart(db, undefined, t0);
+    expect(left()).toBe(1);
+  });
+
+  test('a lease that took no start says so', () => {
+    expect(leaseNextDrop(db, 's1', t0, 'open')).toEqual({ dropId: 'd1', epoch: 1 });
   });
 
   test('the kill switch and a paused zone still win', () => {
@@ -232,7 +286,7 @@ describe('counting starts (#728)', () => {
 });
 
 describe('an override ends early (#728)', () => {
-  const inForce = () => usageOverride(db, cfg, t0) !== null;
+  const inForce = () => usageOverride(db, t0) !== null;
 
   test('a report at the ceiling clears it, on either window; one under it does not', () => {
     for (const key of ['seven_day', 'five_hour'] as const) {
@@ -255,6 +309,39 @@ describe('an override ends early (#728)', () => {
       expect(getUsageState(db).overrideUntil, key).toBeNull();
       setUsageState(db, { sevenDayUtil: null, fiveHourUtil: null }, t0);
     }
+  });
+
+  test('a report of a window that has already reset does not clear it; one with no reset does', () => {
+    grant();
+    const over = (resetsAt?: string) =>
+      ingestRateLimit(
+        db,
+        report({
+          unifiedWindows: { five_hour: { utilization: 0.96, ...(resetsAt ? { resetsAt } : {}) } },
+        }),
+        src,
+        cfg,
+        t0,
+      );
+    over(iso(-60_000));
+    expect(getUsageState(db).overrideUntil).not.toBeNull();
+    over();
+    expect(getUsageState(db).overrideUntil).toBeNull();
+  });
+
+  test("a Fable-typed report's account windows count toward the ceiling", () => {
+    grant();
+    ingestRateLimit(
+      db,
+      report({
+        rateLimitType: 'seven_day_fable',
+        unifiedWindows: { seven_day: { utilization: 0.99, resetsAt: iso(H) } },
+      }),
+      src,
+      cfg,
+      t0,
+    );
+    expect(getUsageState(db).overrideUntil).toBeNull();
   });
 
   test('a refusal clears it, from a live report too', () => {

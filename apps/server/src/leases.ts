@@ -110,7 +110,7 @@ export function leaseNextDrop(
   gate: Gate,
   exclude: readonly string[] = [],
   excludeRoles: readonly Role[] = [],
-): { dropId: string; epoch: number } | null {
+): { dropId: string; epoch: number; overrideUntil?: string } | null {
   const ex = JSON.stringify(exclude);
   const exRoles = JSON.stringify(excludeRoles);
   return db.transaction(() => {
@@ -121,6 +121,8 @@ export function leaseNextDrop(
     if (!live) return null;
     let next: { id: string } | undefined;
     let probe = false;
+    /** The override grant this lease took a start of, if any. */
+    let start: string | null = null;
     const probeNext = (): { id: string } | undefined => {
       const u = getUsageState(db);
       if (u.probeDropId !== null) return undefined;
@@ -176,13 +178,11 @@ export function leaseNextDrop(
         const found = pick(gate === 'finishing_only' ? held : doctor);
         // Under Command's override each drop the throttle would hold takes one start, here in the
         // lease's transaction: a gate read before the last start was taken leases no more (#728).
-        next =
-          gate === 'override' &&
-          found &&
-          !UNTHROTTLED.has(found.role) &&
-          !takeOverrideStart(db, now)
-            ? pick(held)
-            : found;
+        next = found;
+        if (gate === 'override' && found && !UNTHROTTLED.has(found.role)) {
+          start = takeOverrideStart(db, now);
+          if (start === null) next = pick(held);
+        }
         break;
       }
       default:
@@ -200,7 +200,11 @@ export function leaseNextDrop(
       | undefined;
     if (!row) return null;
     if (probe) setUsageState(db, { probeDropId: next.id }, now);
-    return { dropId: next.id, epoch: row.epoch };
+    return {
+      dropId: next.id,
+      epoch: row.epoch,
+      ...(start === null ? {} : { overrideUntil: start }),
+    };
   })();
 }
 

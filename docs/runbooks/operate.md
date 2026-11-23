@@ -368,10 +368,11 @@ docker compose exec jumpmaster jumpmaster ctl usage override --starts 10 --hours
 docker compose exec jumpmaster jumpmaster ctl usage override --clear
 ```
 
-Each new implement or crew drop takes one start when a stick leases it, again if it is leased again.
-Reviews, heals, resolves and doctor drops take none. The override ends when its starts or its time
-run out, when usage reaches 95% of a window (or `usage.throttleUtilization`, if that is higher),
-when Claude refuses a request, or at a credits stop. It never lifts the kill switch, a paused
+Each new implement or crew drop takes one start when a stick leases it, again if it is leased again
+(a drop the server could not hand out gives its start back). Reviews, heals, resolves and doctor
+drops take none. The override ends when its starts or its time
+run out, when usage reaches 95% of a window (fixed, whatever `usage.throttleUtilization` says), when
+Claude refuses a request, or at a credits stop. It never lifts the kill switch, a paused
 project, a usage pause or a credits stop. The status says how many starts are left. Only an operator
 session or the operator token can set it; the chat cannot. Each change is in the audit log.
 
@@ -560,6 +561,7 @@ token is always allowed.
 | Page | `ctl` | Route |
 |---|---|---|
 | Status | `ctl status [--json]` | `GET /api/control/status` |
+| Status | `ctl usage override [--starts N] [--hours N]`<br>`ctl usage override --clear` | `POST /api/control/usage/override`<br>`DELETE /api/control/usage/override` |
 | Setup | `ctl setup-code` | `POST /api/control/setup/code` |
 | Setup | `ctl setup reopen` | `POST /api/control/setup/reopen` |
 | Setup | `ctl passphrase set (the passphrase on stdin)` | `PUT /api/control/passphrase` |

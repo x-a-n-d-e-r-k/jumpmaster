@@ -276,8 +276,9 @@ export function statusOf(input: StatusInput, now: Date): Status {
     } = {},
   ) => {
     const also: NonNullable<Status['also']> = [];
+    // Said only where it lifts something: not under the kill switch, nor with every project held.
     const o = usage.override;
-    if (o)
+    if (o && !input.killed && activeZones.length > 0)
       also.push({
         text: `Usage override: ${o.startsLeft} of ${o.starts} starts left, until ${o.until.slice(11, 16)} UTC`,
         href: '/',
@@ -733,7 +734,7 @@ export function statusInputOf(o: {
       ...opt('overageResumeWorkItemId', u.overageResumeWorkItemId),
       ...opt('overageProbeSince', u.overageProbeSince),
       // Shown only where it acts: the throttle holds, and the override lifts it.
-      ...opt('override', gate === 'override' ? usageOverride(db, config.usage, now) : null),
+      ...opt('override', gate === 'override' ? usageOverride(db, now) : null),
     },
     sticks: { live: live.length, slots: live.reduce((n, s) => n + s.slots, 0), busy },
     doctor: {

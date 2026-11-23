@@ -165,6 +165,10 @@ export function ingestRateLimit(
     const d = getDrop(db, src.dropId);
     recordUsageWindows(db, windows, now, d ? (d.servedModel ?? d.requestedModel) : null);
   }
+  // Command's override ends at the ceiling (#728), by the account's windows in any report, a
+  // Fable-typed one's too: only a Fable-only refusal leaves it.
+  if (reachesCeiling(data, now) && getUsageState(db).overrideUntil !== null)
+    clearUsageOverride(db, now);
   // A Fable-only limit pauses Fable, never dispatch (best-effort, pending rehearsal).
   if (isFableRateLimit(data)) return pauseFableFor(db, data, now);
   db.transaction(() => {
@@ -181,14 +185,8 @@ export function ingestRateLimit(
       patch.sevenDayResetsAt = normalizeResetsAt(sd.resetsAt) ?? null;
     }
     if (fh || sd) patch.observedAt = now.toISOString();
-    // Command's override ends at once on a refusal or at the ceiling (#728), whoever reports it.
-    const ceiling = overrideCeiling(cfg);
-    if (
-      data.status === 'rejected' ||
-      (fh && fh.utilization >= ceiling) ||
-      (sd && sd.utilization >= ceiling)
-    )
-      Object.assign(patch, NO_OVERRIDE);
+    // Command's override ends at once on a refusal (#728), whoever reports it.
+    if (data.status === 'rejected') Object.assign(patch, NO_OVERRIDE);
 
     const t = now.getTime();
     if (data.status === 'rejected') {
@@ -279,28 +277,35 @@ function throttled(u: UsageStateRow, cfg: UsageConfig, t: number): boolean {
   );
 }
 
-/** The usage share at which an override ends by itself: fixed, so nothing but a release raises it. */
+/**
+ * The usage share at which an override ends by itself. A constant, and never the throttle's own
+ * setting: chat can change that one without a confirmation, so nothing but a release raises this.
+ */
 export const OVERRIDE_CEILING = 0.95;
 export const OVERRIDE_DEFAULTS = { starts: 5, hours: 3 } as const;
 
-/** Never under the throttle's own share: below that, no override is needed. */
-export const overrideCeiling = (cfg: UsageConfig): number =>
-  Math.max(OVERRIDE_CEILING, cfg.throttleUtilization);
+/** Whether a report shows an account window, one that has not reset, at the override's ceiling. */
+function reachesCeiling(data: RateLimitEventData, now: Date): boolean {
+  return [data.unifiedWindows?.five_hour, data.unifiedWindows?.seven_day].some((w) => {
+    if (!w || w.utilization < OVERRIDE_CEILING) return false;
+    const reset = ms(normalizeResetsAt(w.resetsAt));
+    return reset === null || now.getTime() < reset;
+  });
+}
 
 export type UsageOverride = { startsLeft: number; starts: number; until: string };
 
 /** The override in `u`, when it is in force at `t`: in time, with a start left, under the ceiling. */
-function overrideIn(u: UsageStateRow, cfg: UsageConfig, t: number): UsageOverride | null {
+function overrideIn(u: UsageStateRow, t: number): UsageOverride | null {
   const until = ms(u.overrideUntil);
   if (until === null || t >= until) return null;
   if (u.overrideStartsLeft === null || u.overrideStartsLeft <= 0) return null;
-  const ceiling = overrideCeiling(cfg);
   if (
     (u.fiveHourUtil !== null &&
-      u.fiveHourUtil >= ceiling &&
+      u.fiveHourUtil >= OVERRIDE_CEILING &&
       windowLive(u, u.fiveHourResetsAt, FIVE_HOURS, t)) ||
     (u.sevenDayUtil !== null &&
-      u.sevenDayUtil >= ceiling &&
+      u.sevenDayUtil >= OVERRIDE_CEILING &&
       windowLive(u, u.sevenDayResetsAt, SEVEN_DAYS, t))
   )
     return null;
@@ -312,8 +317,8 @@ function overrideIn(u: UsageStateRow, cfg: UsageConfig, t: number): UsageOverrid
 }
 
 /** Command's override of the usage throttle, while it is in force (#728). */
-export function usageOverride(db: Db, cfg: UsageConfig, now: Date): UsageOverride | null {
-  return overrideIn(getUsageState(db), cfg, now.getTime());
+export function usageOverride(db: Db, now: Date): UsageOverride | null {
+  return overrideIn(getUsageState(db), now.getTime());
 }
 
 /** Sets Command's override, replacing any. Only the control route calls this: no chat or MCP path. */
@@ -338,16 +343,28 @@ export function clearUsageOverride(db: Db, now: Date): void {
   setUsageState(db, NO_OVERRIDE, now);
 }
 
-/** Takes one start of the override, inside the caller's transaction; false when none is left. */
-export function takeOverrideStart(db: Db, now: Date): boolean {
-  return (
-    db
-      .prepare(
-        `UPDATE usage_state SET override_starts_left = override_starts_left - 1
-         WHERE id = 1 AND override_starts_left > 0 AND override_until > @now`,
-      )
-      .run({ now: now.toISOString() }).changes === 1
-  );
+/**
+ * Takes one start of the override, inside the caller's transaction: the grant it came from, by its
+ * end, or null when none is left.
+ */
+export function takeOverrideStart(db: Db, now: Date): string | null {
+  const r = db
+    .prepare(
+      `UPDATE usage_state SET override_starts_left = override_starts_left - 1
+       WHERE id = 1 AND override_starts_left > 0 AND override_until > @now
+       RETURNING override_until AS until`,
+    )
+    .get({ now: now.toISOString() }) as { until: string } | undefined;
+  return r?.until ?? null;
+}
+
+/** Gives back a start whose drop never left the server, while its own grant still stands. */
+export function refundOverrideStart(db: Db, until: string | undefined, now: Date): void {
+  if (until === undefined) return;
+  db.prepare(
+    `UPDATE usage_state SET override_starts_left = override_starts_left + 1, updated_at = @now
+     WHERE id = 1 AND override_until = @until AND override_starts_left < override_starts`,
+  ).run({ until, now: now.toISOString() });
 }
 
 /** Whether the throttle holds new work now, override or not: what an override would lift. */
@@ -360,7 +377,7 @@ export function dispatchGate(db: Db, cfg: UsageConfig, now: Date): Gate {
   const u = getUsageState(db);
   const gate = baseGate(u, cfg, now);
   // An override lifts the throttle alone: a stop, a pause and a probe win over it.
-  return gate === 'finishing_only' && overrideIn(u, cfg, now.getTime()) ? 'override' : gate;
+  return gate === 'finishing_only' && overrideIn(u, now.getTime()) ? 'override' : gate;
 }
 
 /** The gate without Command's override. */
