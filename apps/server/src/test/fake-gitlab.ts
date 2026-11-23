@@ -92,6 +92,9 @@ export type GitLabMergeRequest = {
   merged_at: string | null;
   closed_at: string | null;
   diff_refs: GitLabDiffRefs;
+  /** GitLab's `changes_count` (a string, `"1000+"` when the diff overflows). The single-MR read
+   *  reports the count of its diff files unless a test sets this; `null` leaves it out. */
+  changes_count?: string | null;
 };
 export type GitLabLabel = { id: number; name: string; color: string; description: string | null };
 export type GitLabNote = {
@@ -958,9 +961,15 @@ export function fakeGitLab(opts: {
       .sort(byNewest);
     return paged(list, c.query);
   });
+  /** The files MR `mr` changes, from its merge base to its head. */
+  const mrDiffs = (mr: GitLabMergeRequest) =>
+    snapshotDiffs(commitOf(mr.diff_refs.base_sha).files, commitOf(mr.diff_refs.head_sha).files);
   route('GET', /^\/merge_requests\/(\d+)$/, (_c, m) => {
     const mr = findMr(m[1]);
-    return mr ? [200, mr] : err(404, '404 Not found');
+    if (!mr) return err(404, '404 Not found');
+    const { changes_count, ...rest } = mr;
+    if (changes_count === null) return [200, rest];
+    return [200, { ...rest, changes_count: changes_count ?? String(mrDiffs(mr).length) }];
   });
   route('POST', /^\/merge_requests$/, (c) => {
     if (c.level < ACCESS.developer) return FORBIDDEN;
@@ -1104,8 +1113,7 @@ export function fakeGitLab(opts: {
   route('GET', /^\/merge_requests\/(\d+)\/diffs$/, (c, m) => {
     const mr = findMr(m[1]);
     if (!mr) return err(404, '404 Not found');
-    const { base_sha, head_sha } = mr.diff_refs;
-    return paged(snapshotDiffs(commitOf(base_sha).files, commitOf(head_sha).files), c.query);
+    return paged(mrDiffs(mr), c.query);
   });
 
   // --- Pipelines, jobs and commit statuses ----------------------------------------------------
