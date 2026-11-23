@@ -8,8 +8,13 @@ import { MAX_INVITE_SLOTS } from '../install/invite.js';
 import { TS_AUTHKEY_PLACEHOLDER } from '../install/stick-sh.js';
 import { PUBLIC_URL_NEEDED, PUBLIC_URL_PAGE } from '../reach.js';
 import { type StickUpgradeView, upgradeWords } from '../stick-upgrade-words.js';
-import { SYSTEM_STICKS_ADD_HREF, SYSTEM_STICKS_HREF, SYSTEM_STICKS_IMAGES_HREF } from './links.js';
-import { escapeHtml, page, type StickLine, systemNav } from './pages.js';
+import {
+  SYSTEM_HREF,
+  SYSTEM_STICKS_ADD_HREF,
+  SYSTEM_STICKS_HREF,
+  SYSTEM_STICKS_IMAGES_HREF,
+} from './links.js';
+import { breadcrumb, escapeHtml, page, type StickLine, systemNav } from './pages.js';
 import { type ZoneRef, zoneNamer } from './zone-name.js';
 
 /** The ceiling a stick reports with no JM_MAX_SLOTS and a JM_SLOTS of 4 or less. */
@@ -235,10 +240,14 @@ export function renderInviteResult(
       ? `<section id="panel-paste"><p>On the machine, as a user who can sudo:</p><pre><code id="install-line">${escapeHtml(r.line)}</code></pre><p><button data-copy="install-line">Copy</button></p><p>It installs Docker if the machine has none (it asks first; add <code>--yes</code> before the code not to be asked), downloads cosign and the stick image from this server, verifies the image's signature offline, starts the stick and waits for it to enroll. The machine needs no registry or GitHub access.</p><p>Its first step swaps the code for an install token, so the code is spent within a second of pasting; if the install then fails, it cancels the invite, and you make a new code here.</p></section>`
       : `<section id="panel-cloud"><p>Paste this as the user data (cloud-init) when you create the VPS. Replace <code>${TS_AUTHKEY_PLACEHOLDER}</code> with an auth key from your Tailscale admin console (Settings, Keys) first: the machine joins your tailnet, then runs the installer line. Create the VPS within the hour, or the code expires.</p><pre><code id="cloud-init">${escapeHtml(r.cloudInit)}</code></pre><p><button data-copy="cloud-init">Copy</button></p></section>`;
   return page(
-    `${systemNav('sticks')}<h2>Add a stick: ${escapeHtml(r.name)}</h2>` +
+    `${systemNav('sticks')}${breadcrumb([
+      { label: 'System', href: SYSTEM_HREF },
+      { label: 'Sticks', href: SYSTEM_STICKS_HREF },
+      { label: 'Add a stick' },
+    ])}<h2>Add a stick: ${escapeHtml(r.name)}</h2>` +
       `<p class="warn"><strong>This code works once, until ${escapeHtml(r.expiresAt)} (${lasts}). It won't be shown again:</strong> copy what you need now. Troopers: ${escapeHtml(troopers)}.</p>` +
       form +
-      `<p><a href="${SYSTEM_STICKS_HREF}">Back to the sticks page</a>: it reads "${escapeHtml(r.name)}: waiting for it to check in" until the stick enrolls.</p>${script}`,
+      `<p>The sticks page reads "${escapeHtml(r.name)}: waiting for it to check in" until the stick enrolls.</p>${script}`,
     { title: 'Add a stick' },
   );
 }

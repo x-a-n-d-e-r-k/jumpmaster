@@ -966,9 +966,11 @@ describe('/work and /drops list pages (#119)', () => {
       expect(rows[2]).toContain('<span class="gate pass">lint: pass</span>');
       expect(rows[2]).not.toContain('fail');
       expect(rows[2]).toContain('#42');
-      // Breadcrumb and the drop-list link.
-      expect(body).toContain('<a href="/activity/work">Work</a>');
-      expect(body).toContain('<a href="/projects/main/work">octo/demo</a>');
+      // One breadcrumb, Projects › the project › Work › the issue, and the drop-list link.
+      expect(body.match(/aria-label="Breadcrumb"/g)).toHaveLength(1);
+      expect(body).toContain(
+        '<ol><li><a href="/projects">Projects</a></li><li><a href="/projects/main">octo/demo</a></li><li><a href="/projects/main/work">Work</a></li><li><span aria-current="page">#5</span></li></ol>',
+      );
       expect(body).toContain(
         'href="/activity/drops?zone=main&amp;issue=5">All drops for this issue</a>',
       );
@@ -1178,7 +1180,9 @@ describe('/work and /drops list pages (#119)', () => {
     const home = (await h.view('/')).body;
     expect(home).toContain('href="/activity/work?state=ready"');
     expect(home).toContain('href="/activity/drops?state=active&amp;kind=all"');
-    expect(home).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/activity">Activity<\/a>.*<\/nav>/);
+    expect(home).toMatch(
+      /<nav class="topnav"[^>]*>.*<a href="\/activity" data-area="activity">Activity<\/a>.*<\/nav>/,
+    );
   });
 });
 
@@ -1296,7 +1300,7 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
     // The harness's own stick, enrolled with 4 and never leased.
     expect(html).toMatch(/<input[^>]*type="number"[^>]*max="4"[^>]*value="4"/);
     // Linked from the System sub-nav, Sticks current (#623), and from the floor's Sticks summary.
-    expect(html).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/system">System<\/a>.*<\/nav>/);
+    expect(html).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/system"[^>]*>System<\/a>.*<\/nav>/);
     expect(html).toContain('<a href="/system/sticks" aria-current="page">Sticks</a>');
     const home = (await h.view('/')).body;
     expect(home).toMatch(/<div id="sticks">.*<a href="\/system\/sticks">Manage sticks<\/a>/);
@@ -1499,7 +1503,9 @@ describe('project pages live under /projects (issue #615)', () => {
   test('the top bar and the list say Projects; a project is one repository', async () => {
     const h = await seeded();
     const list = (await h.view('/projects')).body;
-    expect(list).toContain('<a href="/projects">Projects</a>');
+    expect(list).toContain(
+      '<a href="/projects" aria-current="page" data-area="projects">Projects</a>',
+    );
     expect(list).not.toContain('>Zones</a>');
     expect(list).toContain('<h2>Projects</h2>');
     expect(list).toContain('<p>A project is one repository Jumpmaster works on.</p>');
@@ -1969,7 +1975,7 @@ describe('the System area (#623)', () => {
     expect(body).toContain('<title>Jumpmaster: Health</title>');
     expect(body).toContain('<h2>Health</h2>');
     expect(body).toContain('data-doctor="/api/control/doctor"');
-    expect(body).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/system">System<\/a>.*<\/nav>/);
+    expect(body).toMatch(/<nav class="topnav"[^>]*>.*<a href="\/system"[^>]*>System<\/a>.*<\/nav>/);
   });
 
   test('Zone problems is on Health, once and above the check table, and not on Credentials', async () => {

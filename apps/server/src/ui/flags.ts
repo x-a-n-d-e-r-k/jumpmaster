@@ -3,7 +3,7 @@ import { type FlagGroup, type FlagRow, type FlagScope, flagRows } from '../confi
 import type { ConfigStore } from '../config/store.js';
 import type { DropZoneConfig } from '../config.js';
 import { SYSTEM_OTHER_MACHINES_HREF } from './links.js';
-import { escapeHtml, PROJECTS_HREF, page, projectHref } from './pages.js';
+import { breadcrumb, escapeHtml, PROJECTS_HREF, page, projectHref } from './pages.js';
 import { CONFIG_ANSWER_FN, RESTART_NOTE, settingControl, settingId } from './setting-controls.js';
 import { type ZoneRef, zoneName, zoneNameText } from './zone-name.js';
 
@@ -326,7 +326,11 @@ export function renderFlags(
     `${
       o.header
         ? `${o.header(resolved, all)}<p><a href="${base}/setup#advanced">View the zone as JSON</a></p>`
-        : `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${base}">${zoneName(resolved, all)}</a> · <a href="${base}/setup#advanced">View the zone as JSON</a></p>`
+        : `${breadcrumb([
+            { label: 'Projects', href: PROJECTS_HREF },
+            { label: zoneName(resolved, all), href: base },
+            { label: 'Advanced settings' },
+          ])}<p><a href="${base}/setup#advanced">View the zone as JSON</a></p>`
     }
 <h2>Advanced settings · ${zoneName(resolved, all)}</h2>
 <p>Every setting for this zone. Changes apply at the next pass; one that loosens a safeguard asks you to confirm first.</p>

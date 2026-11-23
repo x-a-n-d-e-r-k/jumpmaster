@@ -313,6 +313,17 @@ describe('POST /setup/github-app/discover', () => {
     expect(JSON.stringify(w.store.document())).not.toContain('999');
   });
 
+  test('the page shows exactly one shared breadcrumb and no Back link', async () => {
+    const w = await world({ zones: [zone('main', 'acme/demo')] });
+    const r = await w.discover();
+    expect(r.statusCode, r.body).toBe(200);
+    expect(r.body.match(/<nav[^>]*aria-label="Breadcrumb"/g) ?? []).toHaveLength(1);
+    expect(r.body).toContain(
+      '<nav class="crumbs" aria-label="Breadcrumb"><ol><li><a href="/system">System</a></li><li><a href="/setup/claude">Setup</a></li><li><a href="/setup/forge">GitHub</a></li><li><span aria-current="page">GitHub App installations</span></li></ol></nav>',
+    );
+    expect(r.body).not.toMatch(/>\s*Back\s*<\/a>/);
+  });
+
   test('an app not installed on the repository: its install link, and no pending change', async () => {
     const w = await world({ zones: [zone('main', 'acme/demo')] });
     const r = await w.discover();
