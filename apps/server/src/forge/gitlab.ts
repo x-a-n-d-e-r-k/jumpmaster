@@ -1,6 +1,7 @@
 // GitLabForge (design spec §5.5, spec §9): the GitLab REST v4 client with the issue, label, comment
 // and viewer methods of `Forge` (first slice, #676) and the branch, file, directory, compare and
-// first-parent methods (second slice, #683). Not wired in: GitLab zones are still refused with
+// first-parent methods (second slice, #683), merge requests (third slice, #690) and approvals as
+// reviews (fourth slice, #696). Not wired in: GitLab zones are still refused with
 // GITLAB_UNSUPPORTED wherever a forge is built.
 //
 // GitLab mapping notes:
@@ -64,6 +65,31 @@
 //   `renamed` for `renamed_file`, else `modified`), `previous_filename` (`old_path`, renames only)
 //   and `patch` (`diff`). An empty, `too_large` or `collapsed` diff is no patch, so the digest is
 //   incomplete (conservative: a pure rename is incomplete too); `compare_timeout` is incomplete.
+// - Approvals as reviews (fourth slice, #696). GitLab Free has no review object and no "request
+//   changes"; the spec (§5.5, §9) is silent on how reviews map, so this mapping is chosen, and it
+//   fails closed. A review is an MR note whose first line is exactly the header
+//   `<!-- jm-review: <EVENT> <sha> -->` (EVENT `APPROVE` or `REQUEST_CHANGES`, sha 40 lowercase
+//   hex), plus GitLab's approval state:
+//   - `createReview` refuses unsent an iid that is not a positive integer, any other event, and a
+//     `commitId` that is not 40-hex, so every note it posts has a header `listReviews` accepts.
+//     APPROVE is `POST approve` with `sha: commitId`: a 409 (the head moved) rejects with 409 and
+//     posts nothing; a 401 (GitLab's answer to any other refusal, "already approved" included)
+//     reads `GET approvals` and goes on only when the viewer is in `approved_by` (so a retry after
+//     a failed note is safe), else rejects with 401. That 401 also invalidates the token provider
+//     in `send` (the token is re-read on the next request); this is accepted. REQUEST_CHANGES, with
+//     no GitLab counterpart, is `POST unapprove` (404, no approval to withdraw, is fine). Then one
+//     note: the header line, then `body`; its id is returned.
+//   - `listReviews` pages the MR notes (system notes skipped) and maps each header note to a review:
+//     `id` the note id, `author` `author.username`, `state` APPROVED or CHANGES_REQUESTED,
+//     `commitId` from the header, `body` the note without the header line, `submittedAt`
+//     `created_at`. It reads `GET approvals` once: an APPROVED note whose author is not in
+//     `approved_by` now is DISMISSED (withdrawn, or reset on push). An approver with no review note
+//     (a UI approval) is a synthetic APPROVED review with `commitId: ''`, `id: 0`, `body: ''` and
+//     `submittedAt` the newest `created_at` of their notes on the MR (else ''). GitLab does not say
+//     which commit a UI approval was given on, so `commitId: ''` never approves a head: fail closed.
+//     A header in a note counts only as that note author's review; trust is the callers' to decide.
+//   - `findReviewByMarker` is the viewer's newest review with a non-zero id whose body's last line
+//     (end trimmed) is the marker, as on GitHub; never a synthetic review.
 // - Every path segment (branch, file path, ref) is URL-encoded; refs otherwise go in the query.
 // Every other `Forge` method throws GitLabUnsupportedError, naming the method, until a later slice.
 //
@@ -113,6 +139,11 @@ export class GitLabForgeError extends Error {
     this.status = status;
   }
 }
+
+/** A full commit SHA, lowercase. */
+const SHA40 = /^[0-9a-f]{40}$/;
+/** A review note's first line: exactly `<!-- jm-review: EVENT sha -->`. */
+const REVIEW_HEADER = /^<!-- jm-review: (APPROVE|REQUEST_CHANGES) ([0-9a-f]{40}) -->$/;
 
 /** GitHub's `PULLS_FILES_CAP`: a list this long or longer is not trusted to be whole. */
 const PULL_FILES_CAP = 3000;
@@ -166,6 +197,7 @@ type RawFile = {
   commit_id: string;
   last_commit_id: string;
 };
+type RawApprovals = { approved_by?: { user?: RawUser }[] } | null;
 type RawNote = {
   id: number;
   body?: string;
@@ -788,6 +820,126 @@ export class GitLabForge implements Forge {
     return digestCompareFiles((c.diffs as RawDiff[]).map(toCompareFile));
   }
 
+  // --- Approvals as reviews -----------------------------------------------------------------
+
+  /**
+   * Review notes (a well-formed header on the first line) as reviews, oldest first, then one
+   * synthetic APPROVED review (`commitId: ''`, `id: 0`) per approver with no review note. An
+   * APPROVED note whose author no longer approves reads as DISMISSED.
+   */
+  async listReviews(number: number): Promise<ForgeReview[]> {
+    const n = mrIid(number);
+    const [notes, approvals] = await Promise.all([
+      this.list<RawNote>(`reading notes on merge request ${n}`, `/merge_requests/${n}/notes`),
+      this.request<RawApprovals>(
+        `reading the approvals of merge request ${n}`,
+        'GET',
+        `/merge_requests/${n}/approvals`,
+      ),
+    ]);
+    const approvers = approverNames(approvals);
+    const reviewed = new Set<string>();
+    const newestNote = new Map<string, RawNote>();
+    const out: ForgeReview[] = [];
+    for (const note of [...notes].sort((a, b) => (newer(a, b) ? 1 : newer(b, a) ? -1 : 0))) {
+      const author = note.author?.username ?? '';
+      const prev = newestNote.get(author);
+      if (!prev || newer(note, prev)) newestNote.set(author, note);
+      const review = note.system ? null : parseReviewNote(note.body ?? '');
+      if (!review) continue;
+      reviewed.add(author);
+      const approved = review.event === 'APPROVE';
+      out.push({
+        id: note.id,
+        author,
+        state: approved ? (approvers.has(author) ? 'APPROVED' : 'DISMISSED') : 'CHANGES_REQUESTED',
+        commitId: review.commitId,
+        body: review.body,
+        submittedAt: note.created_at ?? '',
+      });
+    }
+    for (const user of approvers) {
+      if (reviewed.has(user)) continue;
+      // GitLab does not say which commit a UI approval was given on: it approves no head.
+      out.push({
+        id: 0,
+        author: user,
+        state: 'APPROVED',
+        commitId: '',
+        body: '',
+        submittedAt: newestNote.get(user)?.created_at ?? '',
+      });
+    }
+    return out;
+  }
+
+  /**
+   * APPROVE approves at `commitId` (409: the head moved, nothing posted; 401: success only when
+   * the viewer already approves, so a retry after a failed note is safe). REQUEST_CHANGES
+   * withdraws the viewer's approval (404: there was none). Then one note with the review header.
+   */
+  async createReview(
+    number: number,
+    input: { event: 'APPROVE' | 'REQUEST_CHANGES'; body: string; commitId: string },
+  ): Promise<{ id: number }> {
+    const n = mrIid(number);
+    const { event, commitId } = input;
+    if (event !== 'APPROVE' && event !== 'REQUEST_CHANGES')
+      throw new GitLabForgeError('GitLabForge: a review event must be APPROVE or REQUEST_CHANGES');
+    if (typeof commitId !== 'string' || !SHA40.test(commitId))
+      throw new GitLabForgeError('GitLabForge: a review commitId must be a 40-hex commit SHA');
+    const path = `/merge_requests/${n}`;
+    if (event === 'APPROVE') {
+      try {
+        await this.request(`approving merge request ${n}`, 'POST', `${path}/approve`, {
+          sha: commitId,
+        });
+      } catch (err) {
+        if ((err as GitLabForgeError).status !== 401) throw err;
+        // GitLab answers 401 for "already approved" too (and the 401 invalidated the token
+        // provider, which re-reads the token next time): go on only if the viewer approves.
+        const [me, approvals] = await Promise.all([
+          this.viewerLogin(),
+          this.request<RawApprovals>(
+            `reading the approvals of merge request ${n}`,
+            'GET',
+            `${path}/approvals`,
+          ),
+        ]);
+        if (!approverNames(approvals).has(me)) throw err;
+      }
+    } else {
+      try {
+        await this.request(
+          `withdrawing approval of merge request ${n}`,
+          'POST',
+          `${path}/unapprove`,
+        );
+      } catch (err) {
+        if ((err as GitLabForgeError).status !== 404) throw err;
+      }
+    }
+    const note = await this.request<{ id: number }>(
+      `posting a review on merge request ${n}`,
+      'POST',
+      `${path}/notes`,
+      { body: `${reviewHeader(event, commitId)}\n${input.body}` },
+    );
+    return { id: note.id };
+  }
+
+  /** The viewer's newest review note whose body's last line is `marker`; never a synthetic one. */
+  async findReviewByMarker(number: number, marker: string): Promise<{ id: number } | null> {
+    mrIid(number);
+    const me = await this.viewerLogin();
+    const reviews = await this.listReviews(number);
+    const hits = reviews.filter(
+      (r) => r.author === me && r.id !== 0 && r.body.trimEnd().split('\n').pop() === marker,
+    );
+    const hit = hits.at(-1);
+    return hit ? { id: hit.id } : null;
+  }
+
   // --- Blocked-by: a no-op and a refusal -----------------------------------------------------
 
   /** GitLab Free has no "blocked by" links: none, nothing unreadable, and no request. */
@@ -822,18 +974,6 @@ export class GitLabForge implements Forge {
   }
   async getBranchRules(_branch: string): Promise<BranchRulesRead> {
     throw new GitLabUnsupportedError('getBranchRules');
-  }
-  async listReviews(_number: number): Promise<ForgeReview[]> {
-    throw new GitLabUnsupportedError('listReviews');
-  }
-  async createReview(
-    _number: number,
-    _input: { event: 'APPROVE' | 'REQUEST_CHANGES'; body: string; commitId: string },
-  ): Promise<{ id: number }> {
-    throw new GitLabUnsupportedError('createReview');
-  }
-  async findReviewByMarker(_number: number, _marker: string): Promise<{ id: number } | null> {
-    throw new GitLabUnsupportedError('findReviewByMarker');
   }
   async merge(
     _number: number,
@@ -896,4 +1036,32 @@ function newer(a: RawNote, b: RawNote): boolean {
   const tb = Date.parse(b.created_at ?? '');
   if (Number.isFinite(ta) && Number.isFinite(tb) && ta !== tb) return ta > tb;
   return a.id > b.id;
+}
+
+const reviewHeader = (event: 'APPROVE' | 'REQUEST_CHANGES', commitId: string) =>
+  `<!-- jm-review: ${event} ${commitId} -->`;
+
+/** A note's review header and the body after it, or null when its first line is not a header. */
+function parseReviewNote(
+  body: string,
+): { event: 'APPROVE' | 'REQUEST_CHANGES'; commitId: string; body: string } | null {
+  const nl = body.indexOf('\n');
+  const first = nl === -1 ? body : body.slice(0, nl);
+  const m = REVIEW_HEADER.exec(first);
+  if (!m) return null;
+  return {
+    event: m[1] as 'APPROVE' | 'REQUEST_CHANGES',
+    commitId: m[2] as string,
+    body: nl === -1 ? '' : body.slice(nl + 1),
+  };
+}
+
+/** The usernames in an approvals response's `approved_by`. */
+function approverNames(a: RawApprovals): Set<string> {
+  const names = new Set<string>();
+  for (const e of Array.isArray(a?.approved_by) ? a.approved_by : []) {
+    const u = e?.user?.username;
+    if (typeof u === 'string' && u !== '') names.add(u);
+  }
+  return names;
 }
