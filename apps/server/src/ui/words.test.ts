@@ -9,7 +9,7 @@ import { type Drop, insertDrop, setZoneMode, stampStick, type WorkItem } from '.
 import { type DoctorCheck, SHADOWED_TOKEN_FIX } from '../doctor/checks.js';
 import { GITLAB_UNSUPPORTED } from '../forge/kind.js';
 import { modeCardSummary, refusedCardSummary } from '../mcp/chat-actions.js';
-import { DISCOVER_PATH, INSTALLED_PATH } from '../setup/github-app-installed.js';
+import { applyRefusal, DISCOVER_PATH, INSTALLED_PATH } from '../setup/github-app-installed.js';
 import { type StatusInput, type StatusZone, statusOf } from '../status.js';
 import { ago, world } from '../test/doctorWorld.js';
 import { makeZone } from '../test/fixtures.js';
@@ -18,6 +18,7 @@ import { operatorSession, plus, t0 } from '../test/helpers.js';
 import { githubSection } from './github.js';
 import { codeHtml } from './pages.js';
 import { fixHtml } from './setup.js';
+import { projectWords } from './zone-name.js';
 
 /**
  * What a reader sees of a page: no `<script>`, `<style>`, `<code>` or `<pre>` content, no tags
@@ -552,6 +553,24 @@ describe('every rendered page says project and Home', () => {
     expect(visibleText(`${html}<p>Run <code>jumpmaster ctl zones list</code></p>`)).not.toMatch(
       ZONE_WORD,
     );
+  });
+});
+
+describe('projectWords on refusals', () => {
+  test('a repository or path segment named zone is left alone', () => {
+    expect(projectWords("zone x's history is for octo/zone")).toBe(
+      "project x's history is for octo/zone",
+    );
+  });
+
+  test('a refused discovery change says project', () => {
+    const text = applyRefusal({
+      ok: false,
+      issues: [
+        { path: 'dropZones.1.githubApp', message: 'githubApp applies to GitHub zones only' },
+      ],
+    });
+    expect(text).toBe('githubApp applies to GitHub projects only');
   });
 });
 

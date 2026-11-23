@@ -61,12 +61,12 @@ export function zoneTextNamer(zones: readonly ZoneRef[]): (id: string, repo?: st
  * Validator prose (config issues and warnings, kept as they are for the API, ctl and the log) in
  * the UI's words: "zone" and "zones" read "project" and "projects". Keys such as `dropZones.0.id`
  * and names such as `JM_ZONE_SECRET_…` are left alone (no word boundary around "zone" in them),
- * and so is an id shown as a value: a "zone" joined to a dash or underscore (`drop-zone`), or one
+ * and so is an id shown as a value: a "zone" joined to a dash, underscore or slash (`drop-zone`, `octo/zone`), or one
  * that follows the words that introduce an id ("zone ", "id ", "id: ", "ids ", "not ", "be ",
  * "and "), as in "duplicate zone id: zone".
  */
 export const projectWords = (text: string): string =>
   text.replace(
-    /(?<![\w-]|\b(?:[Zz]ones?|ids?:?|not|be|and) )([Zz])one(s?)(?![\w-])/g,
+    /(?<![\w/-]|\b(?:[Zz]ones?|ids?:?|not|be|and) )([Zz])one(s?)(?![\w/-])/g,
     (_, z: string, s: string) => `${z === 'Z' ? 'P' : 'p'}roject${s}`,
   );

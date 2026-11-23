@@ -360,7 +360,7 @@ config file show here too. From a terminal: `ctl settings set <path>=<json>…`,
 
 Command (a Claude session you run) reaches one zone through Jumpmaster's MCP server at `/mcp`,
 with a token made here. Turn on `mcp.enabled` under Install first (it takes effect at the next
-restart). On **MCP tokens** pick the **Zone**, the **Scope** (`read`, or `write`) and the **Days**
+restart). On **MCP tokens** pick the **Project**, the **Scope** (`read`, or `write`) and the **Days**
 (1 to 90), give it a **Label**, and press **Make a token**: it asks for your passphrase again,
 then shows the token once (the server keeps only its hash). The list shows each token's zone,
 scope, label, dates and last use, never the value; **Revoke** ends it at its next call. A last
