@@ -843,6 +843,55 @@ describe('a CodeQL failure heals with its code-scanning alerts (#652)', () => {
     });
     await pass();
     const drop = activeDropFor(w.db, id);
+    // No annotations on the Actions run (#720): feedback alone.
+    expect(Object.keys(JSON.parse(drop?.inputJson ?? '{}'))).toEqual(['feedback']);
+  });
+});
+
+describe('an Actions failure heals with its failure annotations (#720)', () => {
+  const failing = {
+    path: 'apps/trooper/src/git.test.ts',
+    startLine: 300,
+    level: 'failure',
+    title: 'scrubs the environment',
+    message: "AssertionError: expected '{\"GITHUB_STATE\":…' not to contain 'github.com'",
+  };
+  const exit = { ...failing, message: 'Process completed with exit code 1.' };
+
+  test('the heal drop stores ciAnnotations beside feedback in input_json, raw', async () => {
+    const id = w.prItem(1, 'sha1');
+    approve(id, 'sha1');
+    w.f.state.checks.set('sha1', {
+      state: 'failure',
+      names: ['ci'],
+      failed: [{ name: 'ci', conclusion: 'failure', checkRunId: 78, app: 'github-actions' }],
+    });
+    w.f.state.annotations.set(78, [failing, exit]);
+    await pass();
+    const drop = activeDropFor(w.db, id);
+    expect(drop).toMatchObject({ role: 'heal' });
+    expect(JSON.parse(drop?.inputJson ?? '{}')).toEqual({
+      feedback: {
+        source: 'ci',
+        text: 'CI failed on sha1; reproduce with the gates and fix.\n- ci: failure',
+      },
+      ciAnnotations: [{ check: 'ci', annotations: [failing] }],
+    });
+  });
+
+  test('a read that errors: feedback alone, as before, and no park', async () => {
+    const id = w.prItem(1, 'sha1');
+    approve(id, 'sha1');
+    w.f.state.checks.set('sha1', {
+      state: 'failure',
+      names: ['ci'],
+      failed: [{ name: 'ci', conclusion: 'failure', checkRunId: 78, app: 'github-actions' }],
+    });
+    w.f.state.annotations.set(78, [failing]);
+    w.f.author.failNext('checkAnnotations', { status: 500 });
+    await pass();
+    const drop = activeDropFor(w.db, id);
+    expect(drop).toMatchObject({ role: 'heal' });
     expect(Object.keys(JSON.parse(drop?.inputJson ?? '{}'))).toEqual(['feedback']);
   });
 });

@@ -272,6 +272,8 @@ function enqueue(
             feedback: a.feedback ?? null,
             // A `ci` heal's code-scanning alerts (#652), raw: the payload builder fences them.
             ...(a.codeScanning ? { codeScanning: a.codeScanning } : {}),
+            // Its GitHub Actions failure annotations (#720), raw: fenced by the payload builders.
+            ...(a.ciAnnotations ? { ciAnnotations: a.ciAnnotations } : {}),
           }),
           promptVersion: versions[a.role],
           image: zone.image,
@@ -506,6 +508,8 @@ export async function reconcileZone(
 ): Promise<ReconcileReport> {
   let actions = 0;
   let merges = 0;
+  // A diagnose's CI failures section is redacted with the configured secrets (#720).
+  const crewOpts = { ...opts, secrets };
   if (isKilled(db)) return { actions, merges };
   ensureZoneMode(db, zone.id, zone.mode, now);
   const mode = getZoneMode(db, zone.id, zone.mode);
@@ -643,13 +647,14 @@ export async function reconcileZone(
       const detail = `issue #${pick.issueNumber}`;
       recordObservation(db, zone.id, pick.id, 'would_enqueue:implement', detail, now);
     }
-    await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now, crewImages, opts);
+    await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now, crewImages, crewOpts);
     return { actions, merges };
   }
   if (enqueueNext(db, zone, versions.implement, usageCfg, now, branchUnknown) !== null) actions++;
   // Last, so crew work never takes a place ahead of finishing or implement work.
   if (
-    (await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now, crewImages, opts)) !== null
+    (await enqueueCrew(db, forges, zone, pass, versions, usageCfg, now, crewImages, crewOpts)) !==
+    null
   )
     actions++;
   return { actions, merges };

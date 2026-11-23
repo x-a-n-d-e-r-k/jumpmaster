@@ -274,6 +274,46 @@ export function renderCodeScanning(
   return `## Code scanning alerts (data)\n\n${fence(dropId, 'code-scanning', body)}\n\n${CODE_SCANNING_INSTRUCTION}`;
 }
 
+/** Follows the ci-failures section, outside every fence (#720). */
+export const CI_FAILURES_INSTRUCTION =
+  "These are the failures CI reported. If a test fails only in CI, compare CI's environment with yours (environment variables, tool versions) before changing code.";
+
+/** The most characters of a CI failure annotation's message an agent sees, after redaction. */
+const MAX_CI_MESSAGE = 600;
+
+/** The GitHub Actions failure annotations in a heal's `input_json` (#720), malformed ones dropped. */
+export const ciAnnotationsOf = (raw: unknown): CodeScanning[] => codeScanningOf(raw);
+
+/**
+ * A heal's GitHub Actions failure annotations (#720), one line each, `<check>: <path>:<startLine>
+ * <title>: <message>`, each message cut after redaction, and the whole text redacted again. Not
+ * neutralised or fenced: the caller does both. Empty when there is no annotation.
+ */
+export function ciFailureLines(entries: CodeScanning[], secrets: string[]): string {
+  const lines = entries.flatMap((e) =>
+    e.annotations.map((a) => {
+      const message = [...redact(oneLine(a.message), secrets)].slice(0, MAX_CI_MESSAGE).join('');
+      return oneLine(`${e.check}: ${a.path}:${a.startLine} ${a.title}: ${message}`);
+    }),
+  );
+  return redact(lines.join('\n'), secrets);
+}
+
+/**
+ * A heal's GitHub Actions failure annotations (#720), redacted, neutralised and fenced as data as
+ * `renderCodeScanning` does, the fixed instruction after it, outside the fence. Empty when there
+ * is no annotation.
+ */
+export function renderCiFailures(
+  entries: CodeScanning[],
+  dropId: string,
+  secrets: string[],
+): string {
+  const lines = ciFailureLines(entries, secrets);
+  if (lines === '') return '';
+  return `## CI failures (data)\n\n${fence(dropId, 'ci-failures', neutralise(lines))}\n\n${CI_FAILURES_INSTRUCTION}`;
+}
+
 /** How many of the latest author reports a reviewer sees. */
 const MAX_REPORTS = 3;
 
@@ -715,14 +755,15 @@ export function buildPayload(
       const input = JSON.parse(drop.inputJson ?? '{}') as {
         feedback?: Feedback;
         codeScanning?: unknown;
+        ciAnnotations?: unknown;
       };
       if (!input.feedback) throw new Error(`heal drop ${drop.id} has no feedback`);
       const feedback = renderFeedback(input.feedback, drop.id);
-      const alerts = renderCodeScanning(
-        codeScanningOf(input.codeScanning),
-        drop.id,
-        redactionList(secrets),
-      );
+      // Each set of annotations in its own fence (#652, #720).
+      const sections = [
+        renderCodeScanning(codeScanningOf(input.codeScanning), drop.id, redactionList(secrets)),
+        renderCiFailures(ciAnnotationsOf(input.ciAnnotations), drop.id, redactionList(secrets)),
+      ].filter((x) => x !== '');
       return {
         ...common,
         role,
@@ -735,7 +776,7 @@ export function buildPayload(
           redactionList(secrets),
         ),
         credentials: fetchCredentials,
-        feedback: alerts ? `${feedback}\n\n${alerts}` : feedback,
+        feedback: [feedback, ...sections].join('\n\n'),
       };
     }
     case 'resolve':

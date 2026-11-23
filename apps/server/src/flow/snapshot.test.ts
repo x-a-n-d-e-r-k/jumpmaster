@@ -894,9 +894,8 @@ describe('code-scanning alerts for a failed CodeQL check (#652)', () => {
     expect(s.forgeUnavailable).toBeNull();
   });
 
-  test('a failed github-actions run, a status and an app-less check: no annotations call', async () => {
+  test('a status and an app-less check: no annotations call', async () => {
     fail([
-      { name: 'ci', conclusion: 'failure', checkRunId: 78, app: 'github-actions' },
       { name: 'ci/x', conclusion: 'error' },
       { name: 'jobs', conclusion: 'failure', checkRunId: 79 },
     ]);
@@ -926,6 +925,65 @@ describe('code-scanning alerts for a failed CodeQL check (#652)', () => {
     w.f.author.failNext('checkAnnotations', { status: 403 });
     const s = await snapshotOf();
     expect(s.codeScanning).toEqual([{ check: 'CodeQL', annotations: [] }]);
+    expect(s.forgeUnavailable).toBeNull();
+    expect(s.forgeDenied).toBeNull();
+    expect(s.missingSince).toBeNull();
+    expect(['wait', 'park']).not.toContain(decide(s).kind);
+  });
+});
+
+describe('CI failure annotations for a failed GitHub Actions check (#720)', () => {
+  const failing = {
+    path: 'apps/trooper/src/git.test.ts',
+    startLine: 300,
+    level: 'failure',
+    title: 'git.test.ts > scrubs the environment',
+    message: "AssertionError: expected '{\"GITHUB_STATE\":…' not to contain 'github.com'",
+  };
+  const exit = {
+    path: '.github',
+    startLine: 1,
+    level: 'failure',
+    title: '',
+    message: 'Process completed with exit code 1.',
+  };
+  const fail = (failed: ChecksFacts['failed']) =>
+    w.f.state.checks.set('sha1', { state: 'failure', names: failed.map((f) => f.name), failed });
+
+  test('a failed github-actions run: its annotations, less the exit-code line, in ciAnnotations', async () => {
+    fail([{ name: 'ci', conclusion: 'failure', checkRunId: 78, app: 'github-actions' }]);
+    w.f.state.annotations.set(78, [failing, exit]);
+    const s = await snapshotOf();
+    expect(s.ciAnnotations).toEqual([{ check: 'ci', annotations: [failing] }]);
+    expect(s.codeScanning).toEqual([]);
+    expect(s.forgeUnavailable).toBeNull();
+    expect(w.f.author.calls.filter((c) => c.method === 'checkAnnotations')).toHaveLength(1);
+  });
+
+  test('a failed github-advanced-security run: codeScanning, unchanged, and no ciAnnotations', async () => {
+    const alert = { ...failing, title: 'Missing rate limiting', message: 'not rate-limited.' };
+    fail([
+      { name: 'CodeQL', conclusion: 'failure', checkRunId: 77, app: 'github-advanced-security' },
+    ]);
+    w.f.state.annotations.set(77, [alert]);
+    const s = await snapshotOf();
+    expect(s.codeScanning).toEqual([{ check: 'CodeQL', annotations: [alert] }]);
+    expect(s.ciAnnotations).toEqual([]);
+  });
+
+  test('a PAT zone: Actions jobs without a checkRunId are not read', async () => {
+    fail([{ name: 'ci', conclusion: 'failure' }]);
+    const s = await snapshotOf();
+    expect(s.ciAnnotations).toEqual([]);
+    expect(w.f.author.calls.some((c) => c.method === 'checkAnnotations')).toBe(false);
+  });
+
+  test('an annotations read that errors: an empty list, and the snapshot stays available', async () => {
+    fail([{ name: 'ci', conclusion: 'failure', checkRunId: 78, app: 'github-actions' }]);
+    w.f.state.annotations.set(78, [failing]);
+    w.f.author.failNext('checkAnnotations', { status: 500 });
+    const s = await snapshotOf();
+    expect(s.ciAnnotations).toEqual([{ check: 'ci', annotations: [] }]);
     expect(s.forgeUnavailable).toBeNull();
     expect(s.forgeDenied).toBeNull();
     expect(s.missingSince).toBeNull();

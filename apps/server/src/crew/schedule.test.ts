@@ -411,6 +411,52 @@ describe('enqueueCrew', () => {
   });
 });
 
+describe('diagnose CI failures redaction (#720)', () => {
+  test("reconcileZone's configured secrets redact a diagnose's CI failures section", async () => {
+    const secret = 'zone-gate-secret-not-token-shaped';
+    const item = parkedItem();
+    upsertPullRequest(
+      w.db,
+      { workItemId: item, number: 7, headRef: 'agent/issue-1', headSha: 'h1', state: 'open' },
+      t0,
+    );
+    insertDrop(w.db, {
+      id: 'heal-1',
+      dropZoneId: 'main',
+      workItemId: item,
+      role: 'heal',
+      state: 'succeeded',
+      headSha: 'h1',
+      inputJson: JSON.stringify({
+        feedback: { source: 'ci', text: 'CI failed on h1; reproduce with the gates and fix.' },
+        ciAnnotations: [
+          {
+            check: 'ci',
+            annotations: [
+              {
+                path: 'a.test.ts',
+                startLine: 3,
+                level: 'failure',
+                title: 'env',
+                message: `GATE=${secret}`,
+              },
+            ],
+          },
+        ],
+      }),
+      createdAt: t0.toISOString(),
+    });
+    const pass = await zonePass(w.forges, w.zone, 'main');
+    await reconcileZone(w.db, w.forges, w.zone, pass, promptVersions(), usageCfg, [secret], t0);
+    const row = w.db
+      .prepare(`SELECT input_json AS inputJson FROM drops WHERE role = 'diagnose'`)
+      .get() as { inputJson: string };
+    const input = (JSON.parse(row.inputJson) as CrewInputJson).input;
+    expect(input).toContain('a.test.ts:3 env: GATE=[REDACTED]');
+    expect(input).not.toContain(secret);
+  });
+});
+
 describe('triage scheduling (#184)', () => {
   const request = (n = 179, body = 'Two complaints in two sentences.') =>
     recordTriageRequest(

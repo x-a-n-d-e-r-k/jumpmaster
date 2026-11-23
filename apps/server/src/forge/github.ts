@@ -114,6 +114,9 @@ export type CheckAnnotation = {
 /** The app whose check runs are code scanning's (CodeQL default setup, #652). */
 export const CODE_SCANNING_APP = 'github-advanced-security';
 
+/** The app whose check runs are GitHub Actions jobs (#720). */
+export const ACTIONS_APP = 'github-actions';
+
 /** The most annotations `checkAnnotations` returns. */
 export const MAX_CHECK_ANNOTATIONS = 20;
 /**

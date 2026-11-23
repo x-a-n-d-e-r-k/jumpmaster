@@ -36,6 +36,12 @@ export interface Snapshot {
    */
   codeScanning: CodeScanning[];
   /**
+   * The failure annotations of each failed GitHub Actions check run (#720), read only while
+   * `checks.state` is `failure`, less the runner's "Process completed with exit code N." lines;
+   * a check whose read failed has an empty list. [] when none. Never part of the loop break.
+   */
+  ciAnnotations: CodeScanning[];
+  /**
    * The code-scanning key (`codeScanningKey`) of the item's latest succeeded `ci` heal whose
    * input carried code-scanning alerts, counting only heals created at or after the item's latest
    * applied `retry_item` ruling (#653). null when there is none.
@@ -185,6 +191,8 @@ export type Action =
       feedback?: Feedback;
       /** A `ci` heal's code-scanning alerts, when any failed check had them (#652). */
       codeScanning?: CodeScanning[];
+      /** A `ci` heal's GitHub Actions failure annotations, when any failed check had some (#720). */
+      ciAnnotations?: CodeScanning[];
     }
   | { kind: 'post_review'; verdictId: string }
   /** Copy verdict `fromVerdictId` to `headSha` (see `carriable`). */
@@ -456,6 +464,7 @@ export function decide(s: Snapshot): Action {
     const loop = codeScanningLoop(s);
     if (loop) return loop;
     const lines = failed.map((f) => `\n- ${f.name}: ${f.conclusion}`).join('');
+    const ciAnnotations = s.ciAnnotations.filter((c) => c.annotations.length > 0);
     return {
       kind: 'enqueue',
       role: 'heal',
@@ -465,6 +474,7 @@ export function decide(s: Snapshot): Action {
         text: `CI failed on ${head}; reproduce with the gates and fix.${lines}`,
       },
       ...(s.codeScanning.length > 0 ? { codeScanning: s.codeScanning } : {}),
+      ...(ciAnnotations.length > 0 ? { ciAnnotations } : {}),
     };
   }
   // 25: an older approved item waiting on CI reserves the next merge, so main stops moving under
