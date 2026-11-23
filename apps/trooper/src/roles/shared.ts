@@ -17,6 +17,7 @@ import {
 import { buildClaudeArgs, type ParsedLine, parseStreamLine } from '../claude.js';
 import { eventLines } from '../events.js';
 import { scrubEnv } from '../gates.js';
+import { repoTarget } from '../git.js';
 import type { TrooperDeps } from '../main.js';
 import { sweepUid, type TrooperIdentities } from '../privilege.js';
 import { redact } from '../redact.js';
@@ -94,8 +95,7 @@ export async function cloneAndPrepare(
   emitEvent(deps, ctx, 'phase', { phase: 'clone' });
   try {
     await deps.git.cloneRepo({
-      owner: payload.repo.owner,
-      name: payload.repo.name,
+      ...repoTarget(payload.repo),
       token,
       dir,
       mirrorDir: mirrorDirOf(ctx),

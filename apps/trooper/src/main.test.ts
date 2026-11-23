@@ -569,3 +569,36 @@ test('Claude as the agent starts in / and enters its working copy after the uid 
   ]);
   expect(claudeSpawnArgs(['-p'], '/w', null)).toEqual({ cmd: 'claude', argv: ['-p'], cwd: '/w' });
 });
+
+test('an implement drop with a GitLab repo.forge clones it; a clone failure echoing its oauth2 header is redacted (#716)', async () => {
+  // Not token-shaped: only the explicit entries can redact it.
+  const forgeToken = 'plain-gitlab-token-0123456789';
+  const glBasic = Buffer.from(`oauth2:${forgeToken}`).toString('base64');
+  const forge = { kind: 'gitlab' as const, origin: 'https://gitlab.com', projectPath: 'g/sub/p' };
+  const gl: DropPayload = {
+    ...payload,
+    repo: { ...payload.repo, forge },
+    credentials: { ...payload.credentials, forgeToken },
+  };
+  const f = fakeDeps({ claude: [] });
+  let cloned: unknown;
+  f.deps.git.cloneRepo = async (c) => {
+    cloned = c;
+    throw new Error(`fatal: auth failed for AUTHORIZATION: basic ${glBasic} (${forgeToken})`);
+  };
+  const r = await runTrooper(gl, f.deps);
+  expect(cloned).toMatchObject({ owner: 'o', name: 'r', forge, token: forgeToken });
+  expect(r.status).toBe('failed');
+  for (const text of [r.reason ?? '', ...f.lines]) {
+    expect(text).not.toContain(glBasic);
+    expect(text).not.toContain(forgeToken);
+  }
+  expect(r.reason).toContain('[REDACTED]');
+});
+
+test("an implement drop's fresh-branch check asks the GitLab remote (#716)", async () => {
+  const forge = { kind: 'gitlab' as const, origin: 'https://gitlab.com', projectPath: 'g/sub/p' };
+  const f = fakeDeps({ claude: [completeResult], remoteHasBranch: true });
+  await runTrooper({ ...payload, repo: { ...payload.repo, forge } }, f.deps);
+  expect(f.lsRemote?.t).toEqual({ owner: 'o', name: 'r', forge });
+});

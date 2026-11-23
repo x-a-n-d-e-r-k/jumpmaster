@@ -8,6 +8,7 @@ import {
   DropResultSchema,
   EVENT_PREFIX,
   FEATURES_HEADER,
+  ForgeRemoteSchema,
   IMAGE_MIRROR_FEATURE,
   IMPLEMENT_OUTPUT_SCHEMA,
   ImageFetchSchema,
@@ -913,5 +914,98 @@ describe('push protocol', () => {
     expect(PushResultSchema.safeParse({ status: 'nothing', reason: 'empty' }).success).toBe(true);
     expect(PushResultSchema.safeParse({ status: 'nothing' }).success).toBe(false);
     expect(PushResultSchema.safeParse({ status: 'other', reason: 'x' }).success).toBe(false);
+  });
+});
+
+describe('ForgeRemoteSchema (#716)', () => {
+  const forge = { kind: 'gitlab', origin: 'https://gitlab.com', projectPath: 'group/sub/project' };
+
+  test('accepts a gitlab.com origin and a self-managed origin with a port', () => {
+    expect(ForgeRemoteSchema.parse(forge)).toEqual(forge);
+    const selfManaged = { ...forge, origin: 'https://git.example.internal:8443' };
+    expect(ForgeRemoteSchema.parse(selfManaged)).toEqual(selfManaged);
+  });
+
+  test.each([
+    ['an http:// origin', { origin: 'http://gitlab.com' }],
+    ['an origin with a path', { origin: 'https://gitlab.com/group' }],
+    ['an origin with userinfo', { origin: 'https://user:pw@gitlab.com' }],
+    ['an origin with a trailing slash', { origin: 'https://gitlab.com/' }],
+    ['an origin with a query', { origin: 'https://gitlab.com?x=1' }],
+    ['an origin with a fragment', { origin: 'https://gitlab.com#x' }],
+    ['a non-URL origin', { origin: 'gitlab.com' }],
+    ['a bad project path', { projectPath: 'project' }],
+    ['a project path with ..', { projectPath: 'group/../project' }],
+    ['an unknown kind', { kind: 'gitea' }],
+    ['an extra key', { extra: 1 }],
+  ])('rejects %s', (_what, change) => {
+    expect(ForgeRemoteSchema.safeParse({ ...forge, ...change }).success).toBe(false);
+  });
+
+  const grant = {
+    token: 't',
+    owner: 'o',
+    name: 'n',
+    branch: 'agent/issue-1',
+    base: 'main',
+    lease: '',
+    protectedPaths: [],
+    secrets: [],
+  };
+
+  test('a push grant parses unchanged without forge, and parses with it', () => {
+    expect(PushGrantSchema.parse(grant)).toEqual(grant);
+    expect(PushGrantSchema.parse({ ...grant, forge })).toEqual({ ...grant, forge });
+    expect(PushGrantSchema.safeParse({ ...grant, forge: { ...forge, kind: 'x' } }).success).toBe(
+      false,
+    );
+    const { owner: _o, ...noOwner } = grant;
+    expect(PushGrantSchema.safeParse({ ...noOwner, forge }).success).toBe(false);
+  });
+
+  const crewPayload = {
+    protocol: 1,
+    dropId: 'c1',
+    epoch: 1,
+    role: 'refute',
+    repo: { owner: 'octo', name: 'widgets', defaultBranch: 'main' },
+    model: 'claude-opus-5-5',
+    maxTurns: 50,
+    promptVersion: 'v1',
+    prompt: 'Refute.',
+    image: 'jumpmaster-trooper:test',
+    protectedPaths: [] as string[],
+    credentials: { claudeToken: 'c' },
+  };
+  const doctorPayload = {
+    protocol: 1,
+    dropId: 'doc-1',
+    epoch: 1,
+    role: 'doctor',
+    repo: { owner: 'octo', name: 'widgets', defaultBranch: 'main' },
+    model: 'claude-opus-5-5',
+    image: 'jumpmaster-trooper:test',
+    gates: [] as unknown[],
+    credentials: { claudeToken: 'c', readToken: 'r' },
+  };
+
+  test.each([
+    ['implement', validPayload],
+    ['a crew role', crewPayload],
+    ['doctor', doctorPayload],
+  ])('a %s drop payload parses unchanged without forge, and with it', (_what, p) => {
+    const plain = DropPayloadSchema.parse(p);
+    expect(plain.repo).toEqual(p.repo);
+    expect('forge' in plain.repo).toBe(false);
+    const withForge = DropPayloadSchema.parse({ ...p, repo: { ...p.repo, forge } });
+    expect(withForge.repo).toEqual({ ...p.repo, forge });
+    expect(
+      DropPayloadSchema.safeParse({
+        ...p,
+        repo: { ...p.repo, forge: { ...forge, origin: 'http://gitlab.com' } },
+      }).success,
+    ).toBe(false);
+    const { owner: _o, ...noOwner } = p.repo;
+    expect(DropPayloadSchema.safeParse({ ...p, repo: { ...noOwner, forge } }).success).toBe(false);
   });
 });

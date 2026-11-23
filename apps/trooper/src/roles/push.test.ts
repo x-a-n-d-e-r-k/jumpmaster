@@ -11,7 +11,14 @@ import {
 } from '@jumpmaster/protocol';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import type { TrooperIdentities } from '../privilege.js';
-import { type PushDeps, runPush, SURVIVOR_CHECKS, SURVIVOR_POLL_MS, survivors } from './push.js';
+import {
+  grantSecrets,
+  type PushDeps,
+  runPush,
+  SURVIVOR_CHECKS,
+  SURVIVOR_POLL_MS,
+  survivors,
+} from './push.js';
 
 const B = 'agent/issue-1';
 const HEAD = 'a'.repeat(40);
@@ -313,6 +320,52 @@ describe('runPush', () => {
     }
     expect(JSON.stringify(r)).not.toContain(TOKEN);
     expect(r).toMatchObject({ status: 'failed', retryable: true });
+  });
+
+  describe('a GitLab grant (#716)', () => {
+    const GL_BASIC = Buffer.from(`oauth2:${TOKEN}`).toString('base64');
+    const gitlab = grant({
+      forge: { kind: 'gitlab', origin: 'https://gitlab.com', projectPath: 'group/sub/project' },
+    });
+
+    test('a failure echoing the token and its oauth2 header leaves neither in the reason or line', async () => {
+      const h = harness({
+        grant: gitlab,
+        push: async () => ({
+          status: 'failed',
+          reason: `remote said ${TOKEN} and AUTHORIZATION: basic ${GL_BASIC}`,
+          retryable: true,
+        }),
+      });
+      const r = await runPush(payload(), h.deps);
+      expect(r).toMatchObject({ status: 'failed', retryable: true });
+      expect(h.lines.some((l) => l.startsWith(RESULT_PREFIX))).toBe(true);
+      for (const l of [...h.lines, JSON.stringify(r)]) {
+        expect(l).not.toContain(TOKEN);
+        expect(l).not.toContain(GL_BASIC);
+      }
+      expect(h.calls.push?.[0]?.[1]).toEqual(gitlab);
+    });
+
+    test('a thrown push error echoing the oauth2 header is redacted', async () => {
+      const h = harness({
+        grant: gitlab,
+        push: async () => {
+          throw new Error(`boom ${TOKEN} ${GL_BASIC}`);
+        },
+      });
+      const r = await runPush(payload(), h.deps);
+      expect(r).toMatchObject({ status: 'failed', retryable: false });
+      for (const l of [...h.lines, JSON.stringify(r)]) {
+        expect(l).not.toContain(TOKEN);
+        expect(l).not.toContain(GL_BASIC);
+      }
+    });
+
+    test('grantSecrets adds the oauth2 form only for a GitLab grant', () => {
+      expect(grantSecrets(grant())).toEqual(['zone-secret-xyz', TOKEN, BASIC]);
+      expect(grantSecrets(gitlab)).toEqual(['zone-secret-xyz', TOKEN, BASIC, GL_BASIC]);
+    });
   });
 
   test('nothing is reported as nothing', async () => {
