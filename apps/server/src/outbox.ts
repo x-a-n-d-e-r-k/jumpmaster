@@ -22,6 +22,7 @@ import {
   type PullFacts,
   type TokenProvider,
 } from './forge/github.js';
+import { GitLabForge } from './forge/gitlab.js';
 import { type ForgeKind, forgeKind, GITLAB_UNSUPPORTED } from './forge/kind.js';
 import { credentialFingerprint, type Resolved } from './vault/credentials.js';
 import type { AppRole, CredentialRef } from './vault/github-app-entries.js';
@@ -100,7 +101,50 @@ export type PairOptions = {
    * gets a new pair (issue #266); token refs never read them.
    */
   credentials?: { resolved: Resolved; apps: ResolvedApps };
+  /**
+   * A GitLab zone's tokens (its `gitlab-pat` entries, issue #718): the author's, and in two-bot
+   * mode the reviewer's. Absent, a GitLab zone is refused with GITLAB_UNSUPPORTED. Ignored for a
+   * GitHub zone, as the GitHub options are for a GitLab zone.
+   */
+  gitlabTokens?: GitLabTokens;
 };
+
+/** A GitLab zone's tokens, by role. */
+export type GitLabTokens = { author: string; reviewer?: string };
+
+/** Said when a GitLab zone has tokens but no instance. Never the project path. */
+export const GITLAB_NO_BASE_URL = 'a GitLab zone needs gitlab.baseUrl';
+/** Said when a two-bot GitLab zone has no reviewer token. Never a token, URL or project path. */
+export const GITLAB_NO_REVIEWER = 'a GitLab reviewer token is required for a two-bot zone';
+
+/** The PAT the push containers are granted: the author forge itself. */
+const patPusher = (forge: Forge) => async (): Promise<PushForge> => ({
+  forge,
+  release: async () => {},
+});
+
+/**
+ * A GitLab zone's pair, from the tokens passed in (issue #718). App refs and app options are
+ * GitHub's: none is read or called. As in the PAT path, an admin author's merges go to the
+ * reviewer, and the pusher is the author forge.
+ */
+function gitlabPair(
+  zone: { repo: string; authorMayBeAdmin: boolean; identity?: 'two-bot' | 'starter' },
+  baseUrl: string | undefined,
+  tokens: GitLabTokens,
+  requestTimeoutMs: number | undefined,
+): ForgePair {
+  if (!baseUrl) throw new Error(GITLAB_NO_BASE_URL);
+  const forgeOpts = requestTimeoutMs === undefined ? {} : { requestTimeoutMs };
+  if (zone.identity !== 'starter' && !tokens.reviewer) throw new Error(GITLAB_NO_REVIEWER);
+  const author = new GitLabForge(baseUrl, zone.repo, tokens.author, forgeOpts);
+  const pusher = patPusher(author);
+  if (zone.identity === 'starter' || !tokens.reviewer) return { author, reviewer: null, pusher };
+  const reviewer = new GitLabForge(baseUrl, zone.repo, tokens.reviewer, forgeOpts);
+  return zone.authorMayBeAdmin
+    ? { author, reviewer, merger: reviewer, pusher }
+    : { author, reviewer, pusher };
+}
 
 /**
  * The forges for a zone. An admin author must not be the identity that merges, but an app author
@@ -113,24 +157,24 @@ export function pairFor(
     authorMayBeAdmin: boolean;
     identity?: 'two-bot' | 'starter';
     forge?: ForgeKind | undefined;
+    gitlab?: { baseUrl: string } | undefined;
   },
   secrets: { githubAuthorToken: string; githubReviewerToken?: string },
   opts: PairOptions = {},
 ): ForgePair {
-  // Issue #667: until GitLabForge lands, a GitLab zone gets no forge at all, so nothing is sent
-  // to GitHub on its behalf. The message is fixed: never the base URL or the project path.
-  if (forgeKind(zone) === 'gitlab') throw new Error(GITLAB_UNSUPPORTED);
+  // Issue #667: a GitLab zone never gets a GitHub forge, so nothing is sent to GitHub on its
+  // behalf; without its GitLab tokens (issue #718) it gets no forge at all. The messages are
+  // fixed: never a token, the base URL or the project path.
+  if (forgeKind(zone) === 'gitlab') {
+    if (!opts.gitlabTokens) throw new Error(GITLAB_UNSUPPORTED);
+    return gitlabPair(zone, zone.gitlab?.baseUrl, opts.gitlabTokens, opts.requestTimeoutMs);
+  }
   const [owner = '', name = ''] = zone.repo.split('/');
   const forgeOpts =
     opts.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: opts.requestTimeoutMs };
   // Starter has no second identity, so the author merges (an admin author included: see
   // authorMayBeAdmin, and the per-pass Administration probe that guards it). It always uses the
   // author token, whatever the refs say.
-  /** The PAT the push containers are granted: the author forge itself. */
-  const patPusher = (forge: Forge) => async (): Promise<PushForge> => ({
-    forge,
-    release: async () => {},
-  });
   if (zone.identity === 'starter') {
     const author = new GitHubForge(owner, name, secrets.githubAuthorToken, forgeOpts);
     return { author, reviewer: null, pusher: patPusher(author) };
@@ -333,14 +377,35 @@ export function pairOptionsFor(
  * slot). Exported so the PAT-mode key can be pinned (PR 146's guarantee).
  */
 export function pairKey(zone: PairZone, secrets: PairTokens, opts: PairOptions = {}): string {
+  if (forgeKind(zone) === 'gitlab') return gitlabPairKey(zone, secrets, opts);
   return JSON.stringify([
     zone.repo,
     zone.identity ?? 'two-bot',
     zone.authorMayBeAdmin,
     forgeTokenFingerprint(secrets),
     ...refsKey(zone, opts),
-    // A GitHub zone's key is as it was; a GitLab zone's differs from any GitHub one.
-    ...(forgeKind(zone) === 'gitlab' ? [['forge:gitlab']] : []),
+  ]);
+}
+
+/**
+ * A GitLab zone's key (issue #718): a GitHub zone's head, then a marker no GitHub key has, the
+ * zone's instance and a fingerprint over its GitLab tokens, so a rotated token or a zone moved to
+ * another instance gets a new pair. App refs are ignored, as `pairFor` ignores them.
+ */
+function gitlabPairKey(zone: PairZone, secrets: PairTokens, opts: PairOptions): string {
+  const tokens = opts.gitlabTokens;
+  const fingerprint = tokens
+    ? createHash('sha256')
+        .update(JSON.stringify([tokens.author, tokens.reviewer ?? null]))
+        .digest('hex')
+        .slice(0, 16)
+    : null;
+  return JSON.stringify([
+    zone.repo,
+    zone.identity ?? 'two-bot',
+    zone.authorMayBeAdmin,
+    forgeTokenFingerprint(secrets),
+    ['forge:gitlab', zone.gitlab?.baseUrl ?? null, fingerprint],
   ]);
 }
 
