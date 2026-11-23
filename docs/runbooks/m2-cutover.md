@@ -195,7 +195,7 @@ implement drop is queued. Near the usage limit only finishing work and doctor dr
   started while that PR is open; the next ready issue in rank starts instead. Placement paths are
   the section's inline code spans that look like repository paths (they contain `/` or end in a
   file extension); one ending in `/` is a directory and overlaps every file under it. The held
-  issue's reason reads `waiting: overlaps #<pr> on <path>` on the Work page and in the status
+  issue's reason reads `waiting: overlaps #<pr> on <path>` on the project's **Work** tab and in the status
   line, and observe mode's Log shows "Would hold #N (waiting: overlaps #<pr> on <path>)". Each pass stores the open PR's file list
   when GitHub returns it complete; an incomplete or unread list holds nothing back, and an issue
   whose Placement names no path is never held. Neither rule touches work already running or open.

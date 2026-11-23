@@ -61,7 +61,7 @@ Each step names what is measured or asserted. The steps follow the operability s
 
    *Measure:* the time to a doctor with no fail. Record every fail seen, and whether its link was
    followed.
-3. **First issue.** File it from the New issue page (`/zones/<id>/issues/new`) and wait for its pull request to merge. *Measure:* the time
+3. **First issue.** File it from the New issue page (`/projects/<id>/issues/new`) and wait for its pull request to merge. *Measure:* the time
    to merge, which is excluded from hands-on time. **Status question 1** is asked while this step
    waits on CI.
 4. **Change a running zone.** Pause the zone. **Status question 2** is asked here. Then change a

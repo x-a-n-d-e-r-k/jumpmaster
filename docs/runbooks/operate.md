@@ -35,12 +35,13 @@ goals). Adding the same id again is refused until you choose to resume it: the p
 
 ### Edit a zone
 
-The zone page, `/projects/<zone>`, has a section per concern, each with its own **Save**:
+The project's **Setup** tab, `/projects/<zone>/setup`, has a section per concern and one **Save**
+bar at the bottom for every change on the tab:
 
-- **Project**: the ready and retry labels and the open pull requests to take over. The repository
+- **Repository & labels**: the ready and retry labels and the open pull requests to take over. The repository
   can't change: remove the zone and add a new one. Renaming the ready label to one already on many
   issues dispatches them all.
-- **Stack**: the preset (or an image), the gates, verification, services and limits.
+- **Stack & checks**: the preset (or an image), the gates, verification, services and limits.
 - **Egress**: the mode, the allow list, and the hosts observed in the last 14 days
   ([Egress adoption](#egress-adoption)).
 - **Merging**: the accounts (two-bot or starter), CI, the CI deadline, branch rules, the author as
@@ -97,8 +98,7 @@ zone at once and, for zones on GitHub Apps, suspends their app installations.
 
 A paused or observing zone's open briefings are held off Home: they are not listed or counted
 in **Needs you** or the status line, and the zone gets one line instead, `<repo>: paused, N
-briefings held`, linking to the project's page (`/projects/<zone>`; the old
-`/briefings?zone=<zone>` redirects there). The briefings are unchanged, and the project's
+briefings held`, linking to the project's page (`/projects/<zone>`). The briefings are unchanged, and the project's
 Overview still lists them under its own **Needs you**; resuming the zone lists them on Home
 again. The project's **Needs you** can **Dismiss all** of them after a confirmation that states
 the count (`ctl dismiss <zone> <briefing>…` names them). A dismissal records no ruling: whatever the briefing
@@ -147,8 +147,8 @@ you recognise; the drops listed beside each one say where it came from.
 
 `/system` is the System area. Its sub-nav: **Health** (the doctor, with the zones' credential
 problems above the checks), **Sticks**, **Credentials**, **Server** (the install settings, then
-Other machines), **MCP tokens**, **History** and **Advanced**. The old `/doctor`, `/sticks` and
-`/settings/…` paths redirect to their pages here.
+Other machines), **MCP tokens**, **History** and **Advanced**. Bookmarks to the pages that moved here redirect to
+their new paths.
 
 ### Credentials and rotation
 
@@ -249,7 +249,7 @@ step on the apps path).
    confirm** and confirm it with your passphrase
    ([the confirmation page](#guarded-changes-and-the-confirmation-page)). Nothing is recorded
    until you do.
-4. Set up the new repository's rulesets and CODEOWNERS on its GitHub page
+4. Set up the new repository's rulesets and CODEOWNERS in its project's **GitHub** section
    ([Branch rules](install.md#branch-rules), [step 5](install.md#step-5-the-github-page)), then
    run the doctor (`ctl doctor <zone>`) to zero fails.
 
@@ -675,7 +675,7 @@ collaborator invitations accepted and their tokens, and your own Claude token fr
 1. **Claim it.** Open `http://127.0.0.1:7420`, enter the setup code, choose a passphrase.
 2. **Set it up.** In the setup wizard, connect the Claude token and the GitHub tokens, following
    its account recommendation; add the first repository; import the ruleset file and commit the
-   CODEOWNERS text from the GitHub page; create the labels from the doctor; run the doctor until it
+   CODEOWNERS text from the project's **GitHub** section; create the labels from the doctor; run the doctor until it
    shows no fail.
 3. **First issue.** File the first issue from the zone's New issue page (`/projects/<zone>/issues/new`), and wait for its pull request
    to merge.
