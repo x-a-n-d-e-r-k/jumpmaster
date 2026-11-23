@@ -1,7 +1,9 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
 import { describe, expect, test } from 'vitest';
+import { routesOf } from '../app.js';
 import {
   type Briefing,
   briefingAbout,
@@ -15,6 +17,7 @@ import {
   raiseBriefing,
   refuteExhaustedWhy,
 } from '../briefings.js';
+import { createThread } from '../chat/store.js';
 import type { ClaudePlan, DropZoneConfig } from '../config.js';
 import { STARTER_WARNING } from '../config.js';
 import { type CrewIssue, getCrewIssue, insertCrewIssue, setCrewIssue } from '../crew/store.js';
@@ -43,6 +46,7 @@ import {
   OBSERVATION_ACTIONS,
   observationWords,
   page,
+  projectHeader,
   renderBriefing,
   renderDoctor,
   renderDrop,
@@ -2764,5 +2768,347 @@ describe('the Log: observe decisions in words and rulings (#621)', () => {
     );
     expect(html).toContain('<a href="/activity/log?project=jm&amp;kind=rulings">acme/jm</a>');
     expect(html).toContain('<a href="/activity/log?project=b&amp;kind=rulings">acme/b</a>');
+  });
+});
+
+describe('the Ask panel (#626)', () => {
+  const jm: DropZoneConfig = { ...z, id: 'jm', repo: 'octo/jm' };
+  const projectPage = (current: 'overview' | 'goals' = 'overview') =>
+    page(
+      projectHeader({
+        zone: jm,
+        zones: [jm],
+        mode: 'active',
+        openBriefings: 0,
+        current,
+        ...(current === 'goals' ? { ask: { kind: 'goals', zoneId: 'jm', ref: 'jm' } } : {}),
+      }),
+    );
+
+  /** The header Ask button's `data-focus-*` attributes, as the page rendered them. */
+  const askDataset = (html: string): Record<string, string> => {
+    const tag = /<button [^>]*id="ask-open"[^>]*>/.exec(html)?.[0] ?? '';
+    const out: Record<string, string> = {};
+    for (const [, k, v] of tag.matchAll(/data-focus-(kind|zone|ref)="([^"]*)"/g))
+      out[`focus${(k as string)[0]?.toUpperCase()}${(k as string).slice(1)}`] = v as string;
+    return out;
+  };
+
+  test('the page derives the focus: a project page its zone, Goals goals, a briefing its own, others none', () => {
+    expect(askDataset(projectPage())).toEqual({
+      focusKind: 'zone',
+      focusZone: 'jm',
+      focusRef: 'jm',
+    });
+    expect(askDataset(projectPage('goals'))).toEqual({
+      focusKind: 'goals',
+      focusZone: 'jm',
+      focusRef: 'jm',
+    });
+    const b = renderBriefing({ briefing: briefing({ id: 12 }), rulings: [], zones: [z] });
+    expect(askDataset(b)).toEqual({ focusKind: 'briefing', focusZone: 'main', focusRef: '12' });
+    expect(askDataset(page('<h2>Activity</h2>'))).toEqual({});
+    // The panel header's chip names it.
+    expect(projectPage()).toMatch(
+      /<div class="ask-head"><h2>Ask<\/h2><span class="chip">octo\/jm<\/span>/,
+    );
+    expect(projectPage('goals')).toContain('<span class="chip">octo/jm · goals</span>');
+    expect(b).toContain('<span class="chip">Briefing 12</span>');
+    expect(page('<h2>x</h2>')).toContain('<div class="ask-head"><h2>Ask</h2><a id="ask-full"');
+  });
+
+  test('the panel is a labelled, non-modal complementary region; a page without chrome has none', () => {
+    const html = projectPage();
+    expect(html).toContain(
+      '<aside id="ask-panel" class="ask-panel" role="complementary" aria-label="Ask Jumpmaster" aria-modal="false"',
+    );
+    expect(html).toContain('Open in Chat');
+    // Outside <main>, so the page's landmarks stay as they are.
+    expect(html.indexOf('<aside id="ask-panel"')).toBeGreaterThan(html.indexOf('</main>'));
+    const bare = page('<h2>Log in</h2>', { chrome: false });
+    expect(bare).not.toContain('id="ask-open"');
+    expect(bare).not.toContain('id="ask-panel"');
+    const panel = page('<h2>t</h2>', { panel: true });
+    expect(panel).not.toContain('class="topnav"');
+    expect(panel).not.toContain('id="ask-open"');
+    expect(panel).toContain('<meta name="jm-csrf" content="">');
+    expect(panel).toContain('function jmFetch');
+  });
+
+  class El {
+    hidden = false;
+    textContent = '';
+    href = '';
+    dataset: Record<string, string> = {};
+    attrs: Record<string, string> = {};
+    listeners: Record<string, ((e: unknown) => unknown)[]> = {};
+    static focused: El | null = null;
+    constructor(readonly id: string) {}
+    addEventListener(ev: string, fn: (e: unknown) => unknown) {
+      (this.listeners[ev] ??= []).push(fn);
+    }
+    fire(ev: string, e: unknown = {}) {
+      for (const fn of this.listeners[ev] ?? []) fn(e);
+    }
+    setAttribute(k: string, v: string) {
+      this.attrs[k] = v;
+    }
+    getAttribute(k: string) {
+      return this.attrs[k] ?? null;
+    }
+    focus() {
+      El.focused = this;
+    }
+  }
+
+  type Thread = {
+    id: number;
+    focusKind: string | null;
+    focusZoneId: string | null;
+    focusRef: string | null;
+    createdAt: string;
+  };
+
+  /** The page's Ask panel script in a vm with a fake DOM, `fetch`, `jmFetch` and `sessionStorage`. */
+  function runPanel(
+    html: string,
+    o: { threads?: Thread[]; storage?: 'throws' | Map<string, string>; now?: number } = {},
+  ) {
+    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+      .map((m) => m[1] as string)
+      .find((s) => s.includes("'jm-ask'"));
+    if (!script) throw new Error('no Ask panel script on the page');
+    El.focused = null;
+    const ids = Object.fromEntries(
+      ['ask-open', 'ask-panel', 'ask-frame', 'ask-full', 'ask-out', 'ask-close'].map((id) => [
+        id,
+        new El(id),
+      ]),
+    ) as Record<string, El>;
+    const open = ids['ask-open'] as El;
+    open.dataset = askDataset(html);
+    (ids['ask-panel'] as El).hidden = true;
+    const doc = new El('document');
+    const win = new El('window');
+    const classes = new Set<string>();
+    const gets: string[] = [];
+    const posts: { url: string; body: unknown }[] = [];
+    const store = o.storage === 'throws' ? undefined : (o.storage ?? new Map<string, string>());
+    const sessionStorage = {
+      getItem: (k: string) => {
+        if (!store) throw new Error('SecurityError');
+        return store.get(k) ?? null;
+      },
+      setItem: (k: string, v: string) => {
+        if (!store) throw new Error('SecurityError');
+        store.set(k, v);
+      },
+    };
+    let nextId = 100;
+    const json = (body: unknown, status = 200) => ({
+      ok: status < 300,
+      status,
+      json: async () => body,
+    });
+    const ctx = vm.createContext({
+      document: {
+        getElementById: (id: string) => ids[id] ?? null,
+        addEventListener: (ev: string, fn: (e: unknown) => unknown) => doc.addEventListener(ev, fn),
+        body: {
+          classList: {
+            add: (c: string) => classes.add(c),
+            remove: (c: string) => classes.delete(c),
+          },
+        },
+      },
+      location: { origin: 'http://127.0.0.1:7420' },
+      sessionStorage,
+      Date: { now: () => o.now ?? Date.parse('2026-11-23T12:00:00.000Z'), parse: Date.parse },
+      JSON,
+      fetch: async (url: string) => {
+        gets.push(url);
+        return json({ threads: o.threads ?? [] });
+      },
+      jmFetch: async (url: string, body: unknown) => {
+        posts.push({ url, body });
+        return json({ thread: { id: nextId++ } });
+      },
+    });
+    ctx.window = ctx;
+    ctx.addEventListener = (ev: string, fn: (e: unknown) => unknown) =>
+      win.addEventListener(ev, fn);
+    vm.runInContext(script, ctx);
+    const settle = () => new Promise((r) => setTimeout(r, 0));
+    return { ids, open, doc, win, ctx, gets, posts, store, classes, settle };
+  }
+
+  const recent = (over: Partial<Thread> = {}): Thread => ({
+    id: 7,
+    focusKind: 'zone',
+    focusZoneId: 'jm',
+    focusRef: 'jm',
+    createdAt: '2026-11-23T08:00:00.000Z',
+    ...over,
+  });
+
+  test('on a project page, Ask with no recent thread posts one focused on the zone and shows it', async () => {
+    // Threads that are not this focus's, or older than a day, are not reused.
+    const r = runPanel(projectPage(), {
+      threads: [
+        recent({ id: 1, focusKind: 'goals' }),
+        recent({ id: 2, focusZoneId: 'other', focusRef: 'other' }),
+        recent({ id: 3, createdAt: '2026-11-22T11:00:00.000Z' }),
+        recent({ id: 4, focusKind: null, focusZoneId: null, focusRef: null }),
+      ],
+    });
+    r.open.fire('click');
+    await r.settle();
+    expect(r.posts).toEqual([
+      { url: '/api/chat/threads', body: { focus: { kind: 'zone', zoneId: 'jm', ref: 'jm' } } },
+    ]);
+    const panel = r.ids['ask-panel'] as El;
+    expect(panel.hidden).toBe(false);
+    expect(El.focused).toBe(panel);
+    expect(r.open.attrs['aria-expanded']).toBe('true');
+    expect((r.ids['ask-frame'] as El).attrs.src).toBe('/chat/100?panel=1');
+    expect((r.ids['ask-full'] as El).href).toBe('/chat/100');
+    expect(JSON.parse(r.store?.get('jm-ask') ?? '{}')).toMatchObject({ open: true, thread: 100 });
+  });
+
+  test('Ask with a recent thread of the same focus reuses the newest and posts nothing', async () => {
+    const r = runPanel(projectPage(), {
+      threads: [recent({ id: 7 }), recent({ id: 9, createdAt: '2026-11-23T10:00:00.000Z' })],
+    });
+    r.open.fire('click');
+    await r.settle();
+    expect(r.gets).toEqual(['/api/chat/threads']);
+    expect(r.posts).toEqual([]);
+    expect((r.ids['ask-frame'] as El).attrs.src).toBe('/chat/9?panel=1');
+  });
+
+  test('the next page with the same focus keeps the tab’s thread, opened, without asking the server', async () => {
+    const store = new Map<string, string>();
+    const first = runPanel(projectPage(), { storage: store });
+    first.open.fire('click');
+    await first.settle();
+    expect(first.posts).toHaveLength(1);
+    // Another page of the same project: the panel comes back open on the same thread.
+    const next = runPanel(projectPage(), { storage: store });
+    await next.settle();
+    expect((next.ids['ask-panel'] as El).hidden).toBe(false);
+    expect((next.ids['ask-frame'] as El).attrs.src).toBe('/chat/100?panel=1');
+    expect(next.posts).toEqual([]);
+    expect(next.gets).toEqual([]);
+    // Reopened on load, it leaves the page's focus where it is.
+    expect(El.focused).toBeNull();
+    // A page with another focus gets its own thread.
+    const goals = runPanel(projectPage('goals'), { storage: store });
+    await goals.settle();
+    expect(goals.posts).toEqual([
+      { url: '/api/chat/threads', body: { focus: { kind: 'goals', zoneId: 'jm', ref: 'jm' } } },
+    ]);
+  });
+
+  test('Escape closes the panel and returns focus to the Ask button; so does the frame’s message', async () => {
+    const r = runPanel(projectPage(), { threads: [recent()] });
+    r.open.fire('click');
+    await r.settle();
+    const panel = r.ids['ask-panel'] as El;
+    expect(El.focused).toBe(panel);
+    let prevented = false;
+    r.doc.fire('keydown', { key: 'Escape', preventDefault: () => (prevented = true) });
+    expect(panel.hidden).toBe(true);
+    expect(prevented).toBe(true);
+    expect(El.focused).toBe(r.open);
+    expect(r.open.attrs['aria-expanded']).toBe('false');
+    expect(JSON.parse(r.store?.get('jm-ask') ?? '{}')).toMatchObject({ open: false, thread: 7 });
+    // Escape inside the frame arrives as a message from this origin; another origin's is ignored.
+    r.open.fire('click');
+    await r.settle();
+    r.win.fire('message', { origin: 'http://evil.test', data: { jmAsk: 'close' } });
+    expect(panel.hidden).toBe(false);
+    r.win.fire('message', { origin: 'http://127.0.0.1:7420', data: { jmAsk: 'close' } });
+    expect(panel.hidden).toBe(true);
+    expect(El.focused).toBe(r.open);
+  });
+
+  test('a sessionStorage that throws still opens the panel', async () => {
+    const r = runPanel(projectPage(), { storage: 'throws' });
+    r.open.fire('click');
+    await r.settle();
+    expect((r.ids['ask-panel'] as El).hidden).toBe(false);
+    expect((r.ids['ask-frame'] as El).attrs.src).toBe('/chat/100?panel=1');
+  });
+
+  test('Ask about this opens the panel with its focus, and focus returns to it on close', async () => {
+    const html = page(askButton({ kind: 'briefing', zoneId: 'jm', ref: '12' }, 'Briefing 12'));
+    const r = runPanel(html);
+    const opener = new El('ask-about');
+    await (r.ctx.jmAsk as (f: unknown, from: El) => Promise<void>)(
+      { kind: 'briefing', zoneId: 'jm', ref: '12' },
+      opener,
+    );
+    expect(r.posts).toEqual([
+      { url: '/api/chat/threads', body: { focus: { kind: 'briefing', zoneId: 'jm', ref: '12' } } },
+    ]);
+    (r.ids['ask-close'] as El).fire('click');
+    expect(El.focused).toBe(opener);
+    // The Ask about this script hands the panel the form's focus rather than leaving the page.
+    expect(html).toContain("if(typeof window.jmAsk==='function'){window.jmAsk(focus,");
+  });
+
+  test('an unfocused page reuses its recent unfocused thread', async () => {
+    const r = runPanel(page('<h2>Activity</h2>'), {
+      threads: [
+        recent({ id: 3 }),
+        recent({ id: 5, focusKind: null, focusZoneId: null, focusRef: null }),
+      ],
+    });
+    r.open.fire('click');
+    await r.settle();
+    expect(r.posts).toEqual([]);
+    expect((r.ids['ask-frame'] as El).attrs.src).toBe('/chat/5?panel=1');
+  });
+
+  test('every page with chrome carries exactly one Ask button', async () => {
+    const h = await harness({
+      live: true,
+      dataDir: mkdtempSync(join(tmpdir(), 'jm-ask-')),
+      zone: { protectedPaths: ['.github/**', 'CODEOWNERS', 'GOAL.md'] },
+    });
+    const bid = String(
+      raiseBriefing(
+        h.db,
+        {
+          zoneId: 'main',
+          kind: 'promote',
+          subject: 'issue:1',
+          decision: 'Promote it?',
+          why: 'because',
+          options: [{ id: 'promote', label: 'Promote', effect: 'promote_issue' }],
+          source: 'server',
+        },
+        h.now(),
+      ),
+    );
+    const concrete = (pattern: string) =>
+      pattern
+        .replace(
+          /:[A-Za-z]+/g,
+          pattern.startsWith('/briefings/') ? bid : pattern.startsWith('/projects/') ? 'main' : '1',
+        )
+        .replace(/\*$/, '');
+    createThread(h.db, { title: 'a thread' }, h.now());
+    const checked = new Set<string>();
+    for (const r of routesOf(h.app).filter((x) => x.method === 'GET')) {
+      const url = concrete(r.url);
+      const res = await h.view(url);
+      if (res.statusCode !== 200 || !res.body.includes('class="topnav"')) continue;
+      checked.add(r.url);
+      expect(res.body.match(/id="ask-open"/g), url).toHaveLength(1);
+      expect(res.body.match(/<aside id="ask-panel"/g), url).toHaveLength(1);
+    }
+    for (const p of ['/', '/chat', '/chat/:id', '/projects/:id', '/briefings/:id', '/system'])
+      expect(checked, p).toContain(p);
   });
 });

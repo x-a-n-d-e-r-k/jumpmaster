@@ -238,4 +238,19 @@ details.sticks[open]>summary{margin-bottom:.75rem}
 .t-cut{font-size:.75rem;color:var(--state-warning-base,#b45309)}
 details.raw-events>summary{cursor:pointer;font-weight:500;margin:0 0 .75rem}`;
 
-export const STYLE = TOKENS + BASE + SHELL + FLOOR;
+/** The Ask panel (#626): beside the page on a desktop, the whole screen under 640px. */
+const ASK = `
+.ask-open{min-height:2rem}
+.ask-panel{position:fixed;top:0;right:0;bottom:0;z-index:3;width:420px;max-width:100%;display:flex;flex-direction:column;background:var(--bg-white-0);border-left:1px solid var(--stroke-soft-200);box-shadow:var(--shadow-md)}
+.ask-panel:focus{outline:none}
+.ask-head{display:flex;align-items:center;gap:.5rem;padding:.5rem 1rem;min-height:3.5rem;border-bottom:1px solid var(--stroke-soft-200)}
+.ask-head h2{margin:0;font-size:1rem;line-height:1.5rem}
+.ask-head .chip{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.ask-head a{margin-left:auto;white-space:nowrap}
+#ask-out:empty{display:none}#ask-out{margin:.5rem 1rem}
+.ask-panel iframe{flex:1;width:100%;border:0;background:var(--bg-weak-50)}
+@media (min-width:641px){body.ask-on{padding-right:420px}}
+@media (max-width:640px){.ask-panel{left:0;width:100%;border-left:0}}
+body.in-panel main{padding:0 1rem 0}body.in-panel main>h2:first-child{margin-top:1rem;font-size:1.125rem;line-height:1.5rem}`;
+
+export const STYLE = TOKENS + BASE + SHELL + FLOOR + ASK;

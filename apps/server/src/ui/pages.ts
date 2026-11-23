@@ -513,18 +513,21 @@ function briefingRefs(
 }
 
 /**
- * The script behind every Ask about this button: it opens a thread focused on the button's object
- * (`POST /api/chat/threads {focus}`) and goes to it. It binds each form once, so a page may carry it
- * more than once.
+ * The script behind every Ask about this button: it opens the Ask panel focused on the button's
+ * object (`jmAsk`, the panel script's). A page without the panel opens a thread focused on it
+ * (`POST /api/chat/threads {focus}`) and goes to it. It binds each form once, so a page may carry
+ * it more than once.
  */
-const ASK_SCRIPT = `<script>for(const f of document.querySelectorAll('form.ask')){if(f.dataset.bound)continue;f.dataset.bound='1';f.addEventListener('submit',async(e)=>{e.preventDefault();const r=await jmFetch('/api/chat/threads',{focus:{kind:f.dataset.focusKind,zoneId:f.dataset.focusZone,ref:f.dataset.focusRef}});if(r.ok){const b=await r.json();location.href='/chat/'+encodeURIComponent(b.thread.id);}else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});}</script>`;
+const ASK_SCRIPT = `<script>for(const f of document.querySelectorAll('form.ask')){if(f.dataset.bound)continue;f.dataset.bound='1';f.addEventListener('submit',async(e)=>{e.preventDefault();const focus={kind:f.dataset.focusKind,zoneId:f.dataset.focusZone,ref:f.dataset.focusRef};if(typeof window.jmAsk==='function'){window.jmAsk(focus,f.querySelector('button'));return;}const r=await jmFetch('/api/chat/threads',{focus});if(r.ok){const b=await r.json();location.href='/chat/'+encodeURIComponent(b.thread.id);}else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});}</script>`;
 
 /**
- * Ask about this (#103): a form that opens a chat thread focused on a zone, its goals or a briefing,
- * then goes to `/chat/<id>`. The focus rides in escaped `data-focus-*` attributes.
+ * Ask about this (#103): a form that opens the Ask panel (#626) focused on a zone, its goals or a
+ * briefing. The focus rides in escaped `data-focus-*` attributes; `chip`, the focus as the panel
+ * header's chip shows it (escaped HTML), in an inert template the page shell moves there.
  */
-export function askButton(focus: Focus): string {
-  return `<form class="ask" data-focus-kind="${escapeHtml(focus.kind)}" data-focus-zone="${escapeHtml(focus.zoneId)}" data-focus-ref="${escapeHtml(focus.ref)}"><button>Ask about this</button></form>${ASK_SCRIPT}`;
+export function askButton(focus: Focus, chip?: string): string {
+  const label = chip === undefined ? '' : `<template class="ask-chip">${chip}</template>`;
+  return `<form class="ask" data-focus-kind="${escapeHtml(focus.kind)}" data-focus-zone="${escapeHtml(focus.zoneId)}" data-focus-ref="${escapeHtml(focus.ref)}">${label}<button>Ask about this</button></form>${ASK_SCRIPT}`;
 }
 
 /** The tabs of a project's pages (#616), in the order the tab bar shows them. */
@@ -568,12 +571,13 @@ export function projectHeader(p: {
   const { zone, zones, mode } = p;
   const id = zone.id;
   const [label, next] = mode === 'active' ? ['Pause', 'paused'] : ['Resume', 'active'];
+  const ask = p.ask ?? { kind: 'zone', zoneId: id, ref: id };
   const control = `<button type="button" class="project-mode" data-zone="${escapeHtml(id)}" data-name="${escapeHtml(zoneNameText(zone, zones))}" data-mode="${next}">${label}</button>`;
   return (
     `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${escapeHtml(githubSetupHref(id))}">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${escapeHtml(p.openBriefings)} open)</a></p>` +
     `<header class="project-header"><h2>${zoneName(zone, zones)} ${badge(mode)}</h2>` +
     `<p class="project-mode-label">${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>` +
-    `<div class="project-actions">${askButton(p.ask ?? { kind: 'zone', zoneId: id, ref: id })} ${control} <a href="${escapeHtml(projectHref(id, 'issues/new'))}">New issue</a> <span id="project-mode-out" role="status"></span></div>` +
+    `<div class="project-actions">${askButton(ask, ask.kind === 'goals' ? `${zoneName(zone, zones)} · goals` : zoneName(zone, zones))} ${control} <a href="${escapeHtml(projectHref(id, 'issues/new'))}">New issue</a> <span id="project-mode-out" role="status"></span></div>` +
     `${PROJECT_MODE_SCRIPT}</header>${projectTabs(zone, p.current)}`
   );
 }
@@ -617,7 +621,10 @@ export function renderBriefing(s: {
     .join('');
   return page(
     `<p><a href="/#waiting-on-you">Needs you</a>${s.zones.some((z) => z.id === b.zoneId) ? ` · <a href="${escapeHtml(zoneBriefingsHref(b.zoneId))}">Briefings of ${name(b.zoneId)}</a>` : ''}</p><h2>Briefing ${escapeHtml(b.id)}</h2>` +
-      askButton({ kind: 'briefing', zoneId: b.zoneId, ref: String(b.id) }) +
+      askButton(
+        { kind: 'briefing', zoneId: b.zoneId, ref: String(b.id) },
+        `Briefing ${escapeHtml(b.id)}`,
+      ) +
       briefingBlock(b, ctx, 'h3') +
       (b.state === 'open' ? RULE_SCRIPT : '') +
       `<h3 id="rulings">Rulings</h3>` +
@@ -947,22 +954,99 @@ export const LIVE_SCRIPT = `<script>/*${LIVE_MARKER}*/(()=>{let base=null,pendin
 /** A value that changes on every render while the page's state does not: no reload for it. */
 const volatile = (html: string): string => `<span data-live-ignore>${html}</span>`;
 
+/** A page's first Ask about this form: its focus, as the form escaped it, and its chip. */
+const ASK_FORM =
+  /<form class="ask" data-focus-kind="(zone|goals|briefing)" data-focus-zone="([^"]*)" data-focus-ref="([^"]*)">(?:<template class="ask-chip">(.*?)<\/template>)?/;
+
+/** A page's focus: the escaped values and the chip HTML. */
+type PageFocus = Focus & { chip: string | undefined };
+
+/**
+ * The focus of what a page shows (#626): a project page's (its zone, or Goals' goals) or a
+ * briefing's, as its Ask about this form names it; any other page has none. Values stay escaped.
+ */
+export function pageFocus(body: string): PageFocus | undefined {
+  const m = ASK_FORM.exec(body);
+  if (!m) return undefined;
+  return { kind: m[1] as Focus['kind'], zoneId: m[2] as string, ref: m[3] as string, chip: m[4] };
+}
+
+/** The panel header's chip for a page's focus. */
+const askChip = (f: PageFocus | undefined): string =>
+  f === undefined ? '' : `<span class="chip">${f.chip ?? f.kind}</span>`;
+
+/** The header's Ask button: it carries the page's focus (already escaped) for the panel script. */
+const askOpen = (f: PageFocus | undefined): string =>
+  `<button type="button" id="ask-open" class="ask-open" aria-controls="ask-panel" aria-expanded="false"${f ? ` data-focus-kind="${f.kind}" data-focus-zone="${f.zoneId}" data-focus-ref="${f.ref}"` : ''}>Ask</button>`;
+
+/**
+ * The Ask panel (#626): a complementary region beside the page, not a modal, holding the thread
+ * view (`/chat/<id>?panel=1`) in a same-origin frame.
+ */
+const askPanel = (f: PageFocus | undefined): string =>
+  `<aside id="ask-panel" class="ask-panel" role="complementary" aria-label="Ask Jumpmaster" aria-modal="false" tabindex="-1" hidden>` +
+  `<div class="ask-head"><h2>Ask</h2>${askChip(f)}<a id="ask-full" href="/chat">Open in Chat</a><button type="button" id="ask-close">Close</button></div>` +
+  `<p id="ask-out" role="status"></p><iframe id="ask-frame" title="Ask Jumpmaster thread"></iframe></aside>`;
+
+/** How long a focused thread stays the one the panel reopens: a day. */
+export const ASK_REUSE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The Ask panel's script (#626). Ask opens the panel: the tab's own thread for the same focus
+ * (`sessionStorage`), else the newest thread with that focus made in the last day, else a new one
+ * (`POST /api/chat/threads`). The open state and the thread persist per tab, so the next page with
+ * the same focus shows the same thread. Escape (here or, by message, in the frame) and Close shut
+ * it and give focus back to whatever opened it. `jmAsk(focus, opener)` is what Ask about this
+ * calls. A `sessionStorage` that throws only loses the persistence.
+ */
+export const ASK_PANEL_SCRIPT = `<script>(()=>{const b=document.getElementById('ask-open');const p=document.getElementById('ask-panel');if(!b||!p)return;const fr=document.getElementById('ask-frame');const full=document.getElementById('ask-full');const out=document.getElementById('ask-out');const K='jm-ask';const DAY=${ASK_REUSE_MS};
+const load=()=>{try{const v=JSON.parse(sessionStorage.getItem(K)||'null');return v&&typeof v==='object'?v:{};}catch{return {};}};
+const save=(v)=>{try{sessionStorage.setItem(K,JSON.stringify(v));}catch{}};
+const pf=()=>b.dataset.focusKind?{kind:b.dataset.focusKind,zoneId:b.dataset.focusZone,ref:b.dataset.focusRef}:null;
+const key=(f)=>f?[f.kind,f.zoneId,f.ref].join('\\n'):'';
+let back=null;let gen=0;
+const same=(t,f)=>f?t.focusKind===f.kind&&t.focusZoneId===f.zoneId&&t.focusRef===f.ref:t.focusKind===null;
+const find=async(f)=>{const r=await fetch('/api/chat/threads',{credentials:'same-origin',headers:{accept:'application/json'}});if(!r.ok)return null;const j=await r.json();const now=Date.now();let best=null;for(const t of (j&&j.threads)||[]){const at=Date.parse(t.createdAt);if(!same(t,f)||!(now-at<DAY))continue;if(!best||at>Date.parse(best.createdAt))best=t;}return best;};
+const create=async(f)=>{const r=await jmFetch('/api/chat/threads',f?{focus:f}:{});const j=await r.json().catch(()=>({}));if(!r.ok||!j.thread)throw new Error(r.status+' '+(j.error??''));return j.thread;};
+const show=(id)=>{const u='/chat/'+encodeURIComponent(id);full.href=u;const src=u+'?panel=1';if(fr.getAttribute('src')!==src)fr.setAttribute('src',src);};
+const open=async(f,from,move)=>{if(f===undefined)f=pf();const n=++gen;back=from||b;p.hidden=false;b.setAttribute('aria-expanded','true');document.body.classList.add('ask-on');if(move!==false&&p.focus)p.focus();out.textContent='';
+const s=load();let id=s.focus===key(f)&&s.thread?s.thread:null;save({open:true,focus:key(f),thread:id});
+if(!id){try{const t=(await find(f))||(await create(f));id=t.id;}catch(x){if(n===gen)out.textContent='Could not open a thread: '+((x&&x.message)||x);return;}}
+if(n!==gen)return;show(id);save({open:true,focus:key(f),thread:id});};
+const close=()=>{if(p.hidden)return;gen++;p.hidden=true;b.setAttribute('aria-expanded','false');document.body.classList.remove('ask-on');save({...load(),open:false});const t=back||b;back=null;if(t&&t.focus)t.focus();};
+b.addEventListener('click',()=>{if(p.hidden)open(pf(),b);else close();});
+document.getElementById('ask-close').addEventListener('click',close);
+document.addEventListener('keydown',(e)=>{if(e.key==='Escape'&&!p.hidden){e.preventDefault();close();}});
+window.addEventListener('message',(e)=>{if(e.origin===location.origin&&e.data&&e.data.jmAsk==='close')close();});
+window.jmAsk=(f,from)=>open(f||null,from);
+if(load().open)open(pf(),b,false);})();</script>`;
+
 /**
  * The page shell. With `chrome` (the default, for pages behind the login) it carries an empty
- * `jm-csrf` meta for the guard to fill, `jmFetch`, the navigation and the logout button; the login
- * and setup pages go without.
+ * `jm-csrf` meta for the guard to fill, `jmFetch`, the navigation, the Ask button and panel (#626,
+ * focused on the page's Ask about this object, if any) and the logout button; the login and setup
+ * pages go without. `panel` is a page drawn inside the Ask panel: `jmFetch` and the CSRF meta but
+ * no top bar, its links leaving the frame.
  */
 export const page = (
   body: string,
-  opts: { chrome?: boolean; title?: string; live?: boolean } = {},
+  opts: { chrome?: boolean; title?: string; live?: boolean; panel?: boolean } = {},
 ): string => {
-  const chrome = opts.chrome ?? true;
+  const panel = opts.panel ?? false;
+  const chrome = !panel && (opts.chrome ?? true);
   const title = opts.title ? `Jumpmaster: ${escapeHtml(opts.title)}` : 'Jumpmaster';
-  const nav = chrome ? `<nav class="topnav" aria-label="Main">${NAV}</nav>${LOGOUT}` : '';
+  const focus = chrome ? pageFocus(body) : undefined;
+  const nav = chrome
+    ? `<nav class="topnav" aria-label="Main">${NAV}</nav>${askOpen(focus)}${LOGOUT}`
+    : '';
+  const scripted = chrome || panel;
+  const top = panel
+    ? ''
+    : `<a class="skip" href="#main">Skip to content</a><header class="topbar"><div class="topbar-in"><h1 class="brand">${MARK}Jumpmaster</h1>${nav}</div></header>`;
   return (
-    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${chrome ? `<meta name="jm-csrf" content="">` : ''}<title>${title}</title>${FAVICON_LINK}<style>${STYLE}</style>${chrome ? JM_FETCH : ''}</head>` +
-    `<body><a class="skip" href="#main">Skip to content</a><header class="topbar"><div class="topbar-in"><h1 class="brand">${MARK}Jumpmaster</h1>${nav}</div></header>` +
-    `<main id="main">${body}</main>${chrome ? NAV_SCRIPT : ''}${opts.live ? LIVE_SCRIPT : ''}</body></html>`
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${scripted ? `<meta name="jm-csrf" content="">` : ''}<title>${title}</title>${panel ? '<base target="_top">' : ''}${FAVICON_LINK}<style>${STYLE}</style>${scripted ? JM_FETCH : ''}</head>` +
+    `<body${panel ? ' class="in-panel"' : ''}>${top}` +
+    `<main id="main">${body}</main>${chrome ? `${askPanel(focus)}${NAV_SCRIPT}${ASK_PANEL_SCRIPT}` : ''}${opts.live ? LIVE_SCRIPT : ''}</body></html>`
   );
 };
 

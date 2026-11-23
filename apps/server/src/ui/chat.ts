@@ -292,6 +292,12 @@ function logHtml(
   return out.join('');
 }
 
+/**
+ * In the Ask panel (#626): Escape, unless the confirm dialog took it, asks the page around the
+ * frame to close the panel.
+ */
+export const PANEL_ESCAPE_SCRIPT = `<script>document.addEventListener('keydown',(e)=>{if(e.key!=='Escape'||e.defaultPrevented||window.parent===window)return;const d=document.getElementById('confirm-dialog');if(d&&d.open)return;window.parent.postMessage({jmAsk:'close'},location.origin);});</script>`;
+
 /** The dialog a pending card's Review and confirm opens; its content is only the server's frame. */
 const CONFIRM_DIALOG =
   '<dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title"><h2 id="confirm-title">Confirm a guarded change</h2><div class="confirm-body"></div></dialog>';
@@ -300,13 +306,19 @@ const CONFIRM_DIALOG =
  * The `/chat/:id` page: the thread's stored messages and cards, the send box and the live stream.
  * `pendingLive` says whether a pending card's change still waits for the viewing session
  * (`store.confirmations.pending`); one that does not, or whose time ran out at `now`, renders as
- * Expired. The stored card is left as it is.
+ * Expired. The stored card is left as it is. `panel` draws it for the Ask panel (#626): the same
+ * thread view without the page chrome.
  */
 export function renderThread(
   t: ChatThread,
   messages: ChatMessage[],
   cards: ChatCard[] = [],
-  o: { zones?: readonly ZoneRef[]; pendingLive?: (pendingId: string) => boolean; now?: Date } = {},
+  o: {
+    zones?: readonly ZoneRef[];
+    pendingLive?: (pendingId: string) => boolean;
+    now?: Date;
+    panel?: boolean;
+  } = {},
 ): string {
   const cardHtml = (c: ChatCard): string => {
     const id = cardPendingId(c);
@@ -316,11 +328,12 @@ export function renderThread(
   const last = messages.reduce((n, m) => Math.max(n, m.seq), 0);
   const busy = messages.some((m) => m.state === 'queued' || m.state === 'running');
   return page(
-    `${CHAT_STYLE}${CHIP_STYLE}<p><a href="/chat">All threads</a></p><h2>${escapeHtml(t.title)}${focusChip(t, o.zones ?? [])}</h2>` +
+    `${CHAT_STYLE}${CHIP_STYLE}${o.panel ? '' : '<p><a href="/chat">All threads</a></p>'}<h2>${escapeHtml(t.title)}${focusChip(t, o.zones ?? [])}</h2>` +
       `<div id="chat" data-thread="${t.id}" data-last="${last}" data-busy="${busy ? '1' : '0'}">` +
       `<div id="messages" class="chat-log" aria-live="polite">${logHtml(messages, cards, cardHtml, busy)}</div>` +
       `<form id="send" class="chat-send"><textarea name="text" maxlength="20000" required placeholder="Ask Jumpmaster" aria-describedby="send-hint"></textarea><small id="send-hint" class="hint">Enter to send, Shift+Enter for a new line</small><button class="primary">Send</button></form>${CONFIRM_DIALOG}</div>` +
-      THREAD_SCRIPT,
-    { title: t.title },
+      THREAD_SCRIPT +
+      (o.panel ? PANEL_ESCAPE_SCRIPT : ''),
+    { title: t.title, ...(o.panel ? { panel: true } : {}) },
   );
 }
