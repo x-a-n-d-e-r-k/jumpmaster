@@ -1218,3 +1218,277 @@ describe('merge requests', () => {
     expect(JSON.stringify(gl.requests)).not.toContain(DEVELOPER);
   });
 });
+
+describe('pipelines and jobs', () => {
+  const P = `/projects/${PROJECT.id}`;
+  const ids = (list: { id: number }[]) => list.map((x) => x.id);
+  const names = (list: { name: string }[]) => list.map((x) => x.name);
+
+  function twoShas(gl: FakeGitLab) {
+    const a = gl.seedCommit({ branch: 'main', files: { a: '1' }, message: 'a' });
+    const b = gl.seedCommit({ branch: 'feature', parent: a, files: { a: '2' }, message: 'b' });
+    return { a, b };
+  }
+
+  test('GET pipelines?sha= lists only that SHA, newest first with order_by=id&sort=desc', async () => {
+    const { gl, call } = setup();
+    const { a, b } = twoShas(gl);
+    const first = gl.seedPipeline({ sha: a, ref: 'main', status: 'failed' }).pipeline;
+    const other = gl.seedPipeline({ sha: b, ref: 'feature' }).pipeline;
+    const second = gl.seedPipeline({ sha: a, ref: 'main', status: 'success' }).pipeline;
+
+    const r = await call('GET', `${P}/pipelines?sha=${a}&order_by=id&sort=desc`);
+    expect(r.status).toBe(200);
+    expect(ids(r.body)).toEqual([second.id, first.id]);
+    expect(r.body[0]).toMatchObject({
+      id: second.id,
+      iid: 3,
+      sha: a,
+      ref: 'main',
+      status: 'success',
+      source: 'push',
+      web_url: `${GITLAB}/${PROJECT.path}/-/pipelines/${second.id}`,
+    });
+    for (const p of r.body)
+      for (const k of ['created_at', 'updated_at']) expect(p[k]).toEqual(expect.any(String));
+    const asc = await call('GET', `${P}/pipelines?sha=${a}&order_by=id&sort=asc`);
+    expect(ids(asc.body)).toEqual([first.id, second.id]);
+    expect(ids((await call('GET', `${P}/pipelines?sha=${b}`)).body)).toEqual([other.id]);
+    expect(ids((await call('GET', `${P}/pipelines?ref=main&status=failed`)).body)).toEqual([
+      first.id,
+    ]);
+    expect(ids((await call('GET', `${P}/pipelines`)).body)).toEqual([
+      second.id,
+      other.id,
+      first.id,
+    ]);
+    const p1 = await call('GET', `${P}/pipelines?per_page=2&page=1`);
+    expect(p1.body).toHaveLength(2);
+    expect(p1.headers.get('x-next-page')).toBe('2');
+    expect((await call('GET', `${P}/pipelines/${other.id}`)).body).toMatchObject({
+      id: other.id,
+      sha: b,
+    });
+    expect((await call('GET', `${P}/pipelines/999999`)).status).toBe(404);
+  });
+
+  test('pipeline jobs filter by scope[] and page over more than one page', async () => {
+    const { gl, call } = setup();
+    const { a } = twoShas(gl);
+    const { pipeline, jobs } = gl.seedPipeline({
+      sha: a,
+      jobs: [
+        { name: 'lint', stage: 'test', status: 'success' },
+        { name: 'unit', stage: 'test', status: 'failed' },
+        { name: 'e2e', stage: 'test', status: 'failed', allowFailure: true },
+        { name: 'build', stage: 'build', status: 'canceled' },
+        { name: 'deploy', stage: 'deploy', status: 'manual' },
+      ],
+    });
+    expect(pipeline.status).toBe('failed');
+    const all = await call('GET', `${P}/pipelines/${pipeline.id}/jobs`);
+    expect(names(all.body)).toEqual(['lint', 'unit', 'e2e', 'build', 'deploy']);
+    expect(all.body[1]).toMatchObject({
+      id: jobs[1]?.id,
+      name: 'unit',
+      stage: 'test',
+      status: 'failed',
+      allow_failure: false,
+      web_url: `${GITLAB}/${PROJECT.path}/-/jobs/${jobs[1]?.id}`,
+      pipeline: { id: pipeline.id },
+    });
+    expect(all.body[1].finished_at).toEqual(expect.any(String));
+    expect(all.body[4]).toMatchObject({ started_at: null, finished_at: null });
+    expect(all.body[2].allow_failure).toBe(true);
+
+    const failed = await call('GET', `${P}/pipelines/${pipeline.id}/jobs?scope[]=failed`);
+    expect(names(failed.body)).toEqual(['unit', 'e2e']);
+    const two = await call(
+      'GET',
+      `${P}/pipelines/${pipeline.id}/jobs?scope[]=failed&scope[]=canceled`,
+    );
+    expect(names(two.body)).toEqual(['unit', 'e2e', 'build']);
+
+    const p1 = await call('GET', `${P}/pipelines/${pipeline.id}/jobs?per_page=2&page=1`);
+    const p2 = await call('GET', `${P}/pipelines/${pipeline.id}/jobs?per_page=2&page=2`);
+    const p3 = await call('GET', `${P}/pipelines/${pipeline.id}/jobs?per_page=2&page=3`);
+    expect(p1.headers.get('x-total-pages')).toBe('3');
+    expect(p1.headers.get('x-next-page')).toBe('2');
+    expect(p3.headers.get('x-next-page')).toBe('');
+    expect([...p1.body, ...p2.body, ...p3.body]).toEqual(all.body);
+    expect((await call('GET', `${P}/pipelines/999999/jobs`)).status).toBe(404);
+  });
+
+  test('retrying a job adds a pending job of the same name and hides the old one', async () => {
+    const { gl, call } = setup();
+    const { a } = twoShas(gl);
+    const { pipeline, jobs } = gl.seedPipeline({
+      sha: a,
+      jobs: [
+        { name: 'lint', status: 'success' },
+        { name: 'unit', status: 'failed' },
+      ],
+    });
+    const old = jobs[1] as { id: number };
+    const r = await call('POST', `${P}/jobs/${old.id}/retry`);
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({
+      name: 'unit',
+      status: 'pending',
+      started_at: null,
+      finished_at: null,
+      pipeline: { id: pipeline.id },
+    });
+    expect(r.body.id).not.toBe(old.id);
+
+    const list = await call('GET', `${P}/pipelines/${pipeline.id}/jobs`);
+    expect(ids(list.body)).not.toContain(old.id);
+    expect(names(list.body)).toEqual(['lint', 'unit']);
+    const withRetried = await call(
+      'GET',
+      `${P}/pipelines/${pipeline.id}/jobs?include_retried=true`,
+    );
+    expect(ids(withRetried.body)).toContain(old.id);
+    expect(ids(withRetried.body)).toContain(r.body.id);
+    expect((await call('GET', `${P}/pipelines/${pipeline.id}`)).body.status).toBe('pending');
+
+    gl.setJobStatus(r.body.id, 'success');
+    expect((await call('GET', `${P}/pipelines/${pipeline.id}`)).body.status).toBe('success');
+    expect((await call('GET', `${P}/jobs/${r.body.id}`)).body.status).toBe('success');
+    expect((await call('POST', `${P}/jobs/999999/retry`)).status).toBe(404);
+  });
+
+  test('a pipeline retry retries the failed and canceled jobs only', async () => {
+    const { gl, call } = setup();
+    const { a } = twoShas(gl);
+    const { pipeline, jobs } = gl.seedPipeline({
+      sha: a,
+      jobs: [
+        { name: 'lint', status: 'success' },
+        { name: 'unit', status: 'failed' },
+        { name: 'build', status: 'canceled' },
+        { name: 'deploy', status: 'manual' },
+        { name: 'docs', status: 'skipped' },
+      ],
+    });
+    const r = await call('POST', `${P}/pipelines/${pipeline.id}/retry`);
+    expect(r.status).toBe(201);
+    expect(r.body).toMatchObject({ id: pipeline.id, status: 'pending' });
+    const list = (await call('GET', `${P}/pipelines/${pipeline.id}/jobs`)).body;
+    expect(list.map((j: { name: string; status: string }) => `${j.name}:${j.status}`)).toEqual([
+      'lint:success',
+      'deploy:manual',
+      'docs:skipped',
+      'unit:pending',
+      'build:pending',
+    ]);
+    const kept = ids(list);
+    for (const j of [jobs[0], jobs[3], jobs[4]]) expect(kept).toContain(j?.id);
+    for (const j of [jobs[1], jobs[2]]) expect(kept).not.toContain(j?.id);
+    const all = (await call('GET', `${P}/pipelines/${pipeline.id}/jobs?include_retried=true`)).body;
+    expect(all).toHaveLength(7);
+    expect((await call('POST', `${P}/pipelines/999999/retry`)).status).toBe(404);
+  });
+
+  test('a Reporter gets 403 on both retries; retrying a running job gives 403', async () => {
+    const { gl, call } = setup();
+    const { a } = twoShas(gl);
+    const { pipeline, jobs } = gl.seedPipeline({
+      sha: a,
+      jobs: [
+        { name: 'unit', status: 'failed' },
+        { name: 'slow', status: 'running' },
+      ],
+    });
+    const before = (await call('GET', `${P}/pipelines/${pipeline.id}/jobs?include_retried=true`))
+      .body;
+    const failed = jobs[0] as { id: number };
+    const running = jobs[1] as { id: number };
+    expect((await call('POST', `${P}/jobs/${failed.id}/retry`, { token: REPORTER })).status).toBe(
+      403,
+    );
+    expect(
+      (await call('POST', `${P}/pipelines/${pipeline.id}/retry`, { token: REPORTER })).status,
+    ).toBe(403);
+    expect((await call('POST', `${P}/jobs/${running.id}/retry`)).status).toBe(403);
+    const after = (await call('GET', `${P}/pipelines/${pipeline.id}/jobs?include_retried=true`))
+      .body;
+    expect(after).toEqual(before);
+    expect((await call('GET', `${P}/pipelines`, { token: REPORTER })).status).toBe(200);
+  });
+
+  test('commit statuses for a SHA list with their allow_failure', async () => {
+    const { gl, call } = setup();
+    const { a, b } = twoShas(gl);
+    gl.seedCommitStatus({
+      sha: a,
+      name: 'security/scan',
+      status: 'failed',
+      allowFailure: true,
+      targetUrl: 'https://scan.example/1',
+    });
+    gl.seedCommitStatus({ sha: a, name: 'deploy/preview', status: 'success' });
+    gl.seedCommitStatus({ sha: b, name: 'other', status: 'pending' });
+    const r = await call('GET', `${P}/repository/commits/${a}/statuses`);
+    expect(r.status).toBe(200);
+    expect(r.body).toHaveLength(2);
+    expect(r.body[0]).toMatchObject({
+      sha: a,
+      name: 'security/scan',
+      status: 'failed',
+      allow_failure: true,
+      target_url: 'https://scan.example/1',
+    });
+    expect(r.body[1]).toMatchObject({
+      name: 'deploy/preview',
+      status: 'success',
+      allow_failure: false,
+      target_url: null,
+    });
+    // A newer status of the same name replaces the older one unless `all=true`.
+    gl.seedCommitStatus({ sha: a, name: 'deploy/preview', status: 'running' });
+    const latest = (await call('GET', `${P}/repository/commits/${a}/statuses`)).body;
+    expect(latest.map((s: { status: string }) => s.status)).toEqual(['failed', 'running']);
+    expect((await call('GET', `${P}/repository/commits/${a}/statuses?all=true`)).body).toHaveLength(
+      3,
+    );
+    expect(
+      (await call('GET', `${P}/repository/commits/${a}/statuses?name=security/scan`)).body,
+    ).toHaveLength(1);
+    expect((await call('GET', `${P}/repository/commits/${'f'.repeat(40)}/statuses`)).status).toBe(
+      404,
+    );
+  });
+
+  test('requests carry no token; unknown pipeline routes answer 404 and are listed', async () => {
+    const { gl, call } = setup();
+    const { a } = twoShas(gl);
+    const { pipeline, jobs } = gl.seedPipeline({ sha: a, jobs: [{ name: 'u', status: 'failed' }] });
+    await call('GET', `${P}/pipelines?sha=${a}&private_token=${DEVELOPER}`);
+    await call('POST', `${P}/jobs/${jobs[0]?.id}/retry`, { body: { access_token: REPORTER } });
+    expect((await call('POST', `${P}/pipelines/${pipeline.id}/cancel`)).status).toBe(404);
+    expect((await call('GET', `${P}/jobs/${jobs[0]?.id}/trace`)).status).toBe(404);
+    expect(gl.unknown).toEqual([
+      `POST /api/v4${P}/pipelines/${pipeline.id}/cancel`,
+      `GET /api/v4${P}/jobs/${jobs[0]?.id}/trace`,
+    ]);
+    expect(gl.requests).toHaveLength(4);
+    expect(gl.requests[0]?.query).toEqual({ sha: a });
+    const text = JSON.stringify(gl.requests);
+    for (const t of ALL_TOKENS) expect(text).not.toContain(t);
+  });
+
+  test('setPipelineStatus moves a pipeline; seeding an unknown ref throws', async () => {
+    const { gl, call } = setup();
+    const { a } = twoShas(gl);
+    const { pipeline } = gl.seedPipeline({ sha: a, jobs: [{ name: 'u', status: 'running' }] });
+    expect(pipeline.status).toBe('running');
+    gl.setPipelineStatus(pipeline.id, 'canceled');
+    expect((await call('GET', `${P}/pipelines/${pipeline.id}`)).body.status).toBe('canceled');
+    expect(() => gl.seedPipeline({ sha: 'nope' })).toThrow(/unknown/);
+    expect(() => gl.seedCommitStatus({ sha: 'nope', name: 'x', status: 'success' })).toThrow(
+      /unknown/,
+    );
+    expect(() => gl.setJobStatus(1, 'success')).toThrow(/unknown job/);
+  });
+});

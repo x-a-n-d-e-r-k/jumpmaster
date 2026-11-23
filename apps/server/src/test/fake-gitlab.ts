@@ -105,6 +105,64 @@ export type GitLabNote = {
   noteable_iid: number;
 };
 
+export type GitLabPipelineStatus =
+  | 'created'
+  | 'pending'
+  | 'running'
+  | 'success'
+  | 'failed'
+  | 'canceled'
+  | 'skipped'
+  | 'manual';
+export type GitLabPipeline = {
+  id: number;
+  iid: number;
+  project_id: number;
+  sha: string;
+  ref: string;
+  status: GitLabPipelineStatus;
+  source: string;
+  web_url: string;
+  created_at: string;
+  updated_at: string;
+};
+export type GitLabJobStatus = GitLabPipelineStatus;
+export type GitLabJob = {
+  id: number;
+  name: string;
+  stage: string;
+  status: GitLabJobStatus;
+  allow_failure: boolean;
+  ref: string;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  web_url: string;
+  pipeline: {
+    id: number;
+    iid: number;
+    project_id: number;
+    sha: string;
+    ref: string;
+    status: GitLabPipelineStatus;
+  };
+};
+export type GitLabCommitStatusState = 'pending' | 'running' | 'success' | 'failed' | 'canceled';
+export type GitLabCommitStatus = {
+  id: number;
+  sha: string;
+  ref: string | null;
+  status: GitLabCommitStatusState;
+  name: string;
+  target_url: string | null;
+  description: string | null;
+  allow_failure: boolean;
+  author: GitLabUser;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+};
+
 type User = GitLabUser & { token?: string; accessLevel?: number; scopes: string[] };
 type Reply = [number, unknown] | [number, unknown, Record<string, string>];
 type Ctx = {
@@ -963,6 +1021,248 @@ export function fakeGitLab(opts: { baseUrl: string; project: FakeGitLabProject }
     return paged(snapshotDiffs(commitOf(base_sha).files, commitOf(head_sha).files), c.query);
   });
 
+  // --- Pipelines, jobs and commit statuses ----------------------------------------------------
+
+  /** Pipelines in creation order. Each holds its jobs, retried ones included. */
+  const pipelines: GitLabPipeline[] = [];
+  type StoredJob = Omit<GitLabJob, 'pipeline'> & { pipelineId: number; retried: boolean };
+  const jobs: StoredJob[] = [];
+  const commitStatuses: GitLabCommitStatus[] = [];
+
+  const findPipeline = (id: string | number | undefined) =>
+    pipelines.find((p) => String(p.id) === String(id));
+  const findJob = (id: string | number | undefined) =>
+    jobs.find((j) => String(j.id) === String(id));
+  const pipelineOf = (j: StoredJob) => findPipeline(j.pipelineId) as GitLabPipeline;
+  const jobsOf = (pipelineId: number, includeRetried = false) =>
+    jobs.filter((j) => j.pipelineId === pipelineId && (includeRetried || !j.retried));
+
+  const jobJson = (j: StoredJob): GitLabJob => {
+    const { pipelineId: _p, retried: _r, ...rest } = j;
+    const p = pipelineOf(j);
+    return {
+      ...rest,
+      pipeline: {
+        id: p.id,
+        iid: p.iid,
+        project_id: p.project_id,
+        sha: p.sha,
+        ref: p.ref,
+        status: p.status,
+      },
+    };
+  };
+
+  /** A pipeline's status from its current jobs, roughly as GitLab composes it. */
+  function composite(list: StoredJob[]): GitLabPipelineStatus {
+    const has = (s: GitLabJobStatus) => list.some((j) => j.status === s);
+    if (list.length === 0) return 'created';
+    if (has('running')) return 'running';
+    if (has('pending')) return 'pending';
+    if (has('created')) return 'created';
+    if (list.some((j) => j.status === 'failed' && !j.allow_failure)) return 'failed';
+    if (has('canceled')) return 'canceled';
+    if (has('manual')) return 'manual';
+    if (list.every((j) => j.status === 'skipped')) return 'skipped';
+    return 'success';
+  }
+  function recompute(p: GitLabPipeline) {
+    p.status = composite(jobsOf(p.id));
+    p.updated_at = now();
+  }
+
+  /** Set a job's status, with `started_at` and `finished_at` to match. */
+  function moveJob(j: StoredJob, status: GitLabJobStatus, at = now()) {
+    j.status = status;
+    if (status === 'running') {
+      j.started_at = at;
+      j.finished_at = null;
+    } else if (status === 'success' || status === 'failed' || status === 'canceled') {
+      j.started_at ??= at;
+      j.finished_at = at;
+    } else {
+      j.started_at = null;
+      j.finished_at = null;
+    }
+  }
+
+  function addJob(
+    p: GitLabPipeline,
+    j: { name: string; stage?: string; status?: GitLabJobStatus; allowFailure?: boolean },
+  ): StoredJob {
+    const id = newId();
+    const at = now();
+    const job: StoredJob = {
+      id,
+      name: j.name,
+      stage: j.stage ?? 'test',
+      status: 'created',
+      allow_failure: j.allowFailure ?? false,
+      ref: p.ref,
+      created_at: at,
+      started_at: null,
+      finished_at: null,
+      web_url: `${webRoot}/${project.path}/-/jobs/${id}`,
+      pipelineId: p.id,
+      retried: false,
+    };
+    moveJob(job, j.status ?? 'pending', at);
+    jobs.push(job);
+    return job;
+  }
+
+  /** Retry `old`: it becomes retried and a new pending job takes its place. */
+  function retryJob(old: StoredJob): StoredJob {
+    old.retried = true;
+    return addJob(pipelineOf(old), {
+      name: old.name,
+      stage: old.stage,
+      allowFailure: old.allow_failure,
+      status: 'pending',
+    });
+  }
+
+  /** The commit SHA a seeded pipeline or status is for; throws on an unknown ref. */
+  const knownSha = (ref: string) => {
+    const sha = resolve(ref);
+    if (!sha) throw new Error(`unknown commit or branch ${ref}`);
+    return sha;
+  };
+
+  function addPipeline(s: {
+    sha: string;
+    ref?: string;
+    status?: GitLabPipelineStatus;
+    source?: string;
+    createdAt?: string;
+    jobs?: { name: string; stage?: string; status?: GitLabJobStatus; allowFailure?: boolean }[];
+  }): { pipeline: GitLabPipeline; jobs: GitLabJob[] } {
+    const sha = knownSha(s.sha);
+    const at = s.createdAt ?? now();
+    const id = newId();
+    const pipeline: GitLabPipeline = {
+      id,
+      iid: Math.max(0, ...pipelines.map((p) => p.iid)) + 1,
+      project_id: project.id,
+      sha,
+      ref: s.ref ?? (branches.has(s.sha) ? s.sha : project.defaultBranch),
+      status: 'created',
+      source: s.source ?? 'push',
+      web_url: `${webRoot}/${project.path}/-/pipelines/${id}`,
+      created_at: at,
+      updated_at: at,
+    };
+    pipelines.push(pipeline);
+    const added = (s.jobs ?? []).map((j) => addJob(pipeline, j));
+    pipeline.status = s.status ?? composite(added);
+    return { pipeline, jobs: added.map(jobJson) };
+  }
+
+  const PIPELINE_ORDER: Record<string, (a: GitLabPipeline, b: GitLabPipeline) => number> = {
+    id: (a, b) => a.id - b.id,
+    status: (a, b) => byPath(a.status, b.status) || a.id - b.id,
+    ref: (a, b) => byPath(a.ref, b.ref) || a.id - b.id,
+    updated_at: (a, b) => a.updated_at.localeCompare(b.updated_at) || a.id - b.id,
+  };
+  route('GET', /^\/pipelines$/, (c) => {
+    const q = (k: string) => c.query.get(k);
+    const order = PIPELINE_ORDER[q('order_by') ?? 'id'];
+    if (!order) return [400, { error: 'order_by does not have a valid value' }];
+    const desc = (q('sort') ?? 'desc') !== 'asc';
+    const list = pipelines
+      .filter((p) => q('sha') === null || p.sha === q('sha'))
+      .filter((p) => q('ref') === null || p.ref === q('ref'))
+      .filter((p) => q('status') === null || p.status === q('status'))
+      .sort((a, b) => (desc ? -order(a, b) : order(a, b)));
+    return paged(list, c.query);
+  });
+  route('GET', /^\/pipelines\/(\d+)$/, (_c, m) => {
+    const p = findPipeline(m[1]);
+    return p ? [200, p] : err(404, '404 Not found');
+  });
+  route('GET', /^\/pipelines\/(\d+)\/jobs$/, (c, m) => {
+    const p = findPipeline(m[1]);
+    if (!p) return err(404, '404 Not found');
+    const scopes = [...c.query.getAll('scope[]'), ...c.query.getAll('scope')];
+    const list = jobsOf(p.id, c.query.get('include_retried') === 'true')
+      .filter((j) => scopes.length === 0 || scopes.includes(j.status))
+      .map(jobJson);
+    return paged(list, c.query);
+  });
+  route('GET', /^\/jobs\/(\d+)$/, (_c, m) => {
+    const j = findJob(m[1]);
+    return j ? [200, jobJson(j)] : err(404, '404 Not found');
+  });
+  const RETRYABLE: GitLabJobStatus[] = ['success', 'failed', 'canceled'];
+  route('POST', /^\/jobs\/(\d+)\/retry$/, (c, m) => {
+    const j = findJob(m[1]);
+    if (!j) return err(404, '404 Not found');
+    if (c.level < ACCESS.developer) return FORBIDDEN;
+    if (j.retried || !RETRYABLE.includes(j.status))
+      return err(403, '403 Forbidden - Job is not retryable');
+    const fresh = retryJob(j);
+    recompute(pipelineOf(j));
+    return [201, jobJson(fresh)];
+  });
+  route('POST', /^\/pipelines\/(\d+)\/retry$/, (c, m) => {
+    const p = findPipeline(m[1]);
+    if (!p) return err(404, '404 Not found');
+    if (c.level < ACCESS.developer) return FORBIDDEN;
+    const failed = jobsOf(p.id).filter((j) => j.status === 'failed' || j.status === 'canceled');
+    for (const j of failed) retryJob(j);
+    if (failed.length > 0) recompute(p);
+    return [201, p];
+  });
+
+  function addCommitStatus(s: {
+    sha: string;
+    name: string;
+    status: GitLabCommitStatusState;
+    allowFailure?: boolean;
+    targetUrl?: string | null;
+    description?: string | null;
+    ref?: string | null;
+    author?: string;
+  }): GitLabCommitStatus {
+    const at = now();
+    const done = s.status === 'success' || s.status === 'failed' || s.status === 'canceled';
+    const status: GitLabCommitStatus = {
+      id: newId(),
+      sha: knownSha(s.sha),
+      ref: s.ref ?? null,
+      status: s.status,
+      name: s.name,
+      target_url: s.targetUrl ?? null,
+      description: s.description ?? null,
+      allow_failure: s.allowFailure ?? false,
+      author: publicUser(ensureUser(s.author ?? 'root')),
+      created_at: at,
+      started_at: s.status === 'pending' ? null : at,
+      finished_at: done ? at : null,
+    };
+    commitStatuses.push(status);
+    return status;
+  }
+
+  /** `GET repository/commits/:sha/statuses`: the external statuses on a commit, oldest first.
+   *  Without `all=true` only the newest status of each name is listed, as on GitLab. */
+  route('GET', /^\/repository\/commits\/([^/]+)\/statuses$/, (c, m) => {
+    const sha = resolve(decodeSegment(m[1]));
+    if (!sha) return err(404, '404 Commit Not Found');
+    const ref = c.query.get('ref');
+    const name = c.query.get('name');
+    let list = commitStatuses
+      .filter((s) => s.sha === sha)
+      .filter((s) => ref === null || s.ref === ref)
+      .filter((s) => name === null || s.name === name);
+    if (c.query.get('all') !== 'true') {
+      const newest = new Map<string, GitLabCommitStatus>();
+      for (const s of list) newest.set(s.name, s);
+      list = [...newest.values()].sort((a, b) => a.id - b.id);
+    }
+    return paged(list, c.query);
+  });
+
   // --- Dispatch -----------------------------------------------------------------------------
 
   /** The project route for `rest` (the path after `/projects/:id`), if the fake knows it. */
@@ -1142,6 +1442,36 @@ export function fakeGitLab(opts: { baseUrl: string; project: FakeGitLabProject }
     issues,
     labels,
     notes,
+    /** Create a pipeline for `sha` (a SHA or a branch), with its jobs in order. Its status is
+     *  `status`, or else composed from the jobs'. */
+    seedPipeline: addPipeline,
+    /** Move job `id` to `status` and recompute its pipeline's status. */
+    setJobStatus(id: number, status: GitLabJobStatus): GitLabJob {
+      const j = findJob(id);
+      if (!j) throw new Error(`unknown job ${id}`);
+      moveJob(j, status);
+      recompute(pipelineOf(j));
+      return jobJson(j);
+    },
+    /** Set pipeline `id`'s status directly, leaving its jobs as they are. */
+    setPipelineStatus(id: number, status: GitLabPipelineStatus): GitLabPipeline {
+      const p = findPipeline(id);
+      if (!p) throw new Error(`unknown pipeline ${id}`);
+      p.status = status;
+      p.updated_at = now();
+      return p;
+    },
+    /** Add an external commit status on `sha` (a SHA or a branch). */
+    seedCommitStatus: addCommitStatus,
+    /** The stored pipeline, as the fake holds it now. */
+    pipeline: (id: number) => findPipeline(id),
+    /** The stored job, retried or not, as the API shows it. */
+    job: (id: number) => {
+      const j = findJob(id);
+      return j && { ...jobJson(j), retried: j.retried };
+    },
+    pipelines,
+    commitStatuses,
     /** Remove the fake's interceptors. */
     stop() {
       for (const i of interceptors) nock.removeInterceptor(i);
