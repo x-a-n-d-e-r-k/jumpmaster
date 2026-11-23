@@ -118,6 +118,15 @@ async function world() {
   return { db, f, clock, id, head, pr, one, page, confirm, audits, app: a };
 }
 
+/** #628: a POST-rendered notice carries the one breadcrumb, Projects › the project › Goals › it, and no Back link. */
+function expectGoalsCrumbs(body: string, title: string): void {
+  expect(body.match(/<nav class="crumbs" aria-label="Breadcrumb">/g)).toHaveLength(1);
+  expect(body).toContain(
+    `<ol><li><a href="/projects">Projects</a></li><li><a href="/projects/main">octo/demo</a></li><li><a href="/projects/main/goals">Goals</a></li><li><span aria-current="page">${title}</span></li></ol>`,
+  );
+  expect(body).not.toMatch(/<a [^>]*>[^<]*Back[^<]*<\/a>/);
+}
+
 describe('the goal-change confirm page (#363)', () => {
   test('GET shows the diff and the head SHA, with a passphrase field', async () => {
     const w = await world();
@@ -144,6 +153,7 @@ describe('the goal-change confirm page (#363)', () => {
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({ via: 'session', target: `goal-change:${w.id}` });
     expect(JSON.stringify(audit[0])).not.toContain(PASS);
+    expectGoalsCrumbs(r.body, 'Confirmed');
   });
 
   test('D1 the confirm page needs the passphrase and a session; the Bearer token gets 401', async () => {
@@ -185,6 +195,7 @@ describe('the goal-change confirm page (#363)', () => {
     expect(first.statusCode).toBe(200);
     const second = await w.confirm({ passphrase: PASS, headSha: w.head });
     expect(second.statusCode).toBe(409);
+    expectGoalsCrumbs(second.body, 'Nothing to confirm');
     const again = await w.confirm({ passphrase: PASS, headSha: w.head });
     expect(again.statusCode).toBe(409);
     expect(w.audits()).toHaveLength(1);
@@ -200,6 +211,7 @@ describe('the goal-change confirm page (#363)', () => {
     const moved = await w.confirm({ passphrase: PASS, headSha: w.head });
     expect(moved.statusCode).toBe(409);
     expect(moved.body).toMatch(/propose/i);
+    expectGoalsCrumbs(moved.body, 'Not confirmed');
     // Nor does the new head, which is not the commit the server made.
     const other = await w.confirm({ passphrase: PASS, headSha: 'sha-B' });
     expect(other.statusCode).toBe(409);

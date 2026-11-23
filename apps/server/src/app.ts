@@ -527,7 +527,9 @@ export function createApp(
     if (html.includes(NEEDS_SLOT)) {
       try {
         needsYou = needsYouCount(req);
-      } catch {
+      } catch (err) {
+        // The badge is a hint: a failed count shows none, but says why in the log.
+        req.log.warn({ err }, 'needs-you count for the top bar failed');
         needsYou = 0;
       }
     }

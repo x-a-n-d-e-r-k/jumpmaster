@@ -430,6 +430,15 @@ describe('Add a stick: how it will be installed (issue #269)', () => {
     expect(html).not.toContain('role="tab"');
   });
 
+  test('#628: the result page carries the one breadcrumb, System › Sticks › Add a stick, and no Back link', () => {
+    const html = renderInviteResult({ ...base, kind: 'line', line: 'curl LINE' });
+    expect(html.match(/<nav class="crumbs" aria-label="Breadcrumb">/g)).toHaveLength(1);
+    expect(html).toContain(
+      '<nav class="crumbs" aria-label="Breadcrumb"><ol><li><a href="/system">System</a></li><li><a href="/system/sticks">Sticks</a></li><li><span aria-current="page">Add a stick</span></li></ol></nav>',
+    );
+    expect(html).not.toMatch(/<a [^>]*>[^<]*Back[^<]*<\/a>/);
+  });
+
   test('a cloud-init invite: the result page holds the cloud-config only, 1 hour', () => {
     const html = renderInviteResult({
       ...base,

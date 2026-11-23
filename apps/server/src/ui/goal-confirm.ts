@@ -50,7 +50,6 @@ const goalsTrail = (zone: DropZoneConfig): Crumb[] => [
 
 /** What a change that is not open says instead of a form. */
 function notOpen(f: Found): string {
-  const back = `<a href="${escapeHtml(zoneHref(f.zone.id))}/goals">Back to the goals</a>`;
   const words: Record<GoalChange['state'], string> = {
     proposed: 'This change has no pull request yet. It opens at the next pass; come back then.',
     open: '',
@@ -63,7 +62,7 @@ function notOpen(f: Found): string {
   const error = f.change.error ? ` ${escapeHtml(f.change.error)}.` : '';
   return notice(
     'Nothing to confirm',
-    `${escapeHtml(words[f.change.state])}${error} ${back}`,
+    `${escapeHtml(words[f.change.state])}${error}`,
     goalsTrail(f.zone),
   );
 }
@@ -127,7 +126,6 @@ export function registerGoalConfirmPages(app: FastifyInstance, deps: GoalConfirm
 
     const body = ConfirmBody.safeParse(req.body ?? {});
     const shown = body.success ? body.data.headSha : null;
-    const back = `<a href="${escapeHtml(zoneHref(f.zone.id))}/goals">Back to the goals</a>`;
     const moved = () =>
       send(
         req,
@@ -135,7 +133,7 @@ export function registerGoalConfirmPages(app: FastifyInstance, deps: GoalConfirm
         409,
         notice(
           'Not confirmed',
-          `The pull request is not at the commit Jumpmaster made for this change any more, so it can't be confirmed. Propose the change again. ${back}`,
+          `The pull request is not at the commit Jumpmaster made for this change any more, so it can't be confirmed. Propose the change again.`,
           goalsTrail(f.zone),
         ),
       );
@@ -183,7 +181,7 @@ export function registerGoalConfirmPages(app: FastifyInstance, deps: GoalConfirm
       200,
       notice(
         'Confirmed',
-        `Jumpmaster approves and merges pull request #${escapeHtml(f.change.prNumber)} at commit <code>${escapeHtml(shown)}</code> at the next pass, once its required checks pass. ${back}`,
+        `Jumpmaster approves and merges pull request #${escapeHtml(f.change.prNumber)} at commit <code>${escapeHtml(shown)}</code> at the next pass, once its required checks pass.`,
         goalsTrail(f.zone),
       ),
     );
