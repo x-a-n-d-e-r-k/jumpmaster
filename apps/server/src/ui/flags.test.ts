@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
+import { RoleSchema } from '@jumpmaster/protocol';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
@@ -184,7 +185,9 @@ describe('the advanced settings page, /projects/:id/flags', () => {
     expect(heads[0]).toBe('Crew');
     expect(r.body).toContain('id="flag-search"');
     // Links both ways.
-    expect(r.body).toContain('<a href="/projects/jm/setup#advanced">Edit the zone as JSON</a>');
+    expect(r.body).toContain('<a href="/projects/jm/setup#advanced">View the zone as JSON</a>');
+    expect(r.body).not.toContain('Edit the zone as JSON');
+    expect(r.body).not.toContain('the JSON editor');
     expect((await w.get('/projects/jm/setup')).body).toContain(
       'All settings, one per row: <a href="/projects/jm/flags">advanced settings</a>',
     );
@@ -241,7 +244,9 @@ describe('the advanced settings page, /projects/:id/flags', () => {
     expect(gates).toContain('Changed in the Stack section.');
     expect(gates).toContain('href="/projects/jm/setup#stack"');
     expect(gates).not.toContain('data-path=');
-    expect(rowHtml(html, 'models')).toContain('href="/projects/jm/setup#advanced"');
+    expect(rowHtml(html, 'models')).not.toContain('setup#advanced');
+    // An elsewhere row whose sentence names no section links nowhere.
+    expect(rowHtml(html, 'id')).not.toContain('<a ');
     expect(rowHtml(html, 'id')).toContain(
       'Fixed once the zone exists: remove the zone and add it again to change it.',
     );
@@ -434,7 +439,7 @@ describe('the advanced settings page script', () => {
   });
 });
 
-describe('D5: the page writes through the same guards as the JSON editor', () => {
+describe('D5: the page writes through the same guards as the Setup form', () => {
   test('sibling-path parity: a guarded change asks for confirmation from both, and nothing changes until then', async () => {
     const w = await world({ zones: [zoneDoc('jm', { crew: { refutePromotes: false } })] });
     const before = w.store.revision();
@@ -509,5 +514,119 @@ describe('D5: the page writes through the same guards as the JSON editor', () =>
     const html = rowHtml((await w.get('/projects/jm/flags')).body, 'crew.maxDropsPerDay');
     expect(html).not.toContain('class="set"');
     expect(html).toContain(`value="${String(after?.defaultValue)}"`);
+  });
+});
+
+describe('per-role models on the advanced settings page (#672)', () => {
+  const ROLES = RoleSchema.options;
+  const role = ROLES[0] as string;
+
+  test('the models row has one text input per role, with a data-path, and no link to Advanced', async () => {
+    const w = await world({ zones: [zoneDoc('jm', { models: { [role]: 'claude-x' } })] });
+    const html = rowHtml((await w.get('/projects/jm/flags')).body, 'models');
+    const inputs = [...html.matchAll(/<input type="text"[^>]*data-path="models\.([^"]*)"[^>]*>/g)];
+    expect(inputs.map((m) => m[1])).toEqual([...ROLES]);
+    for (const m of inputs) expect(m[0]).not.toContain('disabled');
+    expect(html).toMatch(
+      new RegExp(
+        `data-path="models\\.${role}"[^>]*data-original="&quot;claude-x&quot;"[^>]*value="claude-x"`,
+      ),
+    );
+    for (const r of ROLES) expect(html).toContain(`<label for="setting-models-${r}">${r}</label>`);
+    expect(html).not.toContain('setup#advanced');
+    expect(html).toContain('data-flag-issue="models"');
+  });
+
+  test("the rows' fields: one per role input, explicit when the role is set", () => {
+    const { fn } = pageScript();
+    const input = (path: string, original: unknown, value: string) => ({
+      disabled: false,
+      value,
+      checked: false,
+      dataset: {
+        path,
+        kind: 'text',
+        original: JSON.stringify(original),
+        ...(path.includes('.') ? { explicit: original === null ? '0' : '1' } : {}),
+      },
+    });
+    const els = [input(`models.${role}`, 'a', ''), input('models.review', null, '')];
+    const tr = { dataset: { flag: 'models', explicit: '1' }, querySelectorAll: () => els };
+    const fields = fn<unknown[]>('jmRowFields')(tr);
+    expect(fields).toEqual([
+      { key: `models.${role}`, kind: 'text', value: '', original: 'a', explicit: true },
+      { key: 'models.review', kind: 'text', value: '', original: null, explicit: false },
+    ]);
+    expect(fn<unknown>('jmFlagsPatch')(fields)).toEqual({ models: { [role]: null } });
+  });
+
+  test('set, clear, an untouched empty role, a Fable model, a stale revision', async () => {
+    const w = await world();
+    const { fn } = pageScript();
+    const send = (fields: unknown[], expectRevision = w.store.revision()) => {
+      const patch = fn<Record<string, unknown>>('jmFlagsPatch')(fields);
+      return {
+        patch,
+        r: w.patch({ patch: { dropZones: [{ id: 'jm', ...patch }] }, expectRevision }),
+      };
+    };
+    // Set one role; the others stay empty and send nothing.
+    const others = ROLES.filter((r) => r !== role).map((r) =>
+      field(`models.${r}`, 'text', '', null, false),
+    );
+    const set = send([field(`models.${role}`, 'text', 'claude-sonnet-x', null, false), ...others]);
+    expect({ dropZones: [{ id: 'jm', ...set.patch }] }).toEqual({
+      dropZones: [{ id: 'jm', models: { [role]: 'claude-sonnet-x' } }],
+    });
+    expect((await set.r).statusCode).toBe(200);
+    expect(zoneOf(w.store, 'jm').models).toEqual({ [role]: 'claude-sonnet-x' });
+
+    // A stale revision is refused and nothing changes.
+    const stale = send([field(`models.${role}`, 'text', 'other', 'claude-sonnet-x', true)], 1);
+    expect((await stale.r).statusCode).toBe(409);
+    expect(zoneOf(w.store, 'jm').models).toEqual({ [role]: 'claude-sonnet-x' });
+
+    // A per-role Fable model is accepted, as the store accepts it.
+    const fable = send([
+      field(`models.${role}`, 'text', 'claude-fable-5-2', 'claude-sonnet-x', true),
+    ]);
+    expect((await fable.r).statusCode).toBe(200);
+    expect(zoneOf(w.store, 'jm').models).toEqual({ [role]: 'claude-fable-5-2' });
+
+    // Clearing sends null for that role, and the key is gone.
+    const clear = send([field(`models.${role}`, 'text', '', 'claude-fable-5-2', true), ...others]);
+    expect(clear.patch).toEqual({ models: { [role]: null } });
+    expect((await clear.r).statusCode).toBe(200);
+    expect(Object.hasOwn((zoneOf(w.store, 'jm').models ?? {}) as object, role)).toBe(false);
+  });
+
+  test('a role the store refuses shows its issue on the models row', async () => {
+    const w = await world();
+    const r = await w.patch({
+      patch: { dropZones: [{ id: 'jm', models: { notARole: 'x' } }] },
+      expectRevision: w.store.revision(),
+    });
+    expect(r.statusCode).toBe(400);
+    const issues = (r.json() as { issues: { path: string; message: string }[] }).issues;
+    const span = { textContent: '' };
+    const document = {
+      addEventListener: () => {},
+      querySelectorAll: () => [],
+      querySelector: (sel: string) => (sel === '[data-flag-issue="models"]' ? span : null),
+    };
+    const { fn } = pageScript(() => ({ ok: false, status: 400, json: { issues } }), { document });
+    const out = stubStatus();
+    expect(
+      await fn<Promise<string>>('jmSaveFlags')(JM, { models: { notARole: 'x' } }, 1, out, () => {}),
+    ).toBe('refused');
+    expect(span.textContent).not.toBe('');
+  });
+
+  test('in file mode the role inputs are disabled', async () => {
+    const w = await world({ file: true });
+    const html = rowHtml((await w.get('/projects/jm/flags')).body, 'models');
+    const inputs = [...html.matchAll(/<input[^>]*data-path="models\.[^"]*"[^>]*>/g)];
+    expect(inputs).toHaveLength(ROLES.length);
+    for (const m of inputs) expect(m[0]).toMatch(/ disabled/);
   });
 });
