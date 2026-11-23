@@ -308,7 +308,6 @@ describe('no-op and refusals', () => {
     const err = await forge.getBranchRules('trunk').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(GitLabUnsupportedError);
     expect((err as Error).message).toContain('getBranchRules');
-    await expect(forge.repoAccess()).rejects.toBeInstanceOf(GitLabUnsupportedError);
     expect(gl.requests).toEqual([]);
   });
 });
@@ -2304,6 +2303,204 @@ describe('merges: secrets', () => {
       expect(statusOf(e)).toBe(401);
       for (const s of [AGENT, WRONG, SQUASH.title, SQUASH.message])
         expect((e as Error).message).not.toContain(s);
+    }
+  });
+});
+
+describe('access', () => {
+  const LEVELS = [ACCESS.guest, ACCESS.reporter, ACCESS.developer, ACCESS.maintainer, ACCESS.owner];
+
+  test('isTrusted and isMaintainer at each access level read /members/all', async () => {
+    const { gl, forge } = setup();
+    for (const level of LEVELS) gl.seedMember({ username: `m${level}`, accessLevel: level });
+    for (const level of LEVELS) {
+      expect(await forge.isTrusted(`m${level}`)).toBe(level >= ACCESS.developer);
+      expect(await forge.isMaintainer(`m${level}`)).toBe(level >= ACCESS.maintainer);
+    }
+    expect(gl.requests.length).toBe(LEVELS.length * 2);
+    for (const r of gl.requests) {
+      expect(r).toMatchObject({ method: 'GET', path: `${API}/members/all` });
+      expect(r.query.query).toMatch(/^m\d0$/);
+    }
+  });
+
+  test('a non-member, a blocked member and a substring match are neither trusted nor maintainers', async () => {
+    const { gl, forge } = setup();
+    gl.seedMember({ username: 'blocked', accessLevel: ACCESS.owner, state: 'blocked' });
+    gl.seedMember({ username: 'devops', accessLevel: ACCESS.owner });
+    gl.seedMember({ username: 'zed', name: 'dev lead', accessLevel: ACCESS.owner });
+    gl.seedMember({ username: 'dev', accessLevel: ACCESS.guest });
+    for (const login of ['stranger', 'blocked', 'dev', 'devop', 'lead']) {
+      expect(await forge.isTrusted(login)).toBe(false);
+      expect(await forge.isMaintainer(login)).toBe(false);
+    }
+    expect(await forge.isMaintainer('devops')).toBe(true);
+    expect(await forge.isTrusted('zed')).toBe(true);
+    for (const r of gl.requests) expect(r.path).toBe(`${API}/members/all`);
+  });
+
+  test('repoAccess: a Developer on a private project in a group', async () => {
+    const gl = fakeGitLab({ baseUrl: GITLAB, project: { ...PROJECT, namespaceKind: 'group' } });
+    fakes.push(gl);
+    gl.addUser({
+      username: 'agent',
+      token: AGENT,
+      accessLevel: ACCESS.developer,
+      scopes: ['api', 'read_user'],
+      expiresAt: '2027-03-01',
+    });
+    const access = await new GitLabForge(GITLAB, PROJECT.path, AGENT).repoAccess();
+    expect(access).toEqual({
+      private: true,
+      defaultBranch: 'trunk',
+      permissions: { admin: false, maintain: false, push: true, triage: true, pull: true },
+      scopes: ['api', 'read_user'],
+      tokenExpiresAt: '2027-03-01',
+      ownerType: 'Organization',
+    });
+    expect('grantedPermissions' in access).toBe(false);
+    const paths = gl.requests.map((r) => r.path);
+    expect(paths).toContain(API);
+    expect(paths).toContain('/api/v4/user');
+    expect(paths).toContain('/api/v4/personal_access_tokens/self');
+    expect(paths.some((p) => /^\/members\/all\/\d+$/.test(p.slice(API.length)))).toBe(true);
+  });
+
+  test('repoAccess: an Owner on a public personal project', async () => {
+    const gl = fakeGitLab({ baseUrl: GITLAB, project: { ...PROJECT, visibility: 'public' } });
+    fakes.push(gl);
+    gl.addUser({
+      username: 'agent',
+      token: AGENT,
+      accessLevel: ACCESS.owner,
+      scopes: ['read_api'],
+      expiresAt: '2026-12-31',
+    });
+    const access = await new GitLabForge(GITLAB, PROJECT.path, AGENT).repoAccess();
+    expect(access).toEqual({
+      private: false,
+      defaultBranch: 'trunk',
+      permissions: { admin: true, maintain: true, push: true, triage: true, pull: true },
+      scopes: ['read_api'],
+      tokenExpiresAt: '2026-12-31',
+      ownerType: 'User',
+    });
+  });
+
+  test('repoAccess: a Maintainer, a Reporter, a Guest and a non-member', async () => {
+    for (const [level, want] of [
+      [ACCESS.maintainer, [false, true, true, true, true]],
+      [ACCESS.reporter, [false, false, false, true, true]],
+      [ACCESS.guest, [false, false, false, false, false]],
+      [undefined, [false, false, false, false, false]],
+    ] as const) {
+      const gl = fakeGitLab({ baseUrl: GITLAB, project: { ...PROJECT, visibility: 'internal' } });
+      fakes.push(gl);
+      gl.addUser({ username: 'agent', token: AGENT, accessLevel: level });
+      const { permissions, private: priv } = await new GitLabForge(
+        GITLAB,
+        PROJECT.path,
+        AGENT,
+      ).repoAccess();
+      const [admin, maintain, push, triage, pull] = want;
+      expect(permissions).toEqual({ admin, maintain, push, triage, pull });
+      expect(priv).toBe(true);
+      gl.stop();
+      nock.cleanAll();
+    }
+  });
+
+  /** A fetch answering the access reads, with `tokenStatus` from /personal_access_tokens/self. */
+  function accessFetch(tokenStatus: number, kind = 'user') {
+    const calls: string[] = [];
+    const json = (status: number, body: unknown) =>
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { 'content-type': 'application/json' },
+      });
+    const stub = (async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      calls.push(url.pathname);
+      if (url.pathname === `/api/v4/projects/${ENCODED}`)
+        return json(200, {
+          id: 77,
+          default_branch: 'trunk',
+          visibility: 'private',
+          namespace: { kind },
+        });
+      if (url.pathname === '/api/v4/user') return json(200, { id: 5, username: 'agent' });
+      if (url.pathname === `/api/v4/projects/${ENCODED}/members/all/5`)
+        return json(200, { id: 5, username: 'agent', access_level: 30, state: 'active' });
+      if (url.pathname === '/api/v4/personal_access_tokens/self')
+        return tokenStatus === 200
+          ? json(200, { scopes: ['api'], expires_at: null })
+          : json(tokenStatus, { message: `${tokenStatus} ${AGENT}` });
+      return json(404, { message: '404 Not Found' });
+    }) as typeof fetch;
+    return { forge: new GitLabForge(GITLAB, PROJECT.path, AGENT, { fetch: stub }), calls };
+  }
+
+  for (const status of [401, 404])
+    test(`repoAccess: a ${status} from /personal_access_tokens/self gives null scopes and expiry`, async () => {
+      const { forge, calls } = accessFetch(status);
+      const access = await forge.repoAccess();
+      expect(access.scopes).toBeNull();
+      expect(access.tokenExpiresAt).toBeNull();
+      expect(access.permissions.push).toBe(true);
+      expect(calls).toContain('/api/v4/personal_access_tokens/self');
+    });
+
+  test('repoAccess: a 500 from /personal_access_tokens/self rejects without the token', async () => {
+    const { forge } = accessFetch(500);
+    const err = (await forge.repoAccess().catch((e: unknown) => e)) as GitLabForgeError;
+    expect(err).toBeInstanceOf(GitLabForgeError);
+    expect(err.status).toBe(500);
+    expect(err.message).not.toContain(AGENT);
+  });
+
+  test('ownerType maps user and group', async () => {
+    for (const [kind, want] of [
+      ['user', 'User'],
+      ['group', 'Organization'],
+    ] as const) {
+      const gl = fakeGitLab({ baseUrl: GITLAB, project: { ...PROJECT, namespaceKind: kind } });
+      fakes.push(gl);
+      gl.addUser({ username: 'agent', token: AGENT, accessLevel: ACCESS.developer });
+      expect(await new GitLabForge(GITLAB, PROJECT.path, AGENT).ownerType()).toBe(want);
+      expect(gl.requests).toMatchObject([{ method: 'GET', path: API }]);
+      gl.stop();
+      nock.cleanAll();
+    }
+  });
+
+  test('an unknown namespace kind rejects ownerType and repoAccess without echoing it', async () => {
+    const KIND = 'mystery-kind-zz';
+    const gl = fakeGitLab({ baseUrl: GITLAB, project: { ...PROJECT, namespaceKind: KIND } });
+    fakes.push(gl);
+    gl.addUser({ username: 'agent', token: AGENT, accessLevel: ACCESS.owner });
+    const forge = new GitLabForge(GITLAB, PROJECT.path, AGENT);
+    for (const p of [forge.ownerType(), forge.repoAccess()]) {
+      const err = (await p.catch((e: unknown) => e)) as Error;
+      expect(err).toBeInstanceOf(GitLabForgeError);
+      expect(err.message).not.toContain(KIND);
+      expect(err.message).not.toContain(AGENT);
+    }
+  });
+
+  test('the token appears in no error from the access methods', async () => {
+    const { gl } = setup();
+    gl.seedMember({ username: 'm', accessLevel: ACCESS.owner });
+    const wrong = new GitLabForge(GITLAB, PROJECT.path, WRONG);
+    const errs = await Promise.all([
+      wrong.isTrusted('m').catch((e: unknown) => e),
+      wrong.isMaintainer('m').catch((e: unknown) => e),
+      wrong.repoAccess().catch((e: unknown) => e),
+      wrong.ownerType().catch((e: unknown) => e),
+    ]);
+    for (const e of errs) {
+      expect(e).toBeInstanceOf(GitLabForgeError);
+      expect((e as Error).message).not.toContain(WRONG);
+      expect(String((e as Error).stack)).not.toContain(WRONG);
     }
   });
 });
