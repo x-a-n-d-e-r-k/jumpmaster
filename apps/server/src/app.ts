@@ -87,7 +87,7 @@ import { transcriptPruned } from './transcripts.js';
 import { registerAuthPages } from './ui/auth-pages.js';
 import { renderChatList, renderThread } from './ui/chat.js';
 import { registerConfirmPages } from './ui/confirm.js';
-import type { FloorInputs, PendingLine } from './ui/floor.js';
+import { type FloorInputs, needsRows, type PendingLine } from './ui/floor.js';
 import { githubSectionRenderer } from './ui/github.js';
 import { registerGoalConfirmPages } from './ui/goal-confirm.js';
 import {
@@ -106,10 +106,13 @@ import {
   DROP_LIST_LIMIT,
   DROP_STATES,
   type DropKind,
+  fillChrome,
   type HomeState,
   type ItemDetail,
+  KILL_SLOT,
   LOG_KINDS,
   type LogKind,
+  NEEDS_SLOT,
   PROJECTS_HREF,
   renderBoard,
   renderBriefing,
@@ -494,16 +497,49 @@ export function createApp(
     backoff,
     forgesFor: deps.forgesFor,
   });
-  // The confirmation page for a session's guarded config change (§7.5): with the store only.
-  if (deps.config instanceof ConfigStore) {
-    // Every page's navigation gains the store-only pages (Projects, and System's settings pages).
-    app.addHook('onSend', async (_req, reply, payload) =>
-      typeof payload === 'string' && String(reply.getHeader('content-type')).startsWith('text/html')
+  /** Needs you's count for the top bar's badge, read as Home reads its rows (#628). */
+  const needsYouCount = (req: FastifyRequest): number => {
+    const config = cfg(req);
+    const zones = config.dropZones;
+    return needsRows({
+      zones,
+      modes: Object.fromEntries(zones.map((z) => [z.id, getZoneMode(deps.db, z.id, z.mode)])),
+      fails: projectFails(latestDoctorRun(deps.db)?.checks ?? [], zones),
+      pending: pendingLinesFor(req),
+      briefings: floorBriefings(deps.db, zones).listed,
+      items: zones.flatMap((z) => listWorkItems(deps.db, z.id)),
+      now: deps.now(),
+    }).length;
+  };
+  // Every page's top bar (#628): a store install's store-only links (Projects, and System's
+  // settings pages), the current area marked, the kill switch control and Needs you's count.
+  app.addHook('onSend', async (req, reply, payload) => {
+    if (typeof payload !== 'string') return payload;
+    if (!String(reply.getHeader('content-type')).startsWith('text/html')) return payload;
+    let html =
+      deps.config instanceof ConfigStore
         ? payload
             .replace(STORE_NAV_SLOT, STORE_NAV)
             .replace(SYSTEM_STORE_NAV_SLOT, SYSTEM_STORE_NAV)
-        : payload,
-    );
+        : payload;
+    if (!html.includes('class="topnav"')) return html;
+    let needsYou: number | undefined;
+    if (html.includes(NEEDS_SLOT)) {
+      try {
+        needsYou = needsYouCount(req);
+      } catch {
+        needsYou = 0;
+      }
+    }
+    html = fillChrome(html, {
+      path: req.url,
+      ...(html.includes(KILL_SLOT) ? { killed: isKilled(deps.db) } : {}),
+      ...(needsYou !== undefined ? { needsYou } : {}),
+    });
+    return html;
+  });
+  // The confirmation page for a session's guarded config change (§7.5): with the store only.
+  if (deps.config instanceof ConfigStore) {
     registerConfirmPages(app, {
       db: deps.db,
       store: deps.config,
@@ -833,7 +869,7 @@ export function createApp(
         ...(detail ? { detail } : {}),
         drops,
         now: deps.now(),
-        header: projectHeaderFor(db, zone, zones, 'work'),
+        header: projectHeaderFor(db, zone, zones, 'work', [{ label: `#${item.issueNumber}` }]),
       });
       return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
     },
@@ -910,7 +946,16 @@ export function createApp(
     if (!zone) return reply.code(404).type('text/plain').send('not found');
     return reply
       .type('text/html; charset=utf-8')
-      .send(withCsrf(req, renderNewIssue(zone, zones, projectHeaderFor(deps.db, zone, zones))));
+      .send(
+        withCsrf(
+          req,
+          renderNewIssue(
+            zone,
+            zones,
+            projectHeaderFor(deps.db, zone, zones, undefined, [{ label: 'New issue' }]),
+          ),
+        ),
+      );
   });
 
   // The session a chat page is for: another session's own threads (#627) are not shown. Any

@@ -877,8 +877,10 @@ describe('Home (#625)', () => {
       '<dt>Gate</dt>',
     ])
       expect(html, h).not.toContain(h);
-    // The kill switch stays where it is, until the top-bar slice.
-    expect(html).toContain('<form id="kill">');
+    // The kill switch moved to the top bar (#628).
+    expect(html).not.toContain('<form id="kill">');
+    expect(html.slice(html.indexOf('<main'))).not.toContain('id="kill-open"');
+    expect(html.slice(0, html.indexOf('<main'))).toContain('id="kill-open"');
     // Top to bottom: Needs you, Projects, Capacity, Pipeline.
     const order = ['id="waiting-on-you"', 'id="projects"', 'id="capacity"', 'id="pipeline"'].map(
       (x) => html.indexOf(x),

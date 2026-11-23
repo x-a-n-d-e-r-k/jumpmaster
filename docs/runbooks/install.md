@@ -1684,7 +1684,7 @@ A service that does not answer, or cannot reach Claude or GitHub, fails and name
 
 ### `control.kill`
 
-**Action:** Open the kill switch on home (`/`).
+**Action:** Open the kill switch in the top bar (`/`).
 
 The kill switch stops every drop. Release it when safe:
 `docker compose exec jumpmaster jumpmaster ctl unkill`.

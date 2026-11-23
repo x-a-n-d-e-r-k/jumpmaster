@@ -187,14 +187,8 @@ const TONES: Record<string, string> = {
 export const badge = (state: string): string =>
   `<span class="badge ${TONES[state] ?? ''}">${escapeHtml(state)}</span>`;
 
-/** The kill control. It posts with the session's CSRF header, so a page visit cannot trigger it. */
-function killSection(killed: boolean): string {
-  const label = killed ? 'Reset kill switch' : 'Engage kill switch';
-  return `<div class="kill"><h2>Kill switch</h2><form id="kill"><button class="${killed ? 'primary' : 'danger'}">${label}</button></form><script>document.getElementById('kill').addEventListener('submit',async(e)=>{e.preventDefault();const r=await jmFetch('/api/control/kill',{engaged:${killed ? 'false' : 'true'}});if(r.ok)location.reload();else alert('Refused: '+r.status);});</script></div>`;
-}
-
-/** The engaged kill switch, said first and in red: nothing else on the floor matters as much. */
-const KILLED_NOTICE =
+/** The engaged kill switch, said first and in red on every page: nothing else matters as much. */
+export const KILLED_NOTICE =
   '<div class="kill-on" role="alert"><p><strong>The kill switch is engaged.</strong> No work runs and no forge writes happen. Forge and Claude tokens stay valid until you revoke them with their providers.</p></div>';
 
 /** A utilisation meter: the figure, and a bar that warms at 80% and goes red at 95%. */
@@ -557,6 +551,25 @@ export function projectTabs(zone: Pick<ZoneRef, 'id'>, current: ProjectTab | und
   return `<nav class="settings-tabs project-tabs" aria-label="Project tabs">${links}</nav>`;
 }
 
+/**
+ * A project page's breadcrumb (#628): Projects › the project › its tab (none for Overview) ›
+ * whatever `trail` adds, the page itself last.
+ */
+function projectCrumbs(
+  zone: ZoneRef,
+  zones: readonly ZoneRef[],
+  current: ProjectTab | undefined,
+  trail: readonly Crumb[],
+): string {
+  const tab = PROJECT_TABS.find((t) => t.tab === current && t.tab !== 'overview');
+  return breadcrumb([
+    { label: 'Projects', href: PROJECTS_HREF },
+    { label: zoneName(zone, zones), href: projectHref(zone.id) },
+    ...(tab ? [{ label: tab.label, href: tab.href(zone.id) }] : []),
+    ...trail,
+  ]);
+}
+
 /** The header's Pause or Resume button: it sets the zone's mode as the projects list's buttons do. */
 const PROJECT_MODE_SCRIPT = `<script>for(const b of document.querySelectorAll('button.project-mode')){if(b.dataset.bound)continue;b.dataset.bound='1';b.addEventListener('click',async()=>{const r=await jmFetch('/api/control/zones/'+encodeURIComponent(b.dataset.zone),{mode:b.dataset.mode});if(r.ok){location.reload();return;}const j=await r.json().catch(()=>({}));document.getElementById('project-mode-out').textContent=b.dataset.name+': '+(j.error||('refused ('+r.status+')'));});}</script>`;
 
@@ -573,6 +586,8 @@ export function projectHeader(p: {
   openBriefings: number;
   current: ProjectTab | undefined;
   ask?: Focus;
+  /** The breadcrumb's steps below the project's tab (the page itself last), if any. */
+  trail?: readonly Crumb[];
 }): string {
   const { zone, zones, mode } = p;
   const id = zone.id;
@@ -580,7 +595,8 @@ export function projectHeader(p: {
   const ask = p.ask ?? { kind: 'zone', zoneId: id, ref: id };
   const control = `<button type="button" class="project-mode" data-zone="${escapeHtml(id)}" data-name="${escapeHtml(zoneNameText(zone, zones))}" data-mode="${next}">${label}</button>`;
   return (
-    `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a> · <a href="${escapeHtml(githubSetupHref(id))}">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${escapeHtml(p.openBriefings)} open)</a></p>` +
+    projectCrumbs(zone, zones, p.current, p.trail ?? []) +
+    `<p class="project-links"><a href="${escapeHtml(githubSetupHref(id))}">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${escapeHtml(p.openBriefings)} open)</a></p>` +
     `<header class="project-header"><h2>${zoneName(zone, zones)} ${badge(mode)}</h2>` +
     `<p class="project-mode-label">${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>` +
     `<div class="project-actions">${askButton(ask, ask.kind === 'goals' ? `${zoneName(zone, zones)} · goals` : zoneName(zone, zones))} ${control} <a href="${escapeHtml(projectHref(id, 'issues/new'))}">New issue</a> <span id="project-mode-out" role="status"></span></div>` +
@@ -626,7 +642,12 @@ export function renderBriefing(s: {
     )
     .join('');
   return page(
-    `<p><a href="/#waiting-on-you">Needs you</a>${s.zones.some((z) => z.id === b.zoneId) ? ` · <a href="${escapeHtml(zoneBriefingsHref(b.zoneId))}">Briefings of ${name(b.zoneId)}</a>` : ''}</p><h2>Briefing ${escapeHtml(b.id)}</h2>` +
+    breadcrumb([
+      { label: 'Home', href: '/' },
+      { label: 'Needs you', href: '/#waiting-on-you' },
+      { label: `Briefing ${escapeHtml(b.id)}` },
+    ]) +
+      `${s.zones.some((z) => z.id === b.zoneId) ? `<p><a href="${escapeHtml(zoneBriefingsHref(b.zoneId))}">Briefings of ${name(b.zoneId)}</a></p>` : ''}<h2>Briefing ${escapeHtml(b.id)}</h2>` +
       askButton(
         { kind: 'briefing', zoneId: b.zoneId, ref: String(b.id) },
         `Briefing ${escapeHtml(b.id)}`,
@@ -851,10 +872,124 @@ const FAVICON_LINK = `<link rel="icon" type="image/svg+xml" href="${FAVICON_HREF
  * comment, and links nowhere that would 404.
  */
 export const STORE_NAV_SLOT = '<!--jm-store-nav-->';
-export const STORE_NAV = `<a href="${PROJECTS_HREF}">Projects</a>`;
+export const STORE_NAV = `<a href="${PROJECTS_HREF}" data-area="projects">Projects</a>`;
+
+/** Where Needs you's count goes, on Home's top bar link: `fillChrome` fills it from the request. */
+export const NEEDS_SLOT = '<!--jm-needs-you-->';
+/** Where the kill switch control goes in the top bar, and its engaged notice atop `<main>`. */
+export const KILL_SLOT = '<!--jm-kill-->';
+export const KILL_NOTICE_SLOT = '<!--jm-kill-notice-->';
+
+/** The top bar's five areas (#628). */
+export type NavArea = 'home' | 'projects' | 'activity' | 'chat' | 'system';
+
+/**
+ * Which area each path belongs to, by prefix (the path itself, or under it): a drop, a work
+ * item's legacy page and the old lists are Activity's; a briefing and a pending change Home's.
+ */
+const AREA_PREFIXES: readonly [NavArea, readonly string[]][] = [
+  ['home', ['/briefings', '/config/confirm']],
+  ['projects', [PROJECTS_HREF, '/zones', '/goal-changes']],
+  ['activity', [ACTIVITY_HREF, '/drops', '/work', '/board', '/log', '/observations']],
+  ['chat', ['/chat']],
+  ['system', [SYSTEM_HREF, '/setup', '/sticks', '/settings', '/doctor', '/credentials']],
+];
+
+/** The top bar area a path is in: `/` is Home; an unknown path is in none. */
+export function navArea(path: string): NavArea | undefined {
+  const p = path.split(/[?#]/)[0] ?? '';
+  if (p === '/') return 'home';
+  return AREA_PREFIXES.find(([, prefixes]) =>
+    prefixes.some((x) => p === x || p.startsWith(`${x}/`)),
+  )?.[0];
+}
 
 /** The pages every install has, in the order the operator reaches for them. */
-const NAV = `<a href="/">Home</a><a href="${ACTIVITY_HREF}">Activity</a><a href="/chat">Chat</a>${STORE_NAV_SLOT}<a href="${SYSTEM_HREF}">System</a>`;
+const NAV = `<a href="/" data-area="home">Home${NEEDS_SLOT}</a>${STORE_NAV_SLOT}<a href="${ACTIVITY_HREF}" data-area="activity">Activity</a><a href="/chat" data-area="chat">Chat</a><a href="${SYSTEM_HREF}" data-area="system">System</a>`;
+
+/** Needs you's count on Home's link: nothing at 0. */
+export const needsBadge = (n: number): string =>
+  n > 0
+    ? `<span class="nav-badge" title="${n} need${n === 1 ? 's' : ''} you"><span class="sr-only">, </span>${n}<span class="sr-only"> need${n === 1 ? 's' : ''} you</span></span>`
+    : '';
+
+/**
+ * The kill switch control's script (#628): the button opens the confirmation dialog, Cancel and
+ * Escape shut it, and only its Engage (or Reset) posts, once at a time; a refusal or a network
+ * failure is said inside the dialog. It never calls `alert()`.
+ */
+export const KILL_SCRIPT = `<script>(()=>{const $=(i)=>document.getElementById(i);const o=$('kill-open'),d=$('kill-dialog'),c=$('kill-confirm'),x=$('kill-cancel'),e=$('kill-err');if(!o||!d||!c||!x||!e)return;const on=o.dataset.engaged==='true';let busy=false;
+const show=()=>{e.textContent='';if(typeof d.showModal==='function')d.showModal();else d.setAttribute('open','');if(c.focus)c.focus();};
+const hide=()=>{if(typeof d.close==='function')d.close();else d.removeAttribute('open');if(o.focus)o.focus();};
+o.addEventListener('click',show);x.addEventListener('click',hide);
+c.addEventListener('click',async()=>{if(busy)return;busy=true;c.disabled=true;e.textContent='';try{const r=await jmFetch('/api/control/kill',{engaged:!on});if(r.ok){location.reload();return;}const j=await r.json().catch(()=>({}));e.textContent='Refused ('+r.status+')'+(j&&j.error?': '+j.error:'');}catch(err){e.textContent='Could not reach the server: '+((err&&err.message)||err);}finally{busy=false;c.disabled=false;}});})();</script>`;
+
+/**
+ * The kill switch control (#628): a compact button in the top bar, red and reading "Kill switch
+ * on" while engaged, and the confirmation it opens. It posts with the session's CSRF header, so a
+ * page visit cannot trigger it.
+ */
+export function killControl(killed: boolean): string {
+  const [label, title, what, confirm, tone] = killed
+    ? [
+        'Kill switch on',
+        'Reset the kill switch?',
+        'Work runs again and forge writes resume at the next pass.',
+        'Reset',
+        'primary',
+      ]
+    : [
+        'Kill switch',
+        'Engage the kill switch?',
+        'No work runs and no forge writes happen until you reset it. Forge and Claude tokens stay valid until you revoke them with their providers.',
+        'Engage',
+        'danger-filled',
+      ];
+  return (
+    `<button type="button" id="kill-open" class="kill-btn${killed ? ' on' : ''}" aria-haspopup="dialog" aria-controls="kill-dialog" data-engaged="${killed}">${label}</button>` +
+    `<dialog id="kill-dialog" class="kill-dialog" aria-labelledby="kill-title"><h2 id="kill-title">${title}</h2><p>${what}</p>` +
+    `<p id="kill-err" class="kill-err" role="alert"></p>` +
+    `<div class="kill-actions"><button type="button" id="kill-confirm" class="${tone}">${confirm}</button><button type="button" id="kill-cancel">Cancel</button></div></dialog>` +
+    KILL_SCRIPT
+  );
+}
+
+/** What the top bar shows that only the server knows: the path, the kill switch, Needs you. */
+export type ChromeState = { path?: string; killed?: boolean; needsYou?: number };
+
+/**
+ * Fills a page's top bar slots (#628): marks the path's area `aria-current="page"`, draws the kill
+ * switch control and, engaged, its notice atop the page, and Needs you's count on Home. A value
+ * not given leaves its slot for a later fill.
+ */
+export function fillChrome(html: string, s: ChromeState): string {
+  let out = html;
+  if (s.killed !== undefined)
+    out = out
+      .replace(KILL_SLOT, killControl(s.killed))
+      .replace(KILL_NOTICE_SLOT, s.killed ? KILLED_NOTICE : '');
+  if (s.needsYou !== undefined) out = out.replace(NEEDS_SLOT, needsBadge(s.needsYou));
+  const area = s.path === undefined ? undefined : navArea(s.path);
+  if (area !== undefined && !out.includes('aria-current="page" data-area='))
+    out = out.replace(`data-area="${area}">`, `aria-current="page" data-area="${area}">`);
+  return out;
+}
+
+/** A step of a breadcrumb: its label (HTML, escaped) and, but for the page itself, a link. */
+export type Crumb = { label: string; href?: string };
+
+/**
+ * The one breadcrumb (#628), on every page below an area's own pages: area › object › sub-page.
+ * The last step is the page itself, marked current and not a link.
+ */
+export function breadcrumb(trail: readonly Crumb[]): string {
+  const steps = trail.map((c, i) =>
+    i === trail.length - 1
+      ? `<li><span aria-current="page">${c.label}</span></li>`
+      : `<li>${c.href === undefined ? c.label : `<a href="${escapeHtml(c.href)}">${c.label}</a>`}</li>`,
+  );
+  return `<nav class="crumbs" aria-label="Breadcrumb"><ol>${steps.join('')}</ol></nav>`;
+}
 
 /** The System area's pages (#623), in its sub-nav's order; all but Health and Sticks are a store install's. */
 export type SystemPage =
@@ -941,9 +1076,6 @@ export function activityNav(current: ActivityPage): string {
   ).join(' · ');
   return `<nav class="subnav" aria-label="Activity"><p>${links}</p></nav>`;
 }
-
-/** Marks the link for the current page; the longest matching prefix wins. */
-const NAV_SCRIPT = `<script>(()=>{const p=location.pathname;let best=null,len=-1;for(const a of document.querySelectorAll('.topnav a')){const h=a.getAttribute('href');const hit=h==='/'?p==='/':p===h||p.startsWith(h+'/');if(hit&&h.length>len){best=a;len=h.length;}}if(best)best.setAttribute('aria-current','page');})();</script>`;
 
 /** Marks a page that refreshes itself (`page({ live: true })`): a comment inside LIVE_SCRIPT. */
 export const LIVE_MARKER = 'jm-live';
@@ -1044,24 +1176,38 @@ if(load().open)open(pf(),b,false);})();</script>`;
  */
 export const page = (
   body: string,
-  opts: { chrome?: boolean; title?: string; live?: boolean; panel?: boolean } = {},
+  opts: {
+    chrome?: boolean;
+    title?: string;
+    live?: boolean;
+    panel?: boolean;
+    /** Whether the kill switch is engaged; absent, the app fills it in (`fillChrome`). */
+    killed?: boolean;
+    /** Needs you's count; absent, the app fills it in (`fillChrome`). */
+    needsYou?: number;
+  } = {},
 ): string => {
   const panel = opts.panel ?? false;
   const chrome = !panel && (opts.chrome ?? true);
   const title = opts.title ? `Jumpmaster: ${escapeHtml(opts.title)}` : 'Jumpmaster';
   const focus = chrome ? pageFocus(body) : undefined;
   const nav = chrome
-    ? `<nav class="topnav" aria-label="Main">${NAV}</nav>${askOpen(focus)}${LOGOUT}`
+    ? `<nav class="topnav" aria-label="Main">${NAV}</nav><div class="topbar-tools">${askOpen(focus)}<div class="kill-ctl">${KILL_SLOT}</div>${LOGOUT}</div>`
     : '';
   const scripted = chrome || panel;
   const top = panel
     ? ''
     : `<a class="skip" href="#main">Skip to content</a><header class="topbar"><div class="topbar-in"><h1 class="brand">${MARK}Jumpmaster</h1>${nav}</div></header>`;
-  return (
+  const html =
     `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">${scripted ? `<meta name="jm-csrf" content="">` : ''}<title>${title}</title>${panel ? '<base target="_top">' : ''}${FAVICON_LINK}<style>${STYLE}</style>${scripted ? JM_FETCH : ''}</head>` +
     `<body${panel ? ' class="in-panel"' : ''}>${top}` +
-    `<main id="main">${body}</main>${chrome ? `${askPanel(focus)}${NAV_SCRIPT}${ASK_PANEL_SCRIPT}` : ''}${opts.live ? LIVE_SCRIPT : ''}</body></html>`
-  );
+    `<main id="main">${chrome ? KILL_NOTICE_SLOT : ''}${body}</main>${chrome ? `${askPanel(focus)}${ASK_PANEL_SCRIPT}` : ''}${opts.live ? LIVE_SCRIPT : ''}</body></html>`;
+  return chrome
+    ? fillChrome(html, {
+        ...(opts.killed !== undefined ? { killed: opts.killed } : {}),
+        ...(opts.needsYou !== undefined ? { needsYou: opts.needsYou } : {}),
+      })
+    : html;
 };
 
 function elapsed(drop: Drop, now: Date): string {
@@ -1306,7 +1452,7 @@ function listPage(p: {
     : `<p class="empty">${p.empty}</p>`;
   const top =
     p.header === undefined
-      ? `<p><a href="/">Back</a></p>${p.activity ? activityNav(p.activity) : ''}<h2>${p.title}</h2><nav class="filters" aria-label="Project"><p>${zoneLinks}</p></nav>`
+      ? `${p.activity ? activityNav(p.activity) : ''}<h2>${p.title}</h2><nav class="filters" aria-label="Project"><p>${zoneLinks}</p></nav>`
       : `${p.header}<h2>${p.title}</h2>`;
   return page(
     `${top}<nav class="filters" aria-label="State"><p>${stateLinks}</p></nav>${kindNav}${body}`,
@@ -1372,8 +1518,14 @@ export function renderWorkItem(s: {
   const project = zoneName(zone, zones);
   const workZoneHref = projectWorkHref(i.dropZoneId);
   const crumbs =
-    `<nav class="crumbs" aria-label="Breadcrumb"><p><a href="${ACTIVITY_WORK_HREF}">Work</a> › ` +
-    `<a href="${escapeHtml(workZoneHref)}">${project}</a> › #${escapeHtml(i.issueNumber)}</p></nav>`;
+    s.header === undefined
+      ? breadcrumb([
+          { label: 'Activity', href: ACTIVITY_HREF },
+          { label: 'Work', href: ACTIVITY_WORK_HREF },
+          { label: project, href: workZoneHref },
+          { label: `#${escapeHtml(i.issueNumber)}` },
+        ])
+      : '';
   const why = i.reason ?? waitingOn(i);
   const pr = i.prNumber === null ? '-' : githubRef(repo, 'pull', i.prNumber);
   const head = d?.headSha ? `<code>${escapeHtml(d.headSha.slice(0, 7))}</code>` : '-';
@@ -1501,9 +1653,8 @@ export function renderHome(state: HomeState): string {
     now,
   });
   return page(
-    (state.killed ? KILLED_NOTICE : '') +
-      `<h2 class="page-h">Home</h2>` +
-      `<div class="floor-head">${statusBanner(state.status)}${killSection(state.killed ?? false)}</div>` +
+    `<h2 class="page-h">Home</h2>` +
+      `<div class="floor-head">${statusBanner(state.status)}</div>` +
       tokenAgeBanner(state.claudeTokenDays) +
       setupFrame +
       starterBanner +
@@ -1511,7 +1662,7 @@ export function renderHome(state: HomeState): string {
       projectsSection(floorCounts(state, now), state.zones, addProject) +
       capacitySection(state, now) +
       pipelineSection(state, now),
-    { live: true, title: 'Home' },
+    { live: true, title: 'Home', killed: state.killed ?? false, needsYou: needs.length },
   );
 }
 
@@ -1792,11 +1943,22 @@ export type DropContext = { item?: WorkItem; zones?: readonly ZoneRef[]; now?: D
 
 /** The drop page's breadcrumb: under its issue for issue work, else under Drops. */
 function dropCrumbs(drop: Drop, item: WorkItem | undefined, project: string): string {
-  const short = escapeHtml(drop.id.slice(0, 8));
-  const trail = item
-    ? `<a href="${ACTIVITY_WORK_HREF}">Work</a> › <a href="${escapeHtml(projectWorkHref(item.dropZoneId))}">${project}</a> › <a href="${escapeHtml(workItemHref(item))}">#${escapeHtml(item.issueNumber)}</a> › ${short}`
-    : `<a href="${ACTIVITY_DROPS_HREF}">Drops</a> › ${short}`;
-  return `<nav class="crumbs" aria-label="Breadcrumb"><p>${trail}</p></nav>`;
+  const short = { label: `Drop ${escapeHtml(drop.id.slice(0, 8))}` };
+  return breadcrumb(
+    item
+      ? [
+          { label: 'Activity', href: ACTIVITY_HREF },
+          { label: 'Work', href: ACTIVITY_WORK_HREF },
+          { label: project, href: projectWorkHref(item.dropZoneId) },
+          { label: `#${escapeHtml(item.issueNumber)}`, href: workItemHref(item) },
+          short,
+        ]
+      : [
+          { label: 'Activity', href: ACTIVITY_HREF },
+          { label: 'Drops', href: ACTIVITY_DROPS_HREF },
+          short,
+        ],
+  );
 }
 
 /** The drop page's summary: project, work, state, stick, times, PR, head, gates and models. */
@@ -2101,7 +2263,7 @@ export function renderLog(s: {
   }[s.kind];
   const top = tab
     ? `${s.header}<h2>Log</h2>`
-    : `<p><a href="/">Back</a></p>${activityNav('log')}<h2>Log${s.zone === undefined ? '' : ` of ${name(s.zone)}`}</h2><nav class="filters" aria-label="Project"><p>${projectLinks}</p></nav>`;
+    : `${activityNav('log')}<h2>Log${s.zone === undefined ? '' : ` of ${name(s.zone)}`}</h2><nav class="filters" aria-label="Project"><p>${projectLinks}</p></nav>`;
   const titleText = s.zone === undefined ? 'Log' : `Log of ${zoneTextNamer(s.zones)(s.zone)}`;
   return page(
     `${top}<nav class="filters" aria-label="Kind"><p>${kindLinks}</p></nav>` +
@@ -2267,7 +2429,7 @@ export function renderBoard(s: {
   ].join(' · ');
   const where = s.zone === undefined ? '' : ` of ${name(s.zone)}`;
   return page(
-    `<p><a href="/">Back</a></p>${activityNav('board')}<h2>Board${where}</h2>` +
+    `${activityNav('board')}<h2>Board${where}</h2>` +
       `<nav class="filters" aria-label="Project"><p>${projectLinks}</p></nav>` +
       `<div class="board">${BOARD_COLUMNS.map(column).join('')}</div>`,
     {
