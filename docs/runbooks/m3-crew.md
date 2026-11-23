@@ -248,8 +248,12 @@ item's **PR** (the label on the issue does nothing). Then open the diagnose drop
 - `ctl pause <zone>` stops new drops and forge writes. Rulings still record and apply on
   `ctl resume`. A crew-lead that finishes while paused has its filings refused.
 - `ctl observe <zone>` is refused while drops or forge writes are active: `ctl pause <zone>`, wait
-  for them to drain, then observe. In observe, crew work is recorded as `would_enqueue:<role>` on the project's Log (`/projects/<id>/log`); no
-  drops, no rulings applied, no forge writes.
+  for them to drain, then observe. In observe, crew work is recorded on the project's Log
+  (`/projects/<id>/log`) as the drop it would start: "Would start a crew lead drop (lead cycle)",
+  "Would start a refute drop (crew issue <id>)", "Would start a diagnosis (briefing <id>)",
+  "Would start an arbitration (…)", "Would start triage (triage request <id>)" or "Would start an
+  audit (commit <sha>)", with "on #N" or "of #N" when the work has an issue. No drops, no rulings
+  applied, no forge writes.
 - A restart never files an issue twice. An intent with no outbox row is filed on the next active
   pass. A write that may have reached the forge is found by its marker, or marked failed after
   `outboxDeadlineMinutes` (defaults to `ciDeadlineMinutes`, 45). A ruling recorded before a restart applies on the next

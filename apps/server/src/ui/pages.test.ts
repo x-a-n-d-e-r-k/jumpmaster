@@ -2703,17 +2703,49 @@ describe('the Log: observe decisions in words and rulings (#621)', () => {
   });
 
   test('every action literal the server passes recordObservation has words', () => {
+    /** The call's top-level arguments, split at commas outside brackets and quotes. */
+    const argsAt = (src: string, open: number): string[] => {
+      const args: string[] = [];
+      let depth = 0;
+      let quote = '';
+      let start = open + 1;
+      for (let i = open + 1; i < src.length; i++) {
+        const c = src[i];
+        if (quote) {
+          if (c === '\\') i++;
+          else if (c === quote) quote = '';
+        } else if (c === "'" || c === '"' || c === '`') quote = c;
+        else if (c === '(' || c === '[' || c === '{') depth++;
+        else if (c === ')' || c === ']' || c === '}') {
+          if (depth === 0) {
+            args.push(src.slice(start, i).trim());
+            return args;
+          }
+          depth--;
+        } else if (c === ',' && depth === 0) {
+          args.push(src.slice(start, i).trim());
+          start = i + 1;
+        }
+      }
+      return args;
+    };
     const found = new Set<string>();
+    const passedThrough = new Set<string>();
     for (const src of serverSources())
-      for (const m of src.matchAll(
-        /recordObservation\(\s*[^,()]+,\s*[^,()]+,\s*[^,()]+,\s*['"`]([a-z_]+)/g,
-      ))
-        found.add(m[1] ?? '');
+      for (const m of src.matchAll(/(?<!function )\brecordObservation\(/g)) {
+        const action = argsAt(src, (m.index ?? 0) + m[0].length - 1)[3] ?? '';
+        const literal = /^['"`]([a-z_]+)/.exec(action);
+        if (literal) found.add(literal[1] ?? '');
+        else passedThrough.add(action);
+      }
     // Non-vacuous: the recorded events that are not would_ codes are found, and some would_ ones.
     for (const code of ['adopt_refused', 'audit_skipped', 'would_park', 'would_enqueue'])
       expect(found).toContain(code);
     const known: readonly string[] = OBSERVATION_ACTIONS;
     expect([...found].filter((code) => !known.includes(code))).toEqual([]);
+    // An action passed through a variable escapes this scan: only reconcile's `note` helper does,
+    // and it is given would_ literals, which the scan above checks. A new one must be reviewed.
+    expect([...passedThrough]).toEqual(['action']);
   });
 
   test('a recorded event that is not a would_ code is worded as done, not hypothetical', () => {
