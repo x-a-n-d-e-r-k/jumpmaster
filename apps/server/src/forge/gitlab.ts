@@ -1,7 +1,8 @@
 // GitLabForge (design spec §5.5, spec §9): the GitLab REST v4 client with the issue, label, comment
 // and viewer methods of `Forge` (first slice, #676) and the branch, file, directory, compare and
 // first-parent methods (second slice, #683), merge requests (third slice, #690), approvals as
-// reviews (fourth slice, #696) and pipelines and jobs as checks (fifth slice, #697). Not wired
+// reviews (fourth slice, #696), pipelines and jobs as checks (fifth slice, #697) and the SHA-pinned
+// squash merge and rebase as the branch update (sixth slice, #698). Not wired
 // in: GitLab zones are still refused with GITLAB_UNSUPPORTED wherever a forge is built.
 //
 // GitLab mapping notes:
@@ -119,11 +120,32 @@
 //     is a failure above (so never a shadowed job, nor a failed one with `allow_failure`). It
 //     returns their ids, newest first. A refusal (403, 404) or any other error rejects with the
 //     status; pipelines retried before it stay retried, as on GitHub.
+// - Merges (sixth slice, #698), always SHA-pinned:
+//   - `merge(n, { sha, title, message })` is `PUT merge_requests/:iid/merge` with `sha` (refused
+//     unsent unless 40 lowercase hex, so no accept goes without it), `squash: true` and
+//     `squash_commit_message` set to `title`, a blank line, then `message` (just `title` when
+//     `message` is empty). It returns `merged` (`state` is `merged`) and `sha`, the
+//     `squash_commit_sha`, else the `merge_commit_sha`, left out when neither is there.
+//   - Errors: 409 (the SHA is not the head: it moved) rejects with 409, like GitHub's 409; 405
+//     (not mergeable, or not open) and 406 (a conflict) reject with 405, like GitHub's 405; any
+//     other error rejects with its status.
+//   - `updateBranch(n, expectedHeadSha)` is a rebase: GitLab rewrites the source branch's commits
+//     onto the target, where GitHub merges the base in. GitLab's rebase takes no expected head, so
+//     (1) it reads the MR and returns `head_moved`, sending no rebase, when `sha` is not
+//     `expectedHeadSha`; (2) `PUT merge_requests/:iid/rebase`, where anything but 202 rejects;
+//     (3) it reads `GET merge_requests/:iid?include_rebase_in_progress=true` until
+//     `rebase_in_progress` is false, at most 30 times with a wait between (1 s by default,
+//     `rebasePollDelayMs`), and rejects when the rebase is still running after that; (4) a
+//     non-empty `merge_error` is `conflict`, else `updated`.
+//   - The race: a push landing between (1) and (2) is not seen; the rebase then rebases that newer
+//     head. That is accepted: the flow re-reads the head on its next pass, and the SHA-pinned
+//     merge refuses any head it has not seen.
 // - Every path segment (branch, file path, ref) is URL-encoded; refs otherwise go in the query.
 // Every other `Forge` method throws GitLabUnsupportedError, naming the method, until a later slice.
 //
 // Secrets: the token goes only in the PRIVATE-TOKEN header, a redirect is never followed, and no
-// error carries the token, a redirect's Location, the request headers or a fetch failure's cause.
+// error carries the token, a redirect's Location, the request headers, a fetch failure's cause, a
+// request body (a commit message, say) or GitLab's response text: only the HTTP status.
 import { isGitLabProjectPath, stripTrailingSlashes } from '@jumpmaster/protocol';
 import {
   type BlockedByList,
@@ -179,6 +201,13 @@ const REVIEW_HEADER = /^<!-- jm-review: (APPROVE|REQUEST_CHANGES) ([0-9a-f]{40})
 /** GitHub's `PULLS_FILES_CAP`: a list this long or longer is not trusted to be whole. */
 const PULL_FILES_CAP = 3000;
 
+/** How many times `updateBranch` reads an MR whose rebase is in progress, and the default wait
+ *  between reads: about half a minute in all, after which it gives up. */
+const REBASE_POLL_TRIES = 30;
+const REBASE_POLL_DELAY_MS = 1000;
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
 /** The most pages a list follows: 1,000 pages of 100 is far past any project this serves. */
 const MAX_PAGES = 1000;
 
@@ -209,6 +238,10 @@ type RawMergeRequest = {
   labels?: string[];
   web_url?: string;
   changes_count?: unknown;
+  merge_commit_sha?: string | null;
+  squash_commit_sha?: string | null;
+  merge_error?: string | null;
+  rebase_in_progress?: boolean;
 };
 type RawDiff = {
   old_path?: string;
@@ -244,6 +277,8 @@ export type GitLabForgeOptions = {
   fetch?: typeof fetch;
   /** Aborts a request (and its body read) that has not finished in time. */
   requestTimeoutMs?: number;
+  /** The wait between reads of a rebase in progress (default 1000 ms); tests pass 0. */
+  rebasePollDelayMs?: number;
 };
 
 export class GitLabForge implements Forge {
@@ -253,6 +288,7 @@ export class GitLabForge implements Forge {
   private readonly provider: TokenProvider;
   private readonly fetch: typeof fetch;
   private readonly timeoutMs: number | undefined;
+  private readonly rebasePollDelayMs: number;
   private viewer: Promise<string> | undefined;
 
   constructor(
@@ -272,6 +308,7 @@ export class GitLabForge implements Forge {
     this.provider = typeof token === 'string' ? staticTokenProvider(token) : token;
     this.fetch = opts.fetch ?? fetch;
     this.timeoutMs = opts.requestTimeoutMs;
+    this.rebasePollDelayMs = opts.rebasePollDelayMs ?? REBASE_POLL_DELAY_MS;
   }
 
   // --- HTTP ----------------------------------------------------------------------------------
@@ -1096,14 +1133,81 @@ export class GitLabForge implements Forge {
   async getBranchRules(_branch: string): Promise<BranchRulesRead> {
     throw new GitLabUnsupportedError('getBranchRules');
   }
+  /**
+   * Squash-merges MR `number`, pinned to `input.sha` (refused unsent unless 40-hex). 409 (the head
+   * moved) rejects with 409; 405 and 406 (not mergeable, a conflict) reject with 405.
+   */
   async merge(
-    _number: number,
-    _input: { sha: string; method: 'squash'; title: string; message: string },
+    number: number,
+    input: { sha: string; method: 'squash'; title: string; message: string },
   ): Promise<{ merged: boolean; sha?: string }> {
-    throw new GitLabUnsupportedError('merge');
+    const n = mrIid(number);
+    if (!SHA40.test(input.sha))
+      throw new GitLabForgeError('GitLabForge: a merge needs a full 40-hex head SHA');
+    let mr: RawMergeRequest;
+    try {
+      mr = await this.request<RawMergeRequest>(
+        `merging merge request ${n}`,
+        'PUT',
+        `/merge_requests/${n}/merge`,
+        {
+          sha: input.sha,
+          squash: true,
+          squash_commit_message:
+            input.message === '' ? input.title : `${input.title}\n\n${input.message}`,
+        },
+      );
+    } catch (err) {
+      const status = (err as GitLabForgeError).status;
+      if (status === 406)
+        throw new GitLabForgeError(
+          `GitLabForge: merging merge request ${n} failed: HTTP 406 (not mergeable)`,
+          405,
+        );
+      throw err;
+    }
+    const sha = mr?.squash_commit_sha || mr?.merge_commit_sha;
+    return sha ? { merged: mr.state === 'merged', sha } : { merged: mr?.state === 'merged' };
   }
-  async updateBranch(_prNumber: number, _expectedHeadSha: string): Promise<BranchUpdate> {
-    throw new GitLabUnsupportedError('updateBranch');
+
+  /**
+   * Rebases MR `prNumber`'s source branch onto its target, when its head is still
+   * `expectedHeadSha`; see the header for the race this leaves.
+   */
+  async updateBranch(prNumber: number, expectedHeadSha: string): Promise<BranchUpdate> {
+    const n = mrIid(prNumber);
+    const mr = await this.request<RawMergeRequest>(
+      `reading merge request ${n}`,
+      'GET',
+      `/merge_requests/${n}`,
+    );
+    if (mr?.sha !== expectedHeadSha) return { kind: 'head_moved' };
+    const { status } = await this.send(
+      `rebasing merge request ${n}`,
+      'PUT',
+      `${this.project}/merge_requests/${n}/rebase`,
+      {},
+    );
+    if (status !== 202)
+      throw new GitLabForgeError(
+        `GitLabForge: rebasing merge request ${n} failed: HTTP ${status}, not 202`,
+        status,
+      );
+    for (let attempt = 0; attempt < REBASE_POLL_TRIES; attempt++) {
+      if (attempt > 0) await sleep(this.rebasePollDelayMs);
+      const now = await this.request<RawMergeRequest>(
+        `reading merge request ${n}`,
+        'GET',
+        `/merge_requests/${n}?include_rebase_in_progress=true`,
+      );
+      if (now?.rebase_in_progress === true) continue;
+      return typeof now?.merge_error === 'string' && now.merge_error !== ''
+        ? { kind: 'conflict' }
+        : { kind: 'updated' };
+    }
+    throw new GitLabForgeError(
+      `GitLabForge: rebasing merge request ${n} failed: still in progress after ${REBASE_POLL_TRIES} reads`,
+    );
   }
   async repoAccess(): Promise<RepoAccess> {
     throw new GitLabUnsupportedError('repoAccess');
