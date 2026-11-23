@@ -879,11 +879,104 @@ describe('repository: compare', () => {
   });
 });
 
-describe('repository: unknown routes', () => {
-  test('GET /repository/tree lands in unknown with a 404', async () => {
+describe('repository: tree', () => {
+  const P = `/projects/${PROJECT.id}`;
+  const tree = (call: ReturnType<typeof setup>['call'], q: string) =>
+    call('GET', `${P}/repository/tree?${q}`);
+  const names = (body: { name: string; type: string }[]) => body.map((e) => `${e.type}:${e.name}`);
+
+  function seed(gl: FakeGitLab) {
+    return gl.seedCommit({
+      branch: 'main',
+      files: { 'README.md': 'r', 'src/a.ts': 'a', 'src/b.ts': 'b', 'src/lib/c.ts': 'c', z: 'z' },
+      message: 'tree',
+    });
+  }
+
+  test('lists the root and a subdirectory, trees first, with blob ids and paths', async () => {
     const { gl, call } = setup();
-    const r = await call('GET', `/projects/${PROJECT.id}/repository/tree`);
+    const sha = seed(gl);
+    const root = await tree(call, 'ref=main');
+    expect(root.status).toBe(200);
+    expect(names(root.body)).toEqual(['tree:src', 'blob:README.md', 'blob:z']);
+    const src = await tree(call, `path=src&ref=${sha}`);
+    expect(names(src.body)).toEqual(['tree:lib', 'blob:a.ts', 'blob:b.ts']);
+    expect(src.body[1]).toMatchObject({
+      id: gitBlobSha('a'),
+      name: 'a.ts',
+      type: 'blob',
+      path: 'src/a.ts',
+      mode: '100644',
+    });
+    expect(src.body[0]).toMatchObject({
+      name: 'lib',
+      type: 'tree',
+      path: 'src/lib',
+      mode: '040000',
+    });
+    expect(names((await tree(call, 'path=src/lib/&ref=main')).body)).toEqual(['blob:c.ts']);
+    expect(gl.requests.at(-1)).toMatchObject({
+      method: 'GET',
+      path: `/api/v4${P}/repository/tree`,
+      query: { path: 'src/lib/', ref: 'main' },
+      user: 'dev',
+    });
+    expect(gl.unknown).toEqual([]);
+  });
+
+  test('pages with page, per_page and x-next-page', async () => {
+    const { gl, call } = setup();
+    const files: Record<string, string> = {};
+    for (let i = 0; i < 5; i++) files[`d/f${i}`] = String(i);
+    gl.seedCommit({ branch: 'main', files, message: 'many' });
+    const one = await tree(call, 'path=d&ref=main&per_page=2&page=1');
+    expect(names(one.body)).toEqual(['blob:f0', 'blob:f1']);
+    expect(one.headers.get('x-next-page')).toBe('2');
+    const three = await tree(call, 'path=d&ref=main&per_page=2&page=3');
+    expect(names(three.body)).toEqual(['blob:f4']);
+    expect(three.headers.get('x-next-page')).toBe('');
+  });
+
+  test('a missing path or ref gives 404; a file path gives an empty list', async () => {
+    const { gl, call } = setup();
+    seed(gl);
+    expect((await tree(call, 'path=nope&ref=main')).status).toBe(404);
+    expect((await tree(call, 'path=src&ref=nope')).status).toBe(404);
+    expect((await tree(call, `path=src&ref=${'0'.repeat(40)}`)).status).toBe(404);
+    const file = await tree(call, 'path=src/a.ts&ref=main');
+    expect(file.status).toBe(200);
+    expect(file.body).toEqual([]);
+  });
+
+  test('without ref, the default branch is listed', async () => {
+    const { gl, call } = setup();
+    seed(gl);
+    expect(names((await tree(call, 'path=src/lib')).body)).toEqual(['blob:c.ts']);
+  });
+});
+
+describe('repository: merge commits', () => {
+  test('seedCommit with parents makes a merge commit', async () => {
+    const { gl } = setup();
+    const a = gl.seedCommit({ branch: 'main', files: { a: '1' }, message: 'a' });
+    const b = gl.seedCommit({ parent: a, files: { b: '1' }, message: 'b' });
+    const m = gl.seedCommit({
+      branch: 'main',
+      parents: [a, b],
+      files: { a: '1', b: '1' },
+      message: 'merge',
+    });
+    expect(gl.commit(m)?.parent_ids).toEqual([a, b]);
+    expect(gl.branchSha('main')).toBe(m);
+    expect(() => gl.seedCommit({ parents: ['nope'], files: {}, message: 'x' })).toThrow(/unknown/);
+  });
+});
+
+describe('repository: unknown routes', () => {
+  test('GET /repository/archive lands in unknown with a 404', async () => {
+    const { gl, call } = setup();
+    const r = await call('GET', `/projects/${PROJECT.id}/repository/archive`);
     expect(r.status).toBe(404);
-    expect(gl.unknown).toEqual([`GET /api/v4/projects/${PROJECT.id}/repository/tree`]);
+    expect(gl.unknown).toEqual([`GET /api/v4/projects/${PROJECT.id}/repository/archive`]);
   });
 });
