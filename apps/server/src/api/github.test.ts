@@ -250,6 +250,26 @@ describe('guidanceFor, app-first', () => {
     expect(f.calls).not.toContain('ownerType');
   });
 
+  test('guidanceFor itself refuses a GitLab zone and reads nothing, for every caller (issue #667)', async () => {
+    const gitlab = makeZone({
+      id: 'demo',
+      repo: 'acme/app',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    });
+    const { store, config } = storeWith(withPat, appsOf(authorApp), [gitlab]);
+    const f = fakeForge();
+    const s = counting();
+    const r = await guidanceFor(store, config, gitlab, f.forgeOf, {
+      now: () => t0,
+      appTokens: s.source,
+    });
+    expect(r).toEqual({ ok: false, status: 400, error: 'GitLab zones are not supported yet' });
+    expect(f.calls).toEqual([]);
+    expect(f.tokens).toEqual([]);
+    expect(s.asked).toEqual([]);
+  });
+
   test('a PAT-only zone without an author PAT is still 409 NO_AUTHOR', async () => {
     const zone = zoneOf({});
     const { store, config } = storeWith(baseEnv, appsOf(authorApp), [zone]);
@@ -395,6 +415,24 @@ describe('the callers', () => {
     expect(g?.ruleset.text).toContain('Lint');
     // Without the source, as before: no author PAT, no guidance.
     expect(await guidanceReader(store, config, f.forgeOf, () => t0)('demo')).toBeUndefined();
+  });
+
+  test('the doctor guidance reader reads nothing for a GitLab zone (issue #667)', async () => {
+    const gitlab = makeZone({
+      id: 'demo',
+      repo: 'acme/app',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    });
+    const { store, config } = storeWith(withPat, appsOf(authorApp), [gitlab]);
+    const f = fakeForge();
+    const s = counting();
+    expect(
+      await guidanceReader(store, config, f.forgeOf, () => t0, s.source)('demo'),
+    ).toBeUndefined();
+    expect(f.calls).toEqual([]);
+    expect(f.tokens).toEqual([]);
+    expect(s.asked).toEqual([]);
   });
 });
 

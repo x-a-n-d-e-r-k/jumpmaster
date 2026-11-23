@@ -335,6 +335,10 @@ export async function guidanceFor(
     appTokens?: Pick<AppTokenSource, 'provider'>;
   } = {},
 ): Promise<GuidanceResult> {
+  // Issue #667: GitHub guidance for a GitLab project would read a GitHub repository that is not
+  // the zone's. Checked here so every caller (the route, the Setup page, the doctor) is covered.
+  // Fixed words: never the base URL or the project path.
+  if (forgeKind(zone) === 'gitlab') return { ok: false, status: 400, error: GITLAB_UNSUPPORTED };
   // A name the config allows but GitHub's does not (owner/name only): said as such, not as a
   // network failure.
   if (!REPO.test(zone.repo)) return { ok: false, status: 400, error: new RepoNameError().message };
