@@ -102,6 +102,7 @@ describe('project addressing', () => {
           path_with_namespace: PROJECT.path,
           default_branch: 'main',
           visibility: 'private',
+          namespace: { kind: 'user' },
         });
         expect((await call('GET', `/projects/${id}/issues`)).status).toBe(200);
       }
@@ -237,11 +238,80 @@ describe('members', () => {
     expect((await call('GET', `/projects/${ENCODED}/members/all/987654`)).status).toBe(404);
     const q = await call('GET', `/projects/${ENCODED}/members/all?query=maint`);
     expect(q.status).toBe(200);
-    expect(q.body).toEqual([{ id: m.id, username: 'maint', name: 'maint', access_level: 40 }]);
+    expect(q.body).toEqual([
+      { id: m.id, username: 'maint', name: 'maint', access_level: 40, state: 'active' },
+    ]);
     const all = await call('GET', `/projects/${ENCODED}/members/all`);
     expect(all.body.map((x: { username: string }) => x.username).sort()).toEqual(
       ['dev', 'guest', 'maint', 'reporter'].sort(),
     );
+  });
+});
+
+describe('access', () => {
+  test('a member state is seedable through seedMember and addUser', async () => {
+    const { gl, call } = setup();
+    const b = gl.seedMember({
+      username: 'blocked',
+      accessLevel: ACCESS.developer,
+      state: 'blocked',
+    });
+    const tok = glpat('B');
+    gl.addUser({ username: 'away', token: tok, accessLevel: ACCESS.reporter, state: 'awaiting' });
+    expect(b.state).toBe('blocked');
+    const one = await call('GET', `/projects/${ENCODED}/members/all/${b.id}`);
+    expect(one.body).toMatchObject({ username: 'blocked', state: 'blocked' });
+    const all = await call('GET', `/projects/${ENCODED}/members/all`);
+    const states = Object.fromEntries(
+      all.body.map((x: { username: string; state: string }) => [x.username, x.state]),
+    );
+    expect(states).toMatchObject({ blocked: 'blocked', away: 'awaiting', guest: 'active' });
+  });
+
+  test('the project namespace kind is seedable', async () => {
+    const gl = fakeGitLab({ baseUrl: GITLAB, project: { ...PROJECT, namespaceKind: 'group' } });
+    fakes.push(gl);
+    gl.addUser({ username: 'dev', token: DEVELOPER, accessLevel: ACCESS.developer });
+    const res = await fetch(`${GITLAB}/api/v4/projects/${PROJECT.id}`, {
+      headers: { 'PRIVATE-TOKEN': DEVELOPER },
+    });
+    expect(((await res.json()) as { namespace: unknown }).namespace).toEqual({ kind: 'group' });
+  });
+
+  test('GET /personal_access_tokens/self answers the caller’s scopes and expiry', async () => {
+    const { gl, call } = setup();
+    const tok = glpat('E');
+    gl.addUser({
+      username: 'exp',
+      token: tok,
+      scopes: ['read_user', 'read_api'],
+      expiresAt: '2027-01-31',
+    });
+    const r = await call('GET', '/personal_access_tokens/self', { token: tok });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ scopes: ['read_user', 'read_api'], expires_at: '2027-01-31' });
+    const dflt = await call('GET', '/personal_access_tokens/self', { token: REPORTER });
+    expect(dflt.body).toMatchObject({ scopes: ['api'], expires_at: null });
+    expect(JSON.stringify(gl.requests)).not.toContain(tok);
+  });
+
+  test('GET /personal_access_tokens/self takes the same scopes as GET /user', async () => {
+    const { gl, call } = setup();
+    const ru = glpat('U');
+    const rr = glpat('Q');
+    gl.addUser({ username: 'ru', token: ru, scopes: ['read_user'] });
+    gl.addUser({ username: 'rr', token: rr, scopes: ['read_repository'] });
+    expect((await call('GET', '/personal_access_tokens/self', { token: ru })).status).toBe(200);
+    expect((await call('GET', '/personal_access_tokens/self', { token: rr })).status).toBe(403);
+    expect(gl.unknown).toEqual([]);
+  });
+
+  test('GET /personal_access_tokens/self answers 401 with no token or an unknown token', async () => {
+    const { call } = setup();
+    const none = await call('GET', '/personal_access_tokens/self', { token: null });
+    expect(none).toMatchObject({ status: 401, body: { message: '401 Unauthorized' } });
+    const wrong = await call('GET', '/personal_access_tokens/self', { token: WRONG });
+    expect(wrong).toMatchObject({ status: 401, body: { message: '401 Unauthorized' } });
   });
 });
 
