@@ -458,13 +458,16 @@ const isUniqueViolation = (e: unknown): boolean =>
 const PR_PARK_REASONS = new Set(['budget exhausted: resolve', 'budget exhausted: base-sync']);
 /** The park of a heal that changed nothing on findings it had already seen. */
 export const HEAL_NO_CHANGES = 'heal made no changes for the same findings';
+/** The reason of a heal that failed a gate, and so did not push (`roles/heal.ts` in the trooper). */
+const HEAL_GATE_FAILED = /^gate .+ failed$/;
 /** The gate-script guard's park reason opens with this (`flow/guards.ts`, `decide`). */
 export const GATE_SCRIPT_PARK = 'gate script changed: ';
 
 /**
  * Which crew action a parked item allows: `implement` for a failed first implementation with no
  * pull request (#396); `pr` for an item with an open PR parked on a resolve or base-sync budget,
- * or by a heal on CI feedback that changed nothing or stopped blocked (#420); `gate` for a
+ * by a heal on CI feedback that changed nothing or stopped blocked (#420), or by a heal on any
+ * feedback that failed a gate and pushed nothing (#675); `gate` for a
  * gate-script park, which the crew may only retry to remove the change.
  */
 export type CrewParkKind = 'implement' | 'pr' | 'gate';
@@ -473,8 +476,9 @@ export type CrewParkKind = 'implement' | 'pr' | 'gate';
  * The crew action the item allows, if any: `crew.autoRetry` on, the item parked in the zone, no
  * crew action ever recorded for it, and a park the crew may act on (`CrewParkKind`). Read from
  * server-recorded rows only, never from an agent's report. A heal park counts only when the newest
- * heal's stored feedback came from CI: a review's findings are the arbiter's, a person's are
- * theirs. A human hold, a hand-opened conflict, a `no_changes` implement, credits, the heal budget
+ * heal's stored feedback came from CI (a review's findings are the arbiter's, a person's are
+ * theirs), or when that heal failed a gate and the PR head is still the one it started from:
+ * nothing was pushed, so there is nothing to arbitrate. A human hold, a hand-opened conflict, a `no_changes` implement, credits, the heal budget
  * (a review disagreement) or any other reason allows none.
  */
 export function crewParkKind(db: Db, zone: DropZoneConfig, itemId: number): CrewParkKind | null {
@@ -489,10 +493,12 @@ function parkKind(db: Db, zone: DropZoneConfig, itemId: number): CrewParkKind | 
   const pr = getPullRequest(db, itemId);
   const newest = db
     .prepare(
-      `SELECT role, state, result_json AS resultJson FROM drops WHERE work_item_id = ?
-       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+      `SELECT role, state, head_sha AS headSha, result_json AS resultJson FROM drops
+       WHERE work_item_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`,
     )
-    .get(itemId) as { role: string; state: string; resultJson: string | null } | undefined;
+    .get(itemId) as
+    | { role: string; state: string; headSha: string | null; resultJson: string | null }
+    | undefined;
   if (item.prNumber === null && pr === undefined) {
     return newest?.role === 'implement' && newest.state === 'failed' ? 'implement' : null;
   }
@@ -502,16 +508,28 @@ function parkKind(db: Db, zone: DropZoneConfig, itemId: number): CrewParkKind | 
   if (reason.startsWith(GATE_SCRIPT_PARK)) return 'gate';
   const ciHeal = lastHealFeedback(db, itemId)?.source === 'ci';
   if (reason === HEAL_NO_CHANGES) return ciHeal ? 'pr' : null;
-  if (newest?.role === 'heal' && ciHeal) {
-    let result: { status?: unknown; reason?: unknown } = {};
-    try {
-      result = (JSON.parse(newest.resultJson ?? '{}') ?? {}) as typeof result;
-    } catch {
-      return null;
-    }
-    const parkedFor = typeof result.reason === 'string' ? result.reason : 'blocked';
-    if (result.status === 'blocked' && reason === parkedFor) return 'pr';
+  if (newest?.role !== 'heal') return null;
+  let result: { status?: unknown; reason?: unknown } = {};
+  try {
+    result = (JSON.parse(newest.resultJson ?? '{}') ?? {}) as typeof result;
+  } catch {
+    return null;
   }
+  // A heal that failed a gate pushed nothing when the head is still the one it started from:
+  // a retry starts from the same head, whoever's feedback it answered (#675).
+  if (
+    newest.state === 'failed' &&
+    typeof result.reason === 'string' &&
+    HEAL_GATE_FAILED.test(result.reason) &&
+    reason === result.reason &&
+    newest.headSha !== null &&
+    newest.headSha === pr.headSha
+  ) {
+    return 'pr';
+  }
+  if (!ciHeal) return null;
+  const parkedFor = typeof result.reason === 'string' ? result.reason : 'blocked';
+  if (result.status === 'blocked' && reason === parkedFor) return 'pr';
   return null;
 }
 
