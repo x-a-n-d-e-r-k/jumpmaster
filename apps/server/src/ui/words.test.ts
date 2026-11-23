@@ -184,7 +184,10 @@ async function seeded(doctor: DoctorCheck[] = []) {
   const h = await harness({
     live: true,
     zone: { ciRequired: true, protectedPaths: PROTECTED },
-    extraZones: [{ id: 'merlin', repo: 'octo/merlin', protectedPaths: PROTECTED }],
+    extraZones: [
+      { id: 'merlin', repo: 'octo/merlin', protectedPaths: PROTECTED },
+      { id: 'gone', repo: 'octo/gone', protectedPaths: PROTECTED },
+    ],
     // The project's GitHub section reads these, never the network.
     guidanceForge: () => ({
       repoAccess: async () => ({
@@ -271,6 +274,14 @@ async function seeded(doctor: DoctorCheck[] = []) {
   });
   expect(r.statusCode, r.body).toBe(409);
   const confirm = r.json().confirm as string;
+  // A removed project: its removal is a revision on the History page.
+  setZoneMode(h.db, 'gone', 'observe', at);
+  const removed = await h.app.inject({
+    method: 'DELETE',
+    url: '/api/control/zones/gone',
+    headers: s.headers,
+  });
+  expect(removed.statusCode, removed.body).toBe(200);
   // A chat thread focused on a project, with a card.
   const th = createThread(
     h.db,
@@ -292,7 +303,16 @@ async function seeded(doctor: DoctorCheck[] = []) {
     },
     at,
   );
-  return { h, briefing, confirm, thread: th.id, cookie: s.cookie };
+  // A chat thread opened with Ask from a doctor check on the project, titled by the server.
+  const asked = await h.app.inject({
+    method: 'POST',
+    url: '/api/chat/threads',
+    headers: s.headers,
+    payload: { focus: { kind: 'doctor', zoneId: 'merlin', ref: 'zone.mode' } },
+  });
+  expect(asked.statusCode, asked.body).toBeLessThan(300);
+  const doctorThread = asked.json().thread.id as string;
+  return { h, briefing, confirm, thread: th.id, doctorThread, cookie: s.cookie };
 }
 
 describe('every rendered page says project and Home', () => {
@@ -300,7 +320,7 @@ describe('every rendered page says project and Home', () => {
     const doctor = await doctorFindings();
     const reached = new Set(doctor.map((c) => c.id));
     for (const id of DOCTOR_REACHED) expect(reached, id).toContain(id);
-    const { h, briefing, confirm, thread, cookie } = await seeded(doctor);
+    const { h, briefing, confirm, thread, doctorThread, cookie } = await seeded(doctor);
     const urls = [
       '/',
       '/?needs=all',
@@ -348,6 +368,13 @@ describe('every rendered page says project and Home', () => {
     expect(page.statusCode, confirm).toBe(200);
     const bad = offenders(visibleText(page.body));
     if (bad.length > 0) found[confirm.replace(/[^/]+$/, ':id')] = bad;
+    // The doctor thread is the session's own that opened it, and so is its row in the list.
+    for (const url of ['/chat', `/chat/${doctorThread}`]) {
+      const own = await h.view(url, { cookie });
+      expect(own.statusCode, url).toBe(200);
+      const badOwn = offenders(visibleText(own.body));
+      if (badOwn.length > 0) found[`${url} (own)`] = badOwn;
+    }
     // Discovery of GitHub App installations, as the session that asks for it.
     const s = operatorSession(h.db, h.now());
     const discover = await h.app.inject({ method: 'POST', url: DISCOVER_PATH, headers: s.headers });
@@ -371,7 +398,16 @@ describe('every rendered page says project and Home', () => {
   });
 
   test('the seed reaches the strings it guards', async () => {
-    const { h, confirm, cookie } = await seeded(await doctorFindings());
+    const { h, confirm, doctorThread, cookie } = await seeded(await doctorFindings());
+    // The History page lists the removed project's revision.
+    expect(visibleText((await h.view('/system/history')).body)).toContain('remove project gone');
+    // The doctor thread is titled by its check, shown as code in the list and on the thread.
+    expect((await h.view('/chat', { cookie })).body).toContain(
+      'Doctor: <code>zone.mode</code></a>',
+    );
+    expect((await h.view(`/chat/${doctorThread}`, { cookie })).body).toContain(
+      '<h2>Doctor: <code>zone.mode</code>',
+    );
     // The egress table marks the observed host no list names.
     expect(visibleText((await h.view('/projects/main/setup')).body)).toMatch(
       /new\.example\.com allowed 2 .*? egress1 not in this project's lists/,

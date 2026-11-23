@@ -1179,6 +1179,12 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 </script>`;
 
+/**
+ * A revision note as the page says it: a project's removal is stored as `remove zone <id>` (the
+ * note `ctl` and the API show, `removalNote`), and said here as `remove project <id>`.
+ */
+const noteWords = (note: string): string => note.replace(/^remove zone /, 'remove project ');
+
 export function renderHistory(o: { store: ConfigStore; revisions: RevisionView[] }): string {
   const { store, revisions } = o;
   const current = store.revision();
@@ -1222,7 +1228,7 @@ export function renderHistory(o: { store: ConfigStore; revisions: RevisionView[]
   const rows = revisions
     .map(
       (r) =>
-        `<tr data-revision="${r.id}"><td>#${r.id}</td><td>${escapeHtml(r.createdAt.slice(0, 16).replace('T', ' '))}</td><td>${escapeHtml(VIA_WORDS[r.via] ?? r.via)}</td><td>${r.note ? escapeHtml(r.note) : '-'}</td><td>${changes(r)}</td><td>${marks(r)}</td><td>${revert(r)}</td></tr>`,
+        `<tr data-revision="${r.id}"><td>#${r.id}</td><td>${escapeHtml(r.createdAt.slice(0, 16).replace('T', ' '))}</td><td>${escapeHtml(VIA_WORDS[r.via] ?? r.via)}</td><td>${r.note ? escapeHtml(noteWords(r.note)) : '-'}</td><td>${changes(r)}</td><td>${marks(r)}</td><td>${revert(r)}</td></tr>`,
     )
     .join('');
   const intro = fileMode

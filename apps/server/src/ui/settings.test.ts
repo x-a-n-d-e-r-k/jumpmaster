@@ -936,7 +936,7 @@ describe('settings, part two (Task 13)', () => {
     expect(rev(poll)).toContain('pollSeconds');
     expect(rev(poll)).not.toContain('class="mark guarded"');
     expect(rev(added)).toContain('class="mark guarded"');
-    expect(rev(removed)).toContain('remove zone main');
+    expect(rev(removed)).toContain('remove project main');
     // Reverting to the revision that held the zone re-adds it: said on the button before it runs.
     expect(rev(added)).toMatch(
       /<button type="button" class="revert" data-id="\d+" data-readds="\[&quot;main&quot;\]">Revert<\/button>/,
