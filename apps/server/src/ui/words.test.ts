@@ -6,7 +6,7 @@ import { GUARDED_PATHS, type GuardCtx, REFUSED_PATHS } from '../config/guarded.j
 import { LEGACY_READY_LABEL } from '../config/ready-label.js';
 import { type ConfigIssue, parseEditable } from '../config.js';
 import { type Drop, insertDrop, setZoneMode, stampStick, type WorkItem } from '../db/repo.js';
-import type { DoctorCheck } from '../doctor/checks.js';
+import { type DoctorCheck, SHADOWED_TOKEN_FIX } from '../doctor/checks.js';
 import { GITLAB_UNSUPPORTED } from '../forge/kind.js';
 import { modeCardSummary, refusedCardSummary } from '../mcp/chat-actions.js';
 import { DISCOVER_PATH, INSTALLED_PATH } from '../setup/github-app-installed.js';
@@ -17,6 +17,7 @@ import { harness } from '../test/flowHarness.js';
 import { operatorSession, plus, t0 } from '../test/helpers.js';
 import { githubSection } from './github.js';
 import { codeHtml } from './pages.js';
+import { fixHtml } from './setup.js';
 
 /**
  * What a reader sees of a page: no `<script>`, `<style>`, `<code>` or `<pre>` content, no tags
@@ -551,6 +552,20 @@ describe('every rendered page says project and Home', () => {
     expect(visibleText(`${html}<p>Run <code>jumpmaster ctl zones list</code></p>`)).not.toMatch(
       ZONE_WORD,
     );
+  });
+});
+
+describe('fixHtml', () => {
+  test('keeps entities whole and stops a ctl command at a bracket', () => {
+    const mirror =
+      'Keep the file a current mirror: docker compose exec -T jumpmaster jumpmaster ctl config export > config/jumpmaster.config.json.tmp && mv config/jumpmaster.config.json.tmp config/jumpmaster.config.json';
+    expect(fixHtml(mirror)).toBe(
+      'Keep the file a current mirror: docker compose exec -T jumpmaster <code>jumpmaster ctl config export &gt; config/jumpmaster.config.json.tmp &amp;&amp; mv config/jumpmaster.config.json.tmp config/jumpmaster.config.json</code>',
+    );
+    expect(fixHtml(SHADOWED_TOKEN_FIX)).toBe(
+      'Remove the one you do not mean: delete the file (then <code>jumpmaster ctl secrets reload</code>), or remove the vault entry with <code>jumpmaster ctl secrets remove &lt;name&gt;</code>.',
+    );
+    expect(fixHtml("it's <b> POST /api/x")).toBe('it&#39;s &lt;b&gt; <code>POST /api/x</code>');
   });
 });
 

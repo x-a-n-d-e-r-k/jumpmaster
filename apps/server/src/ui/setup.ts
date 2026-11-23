@@ -630,13 +630,20 @@ async function createZone(zone, resume, out) {
 
 /**
  * A doctor fix as HTML: escaped, with each ctl command (`jumpmaster ctl …`, up to the end of its
- * sentence) and each API call (`POST /api/…`) set as code, since those keep their own words.
+ * sentence or a bracket) and each API call (`POST /api/…`) set as code, since those keep their own
+ * words. It matches on the raw text and escapes each piece, so an entity is never cut in half.
  */
-const fixHtml = (fix: string): string =>
-  escapeHtml(fix).replace(
-    /\bjumpmaster ctl [^\n;]*?(?=\.(?:\s|$)|[;\n]|$)|\b(?:(?:GET|POST|PUT|PATCH|DELETE) )?\/api\/[^\s()]*[^\s().,;:]/g,
-    (m) => `<code>${m}</code>`,
-  );
+export const fixHtml = (fix: string): string => {
+  const pattern =
+    /\bjumpmaster ctl [^\n;()]*?(?=\.(?:\s|$)|[;\n()]|$)|\b(?:(?:GET|POST|PUT|PATCH|DELETE) )?\/api\/[^\s()]*[^\s().,;:]/g;
+  let out = '';
+  let last = 0;
+  for (const m of fix.matchAll(pattern)) {
+    out += `${escapeHtml(fix.slice(last, m.index))}<code>${escapeHtml(m[0])}</code>`;
+    last = m.index + m[0].length;
+  }
+  return out + escapeHtml(fix.slice(last));
+};
 
 function doctorPage(db: Db, zones: readonly ZoneRef[]): string {
   const name = zoneNamer(zones);
