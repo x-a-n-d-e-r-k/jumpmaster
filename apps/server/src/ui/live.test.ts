@@ -66,11 +66,13 @@ function live() {
     querySelectorAll: (sel: string) => (sel === 'form' ? forms : []),
   };
   const askPanel = { hidden: true };
+  const killDialog = { open: false };
   const document = {
     visibilityState: 'visible',
     activeElement: null as unknown,
     querySelector: (sel: string) => (sel === 'main' ? mainEl : null),
-    getElementById: (id: string) => (id === 'ask-panel' ? askPanel : null),
+    getElementById: (id: string) =>
+      id === 'ask-panel' ? askPanel : id === 'kill-dialog' ? killDialog : null,
     addEventListener: (ev: string, fn: () => void) => {
       (listeners[ev] ??= []).push(fn);
     },
@@ -108,6 +110,7 @@ function live() {
     reload,
     document,
     askPanel,
+    killDialog,
     textarea,
     forms,
     listeners,
@@ -181,6 +184,22 @@ describe('LIVE_SCRIPT', () => {
     await w.tick();
     expect(w.reload.count).toBe(0);
     w.askPanel.hidden = true;
+    w.document.activeElement = null;
+    await w.tick();
+    expect(w.reload.count).toBe(1);
+  });
+
+  test('an open kill switch confirmation holds the reload, so the dialog is not closed mid-confirmation (#628)', async () => {
+    const w = live();
+    await w.tick();
+    w.killDialog.open = true;
+    // Focus sits on the dialog's Engage button, in the header, not in main.
+    w.document.activeElement = { tagName: 'BUTTON' };
+    w.state.answer = () => Promise.resolve(ok('<main>two</main>'));
+    await w.tick();
+    await w.tick();
+    expect(w.reload.count).toBe(0);
+    w.killDialog.open = false;
     w.document.activeElement = null;
     await w.tick();
     expect(w.reload.count).toBe(1);
