@@ -415,7 +415,7 @@ describe('the credentials tab', () => {
     expect(r.statusCode).toBe(301);
     expect(r.headers.location).toBe('/system/credentials');
     // Home links to it.
-    expect((await w.get('/')).body).toContain('<a href="/system">System</a>');
+    expect((await w.get('/')).body).toContain('<a href="/system" data-area="system">System</a>');
   });
 
   test("the wizard's Claude and forge controls are here: the plan, the token date, the repository recommendation and its token links", async () => {

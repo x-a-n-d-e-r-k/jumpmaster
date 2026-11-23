@@ -11,7 +11,8 @@ import { serverScrubSet } from '../forge/scrub-set.js';
 import { appManifest, appRegistrationUrl, isPlainHttpBase } from '../github/app-manifest.js';
 import { PROJECT_URL } from '../project.js';
 import { publicOrigin } from '../reach.js';
-import { escapeHtml, page } from '../ui/pages.js';
+import { SYSTEM_HREF } from '../ui/links.js';
+import { breadcrumb, escapeHtml, page } from '../ui/pages.js';
 import { APP_ROLES, type AppRole, appEntryName } from '../vault/github-app-entries.js';
 import type { AppManifestStore } from './app-manifest-state.js';
 
@@ -96,7 +97,20 @@ export function registerGitHubAppRoutes(app: FastifyInstance, deps: GitHubAppRou
       .code(status)
       .header('referrer-policy', 'no-referrer')
       .type('text/html; charset=utf-8')
-      .send(withCsrf(req, page(body, { title: 'Create a GitHub App' })));
+      .send(
+        withCsrf(
+          req,
+          page(
+            breadcrumb([
+              { label: 'System', href: SYSTEM_HREF },
+              { label: 'Setup', href: '/setup/claude' },
+              { label: 'GitHub', href: '/setup/forge' },
+              { label: 'Create a GitHub App' },
+            ]) + body,
+            { title: 'Create a GitHub App' },
+          ),
+        ),
+      );
 
   /** A callback page: no session, never cached, never a Referer. */
   const callbackPage = (reply: FastifyReply, status: number, body: string) =>

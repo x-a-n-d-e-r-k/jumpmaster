@@ -10,7 +10,7 @@ import type { ChatMessage, ChatThread, ToolStepResult } from '../chat/store.js';
 import { PENDING_MS } from '../config/confirm.js';
 import { FRAME_START } from './confirm.js';
 import { renderChatMarkdown } from './markdown.js';
-import { escapeHtml, linkify, page } from './pages.js';
+import { breadcrumb, escapeHtml, linkify, page } from './pages.js';
 import { relativeTime } from './time.js';
 import { type ZoneRef, zoneNamer } from './zone-name.js';
 
@@ -333,7 +333,7 @@ export function renderThread(
   const last = messages.reduce((n, m) => Math.max(n, m.seq), 0);
   const busy = messages.some((m) => m.state === 'queued' || m.state === 'running');
   return page(
-    `${CHAT_STYLE}${CHIP_STYLE}${o.panel ? '' : '<p><a href="/chat">All threads</a></p>'}<h2>${escapeHtml(t.title)}${focusChip(t, o.zones ?? [])}</h2>` +
+    `${CHAT_STYLE}${CHIP_STYLE}${o.panel ? '' : breadcrumb([{ label: 'Chat', href: '/chat' }, { label: escapeHtml(t.title) }])}<h2>${escapeHtml(t.title)}${focusChip(t, o.zones ?? [])}</h2>` +
       `<div id="chat" data-thread="${t.id}" data-last="${last}" data-busy="${busy ? '1' : '0'}">` +
       `<div id="messages" class="chat-log" aria-live="polite">${logHtml(messages, cards, cardHtml, busy)}</div>` +
       `<form id="send" class="chat-send"><textarea name="text" maxlength="20000" required placeholder="Ask Jumpmaster" aria-describedby="send-hint"></textarea><small id="send-hint" class="hint">Enter to send, Shift+Enter for a new line</small><button class="primary">Send</button></form>${CONFIRM_DIALOG}</div>` +

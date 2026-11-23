@@ -3,7 +3,8 @@ import { withCsrf } from '../auth/guard.js';
 import type { ApplyResult, ConfigStore } from '../config/store.js';
 import type { AppBrokers } from '../forge/app-brokers.js';
 import { GitHubAppError } from '../forge/github-app.js';
-import { escapeHtml, page } from '../ui/pages.js';
+import { SYSTEM_HREF } from '../ui/links.js';
+import { breadcrumb, escapeHtml, page } from '../ui/pages.js';
 import { APP_ROLES, type AppRole, ownerOfRepo } from '../vault/github-app-entries.js';
 import type { ResolvedApps } from '../vault/resolution.js';
 
@@ -219,7 +220,20 @@ export function registerGitHubAppInstalledRoutes(
       .code(status)
       .header('referrer-policy', 'no-referrer')
       .type('text/html; charset=utf-8')
-      .send(withCsrf(req, page(body, { title: 'GitHub App installations' })));
+      .send(
+        withCsrf(
+          req,
+          page(
+            breadcrumb([
+              { label: 'System', href: SYSTEM_HREF },
+              { label: 'Setup', href: '/setup/claude' },
+              { label: 'GitHub', href: '/setup/forge' },
+              { label: 'GitHub App installations' },
+            ]) + body,
+            { title: 'GitHub App installations' },
+          ),
+        ),
+      );
 
   app.post(DISCOVER_PATH, async (req, reply) => {
     const principal = req.principal;

@@ -315,7 +315,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
       detail: 'No work runs and no forge writes happen until you reset it.',
       waitingOn: 'you',
       ...(input.killedSince ? { since: input.killedSince } : {}),
-      action: { label: 'Reset it on home', href: '/' },
+      action: { label: 'Reset it in the top bar', href: '/' },
     });
 
   // The credits stop: the usage gate's strongest state, and the one with a cost (credits.ts).

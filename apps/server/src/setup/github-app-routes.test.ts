@@ -485,6 +485,32 @@ describe('callback', () => {
   });
 });
 
+describe('breadcrumb', () => {
+  const CRUMB =
+    '<nav class="crumbs" aria-label="Breadcrumb"><ol><li><a href="/system">System</a></li><li><a href="/setup/claude">Setup</a></li><li><a href="/setup/forge">GitHub</a></li><li><span aria-current="page">Create a GitHub App</span></li></ol></nav>';
+  const crumbs = (html: string) => html.match(/<nav[^>]*aria-label="Breadcrumb"/g) ?? [];
+
+  test('start (served and refused) and finish each show exactly one shared breadcrumb and no Back link', async () => {
+    const w = await world();
+    const { s, cb } = await through(w);
+    const refused = await w.start(s.cookie, {
+      owner: 'not an owner!',
+      role: 'author',
+      ownerType: 'User',
+    });
+    expect(refused.statusCode).toBe(400);
+    const started = await w.start(s.cookie);
+    expect(started.statusCode).toBe(200);
+    const finished = await w.finish(s.cookie, hidden(cb.body, 'id'));
+    expect(finished.statusCode, finished.body).toBe(200);
+    for (const r of [refused, started, finished]) {
+      expect(crumbs(r.body)).toHaveLength(1);
+      expect(r.body).toContain(CRUMB);
+      expect(r.body).not.toMatch(/>\s*Back\s*<\/a>/);
+    }
+  });
+});
+
 describe('finish', () => {
   test('from the bound session: writes the entry, resolves it, audits without the PEM, links the install', async () => {
     const w = await world();

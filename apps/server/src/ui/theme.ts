@@ -111,10 +111,27 @@ const SHELL = `
 .topnav a{color:var(--text-sub-600);padding:.375rem .625rem;border-radius:8px;white-space:nowrap}
 .topnav a:hover{background:var(--bg-weak-50);color:var(--text-strong-950);text-decoration:none}
 .topnav a[aria-current=page]{background:var(--bg-weak-50);color:var(--text-strong-950)}
-.logout{margin:0 0 0 auto}.logout button{min-height:2rem}
+.topbar-tools{display:flex;align-items:center;gap:.5rem;margin-left:auto;flex-wrap:wrap;justify-content:flex-end;min-width:0}
+.logout{margin:0}.logout button{min-height:2rem}
+.kill-ctl{display:contents}
+button.kill-btn{min-height:2rem;white-space:nowrap}
+button.kill-btn.on{background:var(--error-base);color:var(--static-white);box-shadow:none}
+button.kill-btn.on:hover{background:var(--red-600)}
+.kill-dialog{max-width:min(28rem,calc(100vw - 2rem));border:0;border-radius:16px;padding:1.25rem;box-shadow:var(--shadow-xs),inset 0 0 0 1px var(--stroke-soft-200);background:var(--bg-white-0);color:var(--text-strong-950)}
+.kill-dialog::backdrop{background:rgba(0,0,0,.4)}
+.kill-dialog h2{font-size:1.125rem;line-height:1.5rem;margin:0 0 .5rem}
+.kill-err{color:var(--error-base);margin:.5rem 0}.kill-err:empty{display:none}
+.kill-actions{display:flex;gap:.5rem;flex-wrap:wrap}
+.nav-badge{display:inline-flex;align-items:center;justify-content:center;min-width:1.25rem;height:1.25rem;padding:0 .375rem;margin-left:.25rem;border-radius:999px;background:var(--error-base);color:var(--static-white);font:500 .75rem/1 var(--font-sans)}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+nav.crumbs{margin:0 0 .75rem;color:var(--text-sub-600)}
+nav.crumbs ol{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:.25rem}
+nav.crumbs li{min-width:0;overflow-wrap:anywhere}
+nav.crumbs li+li::before{content:"›";margin-right:.25rem;color:var(--text-soft-400)}
+nav.crumbs [aria-current]{color:var(--text-strong-950)}
 main{max-width:76rem;margin:0 auto;padding:1.5rem 1.5rem 4rem}
 main>h2:first-child,main>p:first-child+h2{margin-top:.5rem}
-@media (max-width:720px){.topbar-in{padding:0 1rem;gap:.75rem;flex-wrap:wrap;padding-top:.5rem}.topnav{order:3;flex-basis:100%;padding-bottom:.375rem;margin:0 -.25rem}main{padding:1rem 1rem 3rem}h2{font-size:1.25rem;line-height:1.75rem}}
+@media (max-width:720px){.topbar-in{padding:0 1rem;gap:.5rem;flex-wrap:wrap;padding-top:.5rem}.topnav{order:3;flex-basis:100%;padding-bottom:.375rem;margin:0 -.25rem;gap:0;justify-content:space-between;overflow-x:visible}.topnav a{padding:.375rem .375rem}.topbar-tools{gap:.375rem}main{padding:1rem 1rem 3rem}h2{font-size:1.25rem;line-height:1.75rem}}
 .project-actions{display:flex;gap:.75rem;align-items:center;flex-wrap:wrap;margin:0 0 1rem}.project-actions form{margin:0}
 nav.subnav,nav.settings-tabs,.setup-steps{display:flex;gap:1.5rem;border-bottom:1px solid var(--stroke-soft-200);margin:0 0 1.5rem;overflow-x:auto;font-weight:500;color:var(--text-soft-400)}
 nav.subnav>p{margin:0}
@@ -155,10 +172,7 @@ const FLOOR = `
 .status[data-waiting-on=nothing]{box-shadow:var(--shadow-xs),inset 0 0 0 1px var(--stroke-soft-200),inset 4px 0 0 var(--success-base)}
 .status[data-waiting-on=ci],.status[data-waiting-on=forge],.status[data-waiting-on=claude],.status[data-waiting-on=stick],.status[data-waiting-on=doctor]{box-shadow:var(--shadow-xs),inset 0 0 0 1px var(--stroke-soft-200),inset 4px 0 0 var(--information-base)}
 .status ul.also{margin:.5rem 0 0;color:var(--text-sub-600)}
-.kill{flex:none;margin:0;text-align:right}
-@media (max-width:720px){.floor-head{flex-direction:column;align-items:stretch;gap:.75rem}.kill{text-align:left}}
-.kill h2{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
-.kill form{margin:0}
+@media (max-width:720px){.floor-head{flex-direction:column;align-items:stretch;gap:.75rem}}
 .kill-on{background:var(--error-lighter);box-shadow:inset 0 0 0 1px var(--error-light);border-radius:12px;padding:.75rem 1rem;margin:0 0 1rem}
 .kill-on::before{display:none}
 .term{display:block;font:500 .6875rem/1rem var(--font-sans);letter-spacing:.06em;text-transform:uppercase;color:var(--text-soft-400);margin:0 0 .25rem}

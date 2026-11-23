@@ -22,7 +22,7 @@ import type { ClaudePlan, DropZoneConfig } from '../config.js';
 import { STARTER_WARNING } from '../config.js';
 import { type CrewIssue, getCrewIssue, insertCrewIssue, setCrewIssue } from '../crew/store.js';
 import type { Drop, StoredEvent, UsageWindowRow, WorkItem } from '../db/repo.js';
-import { insertDrop, updateDrop, upsertDropZone, upsertWorkItem } from '../db/repo.js';
+import { insertDrop, setKilled, updateDrop, upsertDropZone, upsertWorkItem } from '../db/repo.js';
 import type { GoalChange } from '../goal-change.js';
 import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
@@ -31,18 +31,24 @@ import { makeZone, zoneWorld } from '../test/fixtures.js';
 import { harness } from '../test/flowHarness.js';
 import {
   askButton,
+  breadcrumb,
   type CrewLine,
   DROP_HEAD,
   dismissAllForm,
   dropRows,
   escapeHtml,
   FAVICON_HREF,
+  fillChrome,
   goalStub,
+  KILL_SCRIPT,
+  KILLED_NOTICE,
   type LogObservation,
   linkify,
   logEntries,
   MARK,
   modelFamily,
+  navArea,
+  needsBadge,
   OBSERVATION_ACTIONS,
   observationWords,
   page,
@@ -57,6 +63,8 @@ import {
   renderNewIssue,
   renderWorkItem,
   renderWorkList,
+  STORE_NAV,
+  STORE_NAV_SLOT,
   STUB_SCRIPT,
   statusBanner,
   workItemRows,
@@ -1395,8 +1403,9 @@ describe('the page shell and its forms', () => {
       expect(html).toContain('<form method="post" action="/logout"');
       expect(html).toMatch(/jmFetch\(/);
     }
-    expect(pages.kill).toContain("jmFetch('/api/control/kill',{engaged:true})");
-    expect(pages.killed).toContain("jmFetch('/api/control/kill',{engaged:false})");
+    expect(pages.kill).toContain("jmFetch('/api/control/kill',{engaged:!on})");
+    expect(pages.kill).toContain('data-engaged="false"');
+    expect(pages.killed).toContain('data-engaged="true"');
     expect(pages.doctor).toContain("jmFetch(b.dataset.doctor,JSON.parse(b.dataset.body||'{}'))");
   });
 
@@ -1707,7 +1716,7 @@ describe('renderWorkList and renderDropList (#119)', () => {
 
   test('the page nav links Activity, which holds Work and Drops (#622)', () => {
     const html = page('x');
-    expect(html).toContain('<a href="/activity">Activity</a>');
+    expect(html).toContain('<a href="/activity" data-area="activity">Activity</a>');
     expect(html).not.toContain('<a href="/work">');
     expect(html).not.toContain('<a href="/drops">');
   });
@@ -2533,7 +2542,7 @@ describe('the drop page header and system-event groups (#499)', () => {
     );
     expect(html.indexOf('<dl class="drop-summary">')).toBeLessThan(html.indexOf('<h3>Transcript'));
     expect(html).toContain(
-      '<a href="/activity/work">Work</a> › <a href="/projects/jm/work">octo/jm</a> › <a href="/projects/jm/work/487">#487</a> › abcdef12',
+      '<nav class="crumbs" aria-label="Breadcrumb"><ol><li><a href="/activity">Activity</a></li><li><a href="/activity/work">Work</a></li><li><a href="/projects/jm/work">octo/jm</a></li><li><a href="/projects/jm/work/487">#487</a></li><li><span aria-current="page">Drop abcdef12</span></li></ol></nav>',
     );
     expect(html).not.toContain('href="/">Back');
   });
@@ -2562,8 +2571,10 @@ describe('the drop page header and system-event groups (#499)', () => {
       now,
     });
     expect(summaryOf(html)).toContain('<dd>crew</dd>');
-    expect(html).toContain('<a href="/activity/drops">Drops</a> › abcdef12');
-    expect(html).not.toContain('<a href="/activity/work">Work</a> ›');
+    expect(html).toContain(
+      '<li><a href="/activity/drops">Drops</a></li><li><span aria-current="page">Drop abcdef12</span></li>',
+    );
+    expect(html).not.toContain('<a href="/activity/work">Work</a>');
   });
 
   test('a drop with no work item, stick or times shows - in those fields', () => {
@@ -2778,6 +2789,71 @@ describe('the Log: observe decisions in words and rulings (#621)', () => {
     expect(html).toContain('<a href="/activity/log?project=b&amp;kind=rulings">acme/b</a>');
   });
 });
+
+/** A store install with one of each object a chrome page shows, and each GET route made concrete. */
+async function chromeWorld() {
+  const h = await harness({
+    live: true,
+    dataDir: mkdtempSync(join(tmpdir(), 'jm-ask-')),
+    zone: { protectedPaths: ['.github/**', 'CODEOWNERS', 'GOAL.md'] },
+  });
+  const bid = String(
+    raiseBriefing(
+      h.db,
+      {
+        zoneId: 'main',
+        kind: 'promote',
+        subject: 'issue:1',
+        decision: 'Promote it?',
+        why: 'because',
+        options: [{ id: 'promote', label: 'Promote', effect: 'promote_issue' }],
+        source: 'server',
+      },
+      h.now(),
+    ),
+  );
+  const concrete = (pattern: string) =>
+    pattern
+      .replace(':issue', '1')
+      .replace(
+        /:[A-Za-z]+/g,
+        pattern.startsWith('/briefings/')
+          ? bid
+          : pattern.startsWith('/projects/')
+            ? 'main'
+            : pattern.startsWith('/drops/')
+              ? 'd1'
+              : '1',
+      )
+      .replace(/\*$/, '');
+  createThread(h.db, { title: 'a thread' }, h.now());
+  upsertDropZone(h.db, {
+    id: 'main',
+    repo: h.zone.repo,
+    defaultBranch: 'main',
+    configJson: '{}',
+  });
+  const item = upsertWorkItem(
+    h.db,
+    {
+      dropZoneId: 'main',
+      issueNumber: 1,
+      title: 'an issue',
+      body: 'b',
+      author: 'human',
+      priority: 2,
+      isFix: false,
+      issueCreatedAt: '2026-01-01T00:00:00.000Z',
+    },
+    h.now(),
+  );
+  insertDrop(
+    h.db,
+    { id: 'd1', dropZoneId: 'main', workItemId: item.id, role: 'implement', state: 'succeeded' },
+    h.now(),
+  );
+  return { h, concrete };
+}
 
 describe('the Ask panel (#626)', () => {
   const jm: DropZoneConfig = { ...z, id: 'jm', repo: 'octo/jm' };
@@ -3179,66 +3255,7 @@ describe('the Ask panel (#626)', () => {
   });
 
   test('every page with chrome carries exactly one Ask button', async () => {
-    const h = await harness({
-      live: true,
-      dataDir: mkdtempSync(join(tmpdir(), 'jm-ask-')),
-      zone: { protectedPaths: ['.github/**', 'CODEOWNERS', 'GOAL.md'] },
-    });
-    const bid = String(
-      raiseBriefing(
-        h.db,
-        {
-          zoneId: 'main',
-          kind: 'promote',
-          subject: 'issue:1',
-          decision: 'Promote it?',
-          why: 'because',
-          options: [{ id: 'promote', label: 'Promote', effect: 'promote_issue' }],
-          source: 'server',
-        },
-        h.now(),
-      ),
-    );
-    const concrete = (pattern: string) =>
-      pattern
-        .replace(':issue', '1')
-        .replace(
-          /:[A-Za-z]+/g,
-          pattern.startsWith('/briefings/')
-            ? bid
-            : pattern.startsWith('/projects/')
-              ? 'main'
-              : pattern.startsWith('/drops/')
-                ? 'd1'
-                : '1',
-        )
-        .replace(/\*$/, '');
-    createThread(h.db, { title: 'a thread' }, h.now());
-    upsertDropZone(h.db, {
-      id: 'main',
-      repo: h.zone.repo,
-      defaultBranch: 'main',
-      configJson: '{}',
-    });
-    const item = upsertWorkItem(
-      h.db,
-      {
-        dropZoneId: 'main',
-        issueNumber: 1,
-        title: 'an issue',
-        body: 'b',
-        author: 'human',
-        priority: 2,
-        isFix: false,
-        issueCreatedAt: '2026-01-01T00:00:00.000Z',
-      },
-      h.now(),
-    );
-    insertDrop(
-      h.db,
-      { id: 'd1', dropZoneId: 'main', workItemId: item.id, role: 'implement', state: 'succeeded' },
-      h.now(),
-    );
+    const { h, concrete } = await chromeWorld();
     const checked = new Set<string>();
     for (const r of routesOf(h.app).filter((x) => x.method === 'GET')) {
       const url = concrete(r.url);
@@ -3294,5 +3311,352 @@ describe('renderDoctor Ask (#627)', () => {
     expect(html).toContain(
       '<button type="button" id="ask-open" class="ask-open" aria-controls="ask-panel" aria-expanded="false">Ask</button>',
     );
+  });
+});
+
+describe('the top bar (#628)', () => {
+  /** A page's top bar as a store install draws it, filled for `path`. */
+  const bar = (path?: string, html = page('<p>x</p>')) => {
+    const full = fillChrome(
+      html.replace(STORE_NAV_SLOT, STORE_NAV),
+      path === undefined ? {} : { path },
+    );
+    return /<nav class="topnav" aria-label="Main">([\s\S]*?)<\/nav>/.exec(full)?.[1] ?? '';
+  };
+  /**
+   * An element's text, read by walking the markup one character at a time:
+   * everything from a `<` to its `>` is a tag and is skipped, and an angle
+   * bracket is never copied, so no tag can survive into the text.
+   */
+  const textOf = (html: string) => {
+    let text = '';
+    let inTag = false;
+    for (const ch of html) {
+      if (ch === '<') inTag = true;
+      else if (ch === '>') inTag = false;
+      else if (!inTag) text += ch;
+    }
+    return text;
+  };
+  const labels = (nav: string) =>
+    [...nav.matchAll(/<a [^>]*>([\s\S]*?)<\/a>/g)].map((m) =>
+      textOf((m[1] as string).replace(/<span class="nav-badge"[\s\S]*?<\/span><\/span>/, '')),
+    );
+  const current = (nav: string) =>
+    [...nav.matchAll(/<a [^>]*aria-current="page"[^>]*>([\s\S]*?)<\/a>/g)].map((m) =>
+      textOf(m[1] as string),
+    );
+
+  test('the nav reads exactly Home, Projects, Activity, Chat, System, in order', () => {
+    expect(labels(bar())).toEqual(['Home', 'Projects', 'Activity', 'Chat', 'System']);
+    // A config-file install has no Projects page, so no link to it.
+    const file = /<nav class="topnav"[^>]*>([\s\S]*?)<\/nav>/.exec(page('x'))?.[1] ?? '';
+    expect(labels(file)).toEqual(['Home', 'Activity', 'Chat', 'System']);
+  });
+
+  test.each([
+    ['/', 'Home'],
+    ['/projects/jm/setup', 'Projects'],
+    ['/activity/drops', 'Activity'],
+    ['/drops/abc', 'Activity'],
+    ['/work/main/3', 'Activity'],
+    ['/chat/1', 'Chat'],
+    ['/system/history', 'System'],
+    ['/setup/claude', 'System'],
+    ['/briefings/3', 'Home'],
+    ['/config/confirm/abc', 'Home'],
+  ])('%s marks %s, and only it', (path, area) => {
+    expect(current(bar(path))).toEqual([area]);
+  });
+
+  test('a path in no area marks nothing; a prefix is a whole segment', () => {
+    expect(navArea('/chatter')).toBeUndefined();
+    expect(navArea('/dropsy')).toBeUndefined();
+    expect(navArea('/drops?x=1')).toBe('activity');
+    expect(current(bar('/nowhere'))).toEqual([]);
+  });
+
+  test("Home's Needs you badge shows the count above 0, and nothing at 0", () => {
+    const parked = (n: number): WorkItem => ({
+      ...item,
+      id: n,
+      issueNumber: n,
+      state: 'parked',
+      reason: 'r',
+    });
+    const two = renderHome({ zones: [z], items: [parked(1), parked(2)], drops: [], sticks: [] });
+    const home = (html: string) =>
+      /<a href="\/" [^>]*>([\s\S]*?)<\/a>/.exec(bar(undefined, html))?.[1];
+    expect(home(two)).toMatch(/^Home<span class="nav-badge"[^>]*>.*>2<.*<\/span>$/);
+    expect(two.slice(two.indexOf('<main'))).toContain('data-kind="parked"');
+    const none = renderHome({ zones: [z], items: [], drops: [], sticks: [] });
+    expect(home(none)).toBe('Home');
+    expect(none).not.toContain('class="nav-badge"');
+    expect(needsBadge(0)).toBe('');
+  });
+
+  test('the kill switch control: compact in the top bar, red and "Kill switch on" when engaged', () => {
+    const off = page('<p>x</p>', { killed: false });
+    const on = page('<p>x</p>', { killed: true });
+    const head = (html: string) => html.slice(0, html.indexOf('<main'));
+    expect(head(off)).toContain(
+      '<button type="button" id="kill-open" class="kill-btn" aria-haspopup="dialog" aria-controls="kill-dialog" data-engaged="false">Kill switch</button>',
+    );
+    expect(head(on)).toContain('class="kill-btn on"');
+    expect(head(on)).toContain('>Kill switch on</button>');
+    // The confirmation says what engaging does, with Engage and Cancel; Reset asks too.
+    expect(off).toMatch(
+      /<dialog id="kill-dialog"[^>]*>.*No work runs and no forge writes happen.*>Engage<\/button><button type="button" id="kill-cancel">Cancel<\/button><\/div><\/dialog>/,
+    );
+    expect(on).toMatch(
+      /<dialog id="kill-dialog"[^>]*><h2 id="kill-title">Reset the kill switch\?<\/h2>.*>Reset<\/button><button type="button" id="kill-cancel">Cancel<\/button>/,
+    );
+    // Engaged, every page says so first.
+    const main = (html: string) => html.slice(html.indexOf('<main id="main">') + 16);
+    expect(main(on).startsWith(KILLED_NOTICE)).toBe(true);
+    expect(main(off).startsWith('<p>x</p>')).toBe(true);
+    expect(KILL_SCRIPT).not.toMatch(/\balert\(/);
+  });
+
+  test('the app fills the kill state on every page: unfilled, the slot draws nothing', () => {
+    const bare = page('<p>x</p>');
+    expect(bare).not.toContain('id="kill-open"');
+    expect(fillChrome(bare, { killed: true })).toContain('Kill switch on');
+    expect(fillChrome(bare, { killed: true })).toContain(KILLED_NOTICE);
+  });
+
+  test('at 375px the top bar wraps its tools and spreads the five links, with no scroller', () => {
+    const css = page('x').slice(page('x').indexOf('<style>'), page('x').indexOf('</style>'));
+    const mobile =
+      /@media \(max-width:720px\)\{\.topbar-in\{([^}]*)\}\.topnav\{([^}]*)\}\.topnav a\{([^}]*)\}/.exec(
+        css,
+      );
+    expect(mobile).not.toBeNull();
+    expect(mobile?.[1]).toContain('flex-wrap:wrap');
+    expect(mobile?.[2]).toContain('flex-basis:100%');
+    expect(mobile?.[2]).toContain('overflow-x:visible');
+    expect(mobile?.[2]).toContain('justify-content:space-between');
+    expect(mobile?.[3]).toContain('padding:.375rem .375rem');
+    expect(css).toMatch(/\.topbar-tools\{[^}]*flex-wrap:wrap/);
+    expect(css).toMatch(/\.kill-dialog\{[^}]*max-width:min\(28rem,calc\(100vw - 2rem\)\)/);
+  });
+
+  test('breadcrumb: area › object › page, the page itself current and no link', () => {
+    expect(
+      breadcrumb([
+        { label: 'Projects', href: '/projects' },
+        { label: 'a&amp;b', href: '/projects/a"b' },
+        { label: 'Setup' },
+      ]),
+    ).toBe(
+      '<nav class="crumbs" aria-label="Breadcrumb"><ol><li><a href="/projects">Projects</a></li><li><a href="/projects/a&quot;b">a&amp;b</a></li><li><span aria-current="page">Setup</span></li></ol></nav>',
+    );
+  });
+});
+
+describe('the kill switch control script (#628)', () => {
+  class Node {
+    textContent = '';
+    disabled = false;
+    open = false;
+    dataset: Record<string, string> = {};
+    listeners: Record<string, (() => unknown)[]> = {};
+    focused = 0;
+    addEventListener(ev: string, fn: () => unknown) {
+      (this.listeners[ev] ??= []).push(fn);
+    }
+    async click() {
+      await Promise.all((this.listeners.click ?? []).map((fn) => fn()));
+    }
+    showModal() {
+      this.open = true;
+    }
+    close() {
+      this.open = false;
+    }
+    focus() {
+      this.focused++;
+    }
+  }
+
+  /** The page's kill script in a vm, with `jmFetch` answering `status` and an `alert` that throws. */
+  function run(killed: boolean, status = 200, error?: string) {
+    const html = page('<p>x</p>', { killed });
+    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/gi)]
+      .map((m) => m[1] as string)
+      .find((s) => s.includes("'kill-open'"));
+    if (!script) throw new Error('no kill script on the page');
+    const ids: Record<string, Node> = Object.fromEntries(
+      ['kill-open', 'kill-dialog', 'kill-confirm', 'kill-cancel', 'kill-err'].map((id) => [
+        id,
+        new Node(),
+      ]),
+    );
+    const open = ids['kill-open'] as Node;
+    open.dataset.engaged = /data-engaged="(true|false)"/.exec(html)?.[1] ?? '';
+    const posts: { url: string; body: unknown }[] = [];
+    let reloads = 0;
+    let alerts = 0;
+    const ctx = vm.createContext({
+      document: { getElementById: (id: string) => ids[id] ?? null },
+      location: {
+        reload: () => {
+          reloads++;
+        },
+      },
+      alert: () => {
+        alerts++;
+        throw new Error('alert called');
+      },
+      jmFetch: async (url: string, body: unknown) => {
+        posts.push({ url, body });
+        return {
+          ok: status < 300,
+          status,
+          json: async () => (error === undefined ? {} : { error }),
+        };
+      },
+    });
+    vm.runInContext(script, ctx);
+    return {
+      open,
+      dialog: ids['kill-dialog'] as Node,
+      confirm: ids['kill-confirm'] as Node,
+      cancel: ids['kill-cancel'] as Node,
+      err: ids['kill-err'] as Node,
+      posts,
+      reloads: () => reloads,
+      alerts: () => alerts,
+    };
+  }
+
+  test('pressing Kill switch opens the confirmation and sends nothing; Cancel shuts it', async () => {
+    const k = run(false);
+    await k.open.click();
+    expect(k.dialog.open).toBe(true);
+    expect(k.posts).toEqual([]);
+    await k.cancel.click();
+    expect(k.dialog.open).toBe(false);
+    expect(k.posts).toEqual([]);
+    expect(k.reloads()).toBe(0);
+  });
+
+  test('confirming posts {engaged:true} once, then reloads', async () => {
+    const k = run(false);
+    await k.open.click();
+    await Promise.all([k.confirm.click(), k.confirm.click()]);
+    expect(k.posts).toEqual([{ url: '/api/control/kill', body: { engaged: true } }]);
+    expect(k.reloads()).toBe(1);
+  });
+
+  test('Reset asks too, and its confirmation posts {engaged:false}', async () => {
+    const k = run(true);
+    await k.open.click();
+    expect(k.posts).toEqual([]);
+    await k.confirm.click();
+    expect(k.posts).toEqual([{ url: '/api/control/kill', body: { engaged: false } }]);
+  });
+
+  test('a refused post shows the error in the dialog and never calls alert', async () => {
+    const k = run(false, 403, 'forbidden');
+    await k.open.click();
+    await k.confirm.click();
+    expect(k.posts).toHaveLength(1);
+    expect(k.dialog.open).toBe(true);
+    expect(k.err.textContent).toBe('Refused (403): forbidden');
+    expect(k.alerts()).toBe(0);
+    expect(k.reloads()).toBe(0);
+    // It can be tried again, and reopening clears the old error.
+    expect(k.confirm.disabled).toBe(false);
+    await k.cancel.click();
+    await k.open.click();
+    expect(k.err.textContent).toBe('');
+  });
+});
+
+describe('every chrome page (#628)', () => {
+  /** The area pages themselves: the five areas' own and their sub-nav's and tabs' pages. */
+  const TOP_LEVEL = new Set([
+    '/',
+    '/projects',
+    '/activity',
+    '/activity/work',
+    '/activity/drops',
+    '/activity/log',
+    '/chat',
+    '/system',
+    '/system/sticks',
+    '/system/sticks/images',
+    '/system/credentials',
+    '/system/server',
+    '/system/mcp-tokens',
+    '/system/history',
+    '/system/advanced',
+  ]);
+  const OLD = ['Floor', 'Drops', 'Briefings', 'Sticks', 'Settings', 'Doctor', 'Observations'];
+
+  test('one breadcrumb below the areas, none on them; no Back links; only the five in the top bar', async () => {
+    const { h, concrete } = await chromeWorld();
+    const checked = new Set<string>();
+    for (const r of routesOf(h.app).filter((x) => x.method === 'GET')) {
+      const url = concrete(r.url);
+      const res = await h.view(url);
+      if (!res.body.includes('class="topnav"')) continue;
+      checked.add(r.url);
+      const body = res.body;
+      const main = body.slice(body.indexOf('<main'));
+      const crumbs = main.match(/<nav[^>]*aria-label="Breadcrumb"/g) ?? [];
+      expect(crumbs, url).toHaveLength(TOP_LEVEL.has(url) ? 0 : 1);
+      if (crumbs.length === 1)
+        expect(main, url).toContain('<nav class="crumbs" aria-label="Breadcrumb"><ol>');
+      expect(body, url).not.toMatch(/<a [^>]*>\s*Back\s*<\/a>/);
+      // No ad-hoc way back outside the breadcrumb and the top bar.
+      const rest = main.replace(/<nav class="crumbs"[\s\S]*?<\/nav>/, '');
+      expect(rest, url).not.toMatch(/<a href="\/">Home<\/a>|>All threads<\/a>/);
+      const nav = /<nav class="topnav"[^>]*>([\s\S]*?)<\/nav>/.exec(body)?.[1] ?? '';
+      const words = [...nav.matchAll(/<a [^>]*>(\w+)/g)].map((m) => m[1]);
+      expect(words, url).toEqual(['Home', 'Projects', 'Activity', 'Chat', 'System']);
+      for (const old of OLD) expect(nav, `${url} ${old}`).not.toContain(old);
+      // The area the page is in is marked; the kill control and its slot are filled.
+      const area = navArea(url);
+      expect(nav.match(/aria-current="page"/g)?.length ?? 0, url).toBe(area ? 1 : 0);
+      expect(body.match(/id="kill-open"/g), url).toHaveLength(1);
+      expect(body, url).not.toContain('<!--jm-');
+    }
+    for (const p of ['/', '/drops/:id', '/briefings/:id', '/chat/:id', '/projects/:id/work/:issue'])
+      expect(checked, p).toContain(p);
+    // Non-vacuous: a drop's page marks Activity.
+    const dropPage = (await h.view('/drops/d1')).body;
+    expect(dropPage).toContain(
+      '<a href="/activity" aria-current="page" data-area="activity">Activity</a>',
+    );
+  });
+
+  test('engaged, every page shows the notice first and the control reads "Kill switch on"', async () => {
+    const { h, concrete } = await chromeWorld();
+    const off = await h.view('/chat');
+    expect(off.body).not.toContain('class="kill-on"');
+    expect(off.body).toContain('>Kill switch</button>');
+    setKilled(h.db, true, h.now());
+    for (const url of ['/', '/chat', concrete('/drops/:id'), '/system', '/projects/main']) {
+      const body = (await h.view(url)).body;
+      expect(body.slice(body.indexOf('<main id="main">') + 16).startsWith(KILLED_NOTICE), url).toBe(
+        true,
+      );
+      expect(body, url).toContain('class="kill-btn on"');
+      expect(body, url).toContain('>Kill switch on</button>');
+    }
+  });
+
+  test("Needs you's badge is on Home's link on every page", async () => {
+    const { h } = await chromeWorld();
+    const badge = (body: string) =>
+      /<a href="\/"[^>]*>Home(<span class="nav-badge"[\s\S]*?<\/span><\/span>)?<\/a>/.exec(
+        body,
+      )?.[1];
+    const n = (await h.view('/')).body.match(/class="needs-row"/g)?.length ?? 0;
+    expect(n).toBeGreaterThan(0);
+    for (const url of ['/', '/chat', '/system'])
+      expect(badge((await h.view(url)).body), url).toContain(`>${n}<`);
   });
 });

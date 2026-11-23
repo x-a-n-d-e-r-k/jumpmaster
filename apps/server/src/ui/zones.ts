@@ -23,6 +23,8 @@ import {
 } from './links.js';
 import {
   badge,
+  breadcrumb,
+  type Crumb,
   dismissAllForm,
   escapeHtml,
   MODE_LABELS,
@@ -57,6 +59,7 @@ export function projectHeaderFor(
   zone: DropZoneConfig,
   zones: readonly ZoneRef[],
   current?: ProjectTab,
+  trail: readonly Crumb[] = [],
 ): string {
   return projectHeader({
     zone,
@@ -64,8 +67,15 @@ export function projectHeaderFor(
     mode: getZoneMode(db, zone.id, zone.mode),
     openBriefings: listBriefings(db, { zoneId: zone.id, state: 'open' }).length,
     current,
+    trail,
   });
 }
+
+/** Add a project's breadcrumb (#628). */
+const NEW_PROJECT_CRUMBS = breadcrumb([
+  { label: 'Projects', href: PROJECTS_HREF },
+  { label: 'Add a project' },
+]);
 
 const EGRESS_WINDOW_MS = 14 * 86_400_000;
 /** How many drop links one observed host lists; the rest are a link to the zone's drops of every kind. */
@@ -174,7 +184,7 @@ function listPage(store: ConfigStore, db: Db): string {
     })
     .join('');
   return page(
-    `<p><a href="/">Home</a></p><h2>Projects</h2><p>A project is one repository Jumpmaster works on.</p>
+    `<h2>Projects</h2><p>A project is one repository Jumpmaster works on.</p>
 ${fileMode ? ADOPT_BANNER : `<p><a href="${PROJECTS_HREF}/new">Add a project</a></p>`}
 <table><tr><th>Project</th><th>Mode</th><th>Stack</th><th>Egress</th><th>Accounts</th><th>Last drop</th><th>Doctor fails</th><th>Needs</th><th></th></tr>${rows || '<tr><td colspan="9">No zones yet.</td></tr>'}</table>
 <p id="mode-out" role="status"></p><p id="stop-out" role="status"></p>
@@ -739,19 +749,16 @@ export function registerZonesPages(
   app.get(PROJECTS_HREF, async (req, reply) => html(req, reply, listPage(store, db)));
   app.get(`${PROJECTS_HREF}/new`, async (req, reply) => {
     if (store.mode() === 'file')
-      return html(
-        req,
-        reply,
-        page(`<p><a href="${PROJECTS_HREF}">Projects</a></p><h2>Add a project</h2>${ADOPT_BANNER}`),
-      );
+      return html(req, reply, page(`${NEW_PROJECT_CRUMBS}<h2>Add a project</h2>${ADOPT_BANNER}`));
     return html(
       req,
       reply,
       page(
-        `<p><a href="/">Home</a> · <a href="${PROJECTS_HREF}">Projects</a></p>${projectBody(
-          getWizard(db).starter ? 'starter' : 'two-bot',
-          { returnTo: PROJECTS_HREF, cancelTo: `${PROJECTS_HREF}/new`, done: PROJECTS_HREF },
-        )}`,
+        `${NEW_PROJECT_CRUMBS}${projectBody(getWizard(db).starter ? 'starter' : 'two-bot', {
+          returnTo: PROJECTS_HREF,
+          cancelTo: `${PROJECTS_HREF}/new`,
+          done: PROJECTS_HREF,
+        })}`,
       ),
     );
   });
@@ -779,7 +786,8 @@ export function registerZonesPages(
     async (req, reply) => {
       const saved = /^\d{1,9}$/.test(req.query.saved ?? '') ? Number(req.query.saved) : undefined;
       const body = renderFlags(store, req.params.id, {
-        header: (zone, zones) => projectHeaderFor(db, zone, zones),
+        header: (zone, zones) =>
+          projectHeaderFor(db, zone, zones, 'setup', [{ label: 'Advanced settings' }]),
         adoptBanner: ADOPT_BANNER,
         forbiddenNote: FORBIDDEN_NOTE,
         ...(saved === undefined ? {} : { saved }),

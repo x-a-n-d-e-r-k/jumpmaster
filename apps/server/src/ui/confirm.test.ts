@@ -137,6 +137,15 @@ async function world() {
 
 const weaken = { dropZones: [zone({ ciRequired: false, egress: { mode: 'off', allow: [] } })] };
 
+/** #628: a POST-rendered notice carries the one breadcrumb, Home › it, and no Back link. */
+function expectHomeCrumbs(body: string, title: string): void {
+  expect(body.match(/<nav class="crumbs" aria-label="Breadcrumb">/g)).toHaveLength(1);
+  expect(body).toContain(
+    `<ol><li><a href="/">Home</a></li><li><span aria-current="page">${title}</span></li></ol>`,
+  );
+  expect(body).not.toMatch(/<a [^>]*>[^<]*Back[^<]*<\/a>/);
+}
+
 describe('the confirmation page', () => {
   test('renders each consequence verbatim with a passphrase field, and mints a confirmation into the form', async () => {
     const w = await world();
@@ -164,6 +173,7 @@ describe('the confirmation page', () => {
     const ok = await w.confirm(id, { token, passphrase: PASS });
     expect(ok.statusCode).toBe(200);
     expect(ok.body).toContain('revision 3');
+    expectHomeCrumbs(ok.body, 'Applied');
     expect(w.store.current().dropZones[0]?.ciRequired).toBe(false);
     // The audit row: via session, guarded, with the paths and never a value.
     const row = listAudit(w.db).find((a) => a.action === 'config.apply');
@@ -178,6 +188,7 @@ describe('the confirmation page', () => {
     const again = await w.confirm(id, { token, passphrase: PASS });
     expect(again.statusCode).toBe(409);
     expect(again.body).toContain('already used');
+    expectHomeCrumbs(again.body, 'Not applied');
     expect(w.store.revision()).toBe(3);
   });
 

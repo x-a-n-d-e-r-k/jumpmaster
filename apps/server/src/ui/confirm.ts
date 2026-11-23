@@ -10,7 +10,7 @@ import type { ConfigStore } from '../config/store.js';
 import { secretList } from '../config.js';
 import type { Db } from '../db/open.js';
 import { safeNext } from './auth-pages.js';
-import { escapeHtml, page } from './pages.js';
+import { breadcrumb, type Crumb, escapeHtml, page } from './pages.js';
 
 export interface ConfirmPageDeps {
   db: Db;
@@ -95,12 +95,18 @@ const REASON: Record<ConsumeFailure, (revision: number) => string> = {
 export const html = (reply: FastifyReply, status: number, body: string) =>
   reply.code(status).type('text/html; charset=utf-8').send(body);
 
-export const notice = (title: string, body: string): string =>
-  page(`<h2>${escapeHtml(title)}</h2><p>${body}</p>`);
+/** Home › the page: a guarded change waits on Home's Needs you. */
+const HOME_TRAIL: readonly Crumb[] = [{ label: 'Home', href: '/' }];
+
+/** A one-paragraph page under `trail` (Home by default), the title its last breadcrumb step. */
+export const notice = (title: string, body: string, trail: readonly Crumb[] = HOME_TRAIL): string =>
+  page(
+    `${breadcrumb([...trail, { label: escapeHtml(title) }])}<h2>${escapeHtml(title)}</h2><p>${body}</p>`,
+  );
 
 const GONE_TEXT =
   'This change is not waiting for confirmation: it was confirmed, it expired (after ten minutes), the server restarted, or it belongs to another session. Start the change again.';
-const GONE = notice('Nothing to confirm', `${GONE_TEXT} <a href="/">Home</a>`);
+const GONE = notice('Nothing to confirm', GONE_TEXT);
 
 /**
  * A frame's start: the `jm-csrf` meta `withCsrf` fills, so the dialog's script has the token its
@@ -144,7 +150,11 @@ export function renderConfirm(
     ? '<button type="button" data-cancel>Cancel</button>'
     : `<a href="${escapeHtml(cancelOf(pending))}">Cancel</a>`;
   const body = `${setup}<p>This change weakens a guard (§7.5). If you confirm it:</p><ul>${items}</ul>${notes}${err}<form method="post" action="/config/confirm/${escapeHtml(pending.id)}"><input type="hidden" name="token" value="${escapeHtml(token)}"><p><label>Operator passphrase <input type="password" name="passphrase" autocomplete="current-password" required autofocus></label></p><p><button class="primary">Confirm</button> ${cancel}</p></form><p><small>The confirmation is good for five minutes and once. <code>jumpmaster ctl</code> makes the same change with the operator token.</small></p>`;
-  return o.frame ? `${FRAME_CSRF}${body}` : page(`<h2>Confirm a guarded change</h2>${body}`);
+  return o.frame
+    ? `${FRAME_CSRF}${body}`
+    : page(
+        `${breadcrumb([...HOME_TRAIL, { label: 'Confirm a guarded change' }])}<h2>Confirm a guarded change</h2>${body}`,
+      );
 }
 
 /** Whether a POST asked for the dialog's JSON answers rather than the page's HTML. */
@@ -280,7 +290,7 @@ export function registerConfirmPages(app: FastifyInstance, deps: ConfirmPageDeps
           req,
           notice(
             'Applied',
-            `The change is applied as revision ${r.revision}; it takes effect at the next pass. <a href="/">Home</a>`,
+            `The change is applied as revision ${r.revision}; it takes effect at the next pass.`,
           ),
         ),
       );
@@ -299,7 +309,7 @@ export function registerConfirmPages(app: FastifyInstance, deps: ConfirmPageDeps
           req,
           notice(
             'Not applied',
-            `${escapeHtml(REASON[r.confirmation](store.revision()))} <a href="${escapeHtml(cancelOf(pending))}">Back</a>`,
+            `${escapeHtml(REASON[r.confirmation](store.revision()))} <a href="${escapeHtml(cancelOf(pending))}">Start the change again</a>`,
           ),
         ),
       );

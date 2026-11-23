@@ -31,8 +31,8 @@ import {
   tokensSection,
   useTokensInstead,
 } from './github.js';
-import { linkTarget } from './links.js';
-import { escapeHtml, page } from './pages.js';
+import { linkTarget, SYSTEM_HREF } from './links.js';
+import { breadcrumb, escapeHtml, page } from './pages.js';
 import { type ZoneRef, zoneName, zoneNamer } from './zone-name.js';
 
 /**
@@ -272,7 +272,11 @@ function frame(step: Step, body: string, opts: { advance?: string } = {}): strin
     return s === step ? `<strong>${label}</strong>` : `<a href="/setup/${s}">${label}</a>`;
   }).join(' · ');
   return page(
-    `<h2>Set up Jumpmaster</h2><p class="setup-steps">${nav}</p>${body}${opts.advance ?? advanceForm(step)}<form method="post" action="/setup/dismiss" style="margin-top:2rem"><button>Dismiss setup</button> <small>Every step stays at its address; home links “Add a project”.</small></form>`,
+    `${breadcrumb([
+      { label: 'System', href: SYSTEM_HREF },
+      { label: 'Setup', href: `/setup/${STEPS[0]}` },
+      { label: escapeHtml(TITLES[step]) },
+    ])}<h2>Set up Jumpmaster</h2><p class="setup-steps">${nav}</p>${body}${opts.advance ?? advanceForm(step)}<form method="post" action="/setup/dismiss" style="margin-top:2rem"><button>Dismiss setup</button> <small>Every step stays at its address; home links “Add a project”.</small></form>`,
   );
 }
 
