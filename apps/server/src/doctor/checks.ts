@@ -856,6 +856,13 @@ function usageCheck(d: DoctorDeps): DoctorCheck {
         summary: `usage is above the throttle (${Math.round(d.config.usage.throttleUtilization * 100)}%): only finishing work (review, heal, resolve) dispatches`,
         fix: 'Nothing to do: new work resumes when usage falls or the window resets.',
       };
+    case 'override':
+      return {
+        ...base,
+        status: 'warn',
+        summary: `usage is near its limit and Command overrode the throttle: ${u.overrideStartsLeft} of ${u.overrideStarts} starts left, until ${u.overrideUntil}`,
+        fix: 'Nothing to do: it ends by itself. End it now with jumpmaster ctl usage override --clear.',
+      };
     case 'credits_resume':
       return {
         ...base,

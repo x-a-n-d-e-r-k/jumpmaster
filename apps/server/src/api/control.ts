@@ -119,6 +119,14 @@ import {
 import { safeNext } from '../ui/auth-pages.js';
 import { MODE_LABELS } from '../ui/pages.js';
 import {
+  clearUsageOverride,
+  OVERRIDE_DEFAULTS,
+  overrideCeiling,
+  setUsageOverride,
+  throttleHolds,
+  usageOverride,
+} from '../usage.js';
+import {
   credentialCreatedAt,
   shadowedAppEntries,
   shadowedCredentials,
@@ -316,6 +324,11 @@ const RuleBody = z.object({
   optionsDigest: z.string().max(64).optional(),
 });
 const KillBody = z.object({ engaged: z.boolean() });
+/** Command's override of the usage throttle (#728): bounded, whoever asks. */
+const OverrideBody = z.strictObject({
+  starts: z.number().int().min(1).max(20).default(OVERRIDE_DEFAULTS.starts),
+  hours: z.number().int().min(1).max(12).default(OVERRIDE_DEFAULTS.hours),
+});
 const PassphraseBody = z.strictObject({ passphrase: z.string().max(4 * MAX_PASSPHRASE) });
 const SudoBody = z.object({
   passphrase: z
@@ -1192,6 +1205,40 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
         return reply.code(status).send(rest);
       },
     );
+
+    // Command's override of the usage throttle (#728). Not a shared action: chat and MCP call none of
+    // this, and an MCP token does not pass the guard.
+    scope.post('/api/control/usage/override', async (req, reply) => {
+      const body = OverrideBody.safeParse(req.body ?? {});
+      if (!body.success)
+        return reply.code(400).send({ error: 'starts is 1 to 20 and hours 1 to 12, both whole' });
+      const usage = cfg(req).usage;
+      if (!throttleHolds(db, usage, now()))
+        return reply
+          .code(409)
+          .send({ error: 'nothing to override: the usage throttle is not holding work' });
+      const { starts, hours } = body.data;
+      const by = req.principal?.via === 'session' ? 'session' : 'token';
+      const set = db.transaction(() => {
+        setUsageOverride(db, { starts, hours, by }, now());
+        const inForce = usageOverride(db, usage, now());
+        // Usage already at the ceiling: say so, rather than store one that can never act.
+        if (!inForce) clearUsageOverride(db, now());
+        return inForce;
+      })();
+      if (!set)
+        return reply.code(409).send({
+          error: `usage is at ${Math.round(overrideCeiling(usage) * 100)}% or more of its window: an override cannot go past that`,
+        });
+      audit(req, 'usage.override', { starts, hours });
+      return set;
+    });
+
+    scope.delete('/api/control/usage/override', async (req) => {
+      clearUsageOverride(db, now());
+      audit(req, 'usage.override.clear', {});
+      return { cleared: true };
+    });
 
     scope.post('/api/control/kill', async (req, reply) => {
       const body = KillBody.safeParse(req.body);

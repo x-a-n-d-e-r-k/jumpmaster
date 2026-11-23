@@ -275,6 +275,8 @@ export function gateWords(u: NonNullable<HomeState['usage']>, now: Date): string
       return 'Dispatch open';
     case 'finishing_only':
       return 'Dispatch open to finishing work only: usage is near its limit';
+    case 'override':
+      return `Dispatch open on your usage override: ${s.overrideStartsLeft ?? 0} of ${s.overrideStarts ?? 0} starts left, ending ${s.overrideUntil ? at(s.overrideUntil, now) : 'soon'}`;
     case 'probe':
       return 'Dispatch probing: one drop at a time until Claude allows more';
     case 'closed':

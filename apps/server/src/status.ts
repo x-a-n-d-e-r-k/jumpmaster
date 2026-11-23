@@ -34,7 +34,7 @@ import {
   SYSTEM_HREF,
 } from './ui/links.js';
 import { wizardActive } from './ui/setup.js';
-import { dispatchGate, type Gate } from './usage.js';
+import { dispatchGate, type Gate, type UsageOverride, usageOverride } from './usage.js';
 import { type CredentialProblem, credentialProblems } from './vault/problems.js';
 
 /**
@@ -82,6 +82,8 @@ export type UsageFacts = {
   overageResumeUntil?: string;
   overageResumeWorkItemId?: number;
   overageProbeSince?: string;
+  /** Command's override of the throttle, while in force (#728). */
+  override?: UsageOverride;
 };
 
 /** One zone as the status reads it. The optional facts serve the headlines that name them. */
@@ -274,6 +276,12 @@ export function statusOf(input: StatusInput, now: Date): Status {
     } = {},
   ) => {
     const also: NonNullable<Status['also']> = [];
+    const o = usage.override;
+    if (o)
+      also.push({
+        text: `Usage override: ${o.startsLeft} of ${o.starts} starts left, until ${o.until.slice(11, 16)} UTC`,
+        href: '/',
+      });
     if (!uses.goalChanges && oldestGoalChange !== undefined)
       also.push({ text: goalText, href: goalConfirmHref(oldestGoalChange) });
     if (!uses.cap)
@@ -724,6 +732,8 @@ export function statusInputOf(o: {
       ...opt('overageResumeUntil', u.overageResumeUntil),
       ...opt('overageResumeWorkItemId', u.overageResumeWorkItemId),
       ...opt('overageProbeSince', u.overageProbeSince),
+      // Shown only where it acts: the throttle holds, and the override lifts it.
+      ...opt('override', gate === 'override' ? usageOverride(db, config.usage, now) : null),
     },
     sticks: { live: live.length, slots: live.reduce((n, s) => n + s.slots, 0), busy },
     doctor: {

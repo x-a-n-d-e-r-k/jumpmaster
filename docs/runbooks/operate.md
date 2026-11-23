@@ -356,6 +356,25 @@ file). `mcp.enabled` and `mcp.maxBodyBytes` take effect at the next restart: the
 config file show here too. From a terminal: `ctl settings set <path>=<json>…`, for example
 `ctl settings set pollSeconds=30`, and `ctl config show`.
 
+### Overriding the usage throttle
+
+When Claude warns that usage is near its limit, or usage passes `usage.throttleUtilization`, only
+finishing work (reviews, heals, resolves) starts. A warning holds new work for five hours from the
+latest report that carries it, and every drop and chat turn reports. To start some work anyway:
+
+```sh
+docker compose exec jumpmaster jumpmaster ctl usage override            # 5 starts, for 3 hours
+docker compose exec jumpmaster jumpmaster ctl usage override --starts 10 --hours 6
+docker compose exec jumpmaster jumpmaster ctl usage override --clear
+```
+
+Each new implement or crew drop takes one start when a stick leases it, again if it is leased again.
+Reviews, heals, resolves and doctor drops take none. The override ends when its starts or its time
+run out, when usage reaches 95% of a window (or `usage.throttleUtilization`, if that is higher),
+when Claude refuses a request, or at a credits stop. It never lifts the kill switch, a paused
+project, a usage pause or a credits stop. The status says how many starts are left. Only an operator
+session or the operator token can set it; the chat cannot. Each change is in the audit log.
+
 ### MCP tokens
 
 Command (a Claude session you run) reaches one zone through Jumpmaster's MCP server at `/mcp`,
