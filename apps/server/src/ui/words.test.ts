@@ -2,10 +2,13 @@ import { describe, expect, test } from 'vitest';
 import { raiseBriefing } from '../briefings.js';
 import { recordCard } from '../chat/cards.js';
 import { appendMessage, createThread } from '../chat/store.js';
-import { type Drop, setZoneMode, type WorkItem } from '../db/repo.js';
+import { GUARDED_PATHS, type GuardCtx, REFUSED_PATHS } from '../config/guarded.js';
+import { type Drop, insertDrop, setZoneMode, stampStick, type WorkItem } from '../db/repo.js';
 import type { DoctorCheck } from '../doctor/checks.js';
 import { modeCardSummary } from '../mcp/chat-actions.js';
+import { DISCOVER_PATH, INSTALLED_PATH } from '../setup/github-app-installed.js';
 import { type StatusInput, type StatusZone, statusOf } from '../status.js';
+import { ago, world } from '../test/doctorWorld.js';
 import { harness } from '../test/flowHarness.js';
 import { operatorSession, plus, t0 } from '../test/helpers.js';
 
@@ -54,9 +57,126 @@ describe('visibleText', () => {
 });
 
 const PROTECTED = ['.github/**', 'CODEOWNERS', 'GOAL.md'];
-const PATCH_NEEDING_CONFIRMATION = { dropZones: [{ id: 'main', ciRequired: false }] };
+const PATCH_NEEDING_CONFIRMATION = {
+  dropZones: [
+    { id: 'main', ciRequired: false },
+    { id: 'merlin', identity: 'starter' },
+  ],
+};
 
-async function seeded() {
+/**
+ * Real doctor findings, not hand-written ones: the doctor run on installs set up so that each
+ * check whose fix names the project's own settings fails or warns.
+ */
+async function doctorFindings(): Promise<DoctorCheck[]> {
+  const worlds = [
+    // No gates (zone.preset), authorMayBeAdmin for a non-admin (forge.admin).
+    world({ zone: { gates: [], authorMayBeAdmin: true } }),
+    // The repository looks like node, the project says python (zone.preset).
+    world({ zone: { preset: 'python' } }),
+    // Starter mode (zone.identity), with a ruleset still asking for an approval.
+    (() => {
+      const w = world({ zone: { identity: 'starter' } });
+      const r = w.f.state.rules.author;
+      if (r.kind === 'ok') r.rules.requiredApprovals = 1;
+      return w;
+    })(),
+    // No CI workflow and no required check under ciRequired (forge.ci, forge.branch-rules).
+    (() => {
+      const w = world();
+      w.f.state.dirs.delete('main:.github/workflows');
+      for (const id of ['author', 'reviewer'] as const) {
+        const r = w.f.state.rules[id];
+        if (r.kind === 'ok') r.rules.requiredChecks = [];
+      }
+      return w;
+    })(),
+    // The only stick lacks egress-v1 under egress enforce (stick.capabilities).
+    (() => {
+      const w = world();
+      stampStick(
+        w.db,
+        's1',
+        {
+          capabilities: ['image-verify-v1', 'push-v1'],
+          imagePolicy: 'signed',
+          version: '0.4.0',
+          pinnedImages: [],
+        },
+        ago(10_000),
+      );
+      return w;
+    })(),
+    // A private repository with a read token but no reviewReadToken (forge.private-clone).
+    (() => {
+      const w = world({ readToken: true });
+      w.f.state.access.author.private = true;
+      return w;
+    })(),
+    // A missing credential (credential.missing).
+    (() => {
+      const w = world();
+      w.deps.credentials = {
+        problems: [
+          {
+            zoneId: 'main',
+            kind: 'missing',
+            credential: 'claudeToken' as never,
+            message: 'no Claude token is set',
+          },
+        ],
+        shadowed: [],
+        vaultKey: { status: 'empty' },
+      };
+      return w;
+    })(),
+    // A doctor drop whose Claude call, service and gate all failed (zone.doctor-drop).
+    (() => {
+      const w = world();
+      insertDrop(
+        w.db,
+        { id: 'doc1', dropZoneId: 'main', workItemId: null, role: 'doctor', state: 'succeeded' },
+        ago(600_000),
+      );
+      const gates = [
+        { name: 'test', exitCode: 2, durationMs: 1, timedOut: false, outputTail: 'FAIL x' },
+      ];
+      w.db.prepare("UPDATE drops SET result_json = ?, finished_at = ? WHERE id = 'doc1'").run(
+        JSON.stringify({
+          status: 'completed',
+          role: 'doctor',
+          gates,
+          doctor: {
+            claude: { ok: false, error: 'model not found' },
+            clone: { ok: true, sha: 'abc1234def' },
+            services: [{ name: 'db', ok: false }],
+            gates,
+          },
+        }),
+        ago(500_000).toISOString(),
+      );
+      return w;
+    })(),
+  ];
+  const out: DoctorCheck[] = [];
+  for (const w of worlds) out.push(...(await w.run()).filter((c) => c.status !== 'pass'));
+  return out;
+}
+
+/** The checks `doctorFindings` must reach, so a change to a world can't make the test vacuous. */
+const DOCTOR_REACHED = [
+  'zone.preset',
+  'forge.admin',
+  'zone.identity',
+  'forge.branch-rules',
+  'forge.ci',
+  'stick.capabilities',
+  'forge.private-clone',
+  'credential.missing',
+  'zone.doctor-drop',
+];
+
+async function seeded(doctor: DoctorCheck[] = []) {
   const h = await harness({
     live: true,
     zone: { ciRequired: true, protectedPaths: PROTECTED },
@@ -99,7 +219,25 @@ async function seeded() {
           summary: 'label agent-ready is missing',
           fix: 'gh label create agent-ready',
         },
+        ...doctor,
       ]),
+    );
+  // A host a drop reached that no list of the project names (the egress table on Setup). The
+  // sync writes the project rows a drop belongs to.
+  await h.sync();
+  insertDrop(
+    h.db,
+    { id: 'egress1', dropZoneId: 'main', workItemId: null, role: 'doctor', state: 'succeeded' },
+    at,
+  );
+  h.db
+    .prepare(
+      `INSERT INTO drop_events (drop_id, seq, ts, kind, data_json) VALUES (?, 1, ?, 'egress', ?)`,
+    )
+    .run(
+      'egress1',
+      at.toISOString(),
+      JSON.stringify({ host: 'new.example.com', decision: 'allowed', count: 2 }),
     );
   const briefing = raiseBriefing(
     h.db,
@@ -155,7 +293,10 @@ async function seeded() {
 
 describe('every rendered page says project and Home', () => {
   test('no page shows "zone" or "Floor" in its visible text', async () => {
-    const { h, briefing, confirm, thread, cookie } = await seeded();
+    const doctor = await doctorFindings();
+    const reached = new Set(doctor.map((c) => c.id));
+    for (const id of DOCTOR_REACHED) expect(reached, id).toContain(id);
+    const { h, briefing, confirm, thread, cookie } = await seeded(doctor);
     const urls = [
       '/',
       '/?needs=all',
@@ -189,6 +330,7 @@ describe('every rendered page says project and Home', () => {
       '/setup/stick',
       '/setup/project',
       '/setup/doctor',
+      INSTALLED_PATH,
     ];
     const found: Record<string, string[]> = {};
     for (const url of urls) {
@@ -202,7 +344,40 @@ describe('every rendered page says project and Home', () => {
     expect(page.statusCode, confirm).toBe(200);
     const bad = offenders(visibleText(page.body));
     if (bad.length > 0) found[confirm.replace(/[^/]+$/, ':id')] = bad;
+    // Discovery of GitHub App installations, as the session that asks for it.
+    const s = operatorSession(h.db, h.now());
+    const discover = await h.app.inject({ method: 'POST', url: DISCOVER_PATH, headers: s.headers });
+    expect(discover.statusCode, discover.body).toBe(200);
+    const badDiscover = offenders(visibleText(discover.body));
+    if (badDiscover.length > 0) found[DISCOVER_PATH] = badDiscover;
     expect(found).toEqual({});
+  });
+
+  test('discovery with no project on GitHub Apps says so in project words', async () => {
+    const h = await harness({
+      live: true,
+      zone: { identity: 'starter', ciRequired: true, protectedPaths: PROTECTED },
+    });
+    const s = operatorSession(h.db, h.now());
+    const res = await h.app.inject({ method: 'POST', url: DISCOVER_PATH, headers: s.headers });
+    expect(res.statusCode, res.body).toBe(200);
+    const text = visibleText(res.body);
+    expect(text).toContain('No project uses GitHub Apps.');
+    expect(offenders(text)).toEqual([]);
+  });
+
+  test('the seed reaches the strings it guards', async () => {
+    const { h, confirm, cookie } = await seeded(await doctorFindings());
+    // The egress table marks the observed host no list names.
+    expect(visibleText((await h.view('/projects/main/setup')).body)).toMatch(
+      /new\.example\.com allowed 2 .*? egress1 not in this project's lists/,
+    );
+    // Doctor fix text is visible on the doctor page, not tucked away in <pre>.
+    const doctor = visibleText((await h.view('/setup/doctor')).body);
+    expect(doctor).toContain('Fix: Set authorMayBeAdmin: false in the project.');
+    expect(doctor).toContain("or set the project's egress.mode to off");
+    // The confirmation page lists the starter consequence, naming the project.
+    expect(visibleText((await h.view(confirm, { cookie })).body)).toContain('project merlin: ');
   });
 
   test('a ctl command inside <code> on a page is not a finding', async () => {
@@ -211,6 +386,33 @@ describe('every rendered page says project and Home', () => {
     expect(visibleText(`${html}<p>Run <code>jumpmaster ctl zones list</code></p>`)).not.toMatch(
       ZONE_WORD,
     );
+  });
+});
+
+describe('guarded-change words', () => {
+  const ctx: GuardCtx = { zoneId: 'main', install: {}, added: false };
+  /** Every consequence a rule can say, each way round, as the confirmation page and Home show it. */
+  const said = (c: string | string[] | undefined) => (c === undefined ? [] : [c].flat());
+
+  test('every guarded consequence and every added-project consequence says project', () => {
+    const lines: string[] = [];
+    for (const g of GUARDED_PATHS) {
+      const [from, to] = g.kind === 'set' ? [[], ['x']] : [undefined, 'starter'];
+      lines.push(...said(g.consequence(from, to, ctx)), ...said(g.consequence(to, from, ctx)));
+    }
+    for (const r of REFUSED_PATHS)
+      lines.push(...said(r.onAdd?.('gitlab', { ...ctx, added: true })));
+    expect(lines.length).toBeGreaterThan(GUARDED_PATHS.length);
+    expect(lines.filter((l) => offenders(l).length > 0)).toEqual([]);
+  });
+});
+
+describe('chat card words', () => {
+  test('a pause card and a resume card each say what happened to the project', () => {
+    expect(modeCardSummary('paused', 'main')).toBe(
+      'Paused project main: no new drops start, running ones finish.',
+    );
+    expect(modeCardSummary('active', 'main')).toBe('Resumed project main: it is active again.');
   });
 });
 

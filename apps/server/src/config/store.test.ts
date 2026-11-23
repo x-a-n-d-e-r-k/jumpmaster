@@ -1937,28 +1937,28 @@ describe('githubApp ids (spec §4.2): config, not secret, and guarded', () => {
       [
         { dropZones: [{ id: 'main', githubApp: ids }] },
         [
-          'Author tokens for zone main will be minted from installation id 11',
-          'Reviewer tokens for zone main will be minted from installation id 22',
-          'Tokens for zone main will be minted for repository id 123',
+          'Author tokens for project main will be minted from installation id 11',
+          'Reviewer tokens for project main will be minted from installation id 22',
+          'Tokens for project main will be minted for repository id 123',
         ],
         ids,
       ],
       [
         { dropZones: [{ id: 'main', githubApp: { repositoryId: 456 } }] },
-        ['Tokens for zone main will be minted for repository id 456'],
+        ['Tokens for project main will be minted for repository id 456'],
         { ...ids, repositoryId: 456 },
       ],
       [
         { dropZones: [{ id: 'main', githubApp: { installations: { author: 12 } } }] },
-        ['Author tokens for zone main will be minted from installation id 12'],
+        ['Author tokens for project main will be minted from installation id 12'],
         { repositoryId: 456, installations: { author: 12, reviewer: 22 } },
       ],
       [
         { dropZones: [{ id: 'main', githubApp: null }] },
         [
-          'Author tokens for zone main will no longer be minted from installation id 12: it is removed',
-          'Reviewer tokens for zone main will no longer be minted from installation id 22: it is removed',
-          'Tokens for zone main will no longer be minted for repository id 456: it is removed',
+          'Author tokens for project main will no longer be minted from installation id 12: it is removed',
+          'Reviewer tokens for project main will no longer be minted from installation id 22: it is removed',
+          'Tokens for project main will no longer be minted for repository id 456: it is removed',
         ],
         undefined,
       ],

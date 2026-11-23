@@ -516,7 +516,8 @@ function overviewPage(
         `<li><a href="/briefings/${encodeURIComponent(String(b.id))}">${escapeHtml(b.decision)}</a></li>`,
     ),
     ...failing.map(
-      (c) => `<li><a href="${SYSTEM_HREF}">${escapeHtml(c.id)}</a>: ${escapeHtml(c.summary)}</li>`,
+      (c) =>
+        `<li><a href="${SYSTEM_HREF}"><code>${escapeHtml(c.id)}</code></a>: ${escapeHtml(c.summary)}</li>`,
     ),
   ];
   const needsYou = `<section id="needs-you"><h3>Needs you</h3>${
@@ -638,7 +639,7 @@ function setupPage(
     ? `<table><tr><th>Host</th><th>Decision</th><th>Connections</th><th>Drops</th><th>Listed</th><th>Adopt</th></tr>${seen
         .map((h) => {
           const by = listedBy(h.host);
-          return `<tr><td>${escapeHtml(h.host)}</td><td>${escapeHtml(h.decision)}</td><td>${formatCount(h.count)}</td><td>${dropsCell(id, h.drops)}</td><td>${by ? `listed by ${escapeHtml(by)}` : `<strong>${escapeHtml("not in this zone's lists")}</strong>`}</td><td>${by ? '-' : `<input type="checkbox" name="adopt" value="${escapeHtml(h.host)}">`}</td></tr>`;
+          return `<tr><td>${escapeHtml(h.host)}</td><td>${escapeHtml(h.decision)}</td><td>${formatCount(h.count)}</td><td>${dropsCell(id, h.drops)}</td><td>${by ? `listed by ${escapeHtml(by)}` : `<strong>${escapeHtml("not in this project's lists")}</strong>`}</td><td>${by ? '-' : `<input type="checkbox" name="adopt" value="${escapeHtml(h.host)}">`}</td></tr>`;
         })
         .join('')}</table>${adoptControls}`
     : '<p>Nothing observed yet.</p>';

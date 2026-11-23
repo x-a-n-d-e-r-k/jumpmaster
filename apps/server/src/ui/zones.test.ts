@@ -383,7 +383,7 @@ describe('the zones page', () => {
     const egress = section((await w.get('/projects/main/setup')).body, 'egress');
     expect(egress).toContain('Observed in the last 14 days');
     expect(egress).toMatch(
-      /new\.example\.com[\s\S]*?href="\/drops\/d1"[\s\S]*?not in this zone&#39;s lists/,
+      /new\.example\.com[\s\S]*?href="\/drops\/d1"[\s\S]*?not in this project&#39;s lists/,
     );
     expect(egress).toMatch(/registry\.npmjs\.org[\s\S]*?listed by the node preset/);
     expect(egress).toContain('name="adopt" value="new.example.com"');
@@ -1031,7 +1031,7 @@ describe('a project: tabs, header and Overview (#616)', () => {
     const needs = block(body, 'needs-you') ?? '';
     expect(needs).toMatch(/<a href="\/briefings\/\d+">Decide crew:a<\/a>/);
     expect(needs).toMatch(/<a href="\/briefings\/\d+">Decide crew:b<\/a>/);
-    expect(needs).toContain('<a href="/system">zone.labels</a>: labels missing');
+    expect(needs).toContain('<a href="/system"><code>zone.labels</code></a>: labels missing');
     expect(needs).not.toContain('not this project');
     expect(needs).not.toContain('Nothing needs you');
 

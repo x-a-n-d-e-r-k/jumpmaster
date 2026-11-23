@@ -25,7 +25,7 @@ import type {
   WorkItemState,
 } from '../db/repo.js';
 import { ACTIVE_DROP_STATES } from '../db/repo.js';
-import type { DoctorAction } from '../doctor/checks.js';
+import { CHECK_IDS, type DoctorAction } from '../doctor/checks.js';
 import { fableWindow, isFableWindow, modelFamily, PER_MODEL_WINDOWS } from '../fable.js';
 import type { GoalChange } from '../goal-change.js';
 import { currentObjective, type GoalRow } from '../goals.js';
@@ -1698,9 +1698,28 @@ function pipelineSection(state: HomeState, now: Date): string {
   return `<section id="pipeline" class="card"><h2>Pipeline</h2><nav class="totals" aria-label="Pipeline">${tiles}</nav></section>`;
 }
 
-/** Plain status text as HTML: escaped, with `code` in backticks rendered as <code>. */
+/** A doctor check id as a whole word (the longest first, so no id stops inside a longer one). */
+const CHECK_ID_WORD = new RegExp(
+  `(?<![\\w.-])(${[...CHECK_IDS]
+    .sort((a, b) => b.length - a.length)
+    .map((id) => id.replace(/[.-]/g, '\\$&'))
+    .join('|')})(?![\\w-]|\\.\\w)`,
+  'g',
+);
+
+/**
+ * Plain status text as HTML: escaped, with `code` in backticks rendered as <code>, and each doctor
+ * check id (an identifier such as `zone.mode`, as `ctl status` prints it) set as code too.
+ */
 const codeHtml = (text: string): string =>
-  escapeHtml(text).replace(/`([^`]+)`/g, '<code>$1</code>');
+  escapeHtml(text)
+    .split(/(`[^`]+`)/)
+    .map((part) =>
+      part.startsWith('`') && part.endsWith('`') && part.length > 1
+        ? `<code>${part.slice(1, -1)}</code>`
+        : part.replace(CHECK_ID_WORD, '<code>$1</code>'),
+    )
+    .join('');
 
 /**
  * The status line: the headline, the detail behind it, every other blocker as a short item with

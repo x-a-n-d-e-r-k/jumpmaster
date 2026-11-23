@@ -206,7 +206,7 @@ export function registerGitHubAppInstalledRoutes(
         page(
           '<h2>The GitHub App is installed</h2>' +
             para(
-              "Jumpmaster asks GitHub for each zone's installation and repository ids, and proposes them as a change you confirm with your passphrase.",
+              "Jumpmaster asks GitHub for each project's installation and repository ids, and proposes them as a change you confirm with your passphrase.",
             ) +
             `<form method="post" action="${DISCOVER_PATH}">` +
             '<button type="submit">Find the installations</button></form>',
@@ -267,7 +267,7 @@ export function registerGitHubAppInstalledRoutes(
       .map(
         (z) =>
           `<h3>${escapeHtml(z.id)} (${escapeHtml(z.repo)})</h3>` +
-          (z.refused ? para(`Zone ${z.id} refused: ${z.refused}`, 'warn') : '') +
+          (z.refused ? para(`Project ${z.id} refused: ${z.refused}`, 'warn') : '') +
           '<ul>' +
           APP_ROLES.map(
             (role) => `<li>${escapeHtml(role)}: ${roleLine(z.repo, z.roles[role], z.refused)}</li>`,
@@ -280,7 +280,7 @@ export function registerGitHubAppInstalledRoutes(
       reply,
       200,
       '<h2>GitHub App installations</h2>' +
-        (zones.length ? list : para('No zone uses GitHub Apps.')) +
+        (zones.length ? list : para('No project uses GitHub Apps.')) +
         result,
     );
   });
