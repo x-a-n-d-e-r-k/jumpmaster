@@ -235,6 +235,24 @@ describe('/chat', () => {
     expect(anon.headers['x-frame-options']).not.toBe('SAMEORIGIN');
   });
 
+  test('a panel reply that is HTML but not a 200 is framed by nobody (#626)', async () => {
+    const w = world();
+    const th = createThread(w.db, { title: 'Ask' }, t0);
+    // A status set before the handler: the panel view still renders, as HTML, but not as a 200.
+    w.app.addHook('preHandler', async (req, reply) => {
+      if (req.url.endsWith('panel=1')) reply.code(203);
+    });
+    const res = await w.app.inject({
+      method: 'GET',
+      url: `/chat/${th.id}?panel=1`,
+      headers: w.session,
+    });
+    expect(res.statusCode).toBe(203);
+    expect(res.headers['content-type']).toMatch(/^text\/html/);
+    expect(res.headers['x-frame-options']).toBe('DENY');
+    expect(res.headers['content-security-policy']).toBe("frame-ancestors 'none'");
+  });
+
   test('in the panel, Escape asks the page around the frame to close it, unless the dialog took it', () => {
     const posted: unknown[] = [];
     let onKey: ((e: { key: string; defaultPrevented?: boolean }) => void) | undefined;

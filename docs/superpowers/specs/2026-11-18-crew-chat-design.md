@@ -105,7 +105,7 @@ The crew lead can propose a goal change too (my call): its briefing carries the 
 ### The page
 
 - `/chat` lists threads, newest first, and opens one. A **Chat** link goes in the top bar on every page.
-- From a zone page, a briefing or a goals page, **Ask about this** opens a new thread focused on that object. Its first turn is given the object's context (the briefing's item, drops, verdicts and diff, for #103).
+- From a zone page, a briefing or a goals page, **Ask about this** opens the Ask side panel (#626) on a thread focused on that object: a recent one with that focus, or a new one. Its first turn is given the object's context (the briefing's item, drops, verdicts and diff, for #103).
 - Messages stream in. Tool calls show as one collapsed line each ("read apps/server/src/goals.ts", "listed jm's open issues"), and actions as cards.
 
 ### Setup

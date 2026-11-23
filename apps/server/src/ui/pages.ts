@@ -946,10 +946,11 @@ export const LIVE_MARKER = 'jm-live';
  * Refreshes a live page (#404): every 10 seconds, while the tab is visible, it fetches the page
  * again and reloads when `<main>`, less every `[data-live-ignore]`, differs from the last fetch's
  * (the first fetch is the baseline). It holds the reload while the owner types in `<main>` or has
- * an unsaved change in one of its forms, checks at once when the tab comes back, ignores a failed
+ * an unsaved change in one of its forms, and while the Ask panel is open (#626: a draft in its
+ * frame is invisible from here), checks at once when the tab comes back, ignores a failed
  * fetch or a non-200, and stops on a 401 or a redirect to the login page.
  */
-export const LIVE_SCRIPT = `<script>/*${LIVE_MARKER}*/(()=>{let base=null,pending=false,stopped=false,busyFetch=false,timer=null;const stop=()=>{stopped=true;if(timer!==null)clearInterval(timer);};const dirty=(f)=>{const t=f.tagName;if(t==='SELECT'){for(const o of f.options||[])if(o.selected!==o.defaultSelected)return true;return false;}if(t==='INPUT'&&(f.type==='checkbox'||f.type==='radio'))return f.checked!==f.defaultChecked;if(t==='INPUT'||t==='TEXTAREA')return f.value!==f.defaultValue;return false;};const busy=()=>{const m=document.querySelector('main');if(!m)return false;const a=document.activeElement;if(a&&/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName||'')&&m.contains(a))return true;for(const f of m.querySelectorAll('form'))for(const e of f.elements)if(dirty(e))return true;return false;};const tick=async()=>{if(stopped||busyFetch||document.visibilityState!=='visible')return;busyFetch=true;try{const r=await fetch(location.pathname+location.search,{credentials:'same-origin',cache:'no-store'});if(r.status===401||(r.redirected&&new URL(r.url,location.origin).pathname==='/login')){stop();return;}if(r.status!==200)return;const m=new DOMParser().parseFromString(await r.text(),'text/html').querySelector('main');if(!m)return;for(const e of m.querySelectorAll('[data-live-ignore]'))e.remove();const html=m.innerHTML;if(base!==null&&html!==base)pending=true;base=html;if(pending&&!busy()){stop();location.reload();}}catch{}finally{busyFetch=false;}};timer=setInterval(tick,10000);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')tick();});})();</script>`;
+export const LIVE_SCRIPT = `<script>/*${LIVE_MARKER}*/(()=>{let base=null,pending=false,stopped=false,busyFetch=false,timer=null;const stop=()=>{stopped=true;if(timer!==null)clearInterval(timer);};const dirty=(f)=>{const t=f.tagName;if(t==='SELECT'){for(const o of f.options||[])if(o.selected!==o.defaultSelected)return true;return false;}if(t==='INPUT'&&(f.type==='checkbox'||f.type==='radio'))return f.checked!==f.defaultChecked;if(t==='INPUT'||t==='TEXTAREA')return f.value!==f.defaultValue;return false;};const busy=()=>{const k=document.getElementById&&document.getElementById('ask-panel');if(k&&!k.hidden)return true;const m=document.querySelector('main');if(!m)return false;const a=document.activeElement;if(a&&/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName||'')&&m.contains(a))return true;for(const f of m.querySelectorAll('form'))for(const e of f.elements)if(dirty(e))return true;return false;};const tick=async()=>{if(stopped||busyFetch||document.visibilityState!=='visible')return;busyFetch=true;try{const r=await fetch(location.pathname+location.search,{credentials:'same-origin',cache:'no-store'});if(r.status===401||(r.redirected&&new URL(r.url,location.origin).pathname==='/login')){stop();return;}if(r.status!==200)return;const m=new DOMParser().parseFromString(await r.text(),'text/html').querySelector('main');if(!m)return;for(const e of m.querySelectorAll('[data-live-ignore]'))e.remove();const html=m.innerHTML;if(base!==null&&html!==base)pending=true;base=html;if(pending&&!busy()){stop();location.reload();}}catch{}finally{busyFetch=false;}};timer=setInterval(tick,10000);document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible')tick();});})();</script>`;
 
 /** A value that changes on every render while the page's state does not: no reload for it. */
 const volatile = (html: string): string => `<span data-live-ignore>${html}</span>`;
@@ -993,11 +994,14 @@ export const ASK_REUSE_MS = 24 * 60 * 60 * 1000;
 
 /**
  * The Ask panel's script (#626). Ask opens the panel: the tab's own thread for the same focus
- * (`sessionStorage`), else the newest thread with that focus made in the last day, else a new one
- * (`POST /api/chat/threads`). The open state and the thread persist per tab, so the next page with
- * the same focus shows the same thread. Escape (here or, by message, in the frame) and Close shut
- * it and give focus back to whatever opened it. `jmAsk(focus, opener)` is what Ask about this
- * calls. A `sessionStorage` that throws only loses the persistence.
+ * (`sessionStorage`) while the server still has it and it is under a day old, else the newest
+ * thread with that focus made in the last day, else a new one (`POST /api/chat/threads`). The open
+ * state and the thread persist per tab, so the next page with the same focus shows the same
+ * thread; a page loaded with the panel open never makes a thread, it stays shut instead until Ask.
+ * Escape (here, unless a dialog on the page has it, or, by message, in the frame) and Close shut
+ * it and give focus back to whatever opened it; a close while the lookup runs abandons it.
+ * `jmAsk(focus, opener)` is what Ask about this calls. A `sessionStorage` that throws only loses
+ * the persistence.
  */
 export const ASK_PANEL_SCRIPT = `<script>(()=>{const b=document.getElementById('ask-open');const p=document.getElementById('ask-panel');if(!b||!p)return;const fr=document.getElementById('ask-frame');const full=document.getElementById('ask-full');const out=document.getElementById('ask-out');const K='jm-ask';const DAY=${ASK_REUSE_MS};
 const load=()=>{try{const v=JSON.parse(sessionStorage.getItem(K)||'null');return v&&typeof v==='object'?v:{};}catch{return {};}};
@@ -1006,17 +1010,18 @@ const pf=()=>b.dataset.focusKind?{kind:b.dataset.focusKind,zoneId:b.dataset.focu
 const key=(f)=>f?[f.kind,f.zoneId,f.ref].join('\\n'):'';
 let back=null;let gen=0;
 const same=(t,f)=>f?t.focusKind===f.kind&&t.focusZoneId===f.zoneId&&t.focusRef===f.ref:t.focusKind===null;
-const find=async(f)=>{const r=await fetch('/api/chat/threads',{credentials:'same-origin',headers:{accept:'application/json'}});if(!r.ok)return null;const j=await r.json();const now=Date.now();let best=null;for(const t of (j&&j.threads)||[]){const at=Date.parse(t.createdAt);if(!same(t,f)||!(now-at<DAY))continue;if(!best||at>Date.parse(best.createdAt))best=t;}return best;};
+const find=async(f,mine)=>{const r=await fetch('/api/chat/threads',{credentials:'same-origin',headers:{accept:'application/json'}});if(!r.ok)return null;const j=await r.json();const now=Date.now();let best=null;for(const t of (j&&j.threads)||[]){const at=Date.parse(t.createdAt);if(!same(t,f)||!(now-at<DAY))continue;if(mine!=null&&String(t.id)===String(mine))return t;if(!best||at>Date.parse(best.createdAt))best=t;}return best;};
 const create=async(f)=>{const r=await jmFetch('/api/chat/threads',f?{focus:f}:{});const j=await r.json().catch(()=>({}));if(!r.ok||!j.thread)throw new Error(r.status+' '+(j.error??''));return j.thread;};
 const show=(id)=>{const u='/chat/'+encodeURIComponent(id);full.href=u;const src=u+'?panel=1';if(fr.getAttribute('src')!==src)fr.setAttribute('src',src);};
+const shut=()=>{gen++;p.hidden=true;b.setAttribute('aria-expanded','false');document.body.classList.remove('ask-on');};
 const open=async(f,from,move)=>{if(f===undefined)f=pf();const n=++gen;back=from||b;p.hidden=false;b.setAttribute('aria-expanded','true');document.body.classList.add('ask-on');if(move!==false&&p.focus)p.focus();out.textContent='';
-const s=load();let id=s.focus===key(f)&&s.thread?s.thread:null;save({open:true,focus:key(f),thread:id});
-if(!id){try{const t=(await find(f))||(await create(f));id=t.id;}catch(x){if(n===gen)out.textContent='Could not open a thread: '+((x&&x.message)||x);return;}}
+const s=load();const mine=s.focus===key(f)&&s.thread?s.thread:null;save({open:true,focus:key(f),thread:mine});let id;
+try{let t=await find(f,mine);if(n!==gen)return;if(!t){if(move===false){shut();save({open:false,focus:key(f),thread:null});return;}t=await create(f);}id=t.id;}catch(x){if(n===gen)out.textContent='Could not open a thread: '+((x&&x.message)||x);return;}
 if(n!==gen)return;show(id);save({open:true,focus:key(f),thread:id});};
-const close=()=>{if(p.hidden)return;gen++;p.hidden=true;b.setAttribute('aria-expanded','false');document.body.classList.remove('ask-on');save({...load(),open:false});const t=back||b;back=null;if(t&&t.focus)t.focus();};
+const close=()=>{if(p.hidden)return;shut();save({...load(),open:false});const t=back||b;back=null;if(t&&t.focus)t.focus();};
 b.addEventListener('click',()=>{if(p.hidden)open(pf(),b);else close();});
 document.getElementById('ask-close').addEventListener('click',close);
-document.addEventListener('keydown',(e)=>{if(e.key==='Escape'&&!p.hidden){e.preventDefault();close();}});
+document.addEventListener('keydown',(e)=>{if(e.key!=='Escape'||p.hidden||e.defaultPrevented||(document.querySelector&&document.querySelector('dialog[open]')))return;e.preventDefault();close();});
 window.addEventListener('message',(e)=>{if(e.origin===location.origin&&e.data&&e.data.jmAsk==='close')close();});
 window.jmAsk=(f,from)=>open(f||null,from);
 if(load().open)open(pf(),b,false);})();</script>`;
