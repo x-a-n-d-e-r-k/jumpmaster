@@ -281,14 +281,22 @@ export const rolesOf = (zone: Pick<DropZoneConfig, 'identity' | 'reviewReadToken
   ...(zone.reviewReadToken ? (['read'] as const) : []),
 ];
 
-/** The guide's steps the doctor checks (#618), each with the doctor checks that judge it, by id. */
+/**
+ * The guide's steps the doctor checks (#618), each with the doctor checks that judge it, by id.
+ * Access is judged by the accounts' own access to the repository (forge.author, forge.reviewer:
+ * the Write role, or the installed app) as well as the clone check, which passes for any public
+ * repository whatever the accounts' roles (#679).
+ */
 export const STEP_CHECKS = {
-  access: ['forge.private-clone'],
+  access: ['forge.author', 'forge.reviewer', 'forge.private-clone'],
   ruleset: ['forge.branch-rules', 'forge.ci'],
   codeowners: ['forge.codeowners'],
   labels: ['forge.labels'],
 } as const satisfies Record<string, readonly string[]>;
 export type GithubStep = keyof typeof STEP_CHECKS;
+
+/** The checks a starter zone has no use for: the doctor skips them by design (no reviewer). */
+const STARTER_SKIPPED: readonly string[] = ['forge.reviewer'];
 
 /** What a step's chip says: done (pass), missing (fail), check (warn) or not checked. */
 export type StepState = 'done' | 'missing' | 'check' | 'not-checked';
@@ -298,13 +306,17 @@ export type StepStatus = { state: StepState; findings: string[] };
  * A step's status from the latest doctor run's checks for the zone (`null`: no run). It is done
  * only when every one of its checks is there and passed: a check that is absent, or skipped, is
  * not checked, never done. A fail is missing, with the doctor's finding; a warn (or info) is check.
+ * A starter zone (`starter`) is not judged by the checks the doctor skips for it by design.
  */
 export function stepStatus(
   checks: readonly DoctorCheck[] | null,
   zoneId: string,
   step: GithubStep,
+  starter = false,
 ): StepStatus {
-  const ids: readonly string[] = STEP_CHECKS[step];
+  const ids: readonly string[] = STEP_CHECKS[step].filter(
+    (id: string) => !(starter && STARTER_SKIPPED.includes(id)),
+  );
   const mine = (checks ?? []).filter((c) => c.zoneId === zoneId && ids.includes(c.id));
   const findings = (st: string[]) =>
     mine.filter((c) => st.includes(c.status)).map((c) => c.summary);
@@ -358,7 +370,8 @@ export function githubSection(
   guidance: { ok: true; guidance: ZoneGuidance; reviewer: string } | { ok: false; error: string },
   checks: readonly DoctorCheck[] | null,
 ): string {
-  const chip = (step: GithubStep) => stepChip(step, stepStatus(checks, zone.id, step));
+  const chip = (step: GithubStep) =>
+    stepChip(step, stepStatus(checks, zone.id, step, zone.identity === 'starter'));
   const head = `<section id="github" class="setup-section"><h3>GitHub</h3>${STEP_STYLE}
 <p>What Jumpmaster needs on GitHub, as links and files: nothing here changes GitHub; the clicks and the commit are yours. The doctor checks each part; its last run's result is beside each step.</p>`;
   if (!guidance.ok)

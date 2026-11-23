@@ -1547,17 +1547,40 @@ describe('Setup has a GitHub section with each step’s doctor status (#618)', (
     return html.slice(at, html.indexOf('</p>', at));
   };
 
-  test('a failing branch-rules check shows the ruleset step missing, with the finding; a passing private-clone shows access done', async () => {
+  test('a failing branch-rules check shows the ruleset step missing, with the finding; the account and clone checks passing show access done', async () => {
     const w = await world();
     doctorRun(w, [
       { id: 'forge.branch-rules', status: 'fail', summary: 'no ruleset requires a pull request' },
       { id: 'forge.private-clone', status: 'pass', summary: 'octo/main is public' },
+      { id: 'forge.author', status: 'pass', summary: 'author can write' },
+      { id: 'forge.reviewer', status: 'pass', summary: 'reviewer can write' },
     ]);
     const github = (await w.get('/projects/main/setup')).body;
     expect(chip(github, 'ruleset')).toContain('data-status="missing">missing</span>');
     expect(chip(github, 'ruleset')).toContain('no ruleset requires a pull request');
     expect(chip(github, 'access')).toContain('data-status="done">done</span>');
     expect(chip(github, 'codeowners')).toContain('data-status="not-checked">not checked</span>');
+  });
+
+  test('a failing reviewer shows access missing with its finding, escaped, though private-clone passes (#679)', async () => {
+    const w = await world();
+    doctorRun(w, [
+      { id: 'forge.private-clone', status: 'pass', summary: 'octo/main is public' },
+      { id: 'forge.author', status: 'pass', summary: 'author can write' },
+      {
+        id: 'forge.reviewer',
+        status: 'fail',
+        summary: 'GitHub reports <read> access to octo/main for the reviewer token, not write',
+      },
+    ]);
+    const html = (await w.get('/projects/main/setup')).body;
+    const access = chip(html, 'access');
+    expect(access).toContain('data-status="missing">missing</span>');
+    expect(access).toContain(
+      'GitHub reports &lt;read&gt; access to octo/main for the reviewer token, not write',
+    );
+    expect(access).not.toContain('<read>');
+    expect(access).not.toContain('octo/main is public');
   });
 
   test('with no doctor run every step shows not checked, and none shows done', async () => {
