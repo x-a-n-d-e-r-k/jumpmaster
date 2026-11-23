@@ -320,6 +320,17 @@ describe('push calls', () => {
     expect(calls[0]?.url).toBe('http://server.test/api/sticks/push-token');
   });
 
+  test('pushGrant accepts a grant with a GitLab forge (#716)', async () => {
+    const forge = { kind: 'gitlab', origin: 'https://gitlab.com', projectPath: 'g/sub/p' };
+    serve(
+      reply(200, { grant: { ...grant, forge } }),
+      reply(200, { grant: { ...grant, forge: { ...forge, origin: 'http://x' } } }),
+    );
+    const c = client();
+    expect(await c.pushGrant('d1', 2)).toEqual({ grant: { ...grant, forge } });
+    await expect(c.pushGrant('d1', 2)).rejects.toThrow();
+  });
+
   test('a malformed grant is refused without echoing the body', async () => {
     serve(reply(200, { grant: { token: 'ghp_secret' } }));
     const err = await client()

@@ -1,4 +1,6 @@
 import {
+  gitlabBasicAuth,
+  type PushGrant,
   type PushPayload,
   PushPayloadSchema,
   type PushResult,
@@ -46,6 +48,14 @@ export type PushEntry = {
 };
 
 export type PushOutcome = 'done' | 'retry' | 'killed' | 'cancelled';
+
+/**
+ * What the stick redacts from a push container's output once it holds the grant: the token and the
+ * grant's secrets, and for a GitLab grant the base64 of `oauth2:<token>` the trooper sends to it.
+ */
+export function grantSecrets(grant: PushGrant): string[] {
+  return [grant.token, ...grant.secrets, ...(grant.forge ? [gitlabBasicAuth(grant.token)] : [])];
+}
 
 /** `min(PUSH_BACKOFF_MAX_MS, 15 s · 2^attempts)`. */
 export function backoffMs(attempts: number): number {
@@ -382,7 +392,7 @@ async function drive(
     }
     if (abort) return abort;
     const { grant } = reply;
-    onSecrets([grant.token, ...grant.secrets]);
+    onSecrets(grantSecrets(grant));
     // Only this call's own container, which has just printed ready, ever gets the grant.
     await handle.writeLine(JSON.stringify(grant));
     handle.endStdin();

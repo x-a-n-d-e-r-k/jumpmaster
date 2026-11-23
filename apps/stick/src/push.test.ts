@@ -11,6 +11,7 @@ import type { ContainerDriver, ContainerHandle, DropNet } from './driver.js';
 import {
   backoffMs,
   createPushLoop,
+  grantSecrets,
   MAX_CONCURRENT_PUSHES,
   NO_RESULT_RETRIES,
   PendingPushes,
@@ -549,5 +550,39 @@ describe('fix round 1', () => {
     expect(d.order).toContain('teardown jm-push-d1-3');
     expect(d.removedVolumes).toEqual([VOLUME]);
     expect(s.pending.size()).toBe(0);
+  });
+});
+
+describe('a GitLab grant (#716)', () => {
+  // Not token-shaped: only the explicit entries can redact it.
+  const TOKEN = 'plain-gitlab-token-0123456789';
+  const GL_BASIC = Buffer.from(`oauth2:${TOKEN}`).toString('base64');
+  const GL_GRANT: PushGrant = {
+    ...GRANT,
+    token: TOKEN,
+    secrets: [],
+    forge: { kind: 'gitlab', origin: 'https://gitlab.com', projectPath: 'g/sub/p' },
+  };
+
+  test("the push container's echo of the oauth2 header is redacted from the stick's log", async () => {
+    const failed = resultLine({
+      status: 'failed',
+      reason: `fatal: AUTHORIZATION: basic ${GL_BASIC} refused`,
+      retryable: false,
+    });
+    const s = setup([{ before: [READY_LINE], after: [failed] }], {
+      grants: [{ grant: GL_GRANT }],
+    });
+    expect(await pushOnce(s.entry, s.deps)).toBe('done');
+    expect(s.d.writes).toEqual([[JSON.stringify(GL_GRANT)]]);
+    const log = s.logs.join('\n');
+    expect(log).toContain('[REDACTED]');
+    expect(log).not.toContain(GL_BASIC);
+    expect(log).not.toContain(TOKEN);
+  });
+
+  test('grantSecrets adds the oauth2 form only for a GitLab grant', () => {
+    expect(grantSecrets(GRANT)).toEqual([GRANT.token, ...GRANT.secrets]);
+    expect(grantSecrets(GL_GRANT)).toEqual([TOKEN, GL_BASIC]);
   });
 });

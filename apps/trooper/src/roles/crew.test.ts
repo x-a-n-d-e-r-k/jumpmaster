@@ -570,3 +570,10 @@ describe('crew prompts', () => {
     expect(diag).toMatch(/`retry` only when a fresh run would plausibly succeed/);
   });
 });
+
+test('a crew drop with a GitLab repo.forge clones it (#716)', async () => {
+  const forge = { kind: 'gitlab' as const, origin: 'https://gitlab.com', projectPath: 'g/sub/p' };
+  const w = world();
+  await runCrew({ ...lead, repo: { ...lead.repo, forge } }, w.deps, newCtx());
+  expect(w.calls[0]).toEqual(['cloneRepo', expect.objectContaining({ forge, token: READ })]);
+});

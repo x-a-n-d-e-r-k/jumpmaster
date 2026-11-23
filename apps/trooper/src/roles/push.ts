@@ -2,6 +2,7 @@ import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Readable } from 'node:stream';
 import {
+  gitlabBasicAuth,
   type PushGrant,
   type PushPayload,
   type PushResult,
@@ -63,7 +64,13 @@ export async function survivors(
 const basicAuth = (token: string): string =>
   Buffer.from(`x-access-token:${token}`).toString('base64');
 
-const grantSecrets = (g: PushGrant): string[] => [...g.secrets, g.token, basicAuth(g.token)];
+/** The grant's secrets and token, with git's basic-auth form; a GitLab grant's `oauth2:` one too. */
+export const grantSecrets = (g: PushGrant): string[] => [
+  ...g.secrets,
+  g.token,
+  basicAuth(g.token),
+  ...(g.forge ? [gitlabBasicAuth(g.token)] : []),
+];
 
 /** Redacts every reason, bounds it, and serialises the result line with the same secrets. */
 function finish(r: PushResult, secrets: string[], emit: (l: string) => void): PushResult {

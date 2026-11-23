@@ -97,3 +97,11 @@ test('resolve refreshes the base in the mirror before merging', async () => {
   const fetch = w.calls.find((c) => c[0] === 'mirrorFetch');
   expect(fetch?.[4]).toEqual(['agent/issue-1', 'main']);
 });
+
+test('a GitLab repo.forge reaches the clone and the branch fetch (#716)', async () => {
+  const forge = { kind: 'gitlab' as const, origin: 'https://gitlab.com', projectPath: 'g/sub/p' };
+  const w = roleWorld({ dirty: true });
+  await runResolve({ ...resolve, repo: { ...resolve.repo, forge } }, w.deps, ctx);
+  expect(w.calls.find((c) => c[0] === 'cloneRepo')?.[1]).toMatchObject({ forge });
+  expect(w.calls.find((c) => c[0] === 'mirrorFetch')?.[3]).toMatchObject({ forge });
+});

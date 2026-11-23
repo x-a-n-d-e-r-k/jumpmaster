@@ -1,6 +1,7 @@
 import { join } from 'node:path';
 import type { DropPayload, DropResult, MergeOutcome } from '@jumpmaster/protocol';
 import { IMPLEMENT_OUTPUT_SCHEMA } from '@jumpmaster/protocol';
+import { repoTarget } from '../git.js';
 import type { TrooperDeps } from '../main.js';
 import {
   type AgentOutcome,
@@ -45,7 +46,7 @@ async function resolveSteps(
 ): Promise<DropResult> {
   const forgeToken = payload.credentials.forgeToken as string;
   const base = payload.repo.defaultBranch;
-  const target = { owner: payload.repo.owner, name: payload.repo.name };
+  const target = repoTarget(payload.repo);
   const as = ctx.ids?.agent ?? null;
   const { branch, headSha: prHead } = payload.pr;
 

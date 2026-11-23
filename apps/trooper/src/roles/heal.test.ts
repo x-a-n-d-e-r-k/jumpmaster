@@ -112,3 +112,15 @@ test('heal stopped by a limit asks for a checkpoint push of the PR branch', asyn
   expect(pushRequestValid(r, 'heal')).toBe(true);
   expect(w.calls).toContainEqual(['commitIfDirty', repoDir, 'wip: checkpoint', null]);
 });
+
+test('a GitLab repo.forge reaches the clone and the branch fetch (#716)', async () => {
+  const forge = { kind: 'gitlab' as const, origin: 'https://gitlab.com', projectPath: 'g/sub/p' };
+  const w = roleWorld({ dirty: true });
+  await runHeal({ ...heal, repo: { ...heal.repo, forge } }, w.deps, ctx);
+  expect(w.calls.find((c) => c[0] === 'cloneRepo')?.[1]).toMatchObject({ forge });
+  expect(w.calls.find((c) => c[0] === 'mirrorFetch')?.[3]).toEqual({
+    owner: 'o',
+    name: 'r',
+    forge,
+  });
+});

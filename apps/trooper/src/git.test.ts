@@ -22,10 +22,13 @@ import {
   conflictMarkers,
   GIT_OUTPUT_MAX_BYTES,
   headSha,
+  initBare,
   mergeInProgress,
+  mirrorFetch,
   prePushCheck,
   prepareBranch,
   remoteBranchExists,
+  remoteBranchSha,
   removeInstructionFiles,
   runGit,
   setGitOutputMaxBytes,
@@ -183,6 +186,7 @@ test('a silent git failure leaks neither the token nor its base64 form', async (
     token,
     {
       gitDir: realpathSync(mirror),
+      remote: { owner: 'o', name: 'r' },
     },
   ).catch((e: Error) => e);
   expect(err).toBeInstanceOf(Error);
@@ -228,11 +232,139 @@ test('the auth header is scoped to https://github.com/ only', async () => {
   expect(
     await runGit(undefined, ['config', '--get', 'http.https://github.com/.extraheader'], token, {
       gitDir,
+      remote: { owner: 'o', name: 'r' },
     }),
   ).toBe(authHeader(token));
   await expect(
-    runGit(undefined, ['config', '--get', 'http.extraheader'], token, { gitDir }),
+    runGit(undefined, ['config', '--get', 'http.extraheader'], token, {
+      gitDir,
+      remote: { owner: 'o', name: 'r' },
+    }),
   ).rejects.toThrow();
+});
+
+test('runGit refuses a token without the remote it is for', async () => {
+  const dir = await clone('noremote');
+  const gitDir = realpathSync(join(dir, '..', 'mirror'));
+  await expect(runGit(undefined, ['rev-parse', '--git-dir'], 'tok', { gitDir })).rejects.toThrow(
+    /without a remote/,
+  );
+});
+
+describe('the remote target decides the URL, auth scope and header (#716)', () => {
+  const TOKEN = 'plain-token-0123456789';
+  const b64 = (s: string) => Buffer.from(s).toString('base64');
+  const GITLAB = {
+    kind: 'gitlab' as const,
+    origin: 'https://git.example.internal:8443',
+    projectPath: 'group/sub/project',
+  };
+  type Call = { argv: string[]; env: NodeJS.ProcessEnv };
+  /** Records every spawn, and runs `true` in its place: no network is touched. */
+  const record = (): Call[] => {
+    const calls: Call[] = [];
+    setSpawn((cmd, args, opts) => {
+      calls.push({ argv: [cmd, ...args], env: (opts.env ?? {}) as NodeJS.ProcessEnv });
+      return spawn('true', [], { ...opts, cwd: '/' });
+    });
+    return calls;
+  };
+  const mirror = async (name: string) => {
+    const d = join(tmp, name);
+    await initBare(d);
+    return d;
+  };
+  const authEnv = (env: NodeJS.ProcessEnv) =>
+    Object.fromEntries(Object.entries(env).filter(([k]) => k.startsWith('GIT_CONFIG_')));
+  const noTokenInArgv = (calls: Call[]) => {
+    for (const c of calls) {
+      for (const a of c.argv) {
+        expect(a).not.toContain(TOKEN);
+        expect(a).not.toContain(b64(`oauth2:${TOKEN}`));
+        expect(a).not.toContain(b64(`x-access-token:${TOKEN}`));
+      }
+    }
+  };
+
+  test('a GitLab target fetches <origin>/<group>/<sub>/<project>.git with the oauth2 header on <origin>/', async () => {
+    const dir = await mirror('gl-fetch');
+    const calls = record();
+    await mirrorFetch(dir, TOKEN, { owner: 'o', name: 'r', forge: GITLAB }, ['main']);
+    expect(calls).toHaveLength(1);
+    const c = calls[0] as Call;
+    expect(c.env.GIT_CONFIG_COUNT).toBe('1');
+    expect(c.env.GIT_CONFIG_KEY_0).toBe('http.https://git.example.internal:8443/.extraheader');
+    expect(c.env.GIT_CONFIG_VALUE_0).toBe(`AUTHORIZATION: basic ${b64(`oauth2:${TOKEN}`)}`);
+    expect(c.argv).toContain('https://git.example.internal:8443/group/sub/project.git');
+    expect(c.argv.join(' ')).not.toContain('github.com');
+    expect(JSON.stringify(authEnv(c.env))).not.toContain('github.com');
+    noTokenInArgv(calls);
+  });
+
+  test('a GitLab target ls-remotes <origin>/<projectPath>.git with the GitLab scope', async () => {
+    const calls = record();
+    await remoteBranchSha({ owner: 'o', name: 'r', forge: GITLAB }, 'main', TOKEN);
+    const ls = calls.find((c) => c.argv.includes('ls-remote')) as Call;
+    expect(ls.env.GIT_CONFIG_KEY_0).toBe('http.https://git.example.internal:8443/.extraheader');
+    expect(ls.env.GIT_CONFIG_VALUE_0).toBe(`AUTHORIZATION: basic ${b64(`oauth2:${TOKEN}`)}`);
+    expect(ls.argv).toContain('https://git.example.internal:8443/group/sub/project.git');
+    noTokenInArgv(calls);
+  });
+
+  test('cloneRepo with a GitLab forge clones <origin>/<projectPath>.git with the GitLab scope', async () => {
+    const home = join(tmp, 'gl-clone');
+    mkdirSync(home);
+    const calls = record();
+    await cloneRepo({
+      owner: 'o',
+      name: 'r',
+      forge: { ...GITLAB, origin: 'https://gitlab.com' },
+      token: TOKEN,
+      dir: join(home, 'repo'),
+    });
+    const fetch = calls.find((c) => c.argv.includes('fetch')) as Call;
+    expect(fetch.argv).toContain('https://gitlab.com/group/sub/project.git');
+    expect(fetch.env.GIT_CONFIG_KEY_0).toBe('http.https://gitlab.com/.extraheader');
+    expect(fetch.env.GIT_CONFIG_VALUE_0).toBe(`AUTHORIZATION: basic ${b64(`oauth2:${TOKEN}`)}`);
+    // Only the root fetch carries the token.
+    expect(calls.filter((c) => JSON.stringify(c.env).includes(b64(`oauth2:${TOKEN}`)))).toEqual([
+      fetch,
+    ]);
+    noTokenInArgv(calls);
+  });
+
+  test("a GitHub target's env and argv are unchanged", async () => {
+    const dir = await mirror('gh-fetch');
+    const calls = record();
+    await mirrorFetch(dir, TOKEN, { owner: 'o', name: 'r' }, ['main']);
+    const c = calls[0] as Call;
+    expect(c.argv).toEqual([
+      'git',
+      '-c',
+      'core.hooksPath=/dev/null',
+      '-c',
+      'protocol.allow=never',
+      '-c',
+      'protocol.https.allow=always',
+      'fetch',
+      '-q',
+      '--no-tags',
+      '--no-write-fetch-head',
+      '--prune',
+      '--end-of-options',
+      'https://github.com/o/r.git',
+      '+refs/heads/main:refs/heads/main',
+    ]);
+    expect(authEnv(c.env)).toEqual({
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.https://github.com/.extraheader',
+      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${b64(`x-access-token:${TOKEN}`)}`,
+    });
+    expect(c.env.GIT_DIR).toBe(dir);
+    noTokenInArgv(calls);
+  });
 });
 
 test('remoteBranchExists reports whether the branch is on the remote', async () => {
