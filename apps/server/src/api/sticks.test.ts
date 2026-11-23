@@ -28,6 +28,7 @@ import {
   getStickByTokenHash,
   getUsageState,
   insertDrop,
+  insertStickInvite,
   listEvents,
   reclaimableDropFor,
   removeStick,
@@ -47,6 +48,7 @@ import {
 import { ScrubSet } from '../forge/scrub-set.js';
 import { StickFetches } from '../images/fetches.js';
 import { ImageMirror } from '../images/mirror.js';
+import { codeHash } from '../install/invite.js';
 import { buildPayload, promptVersions } from '../payloads.js';
 import { type FakeImage, type FakeRegistry, startFakeRegistry } from '../test/fake-registry.js';
 import { fakeForge } from '../test/fakes.js';
@@ -2189,5 +2191,142 @@ describe('a stick starting up reports it on the lease (issue #157)', () => {
     const res = await leaseWith(stickToken, { starting: { image: '' } });
     expect(res.statusCode).toBe(400);
     expect(fetches.starting(stickId, t0)).toBeUndefined();
+  });
+});
+
+describe('stick auth before the body is read (issue #644)', () => {
+  const COVERED_POSTS = [
+    '/api/sticks/lease',
+    '/api/drops/d1/heartbeat',
+    '/api/drops/d1/artifacts',
+    '/api/drops/d1/events',
+    '/api/drops/d1/result',
+    '/api/drops/d1/push-result',
+    '/api/sticks/push-plan',
+    '/api/sticks/push-token',
+    '/api/sticks/salvage',
+  ];
+  const json = { 'content-type': 'application/json' };
+
+  test('a malformed body with no or an unknown bearer is 401 on every covered POST route, never 400', async () => {
+    setup();
+    for (const url of COVERED_POSTS) {
+      for (const headers of [
+        { ...proto, ...json },
+        { ...bearer('unknown-token'), ...json },
+      ]) {
+        const res = await app.inject({ method: 'POST', url, headers, payload: '{"epoch":' });
+        expect(res.statusCode, url).toBe(401);
+        expect(res.json(), url).toEqual({ error: 'unauthorized' });
+      }
+    }
+  });
+
+  test('an events body just under the 8 MiB limit with no bearer is 401', async () => {
+    setup();
+    const payload = '{'.repeat(8 * 1024 * 1024 - 1);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/drops/d1/events',
+      headers: { ...proto, ...json },
+      payload,
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: 'unauthorized' });
+  });
+
+  test('the image route with no bearer is 401', async () => {
+    setup();
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/sticks/images/x/oci.tar?platform=linux/amd64',
+      headers: proto,
+    });
+    expect(res.statusCode).toBe(401);
+    expect(res.json()).toEqual({ error: 'unauthorized' });
+  });
+
+  test('enroll needs no bearer; a malformed enroll body is still 400', async () => {
+    const { db } = setup();
+    const ok = await enroll();
+    expect(ok.stickToken).toMatch(/^[0-9a-f]{64}$/);
+    const code = `jm_enroll_${'C'.repeat(43)}`;
+    insertStickInvite(db, {
+      id: 'inv-1',
+      name: 'by-code',
+      slots: 2,
+      kind: 'line',
+      createdAt: t0.toISOString(),
+      expiresAt: plus(t0, 60 * 60_000).toISOString(),
+      codeHash: codeHash(code),
+    });
+    const byCode = await app.inject({
+      method: 'POST',
+      url: '/api/sticks/enroll',
+      headers: proto,
+      payload: { enrollCode: code, name: 'ignored', slots: 1 },
+    });
+    expect(byCode.statusCode).toBe(200);
+    expect(byCode.json()).toMatchObject({ name: 'by-code' });
+    expect(byCode.json().stickToken).toMatch(/^[0-9a-f]{64}$/);
+    const bad = await app.inject({
+      method: 'POST',
+      url: '/api/sticks/enroll',
+      headers: { ...proto, ...json },
+      payload: '{"joinToken":',
+    });
+    expect(bad.statusCode).toBe(400);
+  });
+
+  test('a missing protocol header with no bearer is 426, before auth', async () => {
+    setup();
+    for (const url of COVERED_POSTS) {
+      const res = await app.inject({ method: 'POST', url, headers: json, payload: '{"epoch":' });
+      expect(res.statusCode, url).toBe(426);
+    }
+    const image = await app.inject({
+      method: 'GET',
+      url: '/api/sticks/images/x/oci.tar?platform=linux/amd64',
+    });
+    expect(image.statusCode).toBe(426);
+    const enrollNoProto = await app.inject({
+      method: 'POST',
+      url: '/api/sticks/enroll',
+      payload: { joinToken: 'join-me', name: 's', slots: 1 },
+    });
+    expect(enrollNoProto.statusCode).toBe(426);
+  });
+
+  test('an enrolled stick gets the same answers; another stick on its drop is refused by the handler', async () => {
+    const { db } = setup();
+    const a = await enroll('a');
+    const b = await enroll('b');
+    const leased = await lease(a.stickToken);
+    expect(leased.statusCode).toBe(200);
+    expect(leased.json()).toMatchObject({ dropId: 'd1', epoch: 1 });
+
+    const post = (url: string, token: string, payload: Record<string, unknown>) =>
+      app.inject({ method: 'POST', url, headers: bearer(token), payload });
+
+    const hb = await post('/api/drops/d1/heartbeat', a.stickToken, { epoch: 1 });
+    expect(hb.statusCode).toBe(200);
+    expect(hb.json()).toEqual({ cancel: false, hard: false });
+    expect((await post('/api/drops/d1/heartbeat', b.stickToken, { epoch: 1 })).statusCode).toBe(
+      409,
+    );
+
+    const events = { epoch: 1, events: [{ ts: t0.toISOString(), kind: 'log', data: {} }] };
+    expect((await post('/api/drops/d1/events', a.stickToken, events)).statusCode).toBe(204);
+    expect((await post('/api/drops/d1/events', b.stickToken, events)).statusCode).toBe(409);
+    expect(listEvents(db, 'd1')).toHaveLength(1);
+
+    // The drop is running, not push_pending: the owner gets the handler's stale answer, and so
+    // does another stick.
+    const own = await post('/api/sticks/push-token', a.stickToken, { dropId: 'd1', epoch: 1 });
+    const other = await post('/api/sticks/push-token', b.stickToken, { dropId: 'd1', epoch: 1 });
+    expect(own.statusCode).toBe(409);
+    expect(own.json()).toMatchObject({ stale: true });
+    expect(other.statusCode).toBe(409);
+    expect(other.json()).toMatchObject({ stale: true });
   });
 });
