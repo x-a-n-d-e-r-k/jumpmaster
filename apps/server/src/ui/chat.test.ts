@@ -27,6 +27,7 @@ import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import {
   CHAT_MISSING_COMMAND,
   messageTextHtml,
+  PANEL_ESCAPE_SCRIPT,
   renderChatList,
   renderThread,
   THREAD_SCRIPT,
@@ -179,6 +180,103 @@ describe('/chat', () => {
       headers: w.session,
     });
     expect(missing.statusCode).toBe(404);
+  });
+
+  test('/chat/:id?panel=1 is the same thread view without the page chrome, framable by this origin only (#626)', async () => {
+    const w = world();
+    const th = createThread(
+      w.db,
+      { title: 'Ask', focus: { kind: 'zone', zoneId: 'main', ref: 'main' } },
+      t0,
+    );
+    appendMessage(w.db, th.id, { role: 'owner', text: 'Is <b>this</b> safe?', state: 'done' }, t0);
+    appendMessage(w.db, th.id, { role: 'tool', text: 'read goals.ts', state: 'done' }, t0);
+    appendMessage(w.db, th.id, { role: 'assistant', text: '**Yes**', state: 'done' }, t0);
+    const full = await w.app.inject({ method: 'GET', url: `/chat/${th.id}`, headers: w.session });
+    const res = await w.app.inject({
+      method: 'GET',
+      url: `/chat/${th.id}?panel=1`,
+      headers: w.session,
+    });
+    expect(res.statusCode).toBe(200);
+    const html = res.body;
+    // No top nav, no Ask button or panel of its own, no All threads link.
+    expect(full.body).toContain('class="topnav"');
+    expect(html).not.toContain('class="topnav"');
+    expect(html).not.toContain('id="ask-open"');
+    expect(html).not.toContain('id="ask-panel"');
+    expect(html).not.toContain('All threads');
+    // The same thread view: messages, steps, Markdown, composer, dialog and script, the CSRF filled.
+    const view = (b: string) => b.slice(b.indexOf('<div id="chat"'), b.indexOf('</main>'));
+    expect(view(html)).toBe(view(full.body) + PANEL_ESCAPE_SCRIPT);
+    expect(html).toContain('Is &lt;b&gt;this&lt;/b&gt; safe?');
+    expect(html).toContain('<strong>Yes</strong>');
+    expect(html).toContain('Worked through 1 step');
+    expect(html).toContain('<form id="send" class="chat-send">');
+    expect(html).toContain('id="confirm-dialog"');
+    expect(html).toContain(THREAD_SCRIPT);
+    expect(html).toContain(PANEL_ESCAPE_SCRIPT);
+    expect(html).toMatch(/<meta name="jm-csrf" content="[^"]+">/);
+    expect(html).toContain('<base target="_top">');
+    // Framable by the app's own pages only; the full page still by none.
+    expect(res.headers['x-frame-options']).toBe('SAMEORIGIN');
+    expect(res.headers['content-security-policy']).toBe("frame-ancestors 'self'");
+    expect(full.headers['x-frame-options']).toBe('DENY');
+    expect(full.headers['content-security-policy']).toBe("frame-ancestors 'none'");
+    // A thread this session can't see is a 404, as on /chat/:id, and framed by nobody.
+    for (const url of [`/chat/${th.id + 1}?panel=1`, `/chat/${th.id + 1}`, '/chat/x?panel=1']) {
+      const missing = await w.app.inject({ method: 'GET', url, headers: w.session });
+      expect(missing.statusCode, url).toBe(404);
+      expect(missing.headers['x-frame-options'], url).not.toBe('SAMEORIGIN');
+    }
+    // Without a session, refused like any page.
+    const anon = await w.app.inject({ method: 'GET', url: `/chat/${th.id}?panel=1` });
+    expect(anon.statusCode).not.toBe(200);
+    expect(anon.headers['x-frame-options']).not.toBe('SAMEORIGIN');
+  });
+
+  test('a panel reply that is HTML but not a 200 is framed by nobody (#626)', async () => {
+    const w = world();
+    const th = createThread(w.db, { title: 'Ask' }, t0);
+    // A status set before the handler: the panel view still renders, as HTML, but not as a 200.
+    w.app.addHook('preHandler', async (req, reply) => {
+      if (req.url.endsWith('panel=1')) reply.code(203);
+    });
+    const res = await w.app.inject({
+      method: 'GET',
+      url: `/chat/${th.id}?panel=1`,
+      headers: w.session,
+    });
+    expect(res.statusCode).toBe(203);
+    expect(res.headers['content-type']).toMatch(/^text\/html/);
+    expect(res.headers['x-frame-options']).toBe('DENY');
+    expect(res.headers['content-security-policy']).toBe("frame-ancestors 'none'");
+  });
+
+  test('in the panel, Escape asks the page around the frame to close it, unless the dialog took it', () => {
+    const posted: unknown[] = [];
+    let onKey: ((e: { key: string; defaultPrevented?: boolean }) => void) | undefined;
+    const dialog = { open: false };
+    const parent = { postMessage: (m: unknown, origin: string) => posted.push([m, origin]) };
+    const ctx = vm.createContext({
+      document: {
+        addEventListener: (_ev: string, fn: typeof onKey) => {
+          onKey = fn;
+        },
+        getElementById: () => dialog,
+      },
+      location: { origin: 'http://127.0.0.1:7420' },
+    });
+    ctx.window = { parent };
+    vm.runInContext(PANEL_ESCAPE_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
+    onKey?.({ key: 'Enter' });
+    onKey?.({ key: 'Escape', defaultPrevented: true });
+    dialog.open = true;
+    onKey?.({ key: 'Escape' });
+    expect(posted).toEqual([]);
+    dialog.open = false;
+    onKey?.({ key: 'Escape' });
+    expect(posted).toEqual([[{ jmAsk: 'close' }, 'http://127.0.0.1:7420']]);
   });
 
   test('reopening a thread replays events after the last seen seq', async () => {
