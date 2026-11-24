@@ -179,6 +179,10 @@
 //     `approvals_before_merge` is never counted. Approval rules are a paid feature: on the Free
 //     tier (403 or 404 there) GitLab enforces no approvals, so `requiredApprovals` is 0 and the read
 //     still succeeds; the two-bot guard then reports `approvals < 1`, the safe reading.
+//   - `approvalRules` (GitLab only) says which: `'read'` when `GET approval_rules` answered (with
+//     or without rules), `'unavailable'` when it was refused with 403 or 404, so a `requiredApprovals`
+//     of 0 there means nothing can be required, not that the rules ask for none. Any other error
+//     still throws.
 //   - `dismissStaleOnPush` is `reset_approvals_on_push` from `GET approvals` (403 or 404: false).
 //   - `requiredChecks` is `['pipeline']` when the project's `only_allow_merge_if_pipeline_succeeds`
 //     is set, else []; `unpinnedChecks` is []; `nonActionsChecks`, `bypass`, `asApp` and
@@ -1257,11 +1261,13 @@ export class GitLabForge implements Forge {
     );
 
     let rules: RawApprovalRule[] = [];
+    let approvalRules: 'read' | 'unavailable' = 'read';
     try {
       rules = await this.list<RawApprovalRule>('listing approval rules', '/approval_rules');
     } catch (err) {
       // The Free tier: GitLab enforces no approvals.
       if (!isRefusal(err)) throw err;
+      approvalRules = 'unavailable';
     }
     const ids = new Set<unknown>(matching.map((e) => e.id).filter((id) => typeof id === 'number'));
     let requiredApprovals = 0;
@@ -1297,6 +1303,7 @@ export class GitLabForge implements Forge {
         viewerIsAdmin: level >= ACCESS_MAINTAINER,
         requiresPullRequest: !canPush,
         requireCodeOwnerReview: matching.some((e) => e.code_owner_approval_required === true),
+        approvalRules,
       },
     };
   }

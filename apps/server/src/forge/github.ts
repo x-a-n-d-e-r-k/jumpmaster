@@ -172,6 +172,12 @@ export type BranchRules = {
   requiresPullRequest?: boolean;
   /** An active pull-request rule requires a code owner's review. */
   requireCodeOwnerReview?: boolean;
+  /**
+   * GitLab only, absent on GitHub: whether the approval rules could be read. `'unavailable'`
+   * means the forge refused the approval-rules read (GitLab Free), so `requiredApprovals` is 0
+   * because nothing can be required, not because the rules ask for none.
+   */
+  approvalRules?: 'read' | 'unavailable';
 };
 
 /** What the token's account may do on the repository, as `GET /repos/{repo}` reports it. */

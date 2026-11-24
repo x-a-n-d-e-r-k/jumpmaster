@@ -1232,6 +1232,18 @@ describe('GitHubForge', () => {
         });
       });
 
+      test('an ok read never carries approvalRules', async () => {
+        nock(api)
+          .get(rulesUrl)
+          .query(true)
+          .reply(200, [prRule(1, 1, true)]);
+        mockRuleset(1, { enforcement: 'active', current_user_can_bypass: 'never' });
+        mockViewer('write');
+        const read = await fresh().getBranchRules('main');
+        if (read.kind !== 'ok') throw new Error('not ok');
+        expect('approvalRules' in read.rules).toBe(false);
+      });
+
       test('reads a code-owner review requirement, and no PR rule as requiresPullRequest false', async () => {
         nock(api)
           .get(rulesUrl)
