@@ -30,6 +30,7 @@ import {
   type RateLimitSource,
   rateLimitFromEvent,
   releaseProbe,
+  usageWarning,
 } from './usage.js';
 
 // This file declares its own clock.
@@ -901,5 +902,95 @@ describe('every reported usage window (#144)', () => {
       // A seven_day pause, capped at an hour until confirmed: never the 5-hour window.
       expect(Date.parse(now.state.pausedUntil) - t0.getTime()).toBeLessThanOrEqual(H + 90_000);
     }
+  });
+});
+
+describe('the stored allowed_warning (#739)', () => {
+  const warn = (extra: Partial<RateLimitEventData> = {}): RateLimitEventData => ({
+    status: 'allowed_warning',
+    ...extra,
+  });
+  const ingest = (data: RateLimitEventData, when = t0, s = src('d1', null)) =>
+    ingestRateLimit(db, data, s, cfg, when, zero);
+  const reset = '2026-10-23T00:00:00Z';
+
+  test('a seven_day warning with a reset is read until that reset, then null', () => {
+    ingest(warn({ rateLimitType: 'seven_day', resetsAt: reset }));
+    const w = {
+      window: 'seven_day',
+      at: t0.toISOString(),
+      resetsAt: new Date(reset).toISOString(),
+    };
+    expect(usageWarning(db, t0)).toEqual(w);
+    expect(usageWarning(db, plus(new Date(reset), -1))).toEqual(w);
+    expect(usageWarning(db, new Date(reset))).toBeNull();
+  });
+
+  test('a warning is stored while a pause is in force', () => {
+    ingest(rej(future), t0, src('d0', 'rate_limited'));
+    expect(dispatchGate(db, cfg, t0)).toBe('closed');
+    ingest(warn({ rateLimitType: 'seven_day', resetsAt: reset }), t0, src('d9', null, null, 9));
+    expect(getUsageState(db).status).toBe('rejected');
+    expect(usageWarning(db, t0)?.window).toBe('seven_day');
+  });
+
+  test('an allowed report for the same window clears it; another window does not', () => {
+    ingest(warn({ rateLimitType: 'seven_day', resetsAt: reset }));
+    ingest({ status: 'allowed', rateLimitType: 'five_hour' });
+    expect(usageWarning(db, t0)?.window).toBe('seven_day');
+    ingest({ status: 'rejected', rateLimitType: 'seven_day' });
+    expect(usageWarning(db, t0)?.window).toBe('seven_day');
+    ingest({ status: 'allowed', rateLimitType: 'seven_day' });
+    expect(usageWarning(db, t0)).toBeNull();
+    expect(getUsageState(db)).toMatchObject({
+      warningWindow: null,
+      warningAt: null,
+      warningResetsAt: null,
+    });
+  });
+
+  test('an allowed report naming no window clears a stored warning', () => {
+    ingest(warn({ rateLimitType: 'seven_day', resetsAt: reset }));
+    ingest({ status: 'allowed' });
+    expect(usageWarning(db, t0)).toBeNull();
+  });
+
+  test('a Fable-typed warning is not stored', () => {
+    ingest(warn({ rateLimitType: 'seven_day_fable', resetsAt: reset }));
+    expect(usageWarning(db, t0)).toBeNull();
+    expect(getUsageState(db).warningAt).toBeNull();
+  });
+
+  test("a warning with only the window's reset takes it", () => {
+    ingest(
+      warn({
+        rateLimitType: 'seven_day',
+        unifiedWindows: { seven_day: { utilization: 0.8, resetsAt: reset } },
+      }),
+    );
+    expect(usageWarning(db, t0)?.resetsAt).toBe(new Date(reset).toISOString());
+  });
+
+  test.each([
+    ['five_hour', 5 * H],
+    ['seven_day', 7 * DAY],
+    [null, 5 * H],
+  ])('a %s warning with no reset expires after its fallback', (window, span) => {
+    ingest(warn(window ? { rateLimitType: window } : {}));
+    expect(usageWarning(db, plus(t0, span - 1))).toEqual({
+      window,
+      at: t0.toISOString(),
+      resetsAt: null,
+    });
+    expect(usageWarning(db, plus(t0, span))).toBeNull();
+  });
+
+  test('an invalid rateLimitType stores window null', () => {
+    ingest(warn({ rateLimitType: 'Not A Window!', resetsAt: reset }));
+    expect(usageWarning(db, t0)).toEqual({
+      window: null,
+      at: t0.toISOString(),
+      resetsAt: new Date(reset).toISOString(),
+    });
   });
 });

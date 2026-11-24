@@ -2,6 +2,7 @@ import {
   type DropResult,
   type RateLimitEventData,
   RateLimitEventDataSchema,
+  USAGE_WINDOW_KEY,
   usageWindowsOf,
 } from '@jumpmaster/protocol';
 import type { UsageConfig } from './config.js';
@@ -187,6 +188,7 @@ export function ingestRateLimit(
       patch.sevenDayResetsAt = normalizeResetsAt(sd.resetsAt) ?? null;
     }
     if (fh || sd) patch.observedAt = now.toISOString();
+    Object.assign(patch, warningPatch(data, u, now));
     // Command's override ends at once on a refusal (#728), whoever reports it.
     if (data.status === 'rejected') Object.assign(patch, NO_OVERRIDE);
 
@@ -249,6 +251,53 @@ export function ingestRateLimit(
     }
     if (Object.keys(patch).length > 0) setUsageState(db, patch, now);
   })();
+}
+
+/** No stored warning, as a patch of the usage row (#739). */
+const NO_WARNING = {
+  warningWindow: null,
+  warningAt: null,
+  warningResetsAt: null,
+} satisfies Partial<UsageStateRow>;
+
+/**
+ * How a report changes the stored warning (#739): an `allowed_warning` replaces it, whatever the
+ * pause; an `allowed` for its window, or naming none, clears it; anything else leaves it.
+ */
+function warningPatch(
+  data: RateLimitEventData,
+  u: UsageStateRow,
+  now: Date,
+): Partial<UsageStateRow> {
+  const named = data.rateLimitType;
+  const window = named !== undefined && USAGE_WINDOW_KEY.test(named) ? named : null;
+  if (data.status === 'allowed_warning') {
+    const own = window !== null ? data.unifiedWindows?.[window]?.resetsAt : undefined;
+    return {
+      warningWindow: window,
+      warningAt: now.toISOString(),
+      warningResetsAt: normalizeResetsAt(data.resetsAt) ?? normalizeResetsAt(own) ?? null,
+    };
+  }
+  if (data.status === 'allowed' && u.warningAt !== null) {
+    if (window === null || window === u.warningWindow) return NO_WARNING;
+  }
+  return {};
+}
+
+/** Claude's last `allowed_warning`, while it is current: until its reset, else its fallback span. */
+export function usageWarning(
+  db: Db,
+  now: Date,
+): { window: string | null; at: string; resetsAt: string | null } | null {
+  const u = getUsageState(db);
+  const at = ms(u.warningAt);
+  if (u.warningAt === null || at === null) return null;
+  const span =
+    u.warningWindow === null || u.warningWindow.startsWith('five_hour') ? FIVE_HOURS : SEVEN_DAYS;
+  const end = ms(u.warningResetsAt) ?? at + span;
+  if (now.getTime() >= end) return null;
+  return { window: u.warningWindow, at: u.warningAt, resetsAt: u.warningResetsAt };
 }
 
 /** Model families a window key may name; such a window is one model's, never the account's. */
