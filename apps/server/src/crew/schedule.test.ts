@@ -1,6 +1,7 @@
 import { DropPayloadSchema } from '@jumpmaster/protocol';
 import { beforeEach, describe, expect, test } from 'vitest';
 import {
+  applyPendingRulings,
   listBriefings,
   raiseBriefing,
   ruleBriefing,
@@ -517,6 +518,96 @@ describe('early lead cycle when the queue empties (#757)', () => {
     setWorkItemState(w.db, own, 'done', undefined, plus(t0, 6 * MIN));
     otherItem('other', 3, 'pr_open', plus(t0, 6 * MIN));
     expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+});
+
+describe('early lead cycle when an objective is marked done (#763)', () => {
+  // Cycle requests are kept in memory across tests: one older than every cycle here is no request.
+  beforeEach(() => requestCrewCycle('main', new Date(0)));
+
+  const deps = { forges: () => w.forges, zone: () => w.zone };
+
+  /** The lead reports the objective finished: Command's `objective_done` briefing, open. */
+  function objectiveBriefing(at: Date): number {
+    const r = applyCrewActions(
+      w.db,
+      w.zone,
+      { objectiveDone: { key: 'document-every-endpoint', why: 'All merged.' } },
+      { kind: 'drop', dropId: 'd1' },
+      at,
+    );
+    const id = r.briefings[0];
+    if (id === undefined) throw new Error('no objective_done briefing');
+    return id;
+  }
+
+  function rule(id: number, choice: 'done' | 'keep', at: Date): number {
+    const ruled = ruleBriefing(w.db, id, choice, '', at);
+    if (!ruled.ok) throw new Error('not ruled');
+    return ruled.rulingId;
+  }
+
+  const doneRows = () =>
+    w.db.prepare('SELECT zone_id AS zoneId, key FROM objectives_done').all() as {
+      zoneId: string;
+      key: string;
+    }[];
+
+  test('marked done: the lead cycle is due at once, before the timer', async () => {
+    finish((await enqueue(t0, noAudit())) ?? '');
+    rule(objectiveBriefing(plus(t0, 30 * MIN)), 'done', plus(t0, 35 * MIN));
+    expect(await applyPendingRulings(w.db, deps, 'main', plus(t0, 36 * MIN))).toBe(1);
+    expect(doneRows()).toEqual([{ zoneId: 'main', key: 'document-every-endpoint' }]);
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 37 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('not applied yet: a ruling not yet applied makes nothing due', async () => {
+    finish((await enqueue(t0, noAudit())) ?? '');
+    rule(objectiveBriefing(plus(t0, 30 * MIN)), 'done', plus(t0, 35 * MIN));
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 36 * MIN))).toBeNull();
+  });
+
+  test('race: a cycle created between the ruling and its application does not swallow it', async () => {
+    finish((await enqueue(t0, noAudit())) ?? '');
+    rule(objectiveBriefing(plus(t0, 30 * MIN)), 'done', plus(t0, 35 * MIN));
+    // A requested cycle starts after the ruling, still reading the old objective.
+    requestCrewCycle('main', plus(t0, 36 * MIN));
+    const raced = (await enqueue(plus(t0, 37 * MIN), noAudit())) ?? '';
+    expect(work(raced)).toEqual({ role: 'crew-lead' });
+    finish(raced);
+    expect(await applyPendingRulings(w.db, deps, 'main', plus(t0, 40 * MIN))).toBe(1);
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 41 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('once: after the early cycle runs, nothing more is due before the timer (D3)', async () => {
+    finish((await enqueue(t0, noAudit())) ?? '');
+    rule(objectiveBriefing(plus(t0, 30 * MIN)), 'done', plus(t0, 35 * MIN));
+    await applyPendingRulings(w.db, deps, 'main', plus(t0, 36 * MIN));
+    const early = (await enqueue(plus(t0, 37 * MIN), noAudit())) ?? '';
+    expect(work(early)).toEqual({ role: 'crew-lead' });
+    finish(early);
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 38 * MIN))).toBeNull();
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 96 * MIN))).toBeNull();
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 97 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('keep: "Keep it open" records nothing and makes nothing due', async () => {
+    finish((await enqueue(t0, noAudit())) ?? '');
+    rule(objectiveBriefing(plus(t0, 30 * MIN)), 'keep', plus(t0, 35 * MIN));
+    expect(await applyPendingRulings(w.db, deps, 'main', plus(t0, 36 * MIN))).toBe(1);
+    expect(doneRows()).toEqual([]);
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 37 * MIN))).toBeNull();
+  });
+
+  test('other zone: an objective marked done in another zone makes nothing due here', async () => {
+    finish((await enqueue(t0, noAudit())) ?? '');
+    const rulingId = rule(objectiveBriefing(plus(t0, 30 * MIN)), 'keep', plus(t0, 35 * MIN));
+    w.db
+      .prepare(
+        `INSERT INTO objectives_done (zone_id, key, done_at, ruling_id) VALUES ('other', ?, ?, ?)`,
+      )
+      .run('document-every-endpoint', plus(t0, 36 * MIN).toISOString(), rulingId);
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 37 * MIN))).toBeNull();
   });
 });
 
