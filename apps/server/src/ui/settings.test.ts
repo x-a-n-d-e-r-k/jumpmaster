@@ -350,7 +350,7 @@ describe('the credentials tab', () => {
         return { ok: r.statusCode < 300, status: r.statusCode, json: async () => r.json() };
       },
     });
-    vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+    vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
     const testOf = async (name: string) => {
       const status = stubStatus();
       const fn = ctx.jmTestCredential as (...a: unknown[]) => Promise<string>;
@@ -1307,7 +1307,7 @@ function pageScript(
       return { ok: a.ok, status: a.status, json: async () => a.json };
     },
   });
-  vm.runInContext(script.replace(/^<script>|<\/script>$/g, ''), ctx);
+  vm.runInContext(script.replace(/^<script>|<\/script>$/gi, ''), ctx);
   return { ctx, calls };
 }
 
@@ -1434,7 +1434,7 @@ function scriptContext(
       return { ok: true, status: 200, json: async () => json };
     },
   });
-  vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+  vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
   return { ctx, calls };
 }
 
@@ -1957,7 +1957,7 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
         return { ok: r.statusCode < 300, status: r.statusCode, json: async () => r.json() };
       },
     });
-    vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+    vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
     const fn = ctx.jmTestApp as (...a: unknown[]) => Promise<string>;
     const run = async (role: string) => {
       const status = stubStatus();
@@ -2245,7 +2245,7 @@ describe("each GitLab zone's gitlab-pat entries on the Credentials tab (#821, sp
     if (at < 0) throw new Error(`no row for ${zone}/${role}`);
     return html.slice(at, html.indexOf('</tr>', at));
   };
-  const withoutScripts = (html: string) => html.replace(/<script>[\s\S]*?<\/script>/g, '');
+  const withoutScripts = (html: string) => html.replace(/<script>[\s\S]*?<\/script>/gi, '');
 
   test('a two-bot zone shows its author and reviewer rows, with name, fingerprint and test result, never a token', async () => {
     const w = await world({ dbMode: true, doc: GITLAB_DOC });
@@ -2362,7 +2362,7 @@ describe("each GitLab zone's gitlab-pat entries on the Credentials tab (#821, sp
           return { ok: ans.status < 300, status: ans.status, json: async () => ans.body };
         },
       });
-      vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+      vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
       const field = { value: o.value ?? '' };
       const status = stubStatus();
       const state = { sudo: true, passphrase: '', ...o.state };
