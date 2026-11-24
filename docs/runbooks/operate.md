@@ -32,7 +32,9 @@ your-org/your-repo` does the same from a terminal (`--preset`, `--identity start
 (`https://gitlab.example.com/group/project`). GitLab has no detection yet: Detect only reads the
 URL, and you choose the stack and add the checks yourself. The page takes no GitLab token; the
 project runs only once its bot tokens are in the vault as `gitlab-pat/<zone id>/author`, plus
-`gitlab-pat/<zone id>/reviewer` for two bots.
+`gitlab-pat/<zone id>/reviewer` for two bots. Set them under System, Credentials, in **GitLab
+tokens** (each entry has **Set**, **Test** and **Remove**, behind your passphrase), or with
+`jumpmaster ctl secrets set gitlab-pat/<zone>/<role>`.
 
 **Resume.** A zone id that was removed keeps its history (issues, drops, GitHub writes, crew issues,
 goals). Adding the same id again is refused until you choose to resume it: the page says what

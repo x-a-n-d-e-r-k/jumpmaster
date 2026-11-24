@@ -1829,7 +1829,7 @@ describe('the project step takes a GitLab project URL (#796)', () => {
     expect(w.detectTokens).toEqual([]);
   });
 
-  test('both forms take any project, with no GitHub-only pattern, and name the vault entries but no refused command', async () => {
+  test('both forms take any project, with no GitHub-only pattern, and name the vault entries, the Credentials page and the ctl command', async () => {
     const w = await world();
     for (const url of ['/setup/project', '/projects/new']) {
       const body = (await w.get(url)).body;
@@ -1842,7 +1842,11 @@ describe('the project step takes a GitLab project URL (#796)', () => {
       expect(body, url).toContain('gitlab-pat/');
       expect(body, url).toContain('/author</code>');
       expect(body, url).toContain('/reviewer</code> for two bots');
-      expect(body, url).not.toContain('ctl secrets set gitlab-pat/');
+      // Where the tokens go (#821): the Credentials page, or the ctl command.
+      const note = /<p id="gitlab-next"[\s\S]*?<\/p>/.exec(body)?.[0] ?? '';
+      expect(note, url).toContain('<a href="/system/credentials">System, Credentials</a>');
+      expect(note, url).toContain('GitLab tokens');
+      expect(note, url).toContain('ctl secrets set gitlab-pat/');
       // The page decides nothing about the forge itself: no URL or path parsing in its script.
       const script = [...body.matchAll(/<script>([\s\S]*?)<\/script>/gi)]
         .map((m) => m[1] as string)

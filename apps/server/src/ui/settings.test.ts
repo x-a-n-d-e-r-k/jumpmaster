@@ -350,7 +350,7 @@ describe('the credentials tab', () => {
         return { ok: r.statusCode < 300, status: r.statusCode, json: async () => r.json() };
       },
     });
-    vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+    vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
     const testOf = async (name: string) => {
       const status = stubStatus();
       const fn = ctx.jmTestCredential as (...a: unknown[]) => Promise<string>;
@@ -1307,7 +1307,7 @@ function pageScript(
       return { ok: a.ok, status: a.status, json: async () => a.json };
     },
   });
-  vm.runInContext(script.replace(/^<script>|<\/script>$/g, ''), ctx);
+  vm.runInContext(script.replace(/^<script>|<\/script>$/gi, ''), ctx);
   return { ctx, calls };
 }
 
@@ -1434,7 +1434,7 @@ function scriptContext(
       return { ok: true, status: 200, json: async () => json };
     },
   });
-  vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+  vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
   return { ctx, calls };
 }
 
@@ -1957,7 +1957,7 @@ describe("each owner's GitHub App pair on the Credentials tab (#375, spec §4.1/
         return { ok: r.statusCode < 300, status: r.statusCode, json: async () => r.json() };
       },
     });
-    vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+    vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
     const fn = ctx.jmTestApp as (...a: unknown[]) => Promise<string>;
     const run = async (role: string) => {
       const status = stubStatus();
@@ -2226,3 +2226,264 @@ const PAT_ROWS: Record<string, string> = {
   githubReadToken:
     '<tr data-credential="githubReadToken"><td><code>githubReadToken</code><br><small>GitHub read token: lets review drops read a private repository</small></td><td data-col="source">environment variable <code>JM_GITHUB_READ_TOKEN</code></td><td data-col="fingerprint"><code>7ba50946</code></td><td data-col="login">-</td><td data-col="set">-</td><td data-col="created">-</td><td data-col="test">-</td><td data-col="actions"><button type="button" class="use-vault" data-name="githubReadToken">Replace</button> <button type="button" class="test" data-name="githubReadToken">Test</button> <button type="button" class="copy" data-name="githubReadToken">Copy into the vault</button> <small>set by the environment variable JM_GITHUB_READ_TOKEN: change it where the server\'s environment is set, and restart the server, to change it there. Replace stores a new value in the vault, which then wins over variables and files.</small></td>',
 };
+
+describe("each GitLab zone's gitlab-pat entries on the Credentials tab (#821, spec §9)", () => {
+  // Made-up tokens, built at run time so no token-shaped literal sits in the tracked file.
+  const glpat = (c: string) => ['glpat', c.repeat(20)].join('-');
+  const GL_AUTHOR = glpat('A');
+  const GL_REVIEWER = glpat('R');
+  const GL_LEFTOVER = glpat('L');
+  const gitlab = { forge: 'gitlab', gitlab: { baseUrl: 'https://gitlab.example.test' } };
+  const GITLAB_DOC = {
+    dropZones: [
+      { ...ZONE, id: 'gl', repo: 'acme/widgets', ...gitlab },
+      { ...ZONE, id: 'solo', repo: 'acme/solo', ...gitlab, identity: 'starter', ciRequired: true },
+    ],
+  };
+  const glRowOf = (html: string, zone: string, role: string): string => {
+    const at = html.indexOf(`<tr data-gitlab-pat="${zone}/${role}"`);
+    if (at < 0) throw new Error(`no row for ${zone}/${role}`);
+    return html.slice(at, html.indexOf('</tr>', at));
+  };
+  const withoutScripts = (html: string) => html.replace(/<script>[\s\S]*?<\/script>/gi, '');
+
+  test('a two-bot zone shows its author and reviewer rows, with name, fingerprint and test result, never a token', async () => {
+    const w = await world({ dbMode: true, doc: GITLAB_DOC });
+    const put = (zone: string, role: 'author' | 'reviewer', value: string, login: string) => {
+      const r = w.store.putGitlabPat(zone, role, value, { result: 'ok', login });
+      if (!r.ok) throw new Error(JSON.stringify(r));
+    };
+    put('gl', 'author', GL_AUTHOR, 'gl-author-bot');
+    put('gl', 'reviewer', GL_REVIEWER, 'gl-reviewer-bot');
+    const html = (await w.get('/system/credentials')).body;
+    const markup = withoutScripts(html);
+    expect(markup).toContain('<section id="gitlab-pats"><h3>GitLab tokens</h3>');
+    const today = t0.toISOString().slice(0, 10);
+    for (const [role, value] of [
+      ['author', GL_AUTHOR],
+      ['reviewer', GL_REVIEWER],
+    ] as const) {
+      const row = glRowOf(markup, 'gl', role);
+      expect(row).toContain(`<code>gitlab-pat/gl/${role}</code>`);
+      expect(row).toContain('<td data-col="zone">gl</td>');
+      expect(row).toContain(`<td data-col="role">${role}</td>`);
+      expect(row).toContain('<td data-col="set">set</td>');
+      expect(row).toContain(`<code>${fingerprintOf(value)}</code>`);
+      expect(row).toContain(`<td data-col="set-at">${today}</td>`);
+      expect(row).toContain(`<td data-col="test">ok <small>${today}</small></td>`);
+      expect(row).toContain(
+        `<form class="gitlab-set" data-zone="gl" data-role="${role}"><input type="password" name="value" autocomplete="off"`,
+      );
+      expect(row).not.toMatch(/name="value"[^>]* value=/);
+      expect(row).toContain(
+        `<button type="button" class="gitlab-test" data-zone="gl" data-role="${role}">Test</button>`,
+      );
+      expect(row).toContain(
+        `<button type="button" class="gitlab-remove" data-zone="gl" data-role="${role}">Remove</button>`,
+      );
+    }
+    // In the views' order: the zones as configured, author before reviewer.
+    const order = ['gl/author', 'gl/reviewer', 'solo/author'].map((k) =>
+      markup.indexOf(`data-gitlab-pat="${k}"`),
+    );
+    expect(order.every((n, i) => n >= 0 && (i === 0 || n > (order[i - 1] as number)))).toBe(true);
+    for (const t of [GL_AUTHOR, GL_REVIEWER]) expect(html).not.toContain(t);
+  });
+
+  test('a starter zone shows its author only; a leftover reviewer shows, offering only Remove', async () => {
+    const w = await world({ dbMode: true, doc: GITLAB_DOC });
+    let markup = withoutScripts((await w.get('/system/credentials')).body);
+    const author = glRowOf(markup, 'solo', 'author');
+    expect(author).toContain('<td data-col="set">not set</td>');
+    expect(author).toContain('class="gitlab-set"');
+    // Not set: nothing to test or remove.
+    expect(author).not.toContain('class="gitlab-test"');
+    expect(author).not.toContain('class="gitlab-remove"');
+    expect(markup).not.toContain('data-gitlab-pat="solo/reviewer"');
+    // A reviewer left from two-bot mode.
+    const vault = w.store.vault();
+    if (vault === 'disabled') throw new Error('expected a vault');
+    vault.put('gitlab-pat/solo/reviewer', GL_LEFTOVER, { now: t0 });
+    w.store.refreshSecrets();
+    const html = (await w.get('/system/credentials')).body;
+    markup = withoutScripts(html);
+    const leftover = glRowOf(markup, 'solo', 'reviewer');
+    expect(leftover).toContain(
+      '<button type="button" class="gitlab-remove" data-zone="solo" data-role="reviewer">Remove</button>',
+    );
+    expect(leftover).not.toContain('class="gitlab-set"');
+    expect(leftover).not.toContain('class="gitlab-test"');
+    expect(leftover).not.toContain('type="password"');
+    expect(html).not.toContain(GL_LEFTOVER);
+  });
+
+  test("an undecryptable entry says it can't be decrypted", async () => {
+    const w = await world({ dbMode: true, doc: GITLAB_DOC });
+    const otherKey = join(mkdtempSync(join(tmpdir(), 'jm-other-')), 'other_key');
+    writeFileSync(otherKey, randomBytes(32).toString('base64url'), { mode: 0o600 });
+    openVault(otherKey, w.db).put('gitlab-pat/gl/author', GL_AUTHOR, { now: t0 });
+    w.store.refreshSecrets();
+    const html = (await w.get('/system/credentials')).body;
+    const row = glRowOf(withoutScripts(html), 'gl', 'author');
+    expect(row).toContain('<td data-col="set">can&#39;t be decrypted</td>');
+    expect(row).toContain(`<code>${fingerprintOf(GL_AUTHOR)}</code>`);
+    expect(row).not.toContain('class="gitlab-test"');
+    expect(html).not.toContain(GL_AUTHOR);
+  });
+
+  test('a GitHub-only config has its sections and no GitLab section or gitlab-pat text outside the script', async () => {
+    const w = await world();
+    const markup = withoutScripts((await w.get('/system/credentials')).body);
+    expect(markup).toContain('<th>Credential</th><th>Source</th>');
+    expect(markup).toContain('<section id="app-entries">');
+    expect(markup).toContain('id="sudo-prompt"');
+    expect(markup).toContain('<h3>Claude</h3>');
+    expect(markup).toMatch(/Plan <strong>pro<\/strong>/);
+    expect(markup).toContain('<h3>GitHub</h3>');
+    expect(markup).not.toContain('GitLab tokens');
+    expect(markup).not.toContain('gitlab-pat');
+    expect(markup).not.toContain('gitlab-pats');
+  });
+
+  describe('the page script', () => {
+    type Answer = { status: number; body: Record<string, unknown> };
+    const run = async (
+      fnName: 'jmSetGitlabPat' | 'jmTestGitlabPat' | 'jmRemoveGitlabPat',
+      o: { zone: string; role: string; value?: string; state?: object; answer?: Answer },
+    ) => {
+      const calls: Call[] = [];
+      const ctx = vm.createContext({
+        document: { addEventListener: () => {}, querySelectorAll: () => [] },
+        encodeURIComponent,
+        jmFetch: async (path: string, body: unknown, method?: string) => {
+          calls.push({ method: method ?? 'POST', path, body });
+          const a = path === '/api/control/sudo' ? { status: 200, body: {} } : o.answer;
+          const ans = a ?? { status: 200, body: { tested: true, result: 'ok', login: 'gl-bot' } };
+          return { ok: ans.status < 300, status: ans.status, json: async () => ans.body };
+        },
+      });
+      vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
+      const field = { value: o.value ?? '' };
+      const status = stubStatus();
+      const state = { sudo: true, passphrase: '', ...o.state };
+      const fn = ctx[fnName] as (...a: unknown[]) => Promise<string>;
+      const result = await fn({ zone: o.zone, role: o.role, field }, state, status);
+      return { result, calls, field, state, status: status.textContent };
+    };
+
+    test('Set, Test and Remove go to the zone and role, each encoded on its own, with the token in the PUT body only', async () => {
+      const set = await run('jmSetGitlabPat', { zone: 'a b/c', role: 'author', value: GL_AUTHOR });
+      expect(set.result).toBe('saved');
+      expect(set.calls).toEqual([
+        {
+          method: 'PUT',
+          path: '/api/control/secrets/gitlab-pat/a%20b%2Fc/author',
+          body: { value: GL_AUTHOR },
+        },
+      ]);
+      expect(set.field.value).toBe('');
+      expect(set.status).not.toContain(GL_AUTHOR);
+      const tested = await run('jmTestGitlabPat', { zone: 'a b/c', role: 'reviewer' });
+      expect(tested.result).toBe('tested');
+      expect(tested.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+        'POST /api/control/secrets/gitlab-pat/a%20b%2Fc/reviewer/test',
+      ]);
+      expect(tested.status).toContain('ok (gl-bot)');
+      const removed = await run('jmRemoveGitlabPat', { zone: 'a b/c', role: 'reviewer' });
+      expect(removed.result).toBe('removed');
+      expect(removed.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+        'DELETE /api/control/secrets/gitlab-pat/a%20b%2Fc/reviewer',
+      ]);
+      for (const c of [...set.calls, ...tested.calls, ...removed.calls])
+        expect(c.path).not.toContain(GL_AUTHOR);
+      // An empty field sends nothing.
+      const empty = await run('jmSetGitlabPat', { zone: 'gl', role: 'author', value: '' });
+      expect(empty.result).toBe('empty');
+      expect(empty.calls).toEqual([]);
+    });
+
+    test('without sudo, the passphrase first; a lapsed sudo answers sudo and opens the prompt', async () => {
+      const none = await run('jmSetGitlabPat', {
+        zone: 'gl',
+        role: 'author',
+        value: GL_AUTHOR,
+        state: { sudo: false },
+      });
+      expect(none.result).toBe('sudo');
+      expect(none.calls).toEqual([]);
+      const typed = await run('jmTestGitlabPat', {
+        zone: 'gl',
+        role: 'author',
+        state: { sudo: false, passphrase: PASS },
+      });
+      expect(typed.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+        'POST /api/control/sudo',
+        'POST /api/control/secrets/gitlab-pat/gl/author/test',
+      ]);
+      const lapsed = {
+        status: 403,
+        body: { error: 'saving a credential asks for your passphrase again', sudo: 'required' },
+      };
+      for (const fnName of ['jmSetGitlabPat', 'jmTestGitlabPat', 'jmRemoveGitlabPat'] as const) {
+        const r = await run(fnName, {
+          zone: 'gl',
+          role: 'author',
+          value: GL_AUTHOR,
+          answer: lapsed,
+        });
+        expect(r.result, fnName).toBe('sudo');
+        expect(r.state.sudo, fnName).toBe(false);
+        expect(r.status, fnName).toContain('passphrase');
+      }
+    });
+
+    test("a refusal shows the server's error (422, 409); the input is cleared after the request", async () => {
+      const failed = await run('jmSetGitlabPat', {
+        zone: 'gl',
+        role: 'author',
+        value: GL_AUTHOR,
+        answer: {
+          status: 422,
+          body: { tested: false, status: 401, error: 'GitLab rejected this token (401)' },
+        },
+      });
+      expect(failed.result).toBe('refused');
+      expect(failed.status).toContain('GitLab rejected this token (401)');
+      expect(failed.status).toContain('422');
+      expect(failed.field.value).toBe('');
+      for (const [fnName, error] of [
+        ['jmSetGitlabPat', 'the vault is off'],
+        ['jmSetGitlabPat', 'a starter project has no reviewer token'],
+        ['jmTestGitlabPat', 'the vault is off'],
+        ['jmRemoveGitlabPat', 'zones need gitlab-pat/gl/author: removing it would park them'],
+      ] as const) {
+        const r = await run(fnName, {
+          zone: 'gl',
+          role: 'author',
+          value: GL_AUTHOR,
+          answer: { status: 409, body: { error } },
+        });
+        expect(r.result, fnName).toBe('refused');
+        expect(r.status, fnName).toContain(error);
+        if (fnName === 'jmSetGitlabPat') expect(r.field.value, fnName).toBe('');
+      }
+      // A test GitLab refuses comes back as tested: false, with its words.
+      const testFailed = await run('jmTestGitlabPat', {
+        zone: 'gl',
+        role: 'author',
+        answer: { status: 200, body: { tested: false, status: 401, error: 'GitLab said no' } },
+      });
+      expect(testFailed.result).toBe('failed');
+      expect(testFailed.status).toContain('GitLab said no');
+    });
+
+    test('the page wires the rows and confirms Remove with the vault rows’ words', () => {
+      expect(CREDENTIALS_SCRIPT).toContain("querySelectorAll('form.gitlab-set')");
+      expect(CREDENTIALS_SCRIPT).toContain("querySelectorAll('button.gitlab-test')");
+      expect(CREDENTIALS_SCRIPT).toContain("querySelectorAll('button.gitlab-remove')");
+      expect(CREDENTIALS_SCRIPT).toContain(
+        "'Remove ' + name + ' from the vault? Jumpmaster refuses to remove it while a project still needs it.'",
+      );
+    });
+  });
+});
