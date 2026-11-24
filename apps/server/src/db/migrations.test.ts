@@ -10,7 +10,7 @@ import { fakeForge } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
 import { M0_SCHEMA_SQL, MIGRATIONS, migrate } from './migrations.js';
 import { type Db, openDb } from './open.js';
-import { getUsageState } from './repo.js';
+import { getStick, getUsageState } from './repo.js';
 
 const tmpDbFile = () => join(mkdtempSync(join(tmpdir(), 'jm-mig-')), 'jm.sqlite');
 const maxVersion = (db: Db) =>
@@ -1872,5 +1872,18 @@ test('v60 adds the usage warning columns to usage_state, null, keeping the row',
     warningAt: null,
     warningResetsAt: null,
   });
+  db.close();
+});
+
+test('v62 adds egress_ceiling_json to sticks: existing rows read as no ceiling (#780)', () => {
+  const f = dbAt(61, (raw) =>
+    raw.exec(
+      `INSERT INTO sticks (id, name, token_hash, slots, created_at) VALUES ('s1', 'one', 'h1', 1, 'a');`,
+    ),
+  );
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT egress_ceiling_json AS c FROM sticks').get()).toEqual({ c: null });
+  expect(getStick(db, 's1')).toMatchObject({ id: 's1', egressCeiling: null });
   db.close();
 });

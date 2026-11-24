@@ -162,6 +162,11 @@ export interface Stick {
   dockerVersion: string | null;
   /** The free space on its drop volumes it last measured (v28); null: unmeasured. */
   freeBytes: number | null;
+  /**
+   * The egress ceiling it last reported (v62, #780); null: none. A stored value that doesn't
+   * parse reads as `[]`, a ceiling that covers nothing.
+   */
+  egressCeiling: string[] | null;
 }
 
 /** The most troopers a stick will run: what it reported, or its enrolled `slots` for an old one. */
@@ -596,18 +601,23 @@ export function listEvents(db: Db, dropId: string): StoredEvent[] {
   return rows.map((r) => ({ seq: r.seq, ts: r.ts, kind: r.kind, data: JSON.parse(r.dataJson) }));
 }
 
-type StickAdvert = Pick<Stick, 'capabilities' | 'imagePolicy' | 'version' | 'pinnedImages'>;
+type StickAdvert = Pick<
+  Stick,
+  'capabilities' | 'imagePolicy' | 'version' | 'pinnedImages' | 'egressCeiling'
+>;
 const NO_ADVERT: StickAdvert = {
   capabilities: [],
   imagePolicy: 'allowlist',
   version: null,
   pinnedImages: [],
+  egressCeiling: null,
 };
 const advertParams = (a: StickAdvert) => ({
   caps: JSON.stringify(a.capabilities),
   policy: a.imagePolicy,
   version: a.version,
   pinned: JSON.stringify(a.pinnedImages),
+  ceiling: a.egressCeiling === null ? null : JSON.stringify(a.egressCeiling),
 });
 
 export function insertStick(
@@ -618,9 +628,9 @@ export function insertStick(
   const { id, name, tokenHash, slots, desiredSlots, autoSlots, ...advert } = s;
   db.prepare(
     `INSERT INTO sticks (id, name, token_hash, slots, created_at, capabilities_json, image_policy,
-       version, pinned_json, desired_slots, auto_slots)
+       version, pinned_json, egress_ceiling_json, desired_slots, auto_slots)
      VALUES (@id, @name, @tokenHash, @slots, @createdAt, @caps, @policy, @version, @pinned,
-       @desiredSlots, @autoSlots)`,
+       @ceiling, @desiredSlots, @autoSlots)`,
   ).run({
     id,
     name,
@@ -652,7 +662,8 @@ export function stampStick(
 ): void {
   db.prepare(
     `UPDATE sticks SET last_seen_at = @now, capabilities_json = @caps, image_policy = @policy,
-       version = @version, pinned_json = @pinned, max_slots = COALESCE(@maxSlots, max_slots),
+       version = @version, pinned_json = @pinned, egress_ceiling_json = @ceiling,
+       max_slots = COALESCE(@maxSlots, max_slots),
        slots = COALESCE(@slots, slots),
        docker_version = CASE WHEN @hasHealth THEN @docker ELSE docker_version END,
        free_bytes = CASE WHEN @hasHealth THEN @freeBytes ELSE free_bytes END
@@ -688,11 +699,13 @@ export function liveDropsOn(db: Db, stickId: string): number {
 const STICK_COLS = `id, name, token_hash AS tokenHash, slots, last_seen_at AS lastSeenAt,
   created_at AS createdAt, capabilities_json AS capabilitiesJson, image_policy AS imagePolicy,
   version, pinned_json AS pinnedJson, desired_slots AS desiredSlots, max_slots AS maxSlots,
-  auto_slots AS autoSlots, docker_version AS dockerVersion, free_bytes AS freeBytes`;
-type StickRow = Omit<Stick, 'capabilities' | 'pinnedImages' | 'autoSlots'> & {
+  auto_slots AS autoSlots, docker_version AS dockerVersion, free_bytes AS freeBytes,
+  egress_ceiling_json AS egressCeilingJson`;
+type StickRow = Omit<Stick, 'capabilities' | 'pinnedImages' | 'autoSlots' | 'egressCeiling'> & {
   capabilitiesJson: string;
   pinnedJson: string;
   autoSlots: number;
+  egressCeilingJson: string | null;
 };
 const parseList = (json: string): string[] => {
   try {
@@ -702,8 +715,12 @@ const parseList = (json: string): string[] => {
     return [];
   }
 };
-const toStick = ({ capabilitiesJson, pinnedJson, ...r }: StickRow): Stick => ({
+/** A stored ceiling: null is none; anything that isn't a JSON array reads as `[]` (covers nothing). */
+const parseCeiling = (json: string | null): string[] | null =>
+  json === null ? null : parseList(json);
+const toStick = ({ capabilitiesJson, pinnedJson, egressCeilingJson, ...r }: StickRow): Stick => ({
   ...r,
+  egressCeiling: parseCeiling(egressCeilingJson),
   // Anything but an exact 'signed' reads as the weaker policy.
   imagePolicy: r.imagePolicy === 'signed' ? 'signed' : 'allowlist',
   capabilities: parseList(capabilitiesJson),

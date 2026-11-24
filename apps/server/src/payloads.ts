@@ -10,13 +10,13 @@ import {
   isCrewRole,
   isOwnerName,
   isRepoName,
-  normalizeHost,
   type Role,
   redact,
   type TriageImage,
   type TriageImageSkipped,
 } from '@jumpmaster/protocol';
 import { COMMAND_VIAS } from './briefings.js';
+import { egressFor } from './egress-for.js';
 import {
   type ClaudeConfig,
   type Config,
@@ -32,7 +32,6 @@ import { malformedDrops } from './flow/malformed.js';
 import { forgeKind } from './forge/kind.js';
 import { type CrewRetryNote, lastFailure, renderLastFailure } from './gate-output.js';
 import { unsanitizeForgeText } from './outbox.js';
-import { PRESET_EGRESS } from './presets.js';
 import { redactionList } from './scrub.js';
 
 const ROLES: Role[] = ['implement', 'review', 'heal', 'resolve', ...CREW_ROLES];
@@ -428,24 +427,8 @@ function arbiterRuling(db: Db, drop: Drop): string {
 // The base hosts live in the protocol package (the stick's ceiling needs them); re-exported here.
 export { BASE_EGRESS };
 
-/** An entry in canonical form: a name, or `*.` plus a name. */
-const canonicalEntry = (e: string): string =>
-  e.startsWith('*.') ? `*.${normalizeHost(e.slice(2)) ?? e.slice(2)}` : (normalizeHost(e) ?? e);
-
-/**
- * The payload's `egress`, absent when the zone's mode is `off` (M3 behaviour). The allow list is
- * the base, the preset's hosts and the zone's own entries, canonical, deduplicated and sorted.
- */
-export function egressFor(zone: DropZoneConfig): EgressPayload | undefined {
-  const mode = zone.egress?.mode ?? 'off';
-  if (mode === 'off') return undefined;
-  const entries = [
-    ...BASE_EGRESS,
-    ...(zone.preset ? PRESET_EGRESS[zone.preset] : []),
-    ...(zone.egress?.allow ?? []),
-  ].map(canonicalEntry);
-  return { mode, allow: [...new Set(entries)].sort() };
-}
+// Moved to its own module so leases.ts can use it without importing this one; re-exported here.
+export { egressFor };
 
 const egressField = (zone: DropZoneConfig): { egress?: EgressPayload } => {
   const egress = egressFor(zone);

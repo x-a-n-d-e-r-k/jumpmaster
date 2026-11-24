@@ -1092,6 +1092,137 @@ describe('stick capabilities, per zone', () => {
     const current = await lease(stickToken);
     expect((current.json() as { dropId: string }).dropId).toBe('d1');
   });
+
+  describe('the egress ceiling a stick reports (#780)', () => {
+    const NPM = ['api.anthropic.com', 'github.com', 'registry.npmjs.org'];
+    const gitlabZone = (mode: 'monitor' | 'enforce' = 'enforce') => ({
+      ...locked,
+      egress: { mode, allow: ['registry.npmjs.org', 'gitlab.example.com'] },
+    });
+    const withZone = (zone = gitlabZone()): Config => ({
+      ...config,
+      dropZones: [config.dropZones[0]!, zone],
+    });
+    const caps = ['egress-v1', 'push-v1'];
+    const storedCeiling = (db: ReturnType<typeof setup>['db'], token: string) =>
+      getStickByTokenHash(db, createHash('sha256').update(token).digest('hex'))?.egressCeiling;
+
+    test('of two sticks, only the one whose ceiling covers the zone leases its drop; attempts untouched', async () => {
+      const { db } = setup({ queued: false, config: withZone() });
+      const w = lockedDrop(db);
+      const before = getAttempts(db, w.id, 'resume');
+      const ceilinged = await enroll('ceilinged');
+      const res = await leaseWith(ceilinged.stickToken, { capabilities: caps, egressCeiling: NPM });
+      expect(res.statusCode).toBe(204);
+      expect(skippedOf(res)).toEqual([
+        { zoneId: 'locked', missing: ['egress-ceiling:gitlab.example.com'] },
+      ]);
+      expect(getDrop(db, 'x1')).toMatchObject({ state: 'queued', stickId: null, epoch: 0 });
+      expect(getAttempts(db, w.id, 'resume')).toEqual(before);
+      expect(listEvents(db, 'x1')).toEqual([]);
+      const other = await enroll('open');
+      const ok = await leaseWith(other.stickToken, { capabilities: caps });
+      expect((ok.json() as { dropId: string }).dropId).toBe('x1');
+    });
+
+    test('with only the ceiling stick, the drop stays queued; adding the host and restarting leases it', async () => {
+      const { db } = setup({ queued: false, config: withZone() });
+      lockedDrop(db);
+      const { stickToken } = await enroll();
+      for (let i = 0; i < 3; i++)
+        expect(
+          (await leaseWith(stickToken, { capabilities: caps, egressCeiling: NPM })).statusCode,
+        ).toBe(204);
+      expect(getDrop(db, 'x1')).toMatchObject({ state: 'queued', epoch: 0 });
+      expect(storedCeiling(db, stickToken)).toEqual(NPM);
+      const widened = [...NPM, 'gitlab.example.com'].sort();
+      const res = await leaseWith(stickToken, { capabilities: caps, egressCeiling: widened });
+      expect((res.json() as { dropId: string }).dropId).toBe('x1');
+      expect(skippedOf(res)).toBeUndefined();
+      expect(storedCeiling(db, stickToken)).toEqual(widened);
+    });
+
+    test('a zone in monitor passes the ceiling stick over with egress-ceiling:mode', async () => {
+      const { db } = setup({ queued: false, config: withZone(gitlabZone('monitor')) });
+      lockedDrop(db);
+      const { stickToken } = await enroll();
+      const wide = [...NPM, 'gitlab.example.com'];
+      const res = await leaseWith(stickToken, { capabilities: caps, egressCeiling: wide });
+      expect(res.statusCode).toBe(204);
+      expect(skippedOf(res)).toEqual([{ zoneId: 'locked', missing: ['egress-ceiling:mode'] }]);
+      expect(getDrop(db, 'x1')?.state).toBe('queued');
+    });
+
+    test('an older stick (no field) leases as today, and null clears a stored ceiling', async () => {
+      const { db } = setup({ queued: false, config: withZone() });
+      lockedDrop(db);
+      const { stickToken } = await enroll();
+      expect(
+        (await leaseWith(stickToken, { capabilities: caps, egressCeiling: NPM })).statusCode,
+      ).toBe(204);
+      expect(storedCeiling(db, stickToken)).toEqual(NPM);
+      const res = await leaseWith(stickToken, { capabilities: caps });
+      expect((res.json() as { dropId: string }).dropId).toBe('x1');
+      expect(storedCeiling(db, stickToken)).toBeNull();
+      await leaseWith(stickToken, { capabilities: caps, egressCeiling: NPM });
+      await leaseWith(stickToken, { capabilities: caps, egressCeiling: null });
+      expect(storedCeiling(db, stickToken)).toBeNull();
+    });
+
+    test('enroll records the ceiling; too many or over-long entries are refused', async () => {
+      const { db } = setup({ queued: false });
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/sticks/enroll',
+        headers: proto,
+        payload: { joinToken: 'join-me', name: 's', slots: 1, egressCeiling: NPM },
+      });
+      const { stickToken } = res.json() as { stickToken: string };
+      expect(storedCeiling(db, stickToken)).toEqual(NPM);
+      const many = Array.from({ length: 257 }, (_, i) => `h${i}.example.com`);
+      for (const bad of [{ egressCeiling: many }, { egressCeiling: ['a'.repeat(256)] }])
+        expect((await leaseWith(stickToken, bad)).statusCode).toBe(400);
+      expect(storedCeiling(db, stickToken)).toEqual(NPM);
+    });
+
+    test('20 skipped zones with 3 uncovered 255-character hosts each keep the skip header under 16 KB', async () => {
+      const host = (z: number, i: number) => `${String.fromCharCode(97 + i)}${z}`.padEnd(255, 'x');
+      const zones = Array.from({ length: 20 }, (_, z) => ({
+        ...locked,
+        id: `z${z}`,
+        repo: `octo/z${z}`,
+        egress: { mode: 'enforce' as const, allow: [0, 1, 2].map((i) => host(z, i)) },
+      }));
+      const { db } = setup({ queued: false, config: { ...config, dropZones: zones } });
+      for (const [z, zone] of zones.entries()) {
+        upsertDropZone(db, { id: zone.id, repo: zone.repo, defaultBranch: 'main', configJson: '{}' });
+        const w = upsertWorkItem(db, {
+          dropZoneId: zone.id,
+          issueNumber: 100 + z,
+          title: 't',
+          body: 'b',
+          author: 'a',
+          priority: 0,
+          isFix: false,
+          issueCreatedAt: t0.toISOString(),
+        });
+        insertDrop(db, {
+          id: `q${z}`,
+          dropZoneId: zone.id,
+          workItemId: w.id,
+          role: 'implement',
+          state: 'queued',
+          createdAt: t0.toISOString(),
+        });
+      }
+      const { stickToken } = await enroll();
+      const res = await leaseWith(stickToken, { capabilities: caps, egressCeiling: NPM });
+      expect(res.statusCode).toBe(204);
+      const header = res.headers['x-jumpmaster-skipped'] as string;
+      expect(skippedOf(res)).toHaveLength(20);
+      expect(Buffer.byteLength(header)).toBeLessThan(16 * 1024);
+    });
+  });
 });
 
 describe('setup mode', () => {

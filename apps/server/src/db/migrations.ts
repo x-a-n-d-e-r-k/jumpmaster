@@ -1652,6 +1652,14 @@ CREATE UNIQUE INDEX crew_issues_one_replacement ON crew_issues(zone_id, replaces
   WHERE replaces IS NOT NULL;
 `;
 
+/**
+ * v62 (#780): the egress ceiling a stick last reported (`JM_EGRESS_CEILING`, a JSON array of
+ * entries), or null: none, as for every stick enrolled before it.
+ */
+const V62_SQL = `
+ALTER TABLE sticks ADD COLUMN egress_ceiling_json TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1714,6 +1722,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 59, sql: V59_SQL },
   { version: 60, sql: V60_SQL },
   { version: 61, sql: V61_SQL },
+  { version: 62, sql: V62_SQL },
 ];
 
 /**

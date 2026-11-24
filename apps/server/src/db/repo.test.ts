@@ -45,6 +45,7 @@ import {
   setWaitingSince,
   setWorkItemState,
   setZoneMode,
+  stampStick,
   stoppingZones,
   updateDrop,
   updateOutbox,
@@ -216,6 +217,43 @@ describe('sticks', () => {
     insertStick(db, { id: 's1', name: 'box', tokenHash: 'h', slots: 2 });
     expect(getStickByTokenHash(db, 'h')).toMatchObject({ id: 's1', name: 'box', slots: 2 });
     expect(getStickByTokenHash(db, 'zz')).toBeUndefined();
+  });
+});
+
+describe('a stick\'s egress ceiling (#780)', () => {
+  const at = new Date('2026-03-01T00:00:00.000Z');
+  const advert = (egressCeiling: string[] | null) => ({
+    capabilities: [],
+    imagePolicy: 'allowlist' as const,
+    version: null,
+    pinnedImages: [],
+    egressCeiling,
+  });
+
+  test('none stored reads as null; a lease replaces it, and null clears it', () => {
+    insertStick(db, { id: 's1', name: 'box', tokenHash: 'h', slots: 1 });
+    expect(getStickByTokenHash(db, 'h')?.egressCeiling).toBeNull();
+    stampStick(db, 's1', advert(['github.com']), at);
+    expect(getStickByTokenHash(db, 'h')?.egressCeiling).toEqual(['github.com']);
+    stampStick(db, 's1', advert(['github.com', 'gitlab.example.com']), at);
+    expect(getStickByTokenHash(db, 'h')?.egressCeiling).toEqual(['github.com', 'gitlab.example.com']);
+    stampStick(db, 's1', advert(null), at);
+    expect(getStickByTokenHash(db, 'h')?.egressCeiling).toBeNull();
+  });
+
+  test('enroll stores it', () => {
+    insertStick(db, { id: 's1', name: 'box', tokenHash: 'h', slots: 1, egressCeiling: ['a.example.com'] });
+    expect(getStickByTokenHash(db, 'h')?.egressCeiling).toEqual(['a.example.com']);
+  });
+
+  test('a stored value that does not parse reads as [] (covers nothing), never as none', () => {
+    insertStick(db, { id: 's1', name: 'box', tokenHash: 'h', slots: 1 });
+    for (const bad of ['{', '"github.com"', '{"a":1}', 'null', '42']) {
+      db.prepare('UPDATE sticks SET egress_ceiling_json = ? WHERE id = ?').run(bad, 's1');
+      expect(getStickByTokenHash(db, 'h')?.egressCeiling, bad).toEqual([]);
+    }
+    db.prepare('UPDATE sticks SET egress_ceiling_json = ? WHERE id = ?').run('["a.com", 3]', 's1');
+    expect(getStickByTokenHash(db, 'h')?.egressCeiling).toEqual(['a.com']);
   });
 });
 

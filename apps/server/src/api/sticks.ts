@@ -223,6 +223,8 @@ const advertOf = (info: StickInfo) => ({
   imagePolicy: info.imagePolicy,
   version: info.version ?? null,
   pinnedImages: info.pinnedImages,
+  // Stored wherever the pins are, so a stick restarted with another ceiling updates (#780).
+  egressCeiling: info.egressCeiling,
 });
 const HeartbeatBody = z.object({ epoch: z.number() });
 /** The largest events batch: the stick posts any event over 1 MiB alone. */
