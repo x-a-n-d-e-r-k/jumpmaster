@@ -5,6 +5,7 @@ import {
   currentObjective,
   type GoalParse,
   getGoals,
+  goalsChangedAt,
   PARSER_VERSION,
   parseGoals,
   refreshGoals,
@@ -171,5 +172,43 @@ describe('refreshGoals', () => {
     const changed = await refreshGoals(db, f.author, zone, 'main', plus(t0, 3000));
     expect(changed.parse.ok).toBe(true);
     expect(changed.sha256).not.toBe(first.sha256);
+  });
+
+  const changedAt = () => goalsChangedAt(db, 'main');
+
+  test('changed_at: a first read and a re-read of the same text leave it null (#832)', async () => {
+    f.state.files.set('main:GOAL.md', DOC);
+    await refreshGoals(db, f.author, zone, 'main', t0);
+    expect(changedAt()).toBeNull();
+    await refreshGoals(db, f.author, zone, 'main', plus(t0, 1000));
+    expect(changedAt()).toBeNull();
+  });
+
+  test('changed_at: a changed file sets it; the same text again leaves it (#832)', async () => {
+    f.state.files.set('main:GOAL.md', DOC);
+    await refreshGoals(db, f.author, zone, 'main', t0);
+    f.state.files.set('main:GOAL.md', `${DOC}\n### Later\n`);
+    await refreshGoals(db, f.author, zone, 'main', plus(t0, 1000));
+    expect(changedAt()).toBe(plus(t0, 1000).toISOString());
+    await refreshGoals(db, f.author, zone, 'main', plus(t0, 2000));
+    expect(changedAt()).toBe(plus(t0, 1000).toISOString());
+  });
+
+  test('changed_at: a parser-version-only update leaves it (#832)', async () => {
+    f.state.files.set('main:GOAL.md', DOC);
+    await refreshGoals(db, f.author, zone, 'main', t0);
+    f.state.files.set('main:GOAL.md', `${DOC}\n### Later\n`);
+    await refreshGoals(db, f.author, zone, 'main', plus(t0, 1000));
+    db.prepare('UPDATE goals SET parser_version = 0').run();
+    const reparsed = await refreshGoals(db, f.author, zone, 'main', plus(t0, 2000));
+    expect(reparsed.parserVersion).toBe(PARSER_VERSION);
+    expect(changedAt()).toBe(plus(t0, 1000).toISOString());
+  });
+
+  test('changed_at: a file that first appears after a missing read is a first read (#832)', async () => {
+    await refreshGoals(db, f.author, zone, 'main', t0);
+    f.state.files.set('main:GOAL.md', DOC);
+    await refreshGoals(db, f.author, zone, 'main', plus(t0, 1000));
+    expect(changedAt()).toBeNull();
   });
 });

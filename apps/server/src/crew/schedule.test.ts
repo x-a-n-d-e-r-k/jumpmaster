@@ -32,7 +32,7 @@ import { zonePass } from '../flow/snapshot.js';
 import { refreshGoals } from '../goals.js';
 import { leaseNextDrop } from '../leases.js';
 import { buildPayload, promptVersions } from '../payloads.js';
-import { crewOn, crewWorld, ISSUE_BODY, parsedCrew } from '../test/crew.js';
+import { crewOn, crewWorld, GOAL, ISSUE_BODY, parsedCrew } from '../test/crew.js';
 import { makeZone, usageCfg, type ZoneWorld } from '../test/fixtures.js';
 import {
   arbiterHarness,
@@ -608,6 +608,90 @@ describe('early lead cycle when an objective is marked done (#763)', () => {
       )
       .run('document-every-endpoint', plus(t0, 36 * MIN).toISOString(), rulingId);
     expect(nextCrewWork(w.db, noAudit(), plus(t0, 37 * MIN))).toBeNull();
+  });
+});
+
+describe('early lead cycle when the goal file changes (#832)', () => {
+  // Cycle requests are kept in memory across tests: one older than every cycle here is no request.
+  beforeEach(() => requestCrewCycle('main', new Date(0)));
+
+  const CHANGED = `${GOAL}\n### Write the changelog\n`;
+
+  /** Stores `text` as the zone's goal file at `at`, through the real goal storing. */
+  async function store(text: string, at: Date, zone: DropZoneConfig = w.zone): Promise<void> {
+    w.f.state.files.set('main:GOAL.md', text);
+    await refreshGoals(w.db, w.f.author, zone, 'main', at);
+  }
+
+  const changedAt = () =>
+    (
+      w.db.prepare(`SELECT changed_at AS c FROM goals WHERE zone_id = 'main'`).get() as {
+        c: string | null;
+      }
+    ).c;
+
+  test('a changed file stored after the last cycle makes the lead cycle due at once', async () => {
+    finish((await enqueue(t0, noAudit())) ?? '');
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 9 * MIN))).toBeNull();
+    await store(CHANGED, plus(t0, 10 * MIN));
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 11 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('once: after that cycle finishes, nothing more is due before the timer (D3)', async () => {
+    finish((await enqueue(t0, noAudit())) ?? '');
+    await store(CHANGED, plus(t0, 10 * MIN));
+    const early = (await enqueue(plus(t0, 11 * MIN), noAudit())) ?? '';
+    expect(work(early)).toEqual({ role: 'crew-lead' });
+    finish(early);
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 12 * MIN))).toBeNull();
+    // The same text is read again every pass: nothing.
+    await store(CHANGED, plus(t0, 13 * MIN));
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 14 * MIN))).toBeNull();
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 70 * MIN))).toBeNull();
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 71 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('the same text stored again: nothing due, and changed_at unchanged', async () => {
+    finish((await enqueue(t0, noAudit())) ?? '');
+    expect(changedAt()).toBeNull();
+    await store(GOAL, plus(t0, 10 * MIN));
+    expect(changedAt()).toBeNull();
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 11 * MIN))).toBeNull();
+  });
+
+  test('an unparseable change starts nothing; a parseable change after it does (D2)', async () => {
+    finish((await enqueue(t0, noAudit())) ?? '');
+    await store('# nothing here', plus(t0, 10 * MIN));
+    expect(changedAt()).toBe(plus(t0, 10 * MIN).toISOString());
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 11 * MIN))).toBeNull();
+    expect(await enqueue(plus(t0, 11 * MIN), noAudit())).toBeNull();
+    await store(CHANGED, plus(t0, 20 * MIN));
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 21 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test("another zone's change makes nothing due here", async () => {
+    finish((await enqueue(t0, noAudit())) ?? '');
+    const other = { ...w.zone, id: 'other' };
+    await store(GOAL, plus(t0, MIN), other);
+    await store(CHANGED, plus(t0, 10 * MIN), other);
+    expect(
+      (
+        w.db.prepare(`SELECT changed_at AS c FROM goals WHERE zone_id = 'other'`).get() as {
+          c: string | null;
+        }
+      ).c,
+    ).toBe(plus(t0, 10 * MIN).toISOString());
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 11 * MIN))).toBeNull();
+  });
+
+  test('a change stored while a lead drop runs is due once that drop has finished', async () => {
+    const running = (await enqueue(t0, noAudit())) ?? '';
+    expect(work(running)).toEqual({ role: 'crew-lead' });
+    await store(CHANGED, plus(t0, 10 * MIN));
+    expect(await enqueue(plus(t0, 11 * MIN), noAudit())).toBeNull();
+    finish(running);
+    const next = (await enqueue(plus(t0, 12 * MIN), noAudit())) ?? '';
+    expect(work(next)).toEqual({ role: 'crew-lead' });
   });
 });
 

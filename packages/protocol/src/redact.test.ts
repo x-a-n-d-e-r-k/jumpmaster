@@ -3,6 +3,8 @@ import {
   containsSecret,
   dropSecrets,
   findPrivateKeys,
+  gitlabBasicAuth,
+  gitlabBasicAuthAs,
   payloadSecrets,
   redact,
   redactTokenShapes,
@@ -387,5 +389,18 @@ describe('stateless token shape in linear time', () => {
   test('a token right after a word character is still redacted', () => {
     expect(redactTokenShapes(`n${token}`)).toBe('n[REDACTED]');
     expect(containsSecret(`n${token}`, [])).toBe(true);
+  });
+});
+
+describe('GitLab basic auth (#830)', () => {
+  const b64 = (s: string) => Buffer.from(s).toString('base64');
+  test('gitlabBasicAuth still encodes oauth2:<token>', () => {
+    expect(gitlabBasicAuth('abc')).toBe(b64('oauth2:abc'));
+  });
+  test('gitlabBasicAuthAs encodes <username>:<token>', () => {
+    expect(gitlabBasicAuthAs('gitlab+deploy-token-7', 'abc')).toBe(
+      b64('gitlab+deploy-token-7:abc'),
+    );
+    expect(gitlabBasicAuthAs('oauth2', 'abc')).toBe(gitlabBasicAuth('abc'));
   });
 });
