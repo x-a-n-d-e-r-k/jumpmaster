@@ -22,7 +22,7 @@ import {
 } from '../db/repo.js';
 import { fableStatus } from '../fable.js';
 import type { ZonePass } from '../flow/snapshot.js';
-import { getGoals } from '../goals.js';
+import { getGoals, goalsChangedAt } from '../goals.js';
 import { log } from '../log.js';
 import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
 import type { CrewInputJson } from '../payloads.js';
@@ -280,7 +280,8 @@ export function nextDiagnose(
  * arbitration of this text yet), triage the oldest open triage request (within `maxTriage`, with a
  * slot free), then the lead cycle when it is due (by time, a ruling on a crew, promote,
  * promote_held or refute_exhausted briefing, an objective marked done since the last cycle, a
- * request, or the queue emptying: `queueEmptied`), then an audit of a merged commit (`auditDue`). An
+ * goal file stored changed since the last cycle while it parses, a request, or the queue emptying:
+ * `queueEmptied`), then an audit of a merged commit (`auditDue`). An
  * exhausted issue that may not be arbitrated, or whose arbitration of this text is settled, is put
  * to Command instead.
  */
@@ -361,8 +362,14 @@ export function nextCrewWork(
   const advanced = db
     .prepare('SELECT 1 FROM objectives_done WHERE zone_id = ? AND done_at > ? LIMIT 1')
     .get(zone.id, last.at);
+  // The stored goal file changed since the last cycle (#832), however it was changed: keyed on the
+  // stored text, so the lead never starts before the server has read it. Only while it parses: an
+  // unparseable file starts nothing. Strict, so once per stored change.
+  const changedAt = goalsChangedAt(db, zone.id);
+  const goalChanged =
+    changedAt !== null && changedAt > last.at && getGoals(db, zone.id)?.parse.ok === true;
   const requested = cycleRequests.get(zone.id);
-  if (ruled || advanced || (requested !== undefined && requested > last.at)) {
+  if (ruled || advanced || goalChanged || (requested !== undefined && requested > last.at)) {
     return { role: 'crew-lead' };
   }
   if (queueEmptied(db, zone.id, last.at, now)) return { role: 'crew-lead' };
