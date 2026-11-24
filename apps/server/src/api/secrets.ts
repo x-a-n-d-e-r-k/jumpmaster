@@ -5,6 +5,7 @@ import { type ConfigStore, VAULT_DISABLED } from '../config/store.js';
 import type { Db } from '../db/open.js';
 import { ACTIVE_STATES_SQL } from '../db/repo.js';
 import { GitHubForge } from '../forge/github.js';
+import { forgeKind } from '../forge/kind.js';
 import { serverScrubSet } from '../forge/scrub-set.js';
 import { MAX_SECRET_FILE_BYTES } from '../secrets.js';
 import {
@@ -31,6 +32,14 @@ import {
   parseAppEntryName,
   serializeAppEntry,
 } from '../vault/github-app-entries.js';
+import {
+  GITLAB_PAT_ROLES,
+  type GitLabPatRole,
+  type GitLabPatZone,
+  gitlabPatEntryName,
+  parseGitlabPatEntryName,
+  testGitlabPatEntry,
+} from '../vault/gitlab-pat-entries.js';
 import { credentialProblems } from '../vault/problems.js';
 import { fingerprintOf } from '../vault/vault.js';
 
@@ -52,6 +61,8 @@ export type SecretRouteDeps = {
   credentialForge?: TestDeps['forge'];
   /** The test of a GitHub App entry (default: `testAppEntry`, a JWT sent to `GET /app`). */
   testApp?: typeof testAppEntry;
+  /** The test of a GitLab zone's token (default: `testGitlabPatEntry`, `GET /user` on its instance). */
+  testGitlabPat?: (value: string, zone: GitLabPatZone) => ReturnType<typeof testGitlabPatEntry>;
 };
 
 const TEST_TIMEOUT_MS = 30_000;
@@ -77,6 +88,13 @@ export const DELETE_OLD_KEY =
   "The new key is stored and in use. Now delete the old key on the app's GitHub page, under Private keys: until then both keys stay valid.";
 const BAD_APP_NAME =
   'an app entry is github-app/<owner>/<role>: a lowercase GitHub owner name, and author or reviewer';
+
+const BAD_GITLAB_NAME =
+  'a GitLab token is gitlab-pat/<zone>/<role>: a project id, and author or reviewer';
+const UNKNOWN_GITLAB_ZONE = 'unknown GitLab project';
+const STARTER_NO_REVIEWER = 'a starter project has no reviewer token';
+/** A GitLab token's body: one line, the token only. */
+const GitlabPatBody = z.strictObject({ value: z.string().min(1).max(MAX_SECRET_FILE_BYTES) });
 
 const PreferBody = z.strictObject({ prefer: z.boolean() });
 /** The queue the vault switches share (no credential is named this). */
@@ -171,10 +189,65 @@ export function appEntryViews(store: Pick<ConfigStore, 'vault' | 'resolvedApps'>
     );
 }
 
+/** A GitLab zone's `gitlab-pat` entry as the list shows it (issue #776): never its value. */
+export type GitlabPatView = {
+  zone: string;
+  role: GitLabPatRole;
+  name: string;
+  set: boolean;
+  undecryptable?: true;
+  fingerprint?: string;
+  setAt?: string;
+  testedAt?: string;
+  testResult?: string;
+};
+
+/**
+ * Each GitLab zone's `gitlab-pat` entries, in zone order: the author, and the reviewer of a
+ * two-bot zone, or of a starter zone whose vault still holds one (a leftover from two-bot mode,
+ * which resolution skips, so it is read from the vault's metadata).
+ */
+export function gitlabPatViews(
+  store: Pick<ConfigStore, 'vault' | 'current' | 'resolvedGitlabPats'>,
+): GitlabPatView[] {
+  const vault = store.vault();
+  const resolved = store.resolvedGitlabPats();
+  return store
+    .current()
+    .dropZones.filter((z) => forgeKind(z) === 'gitlab')
+    .flatMap((z) =>
+      GITLAB_PAT_ROLES.flatMap((role): GitlabPatView[] => {
+        const name = gitlabPatEntryName(z.id, role);
+        const meta = vault === 'disabled' ? undefined : vault.meta(name);
+        const starterReviewer = role === 'reviewer' && z.identity === 'starter';
+        if (starterReviewer && !meta) return [];
+        const set = starterReviewer ? true : resolved.get(z.id)?.[role] !== undefined;
+        return [
+          {
+            zone: z.id,
+            role,
+            name,
+            set,
+            ...(meta && !set ? { undecryptable: true as const } : {}),
+            ...(meta
+              ? {
+                  fingerprint: meta.fingerprint,
+                  setAt: meta.createdAt,
+                  ...(meta.testedAt ? { testedAt: meta.testedAt } : {}),
+                  ...(meta.testResult ? { testResult: meta.testResult } : {}),
+                }
+              : {}),
+          },
+        ];
+      }),
+    );
+}
+
 export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDeps): void {
   const { db, store, audit } = deps;
   const forge = deps.credentialForge ?? defaultForge;
   const testApp = deps.testApp ?? testAppEntry;
+  const testGitlabPat = deps.testGitlabPat ?? ((value, zone) => testGitlabPatEntry(value, zone));
   /** One write per name at a time: a PUT's test, store and swap finish before the next begins. */
   const queues = new Map<string, Promise<unknown>>();
   const serialized = <T>(name: string, fn: () => Promise<T>): Promise<T> => {
@@ -256,6 +329,7 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
         Object.entries(store.resolved()) as [CredentialName, Resolved[CredentialName]][]
       ).map(([n, r]) => view(n, r)),
       apps: appEntryViews(store),
+      gitlabPats: gitlabPatViews(store),
       problems: store.problems(),
     };
   });
@@ -557,6 +631,153 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       });
     },
   );
+
+  /**
+   * A GitLab zone's `gitlab-pat/<zone>/<role>` token (issue #776, §9): set, test and remove. The
+   * zone and role are parsed first and every refusal is fixed text, never the input (a token in
+   * the wrong slot would leak); answers and audits carry names and fingerprints only.
+   */
+  type GitlabParams = { Params: { zone: string; role: string } };
+  const gitlabTarget = (req: FastifyRequest<GitlabParams>, reply: FastifyReply) => {
+    const parsed = parseGitlabPatEntryName(`gitlab-pat/${req.params.zone}/${req.params.role}`);
+    if (!parsed) {
+      void reply.code(400).send({ error: BAD_GITLAB_NAME });
+      return undefined;
+    }
+    const zone = store.current().dropZones.find((z) => z.id === parsed.zoneId);
+    if (!zone || forgeKind(zone) !== 'gitlab') {
+      void reply.code(404).send({ error: UNKNOWN_GITLAB_ZONE });
+      return undefined;
+    }
+    return {
+      zone,
+      role: parsed.role,
+      name: gitlabPatEntryName(parsed.zoneId, parsed.role),
+      starterReviewer: parsed.role === 'reviewer' && zone.identity === 'starter',
+    };
+  };
+  const gitlabRefusal = (t: { status: number | null; problem?: string }) => ({
+    tested: false,
+    status: t.status,
+    ...(t.problem ? { problem: t.problem } : {}),
+    error: t.problem ?? `GitLab did not accept the test (HTTP ${t.status}): try again in a moment.`,
+  });
+
+  scope.put<GitlabParams>('/api/control/secrets/gitlab-pat/:zone/:role', async (req, reply) => {
+    if (sudoRefused(req, reply, 'saving a credential')) return reply;
+    const target = gitlabTarget(req, reply);
+    if (!target) return reply;
+    const body = GitlabPatBody.safeParse(req.body ?? {});
+    // The message is ours: a zod issue could quote the value.
+    if (!body.success)
+      return reply
+        .code(400)
+        .send({ error: 'invalid body: {"value": "<one line, at most 64 KiB>"}' });
+    const { value } = body.data;
+    if (/\s/.test(value))
+      return reply.code(400).send({ error: 'a credential is one line with no whitespace' });
+    const { zone, role, name } = target;
+    return serialized(name, async () => {
+      if (store.vault() === 'disabled') return reply.code(409).send({ error: VAULT_DISABLED });
+      if (target.starterReviewer) return reply.code(409).send({ error: STARTER_NO_REVIEWER });
+      const fingerprint = fingerprintOf(value);
+      const t = await testGitlabPat(value, zone);
+      if (!t.ok) {
+        audit(req, 'secret.set', {
+          name,
+          fingerprint,
+          result: `test failed (${t.status ?? 'no answer'})`,
+        });
+        return reply.code(422).send(gitlabRefusal(t));
+      }
+      const stored = store.putGitlabPat(zone.id, role, value, {
+        result: t.result,
+        ...(t.login ? { login: t.login } : {}),
+      });
+      if (!stored.ok) {
+        audit(req, 'secret.set', { name, fingerprint, result: 'refused' });
+        return reply.code(400).send({ issues: stored.issues });
+      }
+      audit(req, 'secret.set', { name, fingerprint, result: 'stored' });
+      return {
+        name,
+        fingerprint,
+        tested: true,
+        result: t.result,
+        ...(t.login ? { login: t.login } : {}),
+        setAt: stored.meta.createdAt,
+        problems: store.problems(),
+      };
+    });
+  });
+
+  scope.post<GitlabParams>(
+    '/api/control/secrets/gitlab-pat/:zone/:role/test',
+    async (req, reply) => {
+      if (sudoRefused(req, reply, 'testing a credential')) return reply;
+      const target = gitlabTarget(req, reply);
+      if (!target) return reply;
+      const { zone, role, name } = target;
+      return serialized(name, async () => {
+        const vault = store.vault();
+        if (vault === 'disabled') return reply.code(409).send({ error: VAULT_DISABLED });
+        if (target.starterReviewer) return reply.code(409).send({ error: STARTER_NO_REVIEWER });
+        const value = store.resolvedGitlabPats().get(zone.id)?.[role];
+        const meta = vault.meta(name);
+        if (value === undefined || !meta)
+          return reply.code(409).send({
+            error: meta ? 'the token does not decrypt with this vault key' : 'the token is not set',
+          });
+        const t = await testGitlabPat(value, zone);
+        const words = t.ok ? t.result : `failed (${t.status ?? 'no answer'})`;
+        vault.recordTest(name, {
+          at: deps.now(),
+          result: words,
+          ...(t.ok && t.login ? { login: t.login } : {}),
+        });
+        store.refreshSecrets();
+        audit(req, 'secret.test', { name, fingerprint: meta.fingerprint, result: words });
+        return t.ok
+          ? { tested: true, result: t.result, ...(t.login ? { login: t.login } : {}) }
+          : gitlabRefusal(t);
+      });
+    },
+  );
+
+  scope.delete<GitlabParams>('/api/control/secrets/gitlab-pat/:zone/:role', async (req, reply) => {
+    if (sudoRefused(req, reply, 'removing a credential')) return reply;
+    const target = gitlabTarget(req, reply);
+    if (!target) return reply;
+    const { zone, role, name } = target;
+    return serialized(name, async () => {
+      const vault = store.vault();
+      if (vault === 'disabled') return reply.code(409).send({ error: VAULT_DISABLED });
+      const entry = vault.meta(name);
+      if (!entry) return reply.code(409).send({ error: 'the vault holds no such token' });
+      // Refused while a zone needs the entry: judged on the resolved tokens without it.
+      const pats = store.resolvedGitlabPats();
+      const { [role]: _gone, ...rest } = pats.get(zone.id) ?? {};
+      const without = new Map(pats).set(zone.id, rest);
+      const created = credentialProblems(
+        zone,
+        store.resolved(),
+        store.resolvedApps(),
+        without,
+      ).filter((p) => p.credential === name && p.kind === 'missing');
+      if (created.length > 0)
+        return reply.code(409).send({
+          error: `zones need ${name}: removing it would park them`,
+          problems: created,
+        });
+      const done = store.deleteGitlabPat(zone.id, role);
+      if (!done.ok) {
+        audit(req, 'secret.remove', { name, fingerprint: entry.fingerprint, result: 'refused' });
+        return reply.code(400).send({ issues: done.issues });
+      }
+      audit(req, 'secret.remove', { name, fingerprint: entry.fingerprint, result: 'removed' });
+      return { removed: done.deleted, name, problems: store.problems() };
+    });
+  });
 
   scope.delete<{ Params: { name: string } }>('/api/control/secrets/:name', async (req, reply) => {
     const name = nameOf(req, reply);
