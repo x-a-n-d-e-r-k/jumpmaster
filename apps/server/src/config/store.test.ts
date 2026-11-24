@@ -1538,6 +1538,67 @@ describe('GitHub App entries in the store (§4.4)', () => {
     expect(text).not.toContain(REVIEWER);
   });
 
+  describe('putGitlabPat and deleteGitlabPat (issue #776)', () => {
+    const glZone = zone('web', {
+      repo: 'group/sub/web',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    });
+    const AUTHOR = 'plain-gitlab-author-value-000001';
+    const AUTHOR_2 = 'plain-gitlab-author-value-000002';
+    const name = gitlabPatEntryName('web', 'author');
+
+    test('store, record the test, swap in a replacement and remove', () => {
+      const { vault, open } = withVault({ dropZones: [glZone] });
+      const store = open();
+      expect(store.problems().map((p) => p.credential)).toContain(name);
+      const r = store.putGitlabPat('web', 'author', AUTHOR, { result: 'ok', login: 'gl-bot' });
+      expect(r.ok).toBe(true);
+      expect(store.resolvedGitlabPats().get('web')).toEqual({ author: AUTHOR });
+      expect(store.problems().map((p) => p.credential)).not.toContain(name);
+      expect(vault.meta(name)).toMatchObject({
+        testResult: 'ok',
+        login: 'gl-bot',
+        testedAt: t0.toISOString(),
+      });
+      expect(store.putGitlabPat('web', 'author', AUTHOR_2, { result: 'ok' }).ok).toBe(true);
+      expect(store.resolvedGitlabPats().get('web')).toEqual({ author: AUTHOR_2 });
+      expect(store.deleteGitlabPat('web', 'author')).toEqual({ ok: true, deleted: true });
+      expect(vault.meta(name)).toBeUndefined();
+      expect(store.resolvedGitlabPats().get('web')).toEqual({});
+      expect(store.deleteGitlabPat('web', 'author')).toEqual({ ok: true, deleted: false });
+    });
+
+    test('a refresh that fails puts the previous row back, for a put and for a delete', () => {
+      const { vault, open, secrets } = withVault({
+        dropZones: [glZone, zone('main', { repo: 'acme/main' })],
+      });
+      vault.put(name, AUTHOR, { now: t0 });
+      vault.recordTest(name, { at: t0, result: 'ok', login: 'gl-bot' });
+      const store = open();
+      const before = vault.snapshot(name);
+      // A malformed app entry file for the two-bot zone's owner: no refresh loads any more.
+      mkdirSync(join(secrets, 'github-app', 'acme'), { recursive: true });
+      writeFileSync(
+        join(secrets, 'github-app', 'acme', 'author.json'),
+        appEntry.replace('"42"', '"forty-two"'),
+        { mode: 0o600 },
+      );
+      const put = store.putGitlabPat('web', 'author', AUTHOR_2, { result: 'ok' });
+      expect(put.ok).toBe(false);
+      expect(vault.snapshot(name)).toEqual(before);
+      expect(JSON.stringify(put)).not.toContain(AUTHOR_2);
+      const del = store.deleteGitlabPat('web', 'author');
+      expect(del.ok).toBe(false);
+      expect(vault.snapshot(name)).toEqual(before);
+      expect(store.resolvedGitlabPats().get('web')).toEqual({ author: AUTHOR });
+      // With no row before, a failed put leaves none.
+      const reviewer = gitlabPatEntryName('web', 'reviewer');
+      expect(store.putGitlabPat('web', 'reviewer', AUTHOR_2, { result: 'ok' }).ok).toBe(false);
+      expect(vault.snapshot(reviewer)).toBeUndefined();
+    });
+  });
+
   test("a vault app entry for a two-bot zone's owner is in resolvedApps(), on load and on each revision", () => {
     const { vault, open } = withVault({ dropZones: [zone('main', { repo: 'Acme/main' })] });
     vault.put(appEntryName('acme', 'author'), appEntry, { now: t0 });

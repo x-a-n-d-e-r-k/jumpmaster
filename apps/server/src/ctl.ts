@@ -298,27 +298,40 @@ function mcpTokensRequest(args: string[]): Raw | null {
 }
 
 /**
- * The test route of a credential: `github-app/<owner>/<role>` names an app entry, each segment
- * encoded on its own; any other name is one segment.
+ * The test route of a credential: `github-app/<owner>/<role>` and `gitlab-pat/<zone>/<role>` name
+ * an entry, each segment encoded on its own; any other name is one segment.
  */
 function secretTestPath(name: string): string {
   return `${secretPath(name)}/test`;
 }
 
-/** The route of a credential, or of an app entry (`github-app/<owner>/<role>`, issue #599). */
+/**
+ * The route of a credential, of an app entry (`github-app/<owner>/<role>`, issue #599) or of a
+ * GitLab zone's token (`gitlab-pat/<zone>/<role>`, issue #776).
+ */
 function secretPath(name: string): string {
-  const app = /^github-app\/([^/]+)\/([^/]+)$/.exec(name);
-  if (app) {
-    const [, owner = '', role = ''] = app;
-    return `/api/control/secrets/github-app/${encodeURIComponent(owner)}/${encodeURIComponent(role)}`;
+  const entry = /^(github-app|gitlab-pat)\/([^/]+)\/([^/]+)$/.exec(name);
+  if (entry) {
+    const [, kind = '', first = '', role = ''] = entry;
+    return `/api/control/secrets/${kind}/${encodeURIComponent(first)}/${encodeURIComponent(role)}`;
   }
   return `/api/control/secrets/${encodeURIComponent(name)}`;
+}
+
+/** Whether `ctl secrets set` sends `name` to the GitLab token route (issue #776). */
+const isGitlabPatName = (name: string) => /^gitlab-pat\/[^/]+\/[^/]+$/.test(name);
+
+/** The route `ctl secrets set` sends to: a GitLab token's own, else the name as one segment. */
+function secretSetPath(name: string): string {
+  return isGitlabPatName(name)
+    ? secretPath(name)
+    : `/api/control/secrets/${encodeURIComponent(name)}`;
 }
 
 /**
  * `ctl secrets list | set <name> | test <name> | remove <name> | reload | vault on|off |
  * vault prefer on|off | copy-to-vault <name>`; `test` and `remove` also take
- * `github-app/<owner>/<role>`. `set` takes its value
+ * `github-app/<owner>/<role>`, and all three take `gitlab-pat/<zone>/<role>`. `set` takes its value
  * from stdin or a file, never argv: `runSecrets` sends it.
  */
 function secretsRequest(args: string[]): Raw | null {
@@ -333,7 +346,7 @@ function secretsRequest(args: string[]): Raw | null {
   if (verb === 'remove' && rest.length === 0) return { path: secretPath(name), method: 'DELETE' };
   if (verb === 'copy-to-vault' && rest.length === 0)
     return { path: `${at}/copy-to-vault`, body: {} };
-  if (verb === 'set') return { path: at, method: 'PUT' };
+  if (verb === 'set') return { path: secretSetPath(name), method: 'PUT' };
   return null;
 }
 
@@ -1268,7 +1281,9 @@ async function runSecrets(
     const flag = rest[i];
     const v = rest[i + 1];
     if (flag === '--from-file' && v) file = v;
-    else if (flag === '--created' && v && /^\d{4}-\d{2}-\d{2}$/.test(v)) created = v;
+    // A GitLab token's route takes the value only.
+    else if (flag === '--created' && v && /^\d{4}-\d{2}-\d{2}$/.test(v) && !isGitlabPatName(name))
+      created = v;
     else {
       err(
         `ctl secrets set takes the value from stdin or --from-file, never from argv. ${SECRETS_USAGE}`,
@@ -1291,7 +1306,10 @@ async function runSecrets(
     return 2;
   }
   return show(
-    await call('PUT', at(name), { value, ...(created ? { declaredCreatedAt: created } : {}) }),
+    await call('PUT', secretSetPath(name), {
+      value,
+      ...(created ? { declaredCreatedAt: created } : {}),
+    }),
   );
 }
 
