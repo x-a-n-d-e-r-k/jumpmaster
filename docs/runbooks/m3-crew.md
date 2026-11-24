@@ -159,6 +159,10 @@ This marks a cycle due; it runs once the zone is active, the usage gate is open,
 is running, the daily cap allows, `GOAL.md` parses, and pending refute or diagnose work is done. `ctl` needs
 `JM_OPERATOR_TOKEN` (and `JM_SERVER_URL` if the server isn't on `http://127.0.0.1:7420`).
 
+A cycle also starts early, once per emptying, when the zone's queue empties: at least 10 minutes
+after the last cycle, a work item became `done` since it, and no item is `ready`, `in_flight` or
+`pr_open` and no crew issue is still being filed, refuted or promoted (parked items don't count).
+
 **Pass:**
 - New issues carry the staged label and end with the Jumpmaster marker; each has an outbox row.
 - The goals page lists each crew issue with its state and refute findings. Watch stages 2 and 3

@@ -21,7 +21,10 @@ import {
   setWorkItemState,
   setZoneMode,
   updateDrop,
+  upsertDropZone,
   upsertPullRequest,
+  upsertWorkItem,
+  type WorkItemState,
 } from '../db/repo.js';
 import { reconcileZone } from '../flow/reconcile.js';
 import { zonePass } from '../flow/snapshot.js';
@@ -42,7 +45,7 @@ import {
   toPrOpen,
 } from '../test/flowHarness.js';
 import { plus, t0 } from '../test/helpers.js';
-import { applyCrewActions } from './actions.js';
+import { applyCrewActions, OPEN_STATES } from './actions.js';
 import {
   type CrewInputJson,
   crewDropsToday,
@@ -406,6 +409,114 @@ describe('enqueueCrew', () => {
     const offPass = await zonePass(off.forges, off.zone, 'main');
     await reconcileZone(off.db, off.forges, off.zone, offPass, promptVersions(), usageCfg, [], t0);
     expect(off.db.prepare('SELECT COUNT(*) AS n FROM drops').get()).toEqual({ n: 0 });
+  });
+});
+
+describe('early lead cycle when the queue empties (#757)', () => {
+  // Cycle requests are kept in memory across tests: one older than every cycle here is no request.
+  beforeEach(() => requestCrewCycle('main', new Date(0)));
+
+  /** A lead cycle at t0, finished; then item 1 done `doneAfter` minutes later. */
+  async function emptied(doneAfter = 5): Promise<number> {
+    finish((await enqueue()) ?? '');
+    const id = w.item(1, 'in_flight');
+    setWorkItemState(w.db, id, 'done', undefined, plus(t0, doneAfter * MIN));
+    return id;
+  }
+
+  function otherItem(zone: string, n: number, state: WorkItemState, at = t0): number {
+    const wi = upsertWorkItem(w.db, {
+      dropZoneId: zone,
+      issueNumber: n,
+      title: `Issue ${n}`,
+      body: 'b',
+      author: 'human',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    setWorkItemState(w.db, wi.id, state, undefined, at);
+    return wi.id;
+  }
+
+  test('starts: an item done after the last cycle, nothing else open, 10 minutes passed', async () => {
+    await emptied(5);
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 10 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('the last item merging 33 minutes after the cycle starts one at once', async () => {
+    await emptied(33);
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 33 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('waits: 9 minutes since the last cycle', async () => {
+    await emptied(4);
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 9 * MIN))).toBeNull();
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 10 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('waits: no item finished since the last cycle', async () => {
+    finish((await enqueue()) ?? '');
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toBeNull();
+  });
+
+  test('waits: the item finished before the last cycle', async () => {
+    const id = w.item(1, 'in_flight');
+    setWorkItemState(w.db, id, 'done', undefined, plus(t0, -MIN));
+    finish((await enqueue()) ?? '');
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toBeNull();
+  });
+
+  for (const state of ['ready', 'in_flight', 'pr_open'] as const) {
+    test(`waits: an item still ${state}`, async () => {
+      await emptied(5);
+      otherItem('main', 2, state, plus(t0, 5 * MIN));
+      expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toBeNull();
+    });
+  }
+
+  for (const state of OPEN_STATES) {
+    test(`waits: a crew issue still ${state}`, async () => {
+      await emptied(5);
+      const issue = stagedIssue();
+      // refutedSha equal to bodySha: no refute work is due ahead of the lead cycle.
+      setCrewIssue(w.db, issue, { state, refutedSha: 'sha-1' }, t0);
+      expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toBeNull();
+    });
+  }
+
+  test('once: after the early cycle drop exists, the same state waits', async () => {
+    await emptied(5);
+    const l = (await enqueue(plus(t0, 20 * MIN))) ?? '';
+    expect(work(l)).toEqual({ role: 'crew-lead' });
+    finish(l);
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 21 * MIN))).toBeNull();
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 79 * MIN))).toBeNull();
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 80 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('parked: a parked item beside the finished one does not prevent it', async () => {
+    await emptied(5);
+    const p = otherItem('main', 2, 'ready');
+    setWorkItemState(w.db, p, 'parked', 'heal budget exhausted', t0);
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test("other zone: another zone's finished or open items don't count", async () => {
+    upsertDropZone(w.db, {
+      id: 'other',
+      repo: 'octo/other',
+      defaultBranch: 'main',
+      configJson: '{}',
+    });
+    finish((await enqueue()) ?? '');
+    otherItem('other', 1, 'done', plus(t0, 5 * MIN));
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toBeNull();
+
+    const own = w.item(2, 'in_flight');
+    setWorkItemState(w.db, own, 'done', undefined, plus(t0, 6 * MIN));
+    otherItem('other', 3, 'pr_open', plus(t0, 6 * MIN));
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toEqual({ role: 'crew-lead' });
   });
 });
 
