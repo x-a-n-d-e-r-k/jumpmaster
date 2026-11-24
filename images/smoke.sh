@@ -31,11 +31,23 @@ fail() {
   docker logs "$STICK" 2>&1 | tail -20 >&2 || true
   exit 1
 }
+# Whether a container's whole log matches: log_has <container> <grep args…>. Returns 0 on a match,
+# 1 on none. Reads the log once: with pipefail, `docker logs | grep -q` fails when grep's early exit
+# kills the writer with SIGPIPE, although the text was there. An unread log, or a grep error, fails
+# the script: it is never "no match". Call it directly (not in a subshell) so `fail` ends the script.
+log_has() {
+  local name="$1" log rc=0
+  shift
+  log="$(docker logs "$name" 2>&1)" || fail "could not read the logs of $name"
+  grep -q "$@" <<<"$log" || rc=$?
+  [ "$rc" -le 1 ] || fail "grep exited $rc on the logs of $name"
+  return "$rc"
+}
 # Waits up to $3 seconds for a container's logs to contain a fixed string.
 wait_log() {
   local name="$1" want="$2" limit="$3" i
   for ((i = 0; i < limit; i++)); do
-    if docker logs "$name" 2>&1 | grep -qF -- "$want"; then return 0; fi
+    if log_has "$name" -F -- "$want"; then return 0; fi
     sleep 1
   done
   return 1
@@ -84,7 +96,7 @@ if [ "$(uname -s)" = Linux ] && [ "$(id -u)" != 10000 ] && [ "$(id -u)" != 0 ]; 
     "$SERVER_IMAGE" >/dev/null
   wait_log "$SERVER-default" "is not readable by uid 10000" 30 \
     || fail "an unreadable secret was not reported by name"
-  if docker logs "$SERVER-default" 2>&1 | grep -q SMOKE; then fail "a secret value was logged"; fi
+  if log_has "$SERVER-default" SMOKE; then fail "a secret value was logged"; fi
   echo "unreadable secret reported by variable, path and uid: ok"
 else
   echo "unreadable secret check: skipped (needs a non-root Linux host user other than 10000)"
@@ -112,18 +124,18 @@ docker run -d --name "$STICK" --network "$NET" --read-only --tmpfs /tmp \
   -e JM_STICK_NAME=smoke "$STICK_IMAGE" >/dev/null
 wait_log "$STICK" "enrolled as" 60 || fail "stick did not enroll"
 # The stick image runs the signed policy with its shipped cosign, so it advertises image-verify-v1.
-docker logs "$STICK" 2>&1 | grep -qE "image policy signed, capabilities (egress-v1, )?image-verify-v1" \
+log_has "$STICK" -E "image policy signed, capabilities (egress-v1, )?image-verify-v1" \
   || fail "stick did not start under the signed policy with image-verify-v1"
 # Built without TROOPER_IMAGE, its trooper is the dev tag, which signed refuses: the stick still
 # starts and enrolls, and withholds push-v1 (Ruling 17: verify, never refuse to start).
 wait_log "$STICK" "push-v1 withheld" 60 || fail "stick did not withhold push-v1 for an unverified base image"
-docker logs "$STICK" 2>&1 | grep -q 'base image jumpmaster-trooper:dev: image not verified' \
+log_has "$STICK" 'base image jumpmaster-trooper:dev: image not verified' \
   || fail "stick did not log why its base image was refused"
 mode="$(docker exec "$STICK" stat -c '%a %U' /state/stick.json)"
 [ "$mode" = "600 root" ] || fail "stick.json is $mode"
 if docker exec "$STICK" sh -c 'touch /app/x' 2>/dev/null; then fail "stick root is writable"; fi
 for name in "$SERVER" "$STICK"; do
-  if docker logs "$name" 2>&1 | grep -q 'SMOKE\|smoke-join-token\|smoke-operator-token'; then
+  if log_has "$name" 'SMOKE\|smoke-join-token\|smoke-operator-token'; then
     fail "a secret value appears in the $name logs"
   fi
 done
