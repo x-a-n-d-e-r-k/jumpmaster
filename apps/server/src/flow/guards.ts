@@ -991,7 +991,8 @@ export const REPO_UNREACHABLE = "token can't reach the repository";
  * `reviewer` is null). `[]` when protection is not required; null when a read is unavailable
  * (judged on a later pass). With a required code owner review in two-bot mode and the CODEOWNERS
  * text read (`probe.codeowners`), a rule the reviewer bot cannot satisfy is a problem too: GitHub
- * would refuse every merge.
+ * would refuse every merge. A GitLab read whose approval rules are unavailable (the Free tier)
+ * is not held to the approval checks (ruling 120).
  */
 export function branchProtectionProblems(
   rules: { author: BranchRulesRead; reviewer: BranchRulesRead | null },
@@ -1018,8 +1019,13 @@ export function branchProtectionProblems(
       continue;
     }
     const r = read.rules;
-    if (r.requiredApprovals < 1) out.add('approvals < 1');
-    if (!r.dismissStaleOnPush) out.add('stale approvals not dismissed');
+    // GitLab Free refuses approval rules (`approvalRules: 'unavailable'`): nothing can be
+    // required there, so the approval checks are waived and the merge rests on the reviewer
+    // bot's verdict alone (ruling 120); the doctor's forge.branch-rules warns instead.
+    if (r.approvalRules !== 'unavailable') {
+      if (r.requiredApprovals < 1) out.add('approvals < 1');
+      if (!r.dismissStaleOnPush) out.add('stale approvals not dismissed');
+    }
     if (read === rules.author ? authorCanBypass(r) : r.viewerCanBypass) out.add('bot can bypass');
     if (r.viewerIsAdmin && !adminAllowed) out.add('bot is admin');
     for (const c of r.unpinnedChecks) out.add(`required check not pinned: ${c}`);

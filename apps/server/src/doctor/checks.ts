@@ -2231,6 +2231,20 @@ async function branchRulesCheck(
         summary: `${branch} is otherwise safe, but GitHub did not say whether the bots can bypass ${unknown.length === 1 ? 'the ruleset' : 'the rulesets'} ${unknown.join(', ')} (no current_user_can_bypass and no bypass list in its answer)`,
         fix: `${unknown.map((n) => `Open Settings → Rules → Rulesets → ${n} → Bypass list`).join('; ')}, and check that the app is listed only on ${MERGE_RULESET}, and only for the author app.`,
       };
+    // GitLab Free refuses approval rules: the guard waives the approval checks (ruling 120), so
+    // the merge rests on the reviewer bot's verdict alone. Safe enough to run, worth a warning.
+    if (
+      zone.identity !== 'starter' &&
+      [rules.author, rules.reviewer].some(
+        (read) => read?.kind === 'ok' && read.rules.approvalRules === 'unavailable',
+      )
+    )
+      return {
+        ...base,
+        status: 'warn',
+        summary: `${branch} is otherwise safe, but GitLab enforces no approval on this project (approval rules need a paid GitLab tier), so Jumpmaster merges on its reviewer bot's verdict alone`,
+        fix: `On a GitLab tier that offers approval rules, add an approval rule requiring 1 approval on ${branch} and turn on resetting approvals on push (Settings → Merge requests → Merge request approvals); or accept this warning.`,
+      };
     if (twoApp !== undefined && mergeFails === null)
       return {
         ...base,
