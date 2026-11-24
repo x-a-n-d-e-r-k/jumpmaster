@@ -5,7 +5,16 @@ import type { Db } from '../db/open.js';
 import { getZoneMode, isKilled } from '../db/repo.js';
 import { GOAL_CHANGE_PREFIX, proposeGoalChange } from '../goal-change.js';
 import { getGoals, zoneObjective } from '../goals.js';
-import { type CrewIssueState, insertCrewIssue, normTitle } from './store.js';
+import { sanitizeCrewText } from '../outbox.js';
+import { crewBodySha } from './flush.js';
+import {
+  type CrewIssue,
+  type CrewIssueState,
+  commandRejection,
+  getCrewIssueByKey,
+  insertCrewIssue,
+  normTitle,
+} from './store.js';
 
 /** Lower case, punctuation and repeated whitespace collapsed: how two titles are compared. */
 export const normaliseTitle = normTitle;
@@ -162,6 +171,47 @@ export function crewIssueSlots(db: Db, zone: DropZoneConfig): number {
   return Math.max(0, zone.crew.maxStaged - n);
 }
 
+/** The most replacements a chain of crew issues may hold (#784): the original and two refilings. */
+export const MAX_REPLACEMENTS = 2;
+
+/** Why a refiling fails when its chain is full; the lead raises a briefing instead. */
+export const REPLACED_TWICE = 'replaced twice already: raise a briefing';
+
+/**
+ * Why `issue` may not replace the crew issue keyed `key` (#784), or null when it may: that key is
+ * a `rejected` issue of the same zone and objective, rejected by a refute or the arbiter and never
+ * by Command's ruling, with a different body, not replaced yet, and fewer than
+ * `MAX_REPLACEMENTS` replacements behind it.
+ */
+function replacementRefusal(
+  db: Db,
+  zoneId: string,
+  issue: { objective: string; body: string },
+  key: string,
+): string | null {
+  const old = getCrewIssueByKey(db, zoneId, key);
+  if (!old) return `replaces ${key}: no such crew issue`;
+  if (old.objective !== issue.objective) return `replaces ${key}: another objective's issue`;
+  if (old.state !== 'rejected') return `replaces ${key}: not a rejected issue`;
+  if (commandRejection(db, old)) return `replaces ${key}: Command rejected it`;
+  const replaced = db
+    .prepare('SELECT 1 FROM crew_issues WHERE zone_id = ? AND replaces = ? LIMIT 1')
+    .get(zoneId, key);
+  if (replaced) return `replaces ${key}: already replaced`;
+  const sameBody =
+    old.body === issue.body ||
+    (old.bodySha !== null && old.bodySha === crewBodySha(sanitizeCrewText(issue.body, [])));
+  if (sameBody) return `replaces ${key}: the body is unchanged`;
+  // The replacements already behind `old`, walked back through `replaces`, bounded against loops.
+  let behind = 0;
+  for (let at: CrewIssue | undefined = old; at?.replaces != null && behind <= MAX_REPLACEMENTS; ) {
+    behind++;
+    at = getCrewIssueByKey(db, zoneId, at.replaces);
+  }
+  if (behind >= MAX_REPLACEMENTS) return REPLACED_TWICE;
+  return null;
+}
+
 const sourceRefOf = (s: CrewSource): string => (s.kind === 'drop' ? s.dropId : String(s.tokenId));
 
 /**
@@ -312,7 +362,17 @@ export function applyCrewActions(
         refuse('duplicate of an open crew issue');
         continue;
       }
-      if (recentlyRejected.get(zone.id, i.objective, normaliseTitle(i.title), weekAgo)) {
+      // A named replacement must hold (#784); only then is the 7-day refusal lifted.
+      const replacing =
+        i.replaces === undefined ? null : replacementRefusal(db, zone.id, i, i.replaces);
+      if (replacing !== null) {
+        refuse(replacing);
+        continue;
+      }
+      if (
+        i.replaces === undefined &&
+        recentlyRejected.get(zone.id, i.objective, normaliseTitle(i.title), weekAgo)
+      ) {
         refuse('duplicate of a crew issue rejected in the last 7 days');
         continue;
       }
@@ -341,6 +401,7 @@ export function applyCrewActions(
           title: i.title,
           body: i.body,
           priority: i.priority ?? null,
+          replaces: i.replaces ?? null,
           createdAt: now.toISOString(),
         }),
       );

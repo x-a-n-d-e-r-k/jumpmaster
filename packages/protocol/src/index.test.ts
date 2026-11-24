@@ -257,6 +257,19 @@ describe('crew roles', () => {
     expect(parseCrewOutput('crew-lead', badKey).ok).toBe(false);
   });
 
+  test('a crew-lead issue may name the rejected key it replaces; results without it still parse (#784)', () => {
+    expect(parseCrewOutput('crew-lead', lead).ok).toBe(true);
+    const item = lead.fileIssues[0];
+    const refiled = { ...lead, fileIssues: [{ ...item, key: 'add-x-2', replaces: 'add-x' }] };
+    expect(parseCrewOutput('crew-lead', refiled)).toEqual({ ok: true, value: refiled });
+    const bad = { ...lead, fileIssues: [{ ...item, replaces: 'Not A Key' }] };
+    const bad_r = parseCrewOutput('crew-lead', bad);
+    expect(bad_r.ok).toBe(false);
+    if (!bad_r.ok) expect(bad_r.reason).toMatch(/fileIssues\.0\.replaces/);
+    const schema = JSON.stringify(crewOutputJsonSchema('crew-lead'));
+    expect(schema).toContain('"replaces"');
+  });
+
   test('crew-lead output may report the current objective done, and nothing else in it', () => {
     const done = { ...lead, objectiveDone: { key: 'ship-the-cli', why: 'all merged' } };
     expect(parseCrewOutput('crew-lead', done)).toEqual({ ok: true, value: done });

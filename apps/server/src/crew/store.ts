@@ -39,6 +39,8 @@ export type CrewIssue = {
   refutedSha: string | null;
   findingsJson: string | null;
   holdUntil: string | null;
+  /** The key of the rejected crew issue this one replaces (#784), or null. */
+  replaces: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -47,7 +49,7 @@ export type NewCrewIssue = Pick<
   CrewIssue,
   'zoneId' | 'key' | 'source' | 'objective' | 'title' | 'body' | 'priority' | 'createdAt'
 > &
-  Partial<Pick<CrewIssue, 'sourceRef' | 'state' | 'number' | 'bodySha'>>;
+  Partial<Pick<CrewIssue, 'sourceRef' | 'state' | 'number' | 'bodySha' | 'replaces'>>;
 
 export type CrewIssuePatch = Partial<
   Pick<
@@ -75,7 +77,7 @@ export const normTitle = (title: string): string =>
 const COLS = `id, zone_id AS zoneId, key, source, source_ref AS sourceRef, objective, title,
   title_norm AS titleNorm, body, body_sha AS bodySha, priority, number, state,
   refute_count AS refuteCount, refuted_sha AS refutedSha, findings_json AS findingsJson,
-  hold_until AS holdUntil, created_at AS createdAt, updated_at AS updatedAt`;
+  hold_until AS holdUntil, replaces, created_at AS createdAt, updated_at AS updatedAt`;
 
 const COLUMN: Record<keyof CrewIssuePatch, string> = {
   state: 'state',
@@ -94,19 +96,50 @@ export function insertCrewIssue(db: Db, row: NewCrewIssue): number {
   const r = db
     .prepare(
       `INSERT INTO crew_issues (zone_id, key, source, source_ref, objective, title, title_norm, body,
-         body_sha, priority, number, state, created_at, updated_at)
+         body_sha, priority, number, state, replaces, created_at, updated_at)
        VALUES (@zoneId, @key, @source, @sourceRef, @objective, @title, @titleNorm, @body, @bodySha,
-         @priority, @number, @state, @createdAt, @createdAt)`,
+         @priority, @number, @state, @replaces, @createdAt, @createdAt)`,
     )
     .run({
       sourceRef: null,
       number: null,
       bodySha: null,
+      replaces: null,
       state: 'filing',
       ...row,
       titleNorm: normTitle(row.title),
     });
   return Number(r.lastInsertRowid);
+}
+
+export function getCrewIssueByKey(db: Db, zoneId: string, key: string): CrewIssue | undefined {
+  return db
+    .prepare(`SELECT ${COLS} FROM crew_issues WHERE zone_id = ? AND key = ?`)
+    .get(zoneId, key) as CrewIssue | undefined;
+}
+
+/**
+ * Command's latest ruling to reject the crew issue (a chosen option whose effect is
+ * `reject_issue`, on the issue's briefing), with its note; `applied` says whether it was applied.
+ * Undefined when Command never ruled to reject it.
+ */
+export function commandRejection(
+  db: Db,
+  issue: Pick<CrewIssue, 'id' | 'zoneId'>,
+): { note: string; applied: boolean } | undefined {
+  const row = db
+    .prepare(
+      `SELECT r.note, r.applied_at AS appliedAt
+         FROM rulings r JOIN briefings b ON b.id = r.briefing_id, json_each(b.options_json) o
+       WHERE b.zone_id = ? AND b.subject = ?
+         AND json_extract(o.value, '$.id') = r.choice
+         AND json_extract(o.value, '$.effect') = 'reject_issue'
+       ORDER BY (r.applied_at IS NOT NULL) DESC, r.id DESC LIMIT 1`,
+    )
+    .get(issue.zoneId, `issue:${issue.id}`) as
+    | { note: string | null; appliedAt: string | null }
+    | undefined;
+  return row && { note: row.note ?? '', applied: row.appliedAt !== null };
 }
 
 export function getCrewIssue(db: Db, id: number): CrewIssue | undefined {
