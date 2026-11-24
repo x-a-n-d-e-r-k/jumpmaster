@@ -1,4 +1,11 @@
-import type { ImagePolicy, Role, StickCapability } from '@jumpmaster/protocol';
+import {
+  ceilingRefusal,
+  type EgressPayload,
+  entryCovered,
+  type ImagePolicy,
+  type Role,
+  type StickCapability,
+} from '@jumpmaster/protocol';
 import type { Config, DropZoneConfig, UsageConfig } from './config.js';
 import type { Db } from './db/open.js';
 import {
@@ -17,7 +24,9 @@ import {
   setWorkItemState,
   updateDrop,
 } from './db/repo.js';
+import { egressFor } from './egress-for.js';
 import { refundCharge } from './flow/budgets.js';
+import { CEILING_MISSING, CEILING_MODE } from './missing-words.js';
 import {
   DEFAULT_USAGE_CONFIG,
   type Gate,
@@ -64,15 +73,20 @@ export type HeldCandidate = {
 /** Queued drops wait while their zone is paused or observing. */
 const ZONE_ACTIVE = `AND drop_zone_id NOT IN (SELECT zone_id FROM zone_controls WHERE mode <> 'active')`;
 
-export type ZoneRequirements = { caps: Set<StickCapability>; signed: boolean };
+export type ZoneRequirements = {
+  caps: Set<StickCapability>;
+  signed: boolean;
+  /** What `egressFor` gives the zone's drops (undefined when its mode is `off`), for a ceiling. */
+  egress: EgressPayload | undefined;
+};
 
 /**
  * What a stick must have to run this zone's drops: `egress-v1` unless egress is off, and
  * `image-verify-v1` under the `signed` policy when signed images are required (install-wide, or
- * by the zone itself).
+ * by the zone itself). `egress` is what the drops are given, judged against a stick's ceiling.
  */
 export function zoneRequirements(
-  zone: Pick<DropZoneConfig, 'egress' | 'requireSignedImages'>,
+  zone: Pick<DropZoneConfig, 'egress' | 'requireSignedImages' | 'preset'>,
   config: Pick<Config, 'requireSignedImages'>,
 ): ZoneRequirements {
   const caps = new Set<StickCapability>();
@@ -80,16 +94,53 @@ export function zoneRequirements(
   // Strengthen-only: the zone can add the requirement, never remove the install's.
   const signed = config.requireSignedImages === true || zone.requireSignedImages === true;
   if (signed) caps.add('image-verify-v1');
-  return { caps, signed };
+  return { caps, signed, egress: egressFor(zone) };
 }
 
-/** What the stick lacks for these requirements (empty: it may run the zone's drops). */
+/** Hosts an `egress-ceiling:` item names before `+N`, and the characters kept of each. */
+const CEILING_HOSTS_SHOWN = 3;
+const CEILING_HOST_CHARS = 100;
+
+/**
+ * The `egress-ceiling:` item for a stick whose ceiling refuses this egress, or null when it may
+ * run it: `egress-ceiling:mode` when the mode is the cause, else the hosts outside the ceiling,
+ * at most 3 joined with `+`, each cut to 100 printable characters, then `+N` more (a lone host
+ * named `mode` gets a trailing `+`). Short, as it travels in the lease's skip header.
+ */
+function ceilingMissing(
+  egress: EgressPayload | undefined,
+  ceiling: readonly string[] | null,
+): string | null {
+  if (ceilingRefusal(egress, ceiling === null ? null : [...ceiling]) === null) return null;
+  if (!egress || egress.mode !== 'enforce') return CEILING_MODE;
+  const outside = egress.allow.filter((e) => !entryCovered(e, [...(ceiling ?? [])]));
+  const named = outside
+    .slice(0, CEILING_HOSTS_SHOWN)
+    .map((h) => h.replace(/[^\x21-\x2a\x2c-\x7e]/g, '?').slice(0, CEILING_HOST_CHARS));
+  const more = outside.length - named.length;
+  const hosts = [...named, ...(more > 0 ? [String(more)] : [])].join('+');
+  // A lone host literally named `mode` would read as CEILING_MODE: a trailing `+` (an empty part,
+  // which `ceilingHosts` drops) keeps the two apart.
+  return `${CEILING_MISSING}${hosts}${`${CEILING_MISSING}${hosts}` === CEILING_MODE ? '+' : ''}`;
+}
+
+/**
+ * What the stick lacks for these requirements (empty: it may run the zone's drops). A stick that
+ * reported an egress ceiling lacks an `egress-ceiling:` item when it would refuse the zone's
+ * egress (`ceilingRefusal`); one that reported none (null, or an older stick) has no ceiling.
+ */
 export function missingFor(
-  stick: { capabilities: readonly string[]; imagePolicy: ImagePolicy },
+  stick: {
+    capabilities: readonly string[];
+    imagePolicy: ImagePolicy;
+    egressCeiling?: readonly string[] | null;
+  },
   need: ZoneRequirements,
 ): string[] {
   const missing: string[] = [...need.caps].filter((c) => !stick.capabilities.includes(c));
   if (need.signed && stick.imagePolicy !== 'signed') missing.push('image-policy:signed');
+  const ceiling = ceilingMissing(need.egress, stick.egressCeiling ?? null);
+  if (ceiling !== null) missing.push(ceiling);
   return missing;
 }
 

@@ -24,6 +24,7 @@ import { latestDoctorRun } from './doctor/run.js';
 import { isReservationReason } from './flow/decide.js';
 import { listGoalChanges } from './goal-change.js';
 import { missingFor, zoneRequirements } from './leases.js';
+import { missingWords } from './missing-words.js';
 import { isBlocked, isOverlapReason, openPrCap } from './scheduler.js';
 import { redactionList } from './scrub.js';
 import {
@@ -697,15 +698,16 @@ export function statusOf(input: StatusInput, now: Date): Status {
 
 /**
  * Why no live stick can run a zone, or undefined when one can: what they all lack, or what each
- * one lacks when they differ (the lease route's `missingFor`, per stick).
+ * one lacks when they differ (the lease route's `missingFor`, per stick), each in words.
  */
 export function cannotRunText(sticks: { name: string; missing: string[] }[]): string | undefined {
   if (sticks.length === 0 || sticks.some((s) => s.missing.length === 0)) return undefined;
   const shared = (sticks[0]?.missing ?? []).filter((m) =>
     sticks.every((s) => s.missing.includes(m)),
   );
-  if (shared.length > 0) return `no live stick has ${shared.join(', ')}`;
-  return `no live stick can run it (${sticks.map((s) => `${s.name} lacks ${s.missing.join(', ')}`).join('; ')})`;
+  const words = (missing: string[]) => missing.map(missingWords).join(', ');
+  if (shared.length > 0) return `no live stick has ${words(shared)}`;
+  return `no live stick can run it (${sticks.map((s) => `${s.name} lacks ${words(s.missing)}`).join('; ')})`;
 }
 
 /** Stamps the end of a pass (main.ts), so the status knows it across a restart. */
