@@ -133,6 +133,7 @@ done
 if [ -n "$hdr" ]; then printf '%s %s\\n' "$url" "$(cat "$hdr")" >>"$WORK/headers"; fi
 case $url in
   */install/exchange)
+    if [ -n "\${EXCHANGE_HOOK:-}" ]; then sh -c "$EXCHANGE_HOOK"; fi
     if [ -n "\${EXCHANGE_STATUS:-}" ]; then
       printf '{"error":"%s"}' "\${EXCHANGE_ERROR:-unauthorized}" >"$out"
       printf '%s' "$EXCHANGE_STATUS"
@@ -150,6 +151,8 @@ esac
 `,
   docker: `#!/bin/sh
 echo "docker $*" >>"$LOG"
+# The exact arguments of the stick's docker run, one per line.
+if [ "$1 $2" = "run -d" ]; then printf '%s\\n' "$@" >"$WORK/run-args"; fi
 [ "$1 $2" = "run -d" ] && [ -n "\${RUN_FAIL:-}" ] && exit 125
 case "$1 $2" in
   "container inspect") [ -n "\${EXISTS:-}" ] && exit 0; exit 1 ;;
@@ -180,7 +183,8 @@ case $1 in
   tag) ;;
   run) echo "mode $(stat -c %a "$VOLDIR/enroll_code" 2>/dev/null || stat -f %Lp "$VOLDIR/enroll_code") $(cat "$VOLDIR/enroll_code")" >>"$LOG" ;;
   logs)
-    if [ -n "\${ENROLL_FAIL:-}" ]; then echo 'enroll failed: 401 {"error":"unauthorized"}'
+    if [ -n "\${CEILING_FAIL:-}" ]; then echo 'egress ceiling: none set (JM_EGRESS_CEILING)'; echo "$CEILING_FAIL"
+    elif [ -n "\${ENROLL_FAIL:-}" ]; then echo 'enroll failed: 401 {"error":"unauthorized"}'
     elif [ -n "\${ENROLL_SILENT:-}" ]; then echo 'images: from the server, for linux/amd64'
     else echo 'images: from the server, for linux/amd64'; echo 'enrolled as vps-1 (abc-123)'; fi ;;
   stop | rm) ;;
@@ -239,9 +243,10 @@ function world(o: WorldOptions = {}) {
     });
   const file = join(work, 'stick.sh');
   writeFileSync(file, script);
-  const run = (args: string[], env: Record<string, string> = {}) => {
+  const run = (args: string[], env: Record<string, string> = {}, cwd?: string) => {
     const r = spawnSync(join(bin, 'sh'), [file, ...args], {
       encoding: 'utf8',
+      ...(cwd ? { cwd } : {}),
       input: '',
       env: {
         PATH: bin,
@@ -264,6 +269,10 @@ function world(o: WorldOptions = {}) {
       ...r,
       log: text,
       loaded: text.split('\n').some((l) => l.startsWith('docker load')),
+      /** The stick's docker run arguments, one each, if it got that far. */
+      runArgs: existsSync(join(work, 'run-args'))
+        ? readFileSync(join(work, 'run-args'), 'utf8').split('\n').slice(0, -1)
+        : null,
       /** Each curl call's URL and the header its header file held. */
       headers: existsSync(hdrs) ? readFileSync(hdrs, 'utf8').split('\n').filter(Boolean) : [],
     };
@@ -781,6 +790,170 @@ describe('the code is swapped for an install token at once, and a failure cancel
     expect(r.stderr).toContain('could not enroll');
     expect(r.stderr).toContain(WARNING);
     expect(r.stdout).not.toContain('Enrolled as');
+  });
+});
+
+describe('the stick egress ceiling given to the installer (issue #781)', () => {
+  const MESSAGE = 'JM_EGRESS_CEILING must be host names separated by commas';
+  const exchanged = (log: string) => log.includes('/install/exchange');
+  const ceilingArgs = (args: string[]) =>
+    args.flatMap((a, i) => (args[i - 1] === '-e' && a.startsWith('JM_EGRESS_CEILING') ? [a] : []));
+
+  test('set: the container gets exactly -e JM_EGRESS_CEILING=<value>, printed before the exchange', () => {
+    const value = 'registry.npmjs.org,gitlab.example.com';
+    const r = world().run([CODE], { JM_EGRESS_CEILING: value });
+    expect(r.status, r.stderr).toBe(0);
+    const args = r.runArgs ?? [];
+    expect(ceilingArgs(args)).toEqual([`JM_EGRESS_CEILING=${value}`]);
+    expect(args.filter((a) => a.includes('JM_EGRESS_CEILING'))).toHaveLength(1);
+    expect(args.at(-1)).toBe('jumpmaster-stick:installed');
+    expect(r.stdout).toContain(`Egress ceiling: ${value}\n`);
+  });
+
+  test('the value is printed before the exchange request is made', () => {
+    const w = world();
+    const marker = join(w.work, 'printed-before');
+    // A curl that records whether the line was already on stdout when the exchange came.
+    const out = join(w.work, 'stdout');
+    const r = spawnSync(
+      join(w.bin, 'sh'),
+      ['-c', `sh "$0" "$1" >"$OUT"`, join(w.work, 'stick.sh'), CODE],
+      {
+        encoding: 'utf8',
+        env: {
+          PATH: w.bin,
+          LOG: join(w.work, 'log'),
+          WORK: w.work,
+          VOLDIR: w.voldir,
+          TMPDIR: w.work,
+          OUT: out,
+          JM_INSTALL_TTY: join(w.work, 'no-tty'),
+          JM_INSTALL_WAIT: '3',
+          INSTALL_TOKEN_VALUE: INSTALL_TOKEN,
+          IMAGE_ID: w.layout.digest,
+          LOADED: `${STICK_NAME}@${w.layout.digest}`,
+          JM_EGRESS_CEILING: 'registry.npmjs.org',
+          EXCHANGE_HOOK: `grep -q '^Egress ceiling: registry.npmjs.org$' "$OUT" && : >"${marker}"`,
+        },
+      },
+    );
+    expect(r.status, r.stderr).toBe(0);
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  test.each([
+    ['unset', {}],
+    ['set but empty', { JM_EGRESS_CEILING: '' }],
+  ])('%s: no such argument, the docker run as today, and "Egress ceiling: none"', (_, env) => {
+    const r = world().run([CODE], env);
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain('Egress ceiling: none\n');
+    expect((r.runArgs ?? []).some((a) => a.includes('JM_EGRESS_CEILING'))).toBe(false);
+    expect(r.runArgs).toEqual([
+      'run',
+      '-d',
+      '--name',
+      'jm-stick',
+      '--restart',
+      'unless-stopped',
+      '--read-only',
+      '--tmpfs',
+      '/tmp',
+      '-v',
+      '/var/run/docker.sock:/var/run/docker.sock',
+      '-v',
+      'jm-stick:/state',
+      '-e',
+      `JM_SERVER_URL=${SERVER}`,
+      '-e',
+      'JM_ENROLL_CODE_FILE=/state/enroll_code',
+      '-e',
+      'JM_IMAGE_SOURCE=server',
+      '-e',
+      'JM_IMAGE_POLICY=signed',
+      'jumpmaster-stick:installed',
+    ]);
+  });
+
+  test('the server never puts a ceiling in the script text', () => {
+    const script = stickScript(SCRIPT_PARAMS);
+    expect(script).toContain('EGRESS_CEILING=${JM_EGRESS_CEILING:-}');
+    // Outside the usage comment, the only assignment reads it from the operator's shell.
+    const code = script.split('\n').filter((l) => !l.startsWith('#'));
+    expect(code.filter((l) => /JM_EGRESS_CEILING=[^$]/.test(l))).toEqual([]);
+  });
+
+  test('a stick that refuses its ceiling: the container is removed, the code forgotten, and the script dies with its text at once', () => {
+    const w = world();
+    const error =
+      'JM_EGRESS_CEILING entry "10.0.0.1" is not a host name or *. plus a host name (no IPs, ports or URLs)';
+    const r = w.run([CODE], {
+      JM_EGRESS_CEILING: '10.0.0.1',
+      CEILING_FAIL: error,
+      JM_INSTALL_WAIT: '30',
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain(error);
+    expect(r.stderr).not.toContain('did not enroll within');
+    expect(r.log).toContain('docker rm -f jm-stick');
+    expect(existsSync(join(w.voldir, 'enroll_code'))).toBe(false);
+    expect(r.log.split('\n').filter((l) => l.startsWith('docker logs'))).toHaveLength(1);
+    expect(r.log).toContain('/install/cancel');
+  });
+
+  test('--uninstall with an invalid value uninstalls as today', () => {
+    const r = world().run(['--uninstall'], { JM_EGRESS_CEILING: 'a b' });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.log).toContain('docker rm jm-stick');
+    expect(r.log).toContain('docker volume rm jm-stick');
+  });
+
+  const INVALID = [
+    'a b',
+    'a$(touch x)',
+    "a'b",
+    'a"b',
+    'a\nb',
+    'a;b',
+    '10.0.0.1:443',
+    'https://a.example.com',
+    ',a',
+    'a,',
+    'a,,b',
+    'a'.repeat(4001),
+  ];
+  test.each(INVALID.map((v) => [v.length > 40 ? `${v.length} characters` : JSON.stringify(v), v]))(
+    '%s is refused before the exchange',
+    (_, value) => {
+      const w = world();
+      const r = w.run([CODE], { JM_EGRESS_CEILING: value });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain(MESSAGE);
+      expect(exchanged(r.log)).toBe(false);
+      expect(r.headers).toEqual([]);
+      expect(existsSync(join(w.work, 'x'))).toBe(false);
+    },
+  );
+
+  test('4000 characters is accepted', () => {
+    const value = `${'a'.repeat(3995)}.test`;
+    const r = world().run([CODE], { JM_EGRESS_CEILING: value });
+    expect(r.status, r.stderr).toBe(0);
+    expect(ceilingArgs(r.runArgs ?? [])).toEqual([`JM_EGRESS_CEILING=${value}`]);
+  });
+
+  test('a *. value passes unexpanded, run in a directory that has files', () => {
+    const w = world();
+    const cwd = join(w.work, 'cwd');
+    mkdirSync(cwd);
+    for (const f of ['a.example.net', 'b.example.net', '.example.net', 'x']) {
+      writeFileSync(join(cwd, f), '');
+    }
+    const value = '*.example.net,gitlab.example.com,*';
+    const r = w.run([CODE], { JM_EGRESS_CEILING: value }, cwd);
+    expect(r.status, r.stderr).toBe(0);
+    expect(ceilingArgs(r.runArgs ?? [])).toEqual([`JM_EGRESS_CEILING=${value}`]);
+    expect(r.stdout).toContain(`Egress ceiling: ${value}\n`);
   });
 });
 
