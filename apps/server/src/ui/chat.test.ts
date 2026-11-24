@@ -720,7 +720,7 @@ describe('/chat Markdown (#490)', () => {
         throw new Error('the script must not call alert()');
       },
     });
-    vm.runInContext(THREAD_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+    vm.runInContext(THREAD_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
     const emit = (ev: string, data: unknown) => {
       const fn = handlers[ev];
       if (!fn) throw new Error(`no ${ev} listener`);
@@ -2080,7 +2080,7 @@ describe('rename and delete a thread (#833)', () => {
         };
       },
     });
-    vm.runInContext(THREAD_ACTIONS_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+    vm.runInContext(THREAD_ACTIONS_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
     const button = (cls: string) => {
       const b = {
         disabled: false,

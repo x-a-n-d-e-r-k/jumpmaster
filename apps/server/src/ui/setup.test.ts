@@ -503,7 +503,7 @@ function runSave(
       return { ok: a.status < 300, status: a.status, json: async () => a.body };
     },
   });
-  vm.runInContext(SAVE_CREDENTIALS.replace(/^<script>|<\/script>$/g, ''), ctx);
+  vm.runInContext(SAVE_CREDENTIALS.replace(/^<script>|<\/script>$/gi, ''), ctx);
   return {
     fetched,
     out,
