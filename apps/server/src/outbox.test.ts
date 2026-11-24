@@ -1,11 +1,14 @@
 import { readFileSync } from 'node:fs';
+import Database from 'better-sqlite3';
 import nock from 'nock';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
+import { MIGRATIONS } from './db/migrations.js';
 import { type Db, openDb } from './db/open.js';
 import {
   getOutbox,
   insertOutbox,
   listOutbox,
+  type OutboxRow,
   setKilled,
   setZoneMode,
   upsertDropZone,
@@ -1696,5 +1699,224 @@ describe('a GitLab zone without gitlabTokens gets no forge pair (issue #667)', (
     expect(pairKey({ ...github, forge: 'github' as const }, tokens)).toBe(PINNED);
     expect(pairKey(github, tokens)).toBe(PINNED);
     expect(pairKey({ ...gitlab, repo: 'o/r' }, tokens)).not.toBe(PINNED);
+  });
+});
+
+describe('resend after a clean read-back (issue #787)', () => {
+  const head = 'agent/issue-1';
+  const writes = () =>
+    [...f.author.calls, ...f.reviewer.calls].filter((c) =>
+      (FORGE_WRITES as readonly string[]).includes(c.method),
+    );
+  const at = (minutes: number) => plus(t0, minutes * MIN);
+  const pass = (minutes: number) => resolveUnknown(db, forges, 'main', at(minutes), 45);
+
+  /** A create_pr whose connection drops: the row is `unknown`, and GitHub has no PR. */
+  async function droppedPr(): Promise<string> {
+    f.state.branches.set(head, 'h1');
+    f.author.failNext('findOrCreatePullRequest', 'throw');
+    expect((await runOp(db, forges, prOp(), t0)).state).toBe('unknown');
+    return prOp().opKey;
+  }
+
+  beforeEach(() => setZoneMode(db, 'main', 'active', t0));
+
+  test('a dropped create_pr is sent again 2 minutes later, and the PR opens', async () => {
+    const key = await droppedPr();
+    expect(await pass(1)).toBe(0);
+    expect(calls('findOrCreatePullRequest')).toHaveLength(1);
+    expect(await pass(2)).toBe(1);
+    expect(calls('findOrCreatePullRequest')).toHaveLength(2);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'done', resends: 1 });
+    expect([...f.state.pulls.values()].filter((p) => p.headRef === head)).toHaveLength(1);
+  });
+
+  test('a write that landed is read back and never sent twice', async () => {
+    f.state.branches.set(head, 'h1');
+    f.author.failNext('findOrCreatePullRequest', '5xx-after-success');
+    expect((await runOp(db, forges, prOp(), t0)).state).toBe('unknown');
+    expect(await pass(2)).toBe(1);
+    expect(await pass(4)).toBe(0);
+    expect(getOutbox(db, prOp().opKey)).toMatchObject({ state: 'done', resends: 0 });
+    expect(calls('findOrCreatePullRequest')).toHaveLength(1);
+  });
+
+  test('a read-back that fails proves nothing: no send, resends unchanged', async () => {
+    const key = await droppedPr();
+    f.author.failNext('findOpenPullByHead', 'throw');
+    expect(await pass(2)).toBe(0);
+    expect(calls('findOrCreatePullRequest')).toHaveLength(1);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'unknown', resends: 0 });
+  });
+
+  test('a forge that always drops gets 3 resends, then the row fails at its deadline', async () => {
+    const key = await droppedPr();
+    for (let i = 0; i < 10; i++) f.author.failNext('findOrCreatePullRequest', 'throw');
+    for (let m = 2; m <= 44; m += 2) await pass(m);
+    expect(calls('findOrCreatePullRequest')).toHaveLength(4);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'unknown', resends: 3 });
+    await pass(46);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'failed', error: 'unresolved after 45 min' });
+    expect(calls('findOrCreatePullRequest')).toHaveLength(4);
+  });
+
+  test('resends are 2 minutes apart, counted from the last send', async () => {
+    const key = await droppedPr();
+    f.author.failNext('findOrCreatePullRequest', 'throw');
+    await pass(2);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'unknown', resends: 1 });
+    await pass(3);
+    expect(calls('findOrCreatePullRequest')).toHaveLength(2);
+    await pass(4);
+    expect(calls('findOrCreatePullRequest')).toHaveLength(3);
+    expect(getOutbox(db, key)?.state).toBe('done');
+  });
+
+  describe('every kind', () => {
+    type Case = [OutboxRow['kind'], boolean, unknown, () => void];
+    const cases: Case[] = [
+      [
+        'create_pr',
+        true,
+        { head, base: 'main', title: 't', body: 'b' },
+        () => {
+          f.state.branches.set(head, 'h1');
+        },
+      ],
+      [
+        'merge',
+        true,
+        { pr: 1, sha: 'h1', title: 't', message: 'm' },
+        () => {
+          f.state.addPull({ headRef: head, headSha: 'h1', author: 'author-bot' });
+        },
+      ],
+      [
+        'set_labels',
+        true,
+        { number: 5, add: ['x'], remove: [] },
+        () => {
+          f.state.addIssue({ number: 5 });
+        },
+      ],
+      ['update_issue', true, { number: 5, body: 'new' }, () => f.state.addIssue({ number: 5 })],
+      [
+        'create_labels',
+        true,
+        { labels: [{ name: 'jm-new', color: 'ffffff', description: 'd' }] },
+        () => {},
+      ],
+      [
+        'add_blocked_by',
+        true,
+        { issue: 5, blocker: 6, repo: 'octo/demo' },
+        () => {
+          f.state.addIssue({ number: 5 });
+          f.state.addIssue({ number: 6 });
+        },
+      ],
+      [
+        'create_issue',
+        false,
+        { title: 't', body: 'b', labels: [], since: t0.toISOString() },
+        () => {},
+      ],
+      [
+        'comment_issue',
+        false,
+        { number: 5, body: 'b', marker: commentMarker('main', 'k') },
+        () => f.state.addIssue({ number: 5 }),
+      ],
+      [
+        'post_review',
+        false,
+        { pr: 1, event: 'APPROVE', body: 'b', commitId: 'h1' },
+        () => {
+          f.state.addPull({ headRef: head, headSha: 'h1', author: 'author-bot' });
+        },
+      ],
+      [
+        'update_branch',
+        false,
+        { pr: 1, headSha: 'h1', baseSha: 'b1' },
+        () => {
+          f.state.addPull({ headRef: head, headSha: 'h1', author: 'author-bot' });
+        },
+      ],
+    ];
+
+    test.each(cases)('%s: resent %s', async (kind, resent, payload, arrange) => {
+      arrange();
+      const opKey = kind === 'create_pr' ? opKeys.pr(itemId, 'h1') : `${kind}:test`;
+      insertOutbox(db, {
+        id: `seed-${kind}`,
+        opKey,
+        kind,
+        workItemId: itemId,
+        zoneId: 'main',
+        payloadJson: JSON.stringify(payload),
+        state: 'unknown',
+        createdAt: t0.toISOString(),
+      });
+      await pass(2);
+      expect(writes().length > 0).toBe(resent);
+      expect(getOutbox(db, opKey)).toMatchObject({
+        resends: resent ? 1 : 0,
+        state: resent ? 'done' : 'unknown',
+      });
+    });
+  });
+
+  test('create_pr is not resent when the branch head moved off the key sha', async () => {
+    const key = await droppedPr();
+    f.state.branches.set(head, 'h2');
+    await pass(2);
+    expect(calls('findOrCreatePullRequest')).toHaveLength(1);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'unknown', resends: 0 });
+  });
+
+  test.each([
+    ['the kill switch', () => setKilled(db, true, t0)],
+    ['a paused zone', () => setZoneMode(db, 'main', 'paused', t0)],
+    ['an observing zone', () => setZoneMode(db, 'main', 'observe', t0)],
+  ])('%s holds every resend', async (_name, hold) => {
+    const key = await droppedPr();
+    hold();
+    await pass(2);
+    expect(calls('findOrCreatePullRequest')).toHaveLength(1);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'unknown', resends: 0 });
+  });
+
+  test('two passes at once send once', async () => {
+    const key = await droppedPr();
+    await Promise.all([pass(2), pass(2)]);
+    expect(calls('findOrCreatePullRequest')).toHaveLength(2);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'done', resends: 1 });
+  });
+
+  test('a resend the forge refuses (422) fails, as today', async () => {
+    const key = await droppedPr();
+    f.author.failNext('findOrCreatePullRequest', { status: 422, message: 'Validation Failed' });
+    expect(await pass(2)).toBe(0);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'failed', resends: 1 });
+  });
+
+  test('the migration reads existing outbox rows as resent 0 times', () => {
+    const file = tmpDbFile();
+    const raw = new Database(file);
+    raw.exec('CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+    for (const m of MIGRATIONS.filter((m) => m.version <= 62)) {
+      raw.exec(m.sql);
+      m.after?.(raw as unknown as Db);
+      raw.prepare('INSERT INTO schema_version VALUES (?, ?)').run(m.version, 'x');
+    }
+    raw.exec(
+      `INSERT INTO outbox (id, op_key, kind, zone_id, payload_json, state, created_at, updated_at)
+       VALUES ('o1', 'merge:9:h1', 'merge', 'main', '{}', 'unknown', 'a', 'a')`,
+    );
+    raw.close();
+    const migrated = openDb(file);
+    expect(getOutbox(migrated, 'merge:9:h1')?.resends).toBe(0);
+    migrated.close();
   });
 });
