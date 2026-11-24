@@ -1115,7 +1115,8 @@ drop network, and no allow list or ceiling applies to it.
 ### The stick's egress ceiling
 
 Each stick can cap what any drop or push on it may reach, whatever the server sends: set
-`JM_EGRESS_CEILING` on the stick (in `.env` for the compose install) to a comma-separated list
+`JM_EGRESS_CEILING` on the stick (in `.env` for the compose install, on the pasted line for the
+one-line installer: see [Add a stick](#add-a-stick)) to a comma-separated list
 of host names, or `*.` plus a name for its subdomains (never its apex; no IPs, ports or URLs; at
 most 200). A drop on that stick reaches an extra host, a GitLab instance for example, only when
 both the zone's `egress.allow` and the stick's ceiling list it. The stick checks every drop and
@@ -1381,6 +1382,24 @@ The result page shows only the form you chose:
   the same installer line. First replace `TS_AUTHKEY` with an auth key from your Tailscale admin
   console (Settings, Keys). A one-off, pre-approved key is enough.
 
+**To give the stick an egress ceiling** ([The stick's egress ceiling](#the-sticks-egress-ceiling)),
+set `JM_EGRESS_CEILING` on the pasted line, between `sudo` and `sh`:
+
+```sh
+curl -fsSL 'https://<address>/install/stick.sh' | sudo JM_EGRESS_CEILING=registry.npmjs.org,gitlab.example.com sh -s -- jm_enroll_…
+```
+
+Put it after `sudo`, before `sh`. Before `curl` it sets the variable for `curl` only, and sudo
+drops it anyway: it never reaches the script, and the stick gets no ceiling. The installer prints
+`Egress ceiling: <value>` (or `Egress ceiling: none`) before it uses the code, so check that line.
+It accepts only letters, digits, `.`, `*`, `-` and commas, at most 4000 characters, with no empty
+entry (a leading, trailing or doubled comma); anything else stops it with `JM_EGRESS_CEILING must
+be host names separated by commas`, the code unspent. The stick checks the rest when it starts: an
+entry it refuses (an IP address, say) stops it before it enrolls, and the installer removes the
+container, cancels the invite and prints the stick's reason. The server never sets the ceiling;
+the sticks page and the cloud-init text don't carry one. **To change it on an installed stick,**
+remove the stick (below), then install it again with a new code and the new value.
+
 **What the installer does** (the script is `GET /install/stick.sh`; it holds no secret):
 
 1. It refuses anything but Linux on x86_64 or aarch64, and a machine where a stick is already
@@ -1413,7 +1432,8 @@ The result page shows only the form you chose:
    - `JM_ENROLL_CODE_FILE`: the install token, written into the volume with mode 0600 (through
      stdin when the volume is in a VM); the stick enrolls with it as `{ "enrollCode": <token> }`;
    - `JM_IMAGE_SOURCE=server`;
-   - `JM_IMAGE_POLICY=signed`.
+   - `JM_IMAGE_POLICY=signed`;
+   - `JM_EGRESS_CEILING`, only when you gave one, exactly as given.
 7. It waits up to 60 seconds for the stick to enroll. Then it prints
    `Enrolled as <name>. Back to your browser.`, or the enrollment error, and deletes the token
    file. The stick also deletes the file itself once it enrolls. If a stick already has the invite's name (for example, one that
