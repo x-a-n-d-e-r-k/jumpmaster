@@ -66,7 +66,7 @@ import {
   lastArchiveFailure,
 } from '../transcripts.js';
 import { githubSetupHref } from '../ui/links.js';
-import { dispatchGate } from '../usage.js';
+import { dispatchGate, gateReason, gateReasonText } from '../usage.js';
 import {
   APP_ID_MISMATCH,
   APP_KEY_REJECTED,
@@ -853,14 +853,14 @@ function usageCheck(d: DoctorDeps): DoctorCheck {
       return {
         ...base,
         status: 'warn',
-        summary: `usage is above the throttle (${Math.round(d.config.usage.throttleUtilization * 100)}%): only finishing work (review, heal, resolve) dispatches`,
+        summary: `${gateReasonText(gateReason(d.db, d.config.usage, now))}: only finishing work (review, heal, resolve) dispatches`,
         fix: 'Nothing to do: new work resumes when usage falls or the window resets.',
       };
     case 'override':
       return {
         ...base,
         status: 'warn',
-        summary: `usage is near its limit and Command overrode the throttle: ${u.overrideStartsLeft} of ${u.overrideStarts} starts left, until ${u.overrideUntil}`,
+        summary: `${gateReasonText(gateReason(d.db, d.config.usage, now))}, until ${u.overrideUntil}`,
         fix: 'Nothing to do: it ends by itself. End it now with jumpmaster ctl usage override --clear.',
       };
     case 'credits_resume':

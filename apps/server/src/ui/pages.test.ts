@@ -29,6 +29,7 @@ import { forgetSubmitKey, submitKey } from '../intake.js';
 import { statusOf } from '../status.js';
 import { makeZone, zoneWorld } from '../test/fixtures.js';
 import { harness } from '../test/flowHarness.js';
+import { type GateReason, gateReasonText } from '../usage.js';
 import {
   askButton,
   breadcrumb,
@@ -602,6 +603,65 @@ describe('renderHome loop state', () => {
       },
     });
     expect(html).toContain(words);
+  });
+
+  describe('the gate line names what holds it (#753)', () => {
+    const now = new Date('2026-01-01T00:00:00.000Z');
+    const reset = '2026-01-04T00:00:00.000Z';
+    const gateLine = (gate: 'finishing_only' | 'override', reason: GateReason): string => {
+      const html = renderHome({
+        zones: [z],
+        items: [],
+        drops: [],
+        now,
+        usage: { gate, state: usageState, plan: 'pro', windows: [], reason },
+      });
+      return /<p class="gate-words">(.*?)<\/p>/.exec(html)?.[1] ?? '';
+    };
+    const threshold: GateReason = {
+      kind: 'threshold',
+      window: 'seven_day',
+      utilization: 0.834,
+      threshold: 0.8,
+      resetsAt: reset,
+    };
+
+    test('a threshold hold names the window, its figure and the threshold', () => {
+      const l = gateLine('finishing_only', threshold);
+      expect(l).toContain(
+        `Dispatch open to finishing work only: ${gateReasonText(threshold)}; it resets `,
+      );
+      expect(l).toContain('7-day usage at 83% is at or above the 80% throttle');
+      expect(l).toContain(`datetime="${reset}"`);
+    });
+
+    test("under the warning fallback it says Claude's warning holds", () => {
+      const warning: GateReason = { kind: 'warning', window: 'five_hour', resetsAt: null };
+      expect(gateLine('finishing_only', warning)).toBe(
+        'Dispatch open to finishing work only: Claude warned of 5-hour usage and reported no figure for it.',
+      );
+    });
+
+    test('an override names the hold it lifts, and its end', () => {
+      const until = '2026-01-01T03:00:00.000Z';
+      const l = gateLine('override', {
+        kind: 'override',
+        held: threshold,
+        startsLeft: 3,
+        starts: 5,
+        until,
+      });
+      expect(l).toContain(
+        'Dispatch open on your usage override: 7-day usage at 83% is at or above the 80% throttle; Command&#39;s override has 3 of 5 starts left, ending ',
+      );
+      expect(l).toContain(`datetime="${until}"`);
+    });
+
+    test('the reason is escaped', () => {
+      const l = gateLine('finishing_only', { ...threshold, window: 'seven_day_<b>' });
+      expect(l).toContain('&lt;b&gt;');
+      expect(l).not.toContain('<b>');
+    });
   });
 
   describe("Claude's current warning (#749)", () => {

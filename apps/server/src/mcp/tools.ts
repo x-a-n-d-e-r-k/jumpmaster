@@ -20,7 +20,7 @@ import {
 import { getGoals } from '../goals.js';
 import { redactionList } from '../scrub.js';
 import { projectHref } from '../ui/links.js';
-import { dispatchGate } from '../usage.js';
+import { dispatchGate, gateReason, gateReasonText } from '../usage.js';
 import { type Acted, CHAT_ACTION_TOOLS, carded } from './chat-actions.js';
 import { CHAT_TOOLS } from './chat-tools.js';
 import {
@@ -209,7 +209,7 @@ const getQueueTool: ZoneToolDef = {
   name: 'get_queue',
   scope: 'read',
   description:
-    "The zone's mode, the kill switch, the usage gate (with any credits stop), its queued and active drops, and its unresolved forge writes.",
+    "The zone's mode, the kill switch, the usage gate and the reason in words for what holds it (the window, its figure and the threshold; a pause, credits stop, warning or override), any credits stop, the zone's queued and active drops, and its unresolved forge writes.",
   input: NoArgs,
   run({ db, config, zone, now }) {
     const at = now();
@@ -230,6 +230,7 @@ const getQueueTool: ZoneToolDef = {
           crewEnabled: zone.crew.enabled,
           // Global, deliberately: whether anything can run at all.
           gate: dispatchGate(db, config.usage, at),
+          reason: gateReasonText(gateReason(db, config.usage, at)),
           creditsStop: {
             stoppedAt: u.overageStoppedAt,
             until: u.overageUntil,

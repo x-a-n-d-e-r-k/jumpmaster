@@ -37,6 +37,8 @@ import { wizardActive } from './ui/setup.js';
 import {
   dispatchGate,
   type Gate,
+  gateReason,
+  gateReasonText,
   throttleSince,
   type UsageOverride,
   usageOverride,
@@ -92,6 +94,8 @@ export type UsageFacts = {
   override?: UsageOverride;
   /** When the throttle's hold began: the usage report, or the warning that holds (#748). */
   throttledSince?: string;
+  /** What holds the throttle (#753), in `gateReasonText`'s words: set under a throttle or override. */
+  reason?: string;
 };
 
 /** One zone as the status reads it. The optional facts serve the headlines that name them. */
@@ -271,6 +275,10 @@ export function statusOf(input: StatusInput, now: Date): Status {
   // Under the throttle only finishing roles and the doctor lease (leases.ts): the rest waits.
   const throttled = heldQueued.filter((q) => !FINISHING.has(q.d.role) && q.d.role !== 'doctor');
   const crewHeld = input.crewHeld === true && usage.gate === 'finishing_only';
+  // What holds the throttle, in usage.ts's words; capitalised as the detail's opening.
+  const throttleReason = usage.reason
+    ? usage.reason[0]?.toUpperCase() + usage.reason.slice(1)
+    : "Claude's usage throttle holds";
   const goalChanges = input.goalChangesToConfirm ?? [];
   const goalText = `${plural(goalChanges.length, 'goal change')} to confirm`;
   // The oldest change (the lowest id) is the one a link opens.
@@ -460,8 +468,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
     return said(
       {
         headline: `Held by Claude's usage throttle: ${wait(underThrottle, throttled.every((q) => q.d.workItemId !== null) ? 'issue' : 'drop')}; only finishing work starts`,
-        detail:
-          "Claude's usage is above the throttle: reviews, heals and merges go on; new work starts once usage falls back.",
+        detail: `${throttleReason}: reviews, heals and merges go on; new work starts once usage falls back.`,
         waitingOn: 'claude',
         action: { label: 'See usage on home', href: '/' },
       },
@@ -665,8 +672,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
     return said(
       {
         headline: "Held by Claude's usage throttle: the crew waits until usage falls back",
-        detail:
-          'Claude reported its usage near the limit. Reviews, heals and merges go on; the crew lead, audits and new work start again once it clears.',
+        detail: `${throttleReason}. Reviews, heals and merges go on; the crew lead, audits and new work start again once it clears.`,
         waitingOn: 'claude',
         ...(usage.throttledSince ? { since: usage.throttledSince } : {}),
         action: { label: 'See usage on home', href: '/' },
@@ -771,6 +777,12 @@ export function statusInputOf(o: {
       ...opt('throttledSince', throttleSince(db, config.usage, now)),
       // Shown only where it acts: the throttle holds, and the override lifts it.
       ...opt('override', gate === 'override' ? usageOverride(db, now) : null),
+      ...opt(
+        'reason',
+        gate === 'finishing_only' || gate === 'override'
+          ? gateReasonText(gateReason(db, config.usage, now))
+          : null,
+      ),
     },
     sticks: { live: live.length, slots: live.reduce((n, s) => n + s.slots, 0), busy },
     doctor: {
