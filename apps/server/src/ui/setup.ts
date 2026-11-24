@@ -31,7 +31,7 @@ import {
   tokensSection,
   useTokensInstead,
 } from './github.js';
-import { linkTarget, SYSTEM_HREF } from './links.js';
+import { linkTarget, SYSTEM_CREDENTIALS_HREF, SYSTEM_HREF } from './links.js';
 import { breadcrumb, escapeHtml, page } from './pages.js';
 import { projectWords, type ZoneRef, zoneName, zoneNamer } from './zone-name.js';
 
@@ -528,7 +528,7 @@ export function projectBody(
 <h4>Checks (gates) every change must pass</h4><div id="gates"></div><p><button type="button" id="add-gate">Add a check</button></p>
 <p>Accounts: <label><input type="radio" name="identity" value="two-bot"${identity === 'two-bot' ? ' checked' : ''}> two bots (author and reviewer)</label> <label><input type="radio" name="identity" value="starter"${identity === 'starter' ? ' checked' : ''}> starter (one account)</label></p>
 <p id="author-admin"><label><input type="checkbox" name="authorMayBeAdmin" value="1"> The author token belongs to the repository's owner (a personal repository)</label></p>
-<p id="gitlab-next" hidden>This page takes no GitLab token. The project runs only once its bot tokens are in the vault, as <code>gitlab-pat/&lt;zone id&gt;/author</code>, plus <code>gitlab-pat/&lt;zone id&gt;/reviewer</code> for two bots, where the id is the project id above.</p>
+<p id="gitlab-next" hidden>This page takes no GitLab token. The project runs only once its bot tokens are in the vault, as <code>gitlab-pat/&lt;zone id&gt;/author</code>, plus <code>gitlab-pat/&lt;zone id&gt;/reviewer</code> for two bots, where the id is the project id above. Once the project is created, set them under <a href="${SYSTEM_CREDENTIALS_HREF}">System, Credentials</a> (GitLab tokens), or with <code>jumpmaster ctl secrets set gitlab-pat/&lt;zone id&gt;/author</code>.</p>
 <p><button>Create the project</button> <span id="project-out" role="status"></span></p></form>
 <div id="guidance-box" hidden><h4>On GitHub: the ruleset and the code owners</h4>
 <p>Jumpmaster merges only under a branch ruleset, and the protected paths need a person's review. Both files are made from what was detected; nothing is written to GitHub.</p>

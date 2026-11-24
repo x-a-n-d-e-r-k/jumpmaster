@@ -1825,7 +1825,7 @@ Administration and Workflows are `forge.admin`'s. An app has no token expiry to 
 tokens are minted per use.
 
 On a GitLab zone (`forge: 'gitlab'`) the check reads the author's personal access token, stored
-in the vault entry `gitlab-pat/<zone>/author` (System, Credentials, or
+in the vault entry `gitlab-pat/<zone>/author` (System, Credentials, under GitLab tokens, or
 `jumpmaster ctl secrets set gitlab-pat/<zone>/author`), against the GitLab project. It fails when:
 
 - GitLab rejects the token (401): it is wrong, expired or revoked; store a new one in the entry;

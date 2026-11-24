@@ -1,6 +1,12 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { type GuidanceForge, githubGuidanceForge } from '../api/github.js';
-import { type AppEntryView, appEntryViews, DELETE_OLD_KEY } from '../api/secrets.js';
+import {
+  type AppEntryView,
+  appEntryViews,
+  DELETE_OLD_KEY,
+  type GitlabPatView,
+  gitlabPatViews,
+} from '../api/secrets.js';
 import { withCsrf } from '../auth/guard.js';
 import type { BootOrigin } from '../config/boot.js';
 import { flagRows } from '../config/catalog.js';
@@ -15,6 +21,7 @@ import {
 } from '../config.js';
 import type { Db } from '../db/open.js';
 import { FABLE_MAX_UTILIZATION, FABLE_REVIEW_MAX_UTILIZATION } from '../fable.js';
+import { forgeKind } from '../forge/kind.js';
 import { listMcpTokens, MAX_TOKEN_DAYS, type McpTokenInfo } from '../mcp/tokens.js';
 import {
   defaultTailscaleDeps,
@@ -289,6 +296,45 @@ function appEntriesSection(store: ConfigStore): string {
 }
 
 /**
+ * One `gitlab-pat/<zone>/<role>` entry's row (#821): its name, zone, role, state, fingerprint and
+ * dates, never its value. Set takes a token in a password field; Test and Remove follow once it is
+ * set. A starter zone's leftover reviewer offers Remove only: the routes refuse the rest.
+ */
+function gitlabPatRow(v: GitlabPatView, starter: boolean): string {
+  const zone = escapeHtml(v.zone);
+  const role = escapeHtml(v.role);
+  const data = `data-zone="${zone}" data-role="${role}"`;
+  const state = v.undecryptable ? "can't be decrypted" : v.set ? 'set' : 'not set';
+  const test = v.testResult ? `${escapeHtml(v.testResult)} <small>${day(v.testedAt)}</small>` : '-';
+  const leftover = starter && v.role === 'reviewer';
+  const set = leftover
+    ? ''
+    : `<form class="gitlab-set" ${data}><input type="password" name="value" autocomplete="off" spellcheck="false" aria-label="New token for ${escapeHtml(v.name)}"> <button>Set</button></form> `;
+  const testButton =
+    v.set && !leftover ? `<button type="button" class="gitlab-test" ${data}>Test</button> ` : '';
+  const remove =
+    v.set || v.undecryptable
+      ? `<button type="button" class="gitlab-remove" ${data}>Remove</button> `
+      : '';
+  return `<tr data-gitlab-pat="${zone}/${role}"><td><code>${escapeHtml(v.name)}</code></td><td data-col="zone">${zone}</td><td data-col="role">${role}</td><td data-col="set">${escapeHtml(state)}</td><td data-col="fingerprint">${v.fingerprint ? `<code>${escapeHtml(v.fingerprint)}</code>` : '-'}</td><td data-col="set-at">${day(v.setAt)}</td><td data-col="test">${test}</td><td data-col="actions">${set}${testButton}${remove}<span class="gitlab-out" role="status"></span></td></tr>`;
+}
+
+/**
+ * Each GitLab zone's `gitlab-pat` entries (#821, spec §9), from the same views as
+ * `GET /api/control/secrets`. Nothing at all when no zone is on GitLab.
+ */
+function gitlabPatsSection(store: ConfigStore): string {
+  const zones = store.current().dropZones.filter((z) => forgeKind(z) === 'gitlab');
+  if (zones.length === 0) return '';
+  const starters = new Set(zones.filter((z) => z.identity === 'starter').map((z) => z.id));
+  const rows = gitlabPatViews(store)
+    .map((v) => gitlabPatRow(v, starters.has(v.zone)))
+    .join('');
+  return `
+<section id="gitlab-pats"><h3>GitLab tokens</h3><p>Each GitLab project's bot tokens, kept in the vault: the author, and the reviewer for two bots. Jumpmaster tests a token with GitLab before storing it; <code>jumpmaster ctl secrets set gitlab-pat/&lt;zone&gt;/&lt;role&gt;</code> does the same from a terminal.</p><table><tr><th>Entry</th><th>Project</th><th>Role</th><th>State</th><th>Fingerprint</th><th>Set</th><th>Last test</th><th></th></tr>${rows}</table></section>`;
+}
+
+/**
  * The tab's script. `jmReplaceCredential`, `jmTestCredential` and `jmRemoveCredential` take the
  * sudo state the page knows (`{ sudo, passphrase }`) and a status element: without sudo and with
  * no passphrase they answer `'sudo'` and touch nothing (the page then shows the prompt); with one,
@@ -417,6 +463,43 @@ async function jmRemoveCredential(name, state, status) {
   status.textContent = name + ' removed.';
   return 'removed';
 }
+// A GitLab zone's token (#821): zone and role each encoded on its own, never the whole name.
+function jmGitlabUrl(c) {
+  return '/api/control/secrets/gitlab-pat/' + encodeURIComponent(c.zone) + '/' + encodeURIComponent(c.role);
+}
+// Set, Test and Remove on a gitlab-pat entry: sudo first, the token in a PUT body only, the field
+// cleared once the request is made, the server's words on a refusal.
+async function jmGitlabPat(kind, c, state, status) {
+  const name = 'gitlab-pat/' + c.zone + '/' + c.role;
+  if (kind === 'set' && !c.field.value) { status.textContent = 'Enter a token first.'; return 'empty'; }
+  if (!(await jmSudo(state, status))) return 'sudo';
+  let r;
+  if (kind === 'set') {
+    const value = c.field.value;
+    try { r = await jmFetch(jmGitlabUrl(c), { value }, 'PUT'); } finally { c.field.value = ''; }
+  } else if (kind === 'test') r = await jmFetch(jmGitlabUrl(c) + '/test', {});
+  else r = await jmFetch(jmGitlabUrl(c), {}, 'DELETE');
+  if (!r.ok) {
+    if (await jmLapsed(r, state, status)) return 'sudo';
+    if (r.status === 403) state.sudo = false;
+    const what = kind === 'set' ? ' was not saved' : kind === 'test' ? ' was not tested' : ' was not removed';
+    status.textContent = name + what + ' (' + r.status + '): ' + (await jmWhy(r));
+    return 'refused';
+  }
+  const j = await jmBody(r);
+  if (kind === 'remove') { status.textContent = name + ' removed.'; return 'removed'; }
+  const login = j.login ? ' (' + j.login + ')' : '';
+  if (kind === 'set') { status.textContent = name + ': saved and tested, ' + j.result + login + '.'; jmRefreshLink(status); return 'saved'; }
+  status.textContent = j.tested ? name + ': ' + j.result + login : name + ': ' + (await jmWhy({ json: async () => j }));
+  jmRefreshLink(status);
+  return j.tested ? 'tested' : 'failed';
+}
+function jmSetGitlabPat(c, state, status) { return jmGitlabPat('set', c, state, status); }
+function jmTestGitlabPat(c, state, status) { return jmGitlabPat('test', c, state, status); }
+function jmRemoveGitlabPat(c, state, status) { return jmGitlabPat('remove', c, state, status); }
+function jmConfirmRemove(name) {
+  return confirm('Remove ' + name + ' from the vault? Jumpmaster refuses to remove it while a project still needs it.');
+}
 // The vault's switches and Copy into the vault: each sends no value, only the name or the choice.
 async function jmVaultPost(url, body, state, status, what) {
   if (!(await jmSudo(state, status))) return 'sudo';
@@ -470,8 +553,25 @@ document.addEventListener('DOMContentLoaded', () => {
     if (outcome === 'replaced') await jmRefreshAppRow(form.dataset.owner, form.dataset.role);
   });
   for (const b of document.querySelectorAll('button.remove')) b.addEventListener('click', async () => {
-    if (!confirm('Remove ' + b.dataset.name + ' from the vault? Jumpmaster refuses to remove it while a project still needs it.')) return;
+    if (!jmConfirmRemove(b.dataset.name)) return;
     const s = state(); const outcome = await jmRemoveCredential(b.dataset.name, s, status); after(s, outcome);
+    if (outcome === 'removed') location.reload();
+  });
+  // A GitLab token's row (#821): its own status beside the buttons.
+  const glOut = (el) => el.closest('tr').querySelector('.gitlab-out');
+  const glOf = (el) => ({ zone: el.dataset.zone, role: el.dataset.role });
+  for (const form of document.querySelectorAll('form.gitlab-set')) form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const s = state();
+    const outcome = await jmSetGitlabPat({ ...glOf(form), field: form.querySelector('input[name=value]') }, s, glOut(form));
+    after(s, outcome);
+  });
+  for (const b of document.querySelectorAll('button.gitlab-test')) b.addEventListener('click', async () => {
+    const s = state(); after(s, await jmTestGitlabPat(glOf(b), s, glOut(b)));
+  });
+  for (const b of document.querySelectorAll('button.gitlab-remove')) b.addEventListener('click', async () => {
+    if (!jmConfirmRemove('gitlab-pat/' + b.dataset.zone + '/' + b.dataset.role)) return;
+    const s = state(); const outcome = await jmRemoveGitlabPat(glOf(b), s, glOut(b)); after(s, outcome);
     if (outcome === 'removed') location.reload();
   });
   const vaultOn = document.getElementById('vault-on');
@@ -558,7 +658,7 @@ export function renderCredentials(o: {
 <div id="credentials" data-sudo="${o.sudo ? '1' : '0'}">
 ${vaultLine}${running}
 <table><tr><th>Credential</th><th>Source</th><th>Fingerprint</th><th>Login</th><th>Set</th><th>Created</th><th>Last test</th><th></th></tr>${rows}</table>
-${appEntriesSection(store)}
+${appEntriesSection(store)}${gitlabPatsSection(store)}
 ${SUDO_PROMPT('changing a credential')}
 <p id="credentials-status" role="status"></p>
 <h3>Claude</h3>
