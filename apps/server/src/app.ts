@@ -62,7 +62,7 @@ import { latestDoctorRun } from './doctor/run.js';
 import { fableStatus } from './fable.js';
 import type { AppTokenSource } from './forge/app-tokens.js';
 import type { Forge } from './forge/github.js';
-import { listGoalChanges } from './goal-change.js';
+import { listGoalChangesWithStanding } from './goal-change.js';
 import { getGoals, objectivesDone } from './goals.js';
 import { StickFetches } from './images/fetches.js';
 import { createInvite, inviteProblem, inviteTtl } from './install/invite.js';
@@ -934,7 +934,7 @@ export function createApp(
       items: listWorkItems(db, zone.id),
       skippedCrewUnpromoted: lastSyncResult(zone.id)?.skippedCrewUnpromoted ?? [],
       doneByRuling: objectivesDone(db, zone.id),
-      goalChanges: listGoalChanges(db, zone.id),
+      goalChanges: listGoalChangesWithStanding(db, zone.id),
       mode: getZoneMode(db, zone.id, zone.mode),
       openBriefings: listBriefings(db, { zoneId: zone.id, state: 'open' }).length,
       crew: crewLine(db, config, zone, now),

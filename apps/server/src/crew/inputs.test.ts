@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, test } from 'vitest';
-import { applyPendingRulings, raiseBriefing, ruleBriefing } from '../briefings.js';
+import {
+  applyPendingRulings,
+  dismissZoneBriefings,
+  raiseBriefing,
+  ruleBriefing,
+  withdrawZoneBriefings,
+} from '../briefings.js';
 import { insertDrop, insertVerdict, setWorkItemState, updateDrop } from '../db/repo.js';
 import { zonePass } from '../flow/snapshot.js';
 import { proposeGoalChange } from '../goal-change.js';
@@ -281,6 +287,7 @@ describe('goal changes in flight in the crew-lead input (#645)', () => {
   test('each state in flight gets its line in the server words; ended changes and the text never appear', async () => {
     const chat = change('chat', 'proposed', null);
     const crew = change('crew', 'proposed', null);
+    brief(crew);
     const open = change('chat', 'open', 613);
     const confirmed = change('crew', 'confirmed', 614);
     const merged = change('chat', 'merged', 615);
@@ -302,6 +309,72 @@ describe('goal changes in flight in the crew-lead input (#645)', () => {
     );
     for (const id of [merged, closed, refused]) expect(text).not.toContain(`Goal change ${id}`);
     expect(text).not.toContain('No goal changes in flight.');
+    expect(input).not.toContain(MARKER);
+  });
+
+  /** Raises the goal-change briefing the server raises for a crew proposal. */
+  const brief = (id: number): number => {
+    const b = raiseBriefing(
+      w.db,
+      {
+        zoneId: w.zone.id,
+        kind: 'goal_change',
+        subject: `goal-change:${id}`,
+        decision: 'Open a pull request?',
+        why: 'w',
+        options: [
+          { id: 'open', label: 'Open the PR', effect: 'open_goal_change' },
+          { id: 'no', label: 'Leave the goals as they are', effect: 'none' },
+        ],
+        onHold: 'Nothing',
+        source: 'server',
+        sourceRef: 'r',
+      },
+      t0,
+    );
+    if (typeof b !== 'number') throw new Error('briefing not raised');
+    return b;
+  };
+
+  test('a crew proposal with an open goal-change briefing waits for Command', async () => {
+    const id = change('crew', 'proposed', null);
+    brief(id);
+    const input = await leadInput();
+    expect(section(input)).toContain(
+      `Goal change ${id}: proposed; waits for Command's ruling on its goal-change briefing.`,
+    );
+    expect(input).not.toContain(MARKER);
+  });
+
+  test('a crew proposal whose briefing was dismissed is not said to wait for a ruling', async () => {
+    const id = change('crew', 'proposed', null);
+    dismissZoneBriefings(w.db, w.zone.id, [brief(id)], t0);
+    const input = await leadInput();
+    const text = section(input);
+    expect(text).not.toContain("waits for Command's ruling");
+    expect(text).not.toContain(`Goal change ${id}`);
+    expect(text).toContain('No goal changes in flight.');
+    expect(input).not.toContain(MARKER);
+  });
+
+  test('a crew proposal whose briefing was withdrawn is not said to wait for a ruling', async () => {
+    const id = change('crew', 'proposed', null);
+    brief(id);
+    withdrawZoneBriefings(w.db, w.zone.id, t0);
+    const text = section(await leadInput());
+    expect(text).not.toContain(`Goal change ${id}`);
+  });
+
+  test('a crew proposal ruled Open the PR, not yet applied, opens at a coming pass', async () => {
+    const id = change('crew', 'proposed', null);
+    const r = ruleBriefing(w.db, brief(id), 'open', '', t0);
+    expect(r.ok).toBe(true);
+    const input = await leadInput();
+    const text = section(input);
+    expect(text).toContain(
+      `Goal change ${id}: proposed; Command ruled to open it, and its pull request opens at a coming pass.`,
+    );
+    expect(text).not.toContain("waits for Command's ruling");
     expect(input).not.toContain(MARKER);
   });
 });
