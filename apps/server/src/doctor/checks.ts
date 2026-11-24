@@ -340,7 +340,9 @@ function readFailed(
   what: string,
   permission: string,
   r: Failed,
+  gitlab?: { zoneId: string; baseUrl: string },
 ): DoctorCheck {
+  if (gitlab) return gitlabReadFailed(base, who, what, r, gitlab);
   const v = TOKEN_VAR[who];
   if (r.status === 401)
     return {
@@ -372,6 +374,50 @@ function readFailed(
     status: 'warn',
     summary: `could not ${what} with the ${who} token: ${r.status === null ? 'no HTTP answer' : `HTTP ${r.status}`} (${r.message}); the check did not run`,
     fix: 'Check the server can reach api.github.com, then run the doctor again.',
+  };
+}
+
+/**
+ * `readFailed` for a GitLab zone: the token is a `gitlab-pat` vault entry, and a 403 is the token's
+ * scope (every read the doctor makes needs `api`). No line holds a token.
+ */
+function gitlabReadFailed(
+  base: { id: string; zoneId: string | null },
+  who: Identity,
+  what: string,
+  r: Failed,
+  gitlab: { zoneId: string; baseUrl: string },
+): DoctorCheck {
+  const entry = `gitlab-pat/${gitlab.zoneId}/${who}`;
+  const newToken = `Create a GitLab personal access token for the ${who} bot user with the api scope (and neither sudo nor admin_mode), then store it in the vault entry ${entry} (under System, Credentials, or with jumpmaster ctl secrets set ${entry}).`;
+  if (r.status === 401)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `GitLab rejected the ${who} token (401) while trying to ${what}: it is wrong, expired or revoked`,
+      fix: newToken,
+      doc: doc('tokens'),
+    };
+  if (r.rateLimited)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `could not ${what}: GitLab's rate limit refused the ${who} token's read (HTTP ${r.status}); the check did not run`,
+      fix: 'Run the doctor again in a few minutes.',
+    };
+  if (r.status === 403 || r.status === 404)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `the ${who} token can't ${what} (HTTP ${r.status}): it needs the api scope and at least Developer access to the project`,
+      fix: `${newToken} Check that the ${who} bot user is a Developer on the project.`,
+      doc: doc('tokens'),
+    };
+  return {
+    ...base,
+    status: 'warn',
+    summary: `could not ${what} with the ${who} token: ${r.status === null || r.status === 0 ? 'no HTTP answer' : `HTTP ${r.status}`}; the check did not run`,
+    fix: `Check the server can reach ${gitlab.baseUrl}, then run the doctor again.`,
   };
 }
 
@@ -2491,7 +2537,58 @@ function appCodeownersCheck(
   };
 }
 
+const GITLAB_CI = '.gitlab-ci.yml';
+const PIPELINES_SETTING = 'Settings → Merge requests → Pipelines must succeed';
+
+/**
+ * `forge.ci` for a GitLab zone (issue #809): CI is `.gitlab-ci.yml` at the branch's root, and the
+ * project's "Pipelines must succeed" (`requiredChecks: ['pipeline']`) is what holds a merge for it.
+ */
+async function gitlabCiCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> {
+  const base = { id: 'forge.ci', zoneId: zone.id, doc: doc('ci') };
+  const branch = await r.branch();
+  const root = await attempt(() => r.pair.author.listDir(branch, ''));
+  if (!root.ok)
+    return readFailed(base, 'author', `list the root of ${branch}`, 'the api scope', root, {
+      zoneId: zone.id,
+      baseUrl: zone.gitlab?.baseUrl ?? 'the GitLab instance',
+    });
+  const hasCi = (root.value ?? []).includes(GITLAB_CI);
+  const rules = await r.rules();
+  const pipelines = [rules.author, rules.reviewer].some(
+    (x) => x?.kind === 'ok' && x.rules.requiredChecks.includes('pipeline'),
+  );
+  const seen = `${hasCi ? GITLAB_CI : `no ${GITLAB_CI}`} on ${branch}; Pipelines must succeed is ${pipelines ? 'on' : 'off'}`;
+  if (!zone.ciRequired)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `the no-CI-yet path (ciRequired: false): the project's gates are the only check before a merge; ${seen}`,
+      fix: `Once CI exists (a ${GITLAB_CI} at the repository root), turn on Pipelines must succeed (Settings → Merge requests) and set ciRequired: true.`,
+    };
+  if (pipelines && !hasCi)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `Pipelines must succeed is on, but there is no ${GITLAB_CI} on ${branch}: unless an external CI reports a pipeline for each merge request, every merge request would wait for a pipeline that never runs`,
+      fix: `Add ${GITLAB_CI} at the repository root, or set ciRequired: false and turn off ${PIPELINES_SETTING} until CI exists.`,
+    };
+  if (pipelines)
+    return {
+      ...base,
+      status: 'pass',
+      summary: `CI is required: ${GITLAB_CI} is on ${branch} and Pipelines must succeed is on, so GitLab holds each merge request for its pipeline`,
+    };
+  return {
+    ...base,
+    status: 'fail',
+    summary: `ciRequired is true, but Pipelines must succeed is off${hasCi ? '' : ` and there is no ${GITLAB_CI} on ${branch}`}: GitLab would merge without waiting for CI`,
+    fix: `${hasCi ? 'Turn' : `Add ${GITLAB_CI} at the repository root, then turn`} on ${PIPELINES_SETTING}; or, until CI exists, set ciRequired: false in the project (the no-CI-yet path: the gates are the only check).`,
+  };
+}
+
 async function ciCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> {
+  if (forgeKind(zone) === 'gitlab') return gitlabCiCheck(zone, r);
   const base = { id: 'forge.ci', zoneId: zone.id, doc: doc('ci') };
   const branch = await r.branch();
   const dir = await attempt(() => r.pair.author.listDir(branch, '.github/workflows'));
