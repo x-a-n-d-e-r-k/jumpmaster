@@ -8,6 +8,7 @@ import {
   getDrop,
   getUsageState,
   insertDrop,
+  recordUsageWindows,
   setKilled,
   setUsageState,
   setWorkItemState,
@@ -52,6 +53,9 @@ const warned = (over: Parameters<typeof setUsageState>[1] = {}) =>
     },
     t0,
   );
+/** Seeds the account's reported usage windows, as a report's ingest stores them (#738). */
+const windows = (w: Parameters<typeof recordUsageWindows>[1]) =>
+  recordUsageWindows(db, w, t0, null);
 const grant = (starts = 5, hours = 3) => setUsageOverride(db, { starts, hours, by: 'token' }, t0);
 /** Queues a drop: one of an item's roles on an item of its own, a crew or doctor drop on none. */
 const queue = (id: string, role: string, ms: number) => {
@@ -123,22 +127,53 @@ describe('the usage override and the gate (#728)', () => {
   });
 
   test('stored usage at the ceiling is not overridden; a window that has reset does not count', () => {
-    warned({ sevenDayUtil: OVERRIDE_CEILING });
+    warned();
+    windows({ seven_day: { utilization: OVERRIDE_CEILING, resetsAt: iso(36 * H) } });
     grant();
     expect(usageOverride(db, t0)).toBeNull();
     expect(dispatchGate(db, cfg, t0)).toBe('finishing_only');
-    warned({ sevenDayUtil: 0.5, fiveHourUtil: 0.97, fiveHourResetsAt: iso(H) });
+    windows({
+      seven_day: { utilization: 0.5, resetsAt: iso(36 * H) },
+      five_hour: { utilization: 0.97, resetsAt: iso(H) },
+    });
     expect(dispatchGate(db, cfg, t0)).toBe('finishing_only');
     // The five-hour window is over: its old figure holds nothing back.
-    warned({ sevenDayUtil: 0.5, fiveHourUtil: 0.97, fiveHourResetsAt: iso(-1) });
+    windows({
+      seven_day: { utilization: 0.5, resetsAt: iso(36 * H) },
+      five_hour: { utilization: 0.97, resetsAt: iso(-1) },
+    });
     expect(dispatchGate(db, cfg, t0)).toBe('override');
     // So too the seven-day one, once its reset has passed.
-    warned({ sevenDayUtil: 0.97, sevenDayResetsAt: iso(-1), fiveHourUtil: null });
+    windows({ seven_day: { utilization: 0.97, resetsAt: iso(-1) } });
+    expect(dispatchGate(db, cfg, t0)).toBe('override');
+  });
+
+  test('a ceiling read from an account window other than five_hour or seven_day ends it (#738)', () => {
+    warned();
+    grant();
+    windows({
+      seven_day: { utilization: 0.5, resetsAt: iso(36 * H) },
+      seven_day_oauth_apps: { utilization: 0.94, resetsAt: iso(36 * H) },
+    });
+    expect(dispatchGate(db, cfg, t0)).toBe('override');
+    windows({
+      seven_day: { utilization: 0.5, resetsAt: iso(36 * H) },
+      seven_day_oauth_apps: { utilization: OVERRIDE_CEILING, resetsAt: iso(36 * H) },
+    });
+    expect(usageOverride(db, t0)).toBeNull();
+    expect(dispatchGate(db, cfg, t0)).toBe('finishing_only');
+    // A per-model window at the ceiling is not the account's: the override stands.
+    windows({
+      seven_day: { utilization: 0.5, resetsAt: iso(36 * H) },
+      seven_day_fable: { utilization: 0.99, resetsAt: iso(36 * H) },
+      seven_day_overage_included: { utilization: 0.99, resetsAt: iso(36 * H) },
+    });
     expect(dispatchGate(db, cfg, t0)).toBe('override');
   });
 
   test('the ceiling is fixed: raising the throttle setting, as chat can, does not raise it', () => {
-    warned({ sevenDayUtil: 0.95 });
+    warned();
+    windows({ seven_day: { utilization: 0.95, resetsAt: iso(36 * H) } });
     grant();
     for (const throttleUtilization of [0.96, 1])
       expect(dispatchGate(db, { ...cfg, throttleUtilization }, t0)).toBe('finishing_only');

@@ -26,6 +26,7 @@ import { tmpDbFile } from './test/helpers.js';
 import {
   dispatchGate,
   ingestRateLimit,
+  liveAccountWindows,
   type RateLimitSource,
   rateLimitFromEvent,
   releaseProbe,
@@ -528,6 +529,94 @@ test('ingestRateLimit accepts a source with no work item', () => {
   ingestRateLimit(db, rej(future), crew, cfg, t0, zero);
   expect(getUsageState(db)).toMatchObject({ status: 'rejected', causeWorkItemId: null });
   expect(dispatchGate(db, cfg, plus(t0, MIN))).toBe('closed');
+});
+
+describe('the gate reads every account-wide window (#738)', () => {
+  const report = (windows: RateLimitEventData['unifiedWindows']): RateLimitEventData => ({
+    status: 'allowed',
+    unifiedWindows: windows,
+  });
+  const ingest = (windows: RateLimitEventData['unifiedWindows'], when = t0) =>
+    ingestRateLimit(db, report(windows), src('d1', null), cfg, when, zero);
+
+  test('seven_day at 0.92 with a future reset holds', () => {
+    ingest({ seven_day: { utilization: 0.92, resetsAt: future } });
+    expect(dispatchGate(db, cfg, t0)).toBe('finishing_only');
+  });
+
+  test('another account-wide key over the threshold holds', () => {
+    ingest({
+      five_hour: { utilization: 0.1, resetsAt: future },
+      seven_day: { utilization: 0.2, resetsAt: future },
+      seven_day_oauth_apps: { utilization: 0.95, resetsAt: future },
+    });
+    expect(dispatchGate(db, cfg, t0)).toBe('finishing_only');
+  });
+
+  test.each([
+    'seven_day_fable',
+    'seven_day_overage_included',
+    'seven_day_opus',
+    'seven_day_sonnet',
+  ])('%s at 0.99 does not hold dispatch', (key) => {
+    ingest({
+      five_hour: { utilization: 0.5, resetsAt: future },
+      seven_day: { utilization: 0.6, resetsAt: future },
+      [key]: { utilization: 0.99, resetsAt: future },
+    });
+    expect(dispatchGate(db, cfg, t0)).toBe('open');
+  });
+
+  test('below the threshold on every window the gate is open', () => {
+    ingest({
+      five_hour: { utilization: 0.89, resetsAt: future },
+      seven_day: { utilization: 0.5, resetsAt: future },
+      seven_day_oauth_apps: { utilization: 0.3, resetsAt: future },
+    });
+    expect(dispatchGate(db, cfg, t0)).toBe('open');
+  });
+
+  test('a five_hour window over the threshold whose reset has passed does not hold', () => {
+    ingest({
+      five_hour: { utilization: 0.97, resetsAt: '2026-10-20T10:59:00Z' },
+      seven_day: { utilization: 0.4, resetsAt: '2026-10-25T00:00:00Z' },
+    });
+    expect(dispatchGate(db, cfg, t0)).toBe('open');
+  });
+
+  test('a passed reset does not hold, though usage was observed more recently', () => {
+    ingest({ seven_day: { utilization: 0.97, resetsAt: future } });
+    expect(dispatchGate(db, cfg, t0)).toBe('finishing_only');
+    // The shared observation time is newer than the window's reset: the reset still ends it.
+    const later = plus(t0, 2 * H);
+    setUsageState(db, { observedAt: later.toISOString() }, later);
+    expect(dispatchGate(db, cfg, later)).toBe('open');
+  });
+
+  test('a seven_day window with no reset holds for seven days from its own observation', () => {
+    ingest({ seven_day: { utilization: 0.95 } }, plus(t0, -6 * DAY));
+    expect(dispatchGate(db, cfg, t0)).toBe('finishing_only');
+    ingest({ seven_day: { utilization: 0.95 } }, plus(t0, -8 * DAY));
+    // A newer shared observation does not keep the window's old figure alive.
+    setUsageState(db, { observedAt: t0.toISOString() }, t0);
+    expect(dispatchGate(db, cfg, t0)).toBe('open');
+  });
+
+  test('a five_hour window with no reset holds for five hours from its own observation', () => {
+    ingest({ five_hour: { utilization: 0.95 } }, plus(t0, -4 * H));
+    expect(dispatchGate(db, cfg, t0)).toBe('finishing_only');
+    expect(dispatchGate(db, cfg, plus(t0, H))).toBe('open');
+  });
+
+  test('liveAccountWindows lists only live account-wide windows', () => {
+    ingest({
+      five_hour: { utilization: 0.97, resetsAt: '2026-10-20T10:59:00Z' },
+      seven_day: { utilization: 0.4, resetsAt: future },
+      seven_day_fable: { utilization: 0.9, resetsAt: future },
+      seven_day_overage_included: { utilization: 0.9, resetsAt: future },
+    });
+    expect(liveAccountWindows(db, t0).map((w) => w.key)).toEqual(['seven_day']);
+  });
 });
 
 describe('every reported usage window (#144)', () => {
