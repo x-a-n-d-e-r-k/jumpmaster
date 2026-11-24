@@ -6,7 +6,7 @@ import { CONTROL_ROUTES } from './api/manifest.js';
 import { createApp } from './app.js';
 import { loadBoot } from './config/boot.js';
 import { ConfigStore } from './config/store.js';
-import { ctlRequest, runCtl } from './ctl.js';
+import { ctlRequest, runCtl, SECRETS_USAGE } from './ctl.js';
 import { openDb } from './db/open.js';
 import { appendEvents, listEvents, setZoneMode } from './db/repo.js';
 import { zoneGuidance } from './github/guidance.js';
@@ -782,6 +782,79 @@ describe('ctl secrets (Task 4)', () => {
       init: { method: 'POST' },
     });
     expect((await run(['secrets', 'nope'])).code).toBe(2);
+  });
+
+  test('secrets set, test and remove gitlab-pat/<zone>/<role> reach the GitLab token routes (issue #776)', async () => {
+    const GL = ['glpat', 'C'.repeat(20)].join('-');
+    const fromStdin = await run(['secrets', 'set', 'gitlab-pat/web/author'], `${GL}\n`);
+    expect(fromStdin.code).toBe(0);
+    expect(fromStdin.calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets/gitlab-pat/web/author',
+      init: { method: 'PUT' },
+    });
+    expect(bodyOf(fromStdin)).toEqual({ value: GL });
+    const file = join(mkdtempSync(join(tmpdir(), 'jm-ctl-gitlab-')), 'v');
+    writeFileSync(file, `${GL}\n`, { mode: 0o600 });
+    const fromFile = await run(
+      ['secrets', 'set', 'gitlab-pat/web/reviewer', '--from-file', file],
+      '',
+    );
+    expect(fromFile.calls[0]?.url).toBe(
+      'http://127.0.0.1:7420/api/control/secrets/gitlab-pat/web/reviewer',
+    );
+    expect(bodyOf(fromFile)).toEqual({ value: GL });
+    // Each segment is encoded on its own.
+    expect(ctlRequest(['secrets', 'set', 'gitlab-pat/a b/author'])).toEqual({
+      path: '/api/control/secrets/gitlab-pat/a%20b/author',
+      method: 'PUT',
+    });
+    expect(ctlRequest(['secrets', 'test', 'gitlab-pat/web/reviewer'])).toEqual({
+      path: '/api/control/secrets/gitlab-pat/web/reviewer/test',
+      method: 'POST',
+      body: {},
+    });
+    expect(ctlRequest(['secrets', 'remove', 'gitlab-pat/web/reviewer'])).toEqual({
+      path: '/api/control/secrets/gitlab-pat/web/reviewer',
+      method: 'DELETE',
+    });
+    expect((await run(['secrets', 'test', 'gitlab-pat/web/author'])).calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets/gitlab-pat/web/author/test',
+      init: { method: 'POST' },
+    });
+    expect((await run(['secrets', 'remove', 'gitlab-pat/web/reviewer'])).calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets/gitlab-pat/web/reviewer',
+      init: { method: 'DELETE' },
+    });
+    // A value in argv, or a --created the route has no field for, is refused before any call.
+    const argv = await run(['secrets', 'set', 'gitlab-pat/web/author', GL]);
+    expect(argv.code).toBe(2);
+    expect(argv.calls).toHaveLength(0);
+    expect(argv.err.join('\n')).toMatch(/stdin or --from-file/);
+    const created = await run(
+      ['secrets', 'set', 'gitlab-pat/web/author', '--created', '2026-01-02'],
+      `${GL}\n`,
+    );
+    expect(created.code).toBe(2);
+    expect(created.calls).toHaveLength(0);
+    for (const r of [fromStdin, fromFile, argv, created])
+      expect(`${r.out.join('\n')}${r.err.join('\n')}${r.calls[0]?.url ?? ''}`).not.toContain(GL);
+    // set <plain name> and set of another slashed name keep their one-segment path.
+    expect(ctlRequest(['secrets', 'set', 'githubAuthorToken'])?.path).toBe(
+      '/api/control/secrets/githubAuthorToken',
+    );
+    expect(ctlRequest(['secrets', 'set', 'github-app/acme/author'])?.path).toBe(
+      '/api/control/secrets/github-app%2Facme%2Fauthor',
+    );
+    expect((await run(['secrets', 'set', 'githubAuthorToken'], `${GL}\n`)).calls[0]?.url).toBe(
+      'http://127.0.0.1:7420/api/control/secrets/githubAuthorToken',
+    );
+    // The usage names the new forms.
+    for (const form of [
+      'ctl secrets set gitlab-pat/<zone>/<role>',
+      'ctl secrets test gitlab-pat/<zone>/<role>',
+      'ctl secrets remove gitlab-pat/<zone>/<role>',
+    ])
+      expect(SECRETS_USAGE).toContain(form);
   });
 
   test('secrets remove github-app/<owner>/<role> reaches the app entry remove route (issue #599)', async () => {
