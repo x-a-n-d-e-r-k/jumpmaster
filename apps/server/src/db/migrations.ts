@@ -1660,6 +1660,14 @@ const V62_SQL = `
 ALTER TABLE sticks ADD COLUMN egress_ceiling_json TEXT;
 `;
 
+/**
+ * v63: how many times an `unknown` outbox write was sent again after a clean read-back (#787).
+ * Existing rows read as 0.
+ */
+const V63_SQL = `
+ALTER TABLE outbox ADD COLUMN resends INTEGER NOT NULL DEFAULT 0;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1723,6 +1731,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 60, sql: V60_SQL },
   { version: 61, sql: V61_SQL },
   { version: 62, sql: V62_SQL },
+  { version: 63, sql: V63_SQL },
 ];
 
 /**

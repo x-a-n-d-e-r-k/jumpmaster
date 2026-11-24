@@ -1162,11 +1162,13 @@ export interface OutboxRow {
   error: string | null;
   createdAt: string;
   updatedAt: string;
+  /** How many times an `unknown` write was sent again after a clean read-back (#787). */
+  resends: number;
 }
 
 const OUTBOX_COLS = `o.id, o.op_key AS opKey, o.kind, o.work_item_id AS workItemId, o.zone_id AS zoneId,
   o.payload_json AS payloadJson, o.state, o.result_json AS resultJson, o.error,
-  o.created_at AS createdAt, o.updated_at AS updatedAt`;
+  o.created_at AS createdAt, o.updated_at AS updatedAt, o.resends`;
 
 export function getOutbox(db: Db, opKey: string): OutboxRow | undefined {
   return db.prepare(`SELECT ${OUTBOX_COLS} FROM outbox o WHERE o.op_key = ?`).get(opKey) as
@@ -1177,7 +1179,7 @@ export function getOutbox(db: Db, opKey: string): OutboxRow | undefined {
 /** `INSERT OR IGNORE` on `op_key`; returns whether a row was inserted. */
 export function insertOutbox(
   db: Db,
-  row: Omit<OutboxRow, 'resultJson' | 'error' | 'updatedAt'>,
+  row: Omit<OutboxRow, 'resultJson' | 'error' | 'updatedAt' | 'resends'>,
 ): boolean {
   const r = db
     .prepare(
@@ -1240,6 +1242,22 @@ export function deleteFailedOutbox(db: Db, itemId: number, kind?: OutboxRow['kin
       `DELETE FROM outbox WHERE work_item_id = ? AND state = 'failed' AND (? IS NULL OR kind = ?)`,
     )
     .run(itemId, kind ?? null, kind ?? null).changes;
+}
+
+/**
+ * Claims one resend of an `unknown` write: a compare-and-set on its state and the `resends` count
+ * the caller read, which counts the resend and stamps `updated_at`. Of two passes that read the
+ * same row, one wins; returns whether this caller did.
+ */
+export function claimOutboxResend(db: Db, opKey: string, resends: number, now: Date): boolean {
+  return (
+    db
+      .prepare(
+        `UPDATE outbox SET resends = resends + 1, updated_at = ?
+           WHERE op_key = ? AND state = 'unknown' AND resends = ?`,
+      )
+      .run(now.toISOString(), opKey, resends).changes === 1
+  );
 }
 
 /**
