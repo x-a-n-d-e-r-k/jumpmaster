@@ -922,7 +922,7 @@ describe('the wizard says what it checked (#161)', () => {
     const visible = forge.replace(/name="[^"]*"/g, '');
     expect(visible).not.toMatch(/\bauthorMayBeAdmin\b/);
     const text = forge
-      .replace(/<script>[\s\S]*?<\/script>/g, '')
+      .replace(/<script>[\s\S]*?<\/script>/gi, '')
       .replace(/<style>[\s\S]*?<\/style>/g, '')
       .replace(/<[^>]*>/g, ' ');
     expect(text.match(/\b[a-z]+[A-Z][A-Za-z]*\b/g) ?? []).toEqual([]);
@@ -1028,7 +1028,7 @@ describe('creating the GitHub Apps from the forge step (#374, spec §4.1)', () =
     const w = await world({ github: { ownerType: 'Organization' } });
     const forge = (await w.get('/setup/forge?repo=octo-org%2Fdemo')).body;
     const text = forge
-      .replace(/<script>[\s\S]*?<\/script>/g, '')
+      .replace(/<script>[\s\S]*?<\/script>/gi, '')
       .replace(/<style>[\s\S]*?<\/style>/g, '')
       .replace(/<[^>]*>/g, ' ');
     expect(text.match(/\b[a-z]+[A-Z][A-Za-z]*\b/g) ?? []).toEqual([]);
@@ -1522,5 +1522,333 @@ describe('the project step on GitHub Apps with no author token (#549)', () => {
     test('a regular file named like an owner leaves the step unfinished', async () => {
       expect(await next({ roles: ['author'], strayOwner: 'file' })).toBe('/setup/forge');
     });
+  });
+});
+
+// Issue #796: the project step takes owner/name, a GitHub URL or a GitLab project URL.
+const GITLAB_URL = 'https://gitlab.example.com/group/sub/project';
+
+type FakeEl = {
+  hidden: boolean;
+  textContent: string;
+  innerHTML: string;
+  value: string;
+  checked: boolean;
+  name: string;
+  dataset: Record<string, string>;
+  children: FakeEl[];
+  listeners: Record<string, (e: unknown) => unknown>;
+  [k: string]: unknown;
+};
+
+function fakeEl(o: Partial<FakeEl> = {}): FakeEl {
+  const el: FakeEl = {
+    hidden: false,
+    textContent: '',
+    innerHTML: '',
+    value: '',
+    checked: false,
+    name: '',
+    dataset: {},
+    children: [],
+    listeners: {},
+    ...o,
+  };
+  Object.assign(el, {
+    append: (...kids: unknown[]) => {
+      for (const k of kids) if (typeof k === 'object') el.children.push(k as FakeEl);
+    },
+    addEventListener: (t: string, f: (e: unknown) => unknown) => {
+      el.listeners[t] = f;
+    },
+    querySelector: (sel: string) =>
+      el.children.find((c) => sel === `input[name=${c.name}]`) ?? null,
+    querySelectorAll: (sel: string) => (sel === 'p' ? el.children : []),
+  });
+  // `gates.textContent = ''` empties the list, as the DOM does.
+  let text = '';
+  Object.defineProperty(el, 'textContent', {
+    get: () => text,
+    set: (v: string) => {
+      text = v;
+      if (v === '') el.children.length = 0;
+    },
+  });
+  return el;
+}
+
+/**
+ * Runs the project form's script over a small fake page: detects `input` (answered by
+ * `detected`), submits the review as it stands, and returns what the page sent and showed.
+ */
+async function runProjectForm(
+  html: string,
+  input: string,
+  detected: Record<string, unknown>,
+  o: { identity?: string; preset?: string; gates?: { name: string; run: string }[] } = {},
+) {
+  const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/gi)]
+    .map((m) => m[1] as string)
+    .find((s) => s.includes('const HOSTS')) as string;
+  expect(script).toBeDefined();
+  const els: Record<string, FakeEl> = {};
+  const byId = (id: string) => {
+    els[id] ??= fakeEl({ hidden: ['project', 'guidance-box', 'gitlab-next'].includes(id) });
+    return els[id];
+  };
+  const preset = fakeEl({ value: 'generic' });
+  const admin = fakeEl({ name: 'authorMayBeAdmin' });
+  const posts: { url: string; body: Record<string, unknown> }[] = [];
+  const gets: string[] = [];
+  const ctx = vm.createContext({
+    document: {
+      getElementById: byId,
+      createElement: () => fakeEl(),
+      querySelector: (sel: string) =>
+        sel === 'select[name=preset]'
+          ? preset
+          : sel === 'input[name=authorMayBeAdmin]'
+            ? admin
+            : sel === 'input[name=identity]:checked'
+              ? { value: o.identity ?? 'two-bot' }
+              : null,
+      querySelectorAll: () => [],
+    },
+    location: { href: '' },
+    URLSearchParams,
+    JSON,
+    jmFetch: async (url: string, body: Record<string, unknown>) => {
+      posts.push({ url, body });
+      const answer =
+        url === '/api/control/detect'
+          ? { status: 200, json: detected }
+          : { status: 409, json: { needsConfirmation: true, confirm: '/confirm/x' } };
+      return { ok: answer.status < 300, status: answer.status, json: async () => answer.json };
+    },
+    fetch: async (url: string) => {
+      gets.push(url);
+      return { text: async () => '<p>guidance</p>' };
+    },
+  });
+  vm.runInContext(script, ctx);
+  await byId('detect').listeners.submit?.({
+    preventDefault: () => {},
+    target: { project: { value: input } },
+  });
+  const shownGates = byId('gates').children.map((p) => ({
+    name: (p.children[0] as FakeEl).value,
+    run: (p.children[1] as FakeEl).value,
+  }));
+  // The operator's review: the chosen stack and checks.
+  if (o.preset) preset.value = o.preset;
+  if (o.gates) {
+    byId('gates').children.length = 0;
+    for (const g of o.gates)
+      byId('gates').children.push(
+        fakeEl({
+          children: [
+            fakeEl({ name: 'gate-name', value: g.name }),
+            fakeEl({ name: 'gate-run', value: g.run }),
+          ],
+        }),
+      );
+    for (const p of byId('gates').children)
+      Object.assign(p, {
+        querySelector: (sel: string) =>
+          p.children.find((c) => sel === `input[name=${c.name}]`) ?? null,
+      });
+  }
+  const form = {
+    preset,
+    authorMayBeAdmin: admin,
+    id: { value: '' },
+    querySelector: () => ({ value: o.identity ?? 'two-bot' }),
+  };
+  await byId('project').listeners.submit?.({ preventDefault: () => {}, target: form });
+  return { posts, gets, els: byId, shownGates, ctx };
+}
+
+describe('the project step takes a GitLab project URL (#796)', () => {
+  test('a GitLab URL is answered with forge, origin and path, with no read, no app and no token, even with no author token', async () => {
+    const broker: DetectAppBroker = {
+      installationFor: async () => {
+        throw new Error('the app broker must not be called');
+      },
+    } as unknown as DetectAppBroker;
+    const w = await world({ appBroker: broker });
+    expect(w.store.resolved().githubAuthorToken.source).toBe('missing');
+    const d = await w.call('POST', '/api/control/detect', { project: GITLAB_URL });
+    expect(d.statusCode, d.body).toBe(200);
+    expect(d.json()).toEqual({
+      forge: 'gitlab',
+      baseUrl: 'https://gitlab.example.com',
+      repo: 'group/sub/project',
+    });
+    expect(w.detectTokens).toEqual([]);
+  });
+
+  test('the page shows one empty gate row, no guidance, the vault entries, and posts zone.project as typed', async () => {
+    const w = await world();
+    const page = (await w.get('/setup/project')).body;
+    const r = await runProjectForm(
+      page,
+      GITLAB_URL,
+      { forge: 'gitlab', baseUrl: 'https://gitlab.example.com', repo: 'group/sub/project' },
+      { identity: 'two-bot', preset: 'node', gates: [{ name: 'test', run: 'npm test' }] },
+    );
+    expect(r.posts[0]).toEqual({ url: '/api/control/detect', body: { project: GITLAB_URL } });
+    expect(r.shownGates).toEqual([{ name: '', run: '' }]);
+    expect(r.els('found').textContent).toContain('group/sub/project');
+    expect(r.els('found').textContent).toContain('https://gitlab.example.com');
+    expect(r.els('found').textContent).toMatch(/detection is not available on GitLab yet/);
+    expect(r.els('gitlab-next').hidden).toBe(false);
+    expect(r.els('author-admin').hidden).toBe(true);
+    expect(r.els('guidance-box').hidden).toBe(true);
+    expect(r.gets).toEqual([]);
+    expect(r.posts[1]?.url).toBe('/api/control/zones');
+    expect(r.posts[1]?.body.zone).toEqual({
+      project: GITLAB_URL,
+      preset: 'node',
+      gates: [{ name: 'test', run: 'npm test' }],
+      identity: 'two-bot',
+      egress: { mode: 'monitor' },
+    });
+    expect(r.ctx.location).toEqual({ href: '/confirm/x' });
+  });
+
+  test('owner/name posts the same zone body as before and loads the guidance; a github.com URL uses its normalized repo', async () => {
+    const w = await world();
+    const page = (await w.get('/setup/project')).body;
+    const detected = {
+      forge: 'github',
+      repo: 'octo/demo',
+      visibility: 'private',
+      defaultBranch: 'main',
+      preset: 'node',
+      gates: [{ name: 'test', run: 'npm test', timeoutSec: 600 }],
+      evidence: ['package.json'],
+      problems: [],
+      admin: true,
+    };
+    for (const input of ['octo/demo', 'https://github.com/octo/demo']) {
+      const r = await runProjectForm(page, input, detected);
+      expect(r.posts[0]?.body).toEqual({ project: input });
+      expect(r.els('found').textContent).toMatch(/^octo\/demo: private, default branch main/);
+      expect(r.els('gitlab-next').hidden).toBe(true);
+      expect(r.els('guidance-box').hidden).toBe(false);
+      expect(r.gets).toEqual(['/setup/project/github?repo=octo%2Fdemo&identity=two-bot&reviewer=']);
+      expect(r.posts[1]?.body.zone).toEqual({
+        repo: 'octo/demo',
+        preset: 'node',
+        gates: [{ name: 'test', run: 'npm test', timeoutSec: 600 }],
+        identity: 'two-bot',
+        egress: { mode: 'monitor' },
+        authorMayBeAdmin: true,
+        reviewReadToken: true,
+      });
+    }
+  });
+
+  test('the zone the page builds for GitLab is created through the apply path, after the confirmation', async () => {
+    const w = await world();
+    const add = await w.call('POST', '/api/control/zones', {
+      zone: {
+        project: GITLAB_URL,
+        preset: 'node',
+        gates: [{ name: 'test', run: 'npm test' }],
+        identity: 'two-bot',
+        egress: { mode: 'monitor' },
+      },
+      returnTo: '/setup/doctor',
+      cancelTo: '/setup/project',
+    });
+    expect(add.statusCode, add.body).toBe(409);
+    const body = add.json();
+    expect(body.needsConfirmation).toBe(true);
+    const confirm = await w.get(body.confirm);
+    expect(confirm.statusCode).toBe(200);
+    const tokenIn = /name="token" value="([\w-]+)"/.exec(confirm.body)?.[1] as string;
+    const done = await w.form(body.confirm, { token: tokenIn, passphrase: PASS });
+    expect(done.statusCode).toBe(303);
+    expect(done.headers.location).toBe('/setup/doctor');
+    expect(w.store.current().dropZones[0]).toMatchObject({
+      id: 'project',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+      repo: 'group/sub/project',
+      preset: 'node',
+    });
+  });
+
+  test('owner/name and a github.com URL detect through the forge as octo/demo with the usual fields', async () => {
+    const w = await world();
+    await w.call('POST', '/api/control/sudo', { passphrase: PASS });
+    await w.call('PUT', '/api/control/secrets/githubAuthorToken', { value: AUTHOR });
+    for (const project of ['octo/demo', 'https://github.com/octo/demo']) {
+      const d = await w.call('POST', '/api/control/detect', { project });
+      expect(d.statusCode, d.body).toBe(200);
+      expect(d.json()).toMatchObject({
+        forge: 'github',
+        repo: 'octo/demo',
+        visibility: 'public',
+        defaultBranch: 'main',
+        preset: 'node',
+      });
+      expect(d.body).not.toContain(AUTHOR);
+    }
+    expect(w.detectTokens).toEqual([AUTHOR, AUTHOR]);
+  });
+
+  test('a body with both repo and project, or neither, is refused with 400', async () => {
+    const w = await world();
+    for (const body of [{ repo: 'octo/demo', project: 'octo/demo' }, {}])
+      expect((await w.call('POST', '/api/control/detect', body)).statusCode).toBe(400);
+    expect(w.detectTokens).toEqual([]);
+  });
+
+  test('a refused input gets the fixed error and is never echoed, nor logged', async () => {
+    const w = await world();
+    const glpat = 'glpat-' + 'AbCdEfGhIjKlMnOpQrSt';
+    for (const [project, error] of [
+      [
+        'what is this',
+        'the repository must be owner/name with a valid GitHub owner and repository name',
+      ],
+      ['http://gitlab.example.com/group/project', 'a project URL must use https'],
+      [
+        `https://gitlab.example.com/${glpat}/project`,
+        'the project looks like it contains a token: enter owner/name or a project URL',
+      ],
+    ] as const) {
+      const r = await w.call('POST', '/api/control/detect', { project });
+      expect(r.statusCode, project).toBe(400);
+      expect(r.json()).toEqual({ error });
+      expect(r.body).not.toContain(project);
+    }
+    expect(w.logs.join('\n')).not.toContain(glpat);
+    expect(w.detectTokens).toEqual([]);
+  });
+
+  test('both forms take any project, with no GitHub-only pattern, and name the vault entries but no refused command', async () => {
+    const w = await world();
+    for (const url of ['/setup/project', '/projects/new']) {
+      const body = (await w.get(url)).body;
+      const input = /<input name="project"[^>]*>/.exec(body)?.[0];
+      expect(input, url).toBeDefined();
+      expect(input, url).not.toContain('pattern=');
+      expect(body, url).toContain('<label>Project <input name="project"');
+      expect(body, url).not.toContain('name="repo"');
+      expect(body, url).toMatch(/owner\/name, a GitHub URL .* or a GitLab project URL/);
+      expect(body, url).toContain('gitlab-pat/');
+      expect(body, url).toContain('/author</code>');
+      expect(body, url).toContain('/reviewer</code> for two bots');
+      expect(body, url).not.toContain('ctl secrets set gitlab-pat/');
+      // The page decides nothing about the forge itself: no URL or path parsing in its script.
+      const script = [...body.matchAll(/<script>([\s\S]*?)<\/script>/gi)]
+        .map((m) => m[1] as string)
+        .find((s) => s.includes('const HOSTS'));
+      expect(script, url).toContain("jmFetch('/api/control/detect', { project })");
+      expect(script, url).not.toMatch(/new URL\(|\.split\(|\.match\(|\.test\(|RegExp/);
+    }
   });
 });
