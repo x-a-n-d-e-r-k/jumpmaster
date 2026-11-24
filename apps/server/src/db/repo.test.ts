@@ -28,10 +28,12 @@ import {
   latestVerdict,
   listEvents,
   listOutbox,
+  listUsageWindows,
   listWorkItems,
   markMinted,
   markZoneStopping,
   type NewDrop,
+  recordUsageWindows,
   removeStick,
   reserveGrant,
   resetAttempts,
@@ -440,6 +442,51 @@ describe('M1 repo', () => {
       fiveHourUtil: 0.5,
       updatedAt: plus(t0, MIN).toISOString(),
     });
+  });
+});
+
+describe('recordUsageWindows (#737)', () => {
+  test('a new set without a stored five_hour forgets it and updates the other keys', () => {
+    const t1 = new Date('2026-11-01T00:00:00.000Z');
+    const t2 = new Date('2026-11-01T01:00:00.000Z');
+    recordUsageWindows(
+      db,
+      { five_hour: { utilization: 0.5 }, seven_day: { utilization: 0.2 } },
+      t1,
+      null,
+    );
+    recordUsageWindows(
+      db,
+      {
+        seven_day: { utilization: 0.3, resetsAt: '2026-11-08T00:00:00.000Z' },
+        seven_day_fable: { utilization: 0.1 },
+      },
+      t2,
+      'm',
+    );
+    expect(listUsageWindows(db)).toEqual([
+      {
+        key: 'seven_day',
+        utilization: 0.3,
+        resetsAt: '2026-11-08T00:00:00.000Z',
+        observedAt: t2.toISOString(),
+        model: 'm',
+      },
+      {
+        key: 'seven_day_fable',
+        utilization: 0.1,
+        resetsAt: null,
+        observedAt: t2.toISOString(),
+        model: 'm',
+      },
+    ]);
+  });
+
+  test('an empty set forgets nothing', () => {
+    const t1 = new Date('2026-11-01T00:00:00.000Z');
+    recordUsageWindows(db, { five_hour: { utilization: 0.5 } }, t1, null);
+    recordUsageWindows(db, {}, t1, null);
+    expect(listUsageWindows(db).map((w) => w.key)).toEqual(['five_hour']);
   });
 });
 
