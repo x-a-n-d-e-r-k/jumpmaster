@@ -6,7 +6,6 @@ import {
   DropResultSchema,
   dropSecrets,
   FEATURES_HEADER,
-  hostAllowed,
   IMAGE_MIRROR_FEATURE,
   ImageFetchSchema,
   isCrewRole,
@@ -14,7 +13,6 @@ import {
   isRepoFullName,
   isSafeBranchName,
   type LeaseSkip,
-  normalizeHost,
   type PushGrant,
   type PushPlan,
   PushResultSchema,
@@ -77,6 +75,7 @@ import { modelFamily } from '../fable.js';
 import type { AppBrokers } from '../forge/app-brokers.js';
 import type { AppTokenSource } from '../forge/app-tokens.js';
 import { GitHubAppError } from '../forge/github-app.js';
+import { gitlabPushHost } from '../forge/gitlab-host.js';
 import { createHeldDropTokens, failureOf, type HeldDropTokens } from '../forge/held-tokens.js';
 import {
   InstallationCheckError,
@@ -238,36 +237,6 @@ const PushResultBody = z.object({ epoch: z.number(), result: PushResultSchema })
 const PUSHING_ROLES: readonly Role[] = ['implement', 'heal', 'resolve'];
 /** A GitHub zone's push container reaches GitHub and nothing else. */
 const PUSH_EGRESS = ['github.com'];
-
-/**
- * The one host a GitLab zone's push container reaches under egress (issue #783, Ruling 117): its
- * GitLab host, in canonical form, when it is a DNS name on port 443 that the zone's own guarded
- * list allows. Otherwise why not, naming what the operator would change.
- */
-const gitlabPushHost = (
-  baseUrl: string,
-  zoneAllow: string[],
-): { host: string } | { why: string } => {
-  let url: URL;
-  try {
-    url = new URL(baseUrl);
-  } catch {
-    return { why: 'its gitlab.baseUrl is not a URL' };
-  }
-  const port =
-    url.port || (url.protocol === 'https:' ? '443' : url.protocol === 'http:' ? '80' : '');
-  if (port !== '443') {
-    return {
-      why: `the egress proxy allows port 443 only, and its GitLab host is on port ${port || 'unknown'}`,
-    };
-  }
-  const host = normalizeHost(url.hostname);
-  if (host === null) return { why: `its GitLab host ${url.hostname} is not a DNS name` };
-  if (!hostAllowed(host, zoneAllow)) {
-    return { why: `its GitLab host is not allowed: add ${host} to the zone's egress.allow` };
-  }
-  return { host };
-};
 
 const LIVE: readonly DropState[] = ['leased', 'running'];
 /** The roles that clone with the reviewer's read token (§4.2): never an author's. */
