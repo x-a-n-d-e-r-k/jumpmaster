@@ -3,6 +3,7 @@ import {
   ARTIFACT_PREFIX,
   ArtifactChunkSchema,
   type ArtifactUpload,
+  ceilingRefusal,
   type DropPayload,
   type DropResult,
   DropResultSchema,
@@ -20,7 +21,13 @@ import {
 } from '@jumpmaster/protocol';
 import type { Ack, DropClient } from './client.js';
 import type { ContainerDriver, DropNet, VolumeInfo } from './driver.js';
-import { type EgressSession, egressImage, startEgress, trooperEgressRefusal } from './egress.js';
+import {
+  type EgressSession,
+  egressImage,
+  startEgress,
+  stickCeiling,
+  trooperEgressRefusal,
+} from './egress.js';
 import { EventAssembler } from './event-assembler.js';
 import { fetchFromServer, fromServer } from './fetch-image.js';
 import type { ImageHold, StickImages } from './image-gc.js';
@@ -449,6 +456,11 @@ type RunDeps = {
    * never runs meanwhile, and marks its recorded images used now.
    */
   images?: Pick<StickImages, 'lock' | 'used'>;
+  /**
+   * The stick's egress ceiling (main reads `JM_EGRESS_CEILING` once at startup): `undefined`
+   * reads it from the environment, `null` means none.
+   */
+  ceiling?: string[] | null;
 };
 
 /** Starts containers from `refs`: never during an image sweep; each recorded image used now. */
@@ -603,6 +615,24 @@ async function prepareAndRun(
       gates: [],
     });
   };
+  // The stick's egress ceiling, before anything else: a drop outside it reads no base image and
+  // verifies, pulls or creates nothing. Checked on what this stick received, so the server can't
+  // widen it.
+  let ceiling: string[] | null;
+  let outside: string | null;
+  try {
+    ceiling = stickCeiling(deps.ceiling);
+    outside = ceilingRefusal(egress, ceiling);
+  } catch (e) {
+    // An unreadable JM_EGRESS_CEILING is never read as no ceiling.
+    ceiling = [];
+    outside = e instanceof Error ? e.message : String(e);
+  }
+  if (outside) {
+    log(JSON.stringify({ event: 'drop-refused', dropId, epoch, reason: outside }));
+    await fail(outside);
+    return;
+  }
   /** A heartbeat answer (or the lost-server limit) ended the drop: prepare nothing more. */
   const halted = () => {
     if (!beat.halted()) return false;
@@ -764,15 +794,19 @@ async function prepareAndRun(
         const proxy = proxyImage ?? egressImage(process.env);
         const dropNet = net;
         session = await starting(deps, [proxy], () =>
-          startEgress(driver, {
-            dropId,
-            epoch,
-            egress,
-            net: dropNet,
-            image: proxy,
-            labels,
-            ...(deps.egressReadyMs !== undefined ? { readyMs: deps.egressReadyMs } : {}),
-          }),
+          startEgress(
+            driver,
+            {
+              dropId,
+              epoch,
+              egress,
+              net: dropNet,
+              image: proxy,
+              labels,
+              ...(deps.egressReadyMs !== undefined ? { readyMs: deps.egressReadyMs } : {}),
+            },
+            ceiling,
+          ),
         );
       } catch (e) {
         await fail(`egress proxy failed to start: ${e instanceof Error ? e.message : String(e)}`);

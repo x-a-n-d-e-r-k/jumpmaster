@@ -285,6 +285,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
     // The doctor's `chat.service` asks the same service (#336).
     ...(chatService ? { chatHealth: () => chatService.health() } : {}),
     resolvedApps: () => live.resolvedApps(),
+    resolvedGitlabPats: () => live.resolvedGitlabPats(),
     // The kill switch suspends each zone's app installations, and release unsuspends them (§4.2).
     appSuspension: {
       apps: () => live.resolvedApps(),

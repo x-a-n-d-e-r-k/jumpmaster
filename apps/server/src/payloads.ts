@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
   agentBranch,
+  BASE_EGRESS,
   CREW_ROLES,
   type CrewRole,
   type DropPayload,
@@ -424,11 +425,8 @@ function arbiterRuling(db: Db, drop: Drop): string {
   );
 }
 
-/**
- * Hosts every drop under egress reaches: the Claude API and GitHub (clone and push). The monitor
- * rehearsal may extend this; the commit that does records the hosts it observed.
- */
-export const BASE_EGRESS = ['api.anthropic.com', 'github.com'];
+// The base hosts live in the protocol package (the stick's ceiling needs them); re-exported here.
+export { BASE_EGRESS };
 
 /** An entry in canonical form: a name, or `*.` plus a name. */
 const canonicalEntry = (e: string): string =>

@@ -1,7 +1,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import type { ContainerDriver, IsolationFacts } from './driver.js';
 import {
   EgressTally,
@@ -227,6 +227,47 @@ describe('the egress capability', () => {
       JM_EGRESS_MAX_TUNNELS: '256',
       JM_EGRESS_MAX_CONNECTIONS: '512',
     });
+  });
+
+  test('startEgress outside the ceiling throws before any proxy starts', async () => {
+    const d = probeDriver();
+    const o = {
+      dropId: 'd',
+      epoch: 1,
+      egress: { mode: 'enforce' as const, allow: ['github.com', 'evil.example.net'] },
+      net: { proxy: '172.30.0.2' } as never,
+      image: 'i',
+      labels: {},
+      readyMs: 50,
+      env: {},
+    };
+    await expect(startEgress(d.driver, o, ['github.com', 'gitlab.example.com'])).rejects.toThrow(
+      /JM_EGRESS_CEILING.*evil\.example\.net/,
+    );
+    // undefined reads JM_EGRESS_CEILING from the environment given.
+    await expect(
+      startEgress(d.driver, { ...o, env: { JM_EGRESS_CEILING: 'gitlab.example.com' } }),
+    ).rejects.toThrow(/evil\.example\.net/);
+    await expect(
+      startEgress(d.driver, { ...o, egress: { mode: 'monitor', allow: [] } }, ['github.com']),
+    ).rejects.toThrow(/"monitor"/);
+    expect(d.calls.filter((c) => c.startsWith('proxy'))).toEqual([]);
+    // Within it, the proxy starts.
+    const s = await startEgress(d.driver, o, ['github.com', '*.example.net']);
+    await s.stop();
+    expect(d.calls.filter((c) => c.startsWith('proxy '))).toHaveLength(1);
+  });
+
+  test('the capability probe (enforce, nothing allowed) passes under any ceiling', async () => {
+    vi.stubEnv('JM_EGRESS_CEILING', 'gitlab.example.com');
+    try {
+      const d = probeDriver();
+      expect(await egressCapability(d.driver, { HOSTNAME: 'h1' }, { readyMs: 50 })).toEqual({
+        ok: true,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   test("the host-side probe runs from the stick's own image, the drop side from the proxy image", async () => {
