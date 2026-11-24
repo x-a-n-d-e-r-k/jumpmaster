@@ -11,9 +11,10 @@ install and run.
 The current milestone is M5: GitHub App authentication, built as specified in
 `docs/superpowers/specs/2026-11-13-github-app-auth.md` (the spec). Each objective below is one
 task of the spec's §13, except "Usage gate decides on reported utilization", which fixes how the
-dispatch gate reads Claude's usage signals, and "GitLab forge adapter", which is the GitLab adapter
+dispatch gate reads Claude's usage signals, "GitLab forge adapter", which is the GitLab adapter
 that spec §9 and the design spec's §5.5 (`docs/superpowers/specs/2026-10-19-jumpmaster-design.md`)
-assume and Task 12 builds on. Read the named sections of the spec before planning; the spec, the spike
+assume and Task 12 builds on, and "Crew chat enhancements", which improves the owner's crew chat.
+Read the named sections of the spec before planning; the spec, the spike
 results in `docs/spikes/2026-11-14-github-app.md`, and the push container already on `main`
 (spec Task 4) are the ground truth. File issues small enough for one drop each, in dependency
 order, each naming the spec sections it implements.
@@ -130,6 +131,21 @@ It waits for "GitLab forge adapter": the `gitlab-project-token` kind plugs into 
 and the `gitlab-pat` kind that objective delivers. The standalone token client
 (`apps/server/src/forge/gitlab-tokens.ts`, #540 and #595) and GitLab token redaction (#539)
 have already merged.
+
+### Crew chat enhancements
+
+Make the owner's crew chat (`/chat`, `apps/server/src/chat/` and `apps/server/src/ui/chat.ts`)
+easier to live with day to day. It stands apart from the M5 spec; the design of record is
+`docs/superpowers/specs/2026-11-18-crew-chat-design.md`. Parts:
+
+- **Thread management**: rename a thread (from the `/chat` list and the thread page), and delete
+  old threads with a trashcan button on the right side of each listed thread, behind a
+  confirmation. Delete removes the thread's messages and cards with it, is refused while a turn
+  is running or a change waits for confirmation, and never undoes a change the thread applied.
+- Further chat improvements the owner asks for, each as its own issue.
+
+Every route keeps the chat's existing viewer scoping and CSRF protection, and no change weakens
+how chat actions are confirmed or undone.
 
 ## Constraints
 
