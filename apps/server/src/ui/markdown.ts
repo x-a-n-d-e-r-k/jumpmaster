@@ -61,6 +61,8 @@ function isDelimiterRow(line: string): boolean {
 /** A letter, digit, `_` or `/`: `*` and `_` emphasis does not open after or close before one. */
 const WORD_BEFORE = /[\p{L}\p{N}_/]$/u;
 const WORD_AFTER = /^[\p{L}\p{N}_/]/u;
+/** A `.` then a word character: a file extension, as in the `.ts` of `*test/*.ts`. */
+const EXTENSION_AFTER = /^\.[\p{L}\p{N}_]/u;
 
 /**
  * `indexOf` for scans whose start never moves back: each needle remembers its last answer, so
@@ -102,10 +104,12 @@ function bareUrlMask(text: string): Uint8Array {
  * first one after the opener, found through `forwardFinder`, so the scan is linear.
  * `**`, `*` and `_` emphasis opens only after a non-word character (letters, digits, `_` and
  * `/` count as word) and never inside a bare URL; it closes only before a non-word character.
- * Right after a `/` it closes only when the content opens on neither `/`, `.` nor `*` and holds
- * no whitespace: `**docs/**` and `*src/*` are emphasis, but a span from a glob's leading `**`
- * to a `docs/**` later in the line is not; a prefix count of whitespace keeps that check
- * constant-time. So globs (`apps/**` paths, `**.ts`, `docs/**` at the end of a glob),
+ * Right after a `/` it closes only when the content opens on neither `/`, `.` nor `*`, holds
+ * no whitespace and the closer is not followed by `.` and a word character (a file extension):
+ * `**docs/**`, `**docs/**:` and `See **docs/**.` are emphasis, but `*test/*.ts`,
+ * `**build/**.map` and a span from a glob's leading `**` to a `docs/**` later in the line are
+ * not; a prefix count of whitespace keeps that check constant-time. So globs (`apps/**`
+ * paths, `**.ts`, `docs/**` at the end of a glob, `*test/*.ts`),
  * `2*3*4`, `2**3**4`, snake_case and URLs stay text. A `**` that cannot be bold is text as a
  * pair: its second `*` never opens single emphasis and its first never closes it.
  */
@@ -119,11 +123,14 @@ function inline(text: string, refs: LinkRefs, inLink = false): string {
   /**
    * Whether the delimiter starting at `start` and ending at `j` may close a span whose content
    * starts at `open`. Right after a `/` it closes only a glob-free directory name: content that
-   * opens on neither `/`, `.` nor `*` and holds no whitespace.
+   * opens on neither `/`, `.` nor `*`, holds no whitespace and is not followed by a file
+   * extension (`.` then a word character).
    */
   const closesAt = (open: number, start: number, j: number) =>
     (text[start - 1] !== '/' ||
-      (!/[/.*]/.test(text[open] ?? '') && spaces[start] === spaces[open])) &&
+      (!/[/.*]/.test(text[open] ?? '') &&
+        spaces[start] === spaces[open] &&
+        !EXTENSION_AFTER.test(text.slice(j + 1, j + 3)))) &&
     !WORD_AFTER.test(text.slice(j + 1, j + 3));
   const nonSpace = (c: string | undefined) => c !== undefined && !/\s/.test(c);
 
