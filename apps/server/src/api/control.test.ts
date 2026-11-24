@@ -57,12 +57,19 @@ import { credentialCreatedAt } from '../vault/credentials.js';
 import type { AppEntryRead } from '../vault/github-app-entries.js';
 import type { ResolvedApps } from '../vault/resolution.js';
 import { fingerprintOf, openVault } from '../vault/vault.js';
+import { parseProjectRef } from '../zones/project-ref.js';
 import { type ControlDeps, registerControlRoutes, removalNote } from './control.js';
 import { guidanceFor, recommendFor } from './github.js';
 
 const TOKEN = 'o'.repeat(32);
 const HOST = '127.0.0.1:7420';
 const auth = { authorization: `Bearer ${TOKEN}`, host: HOST };
+/** `parseProjectRef`'s fixed refusal for an input. */
+const parseErr = (input: string): string => {
+  const ref = parseProjectRef(input);
+  if (!('error' in ref)) throw new Error('expected a refusal');
+  return ref.error;
+};
 /** The stored id of the session a header set carries. */
 const operatorHashOf = (h: Record<string, string>) =>
   sha256Hex((h.cookie ?? '').replace(/^jm_session=/, ''));
@@ -2073,6 +2080,79 @@ describe('detect and zone add routes', () => {
     expect(r.statusCode).toBe(409);
     expect(r.json().error).toMatch(/author token/);
     expect(seen.calls).toEqual([]);
+  });
+
+  describe('detect with a project (#796)', () => {
+    test('a GitLab project URL is answered with its forge, origin and path, with no forge read and no token, even with no author token', async () => {
+      const { JM_GITHUB_AUTHOR_TOKEN: _a, ...noAuthor } = zenv;
+      const { seen } = zoneApp({ env: noAuthor });
+      const r = await post('/api/control/detect', {
+        project: 'https://gitlab.example.com/group/sub/project',
+      });
+      expect(r.statusCode, r.body).toBe(200);
+      expect(r.json()).toEqual({
+        forge: 'gitlab',
+        baseUrl: 'https://gitlab.example.com',
+        repo: 'group/sub/project',
+      });
+      expect(seen.forges).toBe(0);
+      expect(seen.calls).toEqual([]);
+    });
+
+    test('owner/name and a github.com URL detect through the forge as owner/name, with the usual fields', async () => {
+      for (const project of ['octo/demo', 'https://github.com/octo/demo']) {
+        const { seen } = zoneApp();
+        const r = await post('/api/control/detect', { project });
+        expect(r.statusCode, r.body).toBe(200);
+        expect(r.json()).toMatchObject({
+          forge: 'github',
+          repo: 'octo/demo',
+          visibility: 'public',
+          defaultBranch: 'main',
+          preset: 'node',
+          admin: false,
+        });
+        expect(seen).toMatchObject({ repo: 'octo/demo', token: AUTHOR });
+        expect(r.body).not.toContain(AUTHOR);
+      }
+    });
+
+    test('a {repo} request answers as before, with no forge or repo field added', async () => {
+      zoneApp();
+      const r = await post('/api/control/detect', { repo: 'octo/demo' });
+      expect(r.statusCode).toBe(200);
+      expect(r.json()).not.toHaveProperty('forge');
+      expect(r.json()).not.toHaveProperty('repo');
+    });
+
+    test('a body with both repo and project, or neither, is refused with 400 before any read', async () => {
+      const { seen } = zoneApp();
+      for (const body of [{ repo: 'octo/demo', project: 'octo/demo' }, {}]) {
+        const r = await post('/api/control/detect', body);
+        expect(r.statusCode, JSON.stringify(body)).toBe(400);
+      }
+      expect(seen.forges).toBe(0);
+    });
+
+    test('a refused project answers parseProjectRef’s fixed error and never echoes the input', async () => {
+      const glpat = 'glpat-' + 'AbCdEfGhIjKlMnOpQrSt';
+      const cases: [string, string][] = [
+        ['not a project at all', parseErr('not a project at all')],
+        ['http://gitlab.example.com/group/project', parseErr('http://x.example/g/p')],
+        [`https://gitlab.example.com/group/${glpat}`, parseErr(glpat)],
+      ];
+      expect(cases[2]?.[1]).toMatch(/looks like it contains a token/);
+      expect(cases[1]?.[1]).toBe('a project URL must use https');
+      for (const [project, error] of cases) {
+        const { seen } = zoneApp();
+        const r = await post('/api/control/detect', { project });
+        expect(r.statusCode, project).toBe(400);
+        expect(r.json()).toEqual({ error });
+        expect(r.body).not.toContain(project);
+        expect(r.body).not.toContain(glpat);
+        expect(seen.forges).toBe(0);
+      }
+    });
   });
 
   test('zones add by the token: id from the repository name, detected gates and preset, egress monitor', async () => {
