@@ -522,6 +522,82 @@ describe('ChatTurns', () => {
     expect(req?.model).toBe('claude-opus-5-5');
   });
 
+  test('a GitLab zone is sent with token null and its full project path, never the GitHub read token', async () => {
+    const gitlabZone: DropZoneConfig = makeZone({
+      id: 'lab',
+      repo: 'group/sub/project',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    });
+    const w = world(done(), { config: configOf({ zones: [patZone, gitlabZone] }) });
+    const events: HubEvent[] = [];
+    const th = createThread(w.db, { title: 't' }, t0);
+    w.turns.subscribe(th.id, 0, (e) => events.push(e));
+    w.owner(th.id, 'hi');
+    w.turns.enqueue(th.id);
+    await w.turns.idle();
+    const req = w.service.requests[0];
+    expect(req?.zones[0]).toEqual({
+      id: 'main',
+      owner: 'acme',
+      name: 'demo',
+      defaultBranch: 'trunk',
+      token: READ_PAT,
+      extraRefs: [],
+    });
+    const lab = req?.zones[1];
+    expect(lab?.id).toBe('lab');
+    expect(lab?.token).toBeNull();
+    expect(`${lab?.owner}/${lab?.name}`).toBe('group/sub/project');
+    expect(JSON.stringify(lab)).not.toContain(READ_PAT);
+    const zoneEvents = events.map((e) => e.event).filter((e) => e.type === 'zone');
+    expect(zoneEvents).toEqual([
+      expect.objectContaining({ type: 'zone', zoneId: 'lab', state: 'unavailable' }),
+    ]);
+    const labLine = req?.systemPrompt.split('\n').find((l) => l.includes('zone lab:')) ?? '';
+    expect(labLine).toContain('group/sub/project');
+    expect(labLine).toContain('code unavailable');
+    expect(labLine).not.toContain('code fetched for this turn');
+    expect(req?.systemPrompt).not.toContain('group/sub,');
+    expect(events.map((e) => JSON.stringify(e)).join('')).not.toContain(READ_PAT);
+    expect(w.lines.join('\n')).not.toContain(READ_PAT);
+  });
+
+  test('a GitHub-only turn request and system prompt are unchanged, with or without forge: github', async () => {
+    const githubZone = makeZone({ id: 'gh', repo: 'octo/gh', forge: 'github' });
+    const w = world(done(), { config: configOf({ zones: [patZone, githubZone] }) });
+    const th = createThread(w.db, { title: 't' }, t0);
+    w.owner(th.id, 'hi');
+    w.turns.enqueue(th.id);
+    await w.turns.idle();
+    const req = w.service.requests[0];
+    expect(req?.zones).toEqual([
+      {
+        id: 'main',
+        owner: 'acme',
+        name: 'demo',
+        defaultBranch: 'trunk',
+        token: READ_PAT,
+        extraRefs: [],
+      },
+      {
+        id: 'gh',
+        owner: 'octo',
+        name: 'gh',
+        defaultBranch: 'trunk',
+        token: READ_PAT,
+        extraRefs: [],
+      },
+    ]);
+    expect(req?.systemPrompt).toBe(
+      [
+        "The install's zones, from the server's configuration (trusted). Call the MCP tools with one of these zone ids.",
+        '(trusted) zone main: repository acme/demo, default branch trunk, code fetched for this turn',
+        '(trusted) zone gh: repository octo/gh, default branch trunk, code fetched for this turn',
+      ].join('\n'),
+    );
+  });
+
   test('tool events are stored as tool messages and text as one assistant message', async () => {
     const w = world(async function* () {
       yield { type: 'session', sessionId: 'sess-new' };

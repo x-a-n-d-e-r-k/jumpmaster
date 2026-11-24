@@ -106,4 +106,40 @@ describe('chatReadCredential', () => {
     const cred = await chatReadCredential(appZone, configWith(appZone, true), withReviewerApp);
     expect(cred).toBeNull();
   });
+
+  test('a GitLab zone with githubReadToken set gets null', async () => {
+    const apps = fakeAppTokens();
+    const gitlabZone: DropZoneConfig = {
+      ...patZone,
+      repo: 'group/sub/project',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    };
+    const cred = await chatReadCredential(
+      gitlabZone,
+      configWith(gitlabZone, true),
+      noApps,
+      apps.source,
+    );
+    expect(cred).toBeNull();
+    expect(apps.fresh).not.toHaveBeenCalled();
+  });
+
+  test('a GitLab zone whose first path segment has a resolved reviewer App gets null and mints nothing', async () => {
+    const apps = fakeAppTokens();
+    const gitlabZone: DropZoneConfig = {
+      ...appZone,
+      repo: 'octo/sub/project',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    };
+    const cred = await chatReadCredential(
+      gitlabZone,
+      configWith(gitlabZone, true),
+      withReviewerApp,
+      apps.source,
+    );
+    expect(cred).toBeNull();
+    expect(apps.fresh).not.toHaveBeenCalled();
+  });
 });
