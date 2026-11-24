@@ -571,7 +571,9 @@ export function statusOf(input: StatusInput, now: Date): Status {
   const retrying = input.outboxRetrying[0];
   if (retrying)
     return said({
-      headline: `Retrying a GitHub call: ${retrying.kind} in ${name(retrying.zoneId)}`,
+      headline: `Retrying a GitHub call: ${retrying.kind} in ${name(retrying.zoneId)}${
+        retrying.resends > 0 ? `, resent ${plural(retrying.resends, 'time')}` : ''
+      }`,
       detail:
         'Its outcome is unknown; Jumpmaster reads GitHub back before it writes again, so nothing is done twice.',
       waitingOn: 'forge',

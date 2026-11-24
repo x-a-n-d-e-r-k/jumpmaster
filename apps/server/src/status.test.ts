@@ -98,6 +98,7 @@ const outbox = (o: Partial<OutboxRow> = {}): OutboxRow => ({
   error: null,
   createdAt: t0.toISOString(),
   updatedAt: t0.toISOString(),
+  resends: 0,
   ...o,
 });
 
@@ -859,6 +860,15 @@ describe('zones named by a namer (#99)', () => {
   test('with no namer every line names the zone by id, as `ctl status` shows it', () => {
     const s = statusOf(base({ zones: [zone({ mode: 'paused' })] }), NOW);
     expect(s.headline).toBe('Paused by you: main (paused)');
+  });
+
+  test('a write being retried says how many times it was resent, once it was (#787)', () => {
+    expect(statusOf(base({ outboxRetrying: [outbox({ resends: 2 })] }), NOW).headline).toBe(
+      'Retrying a GitHub call: merge in main, resent 2 times',
+    );
+    expect(statusOf(base({ outboxRetrying: [outbox()] }), NOW).headline).toBe(
+      'Retrying a GitHub call: merge in main',
+    );
   });
 
   test('every headline and list line that names a zone uses the namer', () => {
