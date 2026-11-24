@@ -45,6 +45,7 @@ import {
   isRateLimited,
   type ReadProbe,
 } from '../forge/github.js';
+import { gitlabPushHost } from '../forge/gitlab-host.js';
 import {
   InstallationCheckError,
   type InstallationVerifier,
@@ -3329,6 +3330,35 @@ export function egressSeen(
   };
 }
 
+/**
+ * Why a GitLab zone's pushes and clones are held under egress, with the same inputs the push plan
+ * uses (issue #820), or null when its GitLab host is reachable. Only the reason and the host are
+ * named: never the baseUrl itself, which could carry a token, nor the project path.
+ */
+function gitlabEgressHeld(
+  baseUrl: string,
+  allow: string[],
+): { summary: string; fix: string } | null {
+  const target = gitlabPushHost(baseUrl, allow);
+  if (!('why' in target)) return null;
+  const summary = `pushes and clones of the project are held: ${target.why}`;
+  let hostname = '';
+  try {
+    hostname = new URL(baseUrl).hostname;
+  } catch {}
+  // Allowed once listed: the only reason was the zone's list, and the host is the one to add.
+  const listed = hostname ? gitlabPushHost(baseUrl, [hostname]) : null;
+  if (listed && 'host' in listed)
+    return {
+      summary,
+      fix: `Add ${listed.host} to the zone's egress.allow, then run the doctor again.`,
+    };
+  return {
+    summary,
+    fix: 'Egress allows only a DNS name on port 443: change gitlab.baseUrl to the GitLab host\'s https://<name> URL on port 443, or set egress.mode to "off".',
+  };
+}
+
 function egressCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
   const base = { id: 'zone.egress', zoneId: zone.id, doc: doc('egress') };
   const mode = zone.egress?.mode ?? 'off';
@@ -3340,6 +3370,10 @@ function egressCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
       fix: `Set egress.mode to "monitor", run a doctor drop (jumpmaster ctl doctor ${zone.id} --drop) to see the hosts it uses, add any it needs to egress.allow, then set "enforce".`,
     };
   const allow = egressFor(zone)?.allow ?? [];
+  if (forgeKind(zone) === 'gitlab') {
+    const held = gitlabEgressHeld(zone.gitlab?.baseUrl ?? '', allow);
+    if (held) return { ...base, status: 'fail', ...held };
+  }
   const seen = egressSeen(d.db, zone.id, new Date(d.now().getTime() - EGRESS_WINDOW_MS));
   const window = `${seen.drops} drop(s) in the last ${EGRESS_WINDOW_MS / DAY_MS} days`;
   if (mode === 'monitor') {
