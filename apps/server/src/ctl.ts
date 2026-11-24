@@ -98,14 +98,23 @@ const REPO_ARG = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 const EGRESS = ['off', 'monitor', 'enforce'];
 
 /**
- * `ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress <mode>]
- * [--resume]`: the same route as the wizard's project step. `--egress` defaults to monitor, the
- * wizard's and the add baseline's, never the schema's off. Gates are detected by the server.
+ * `ctl zones add <owner/name | https://<project URL>> [--id <id>] [--preset <p>]
+ * [--gate <name>=<command>]… [--identity starter] [--egress <mode>] [--resume]`: the same route as
+ * the wizard's project step. An owner/name is sent as `zone.repo`; an argument starting with
+ * `https://` is sent as `zone.project`, read by the server (a github.com URL or a GitLab project
+ * URL). Each `--gate` adds `{name, run}`, split at the first `=`. A GitLab URL needs `--preset` and
+ * at least one `--gate`: the server does not detect a GitLab project's gates yet. Without `--gate`
+ * no gates are sent and the server detects them. `--egress` defaults to monitor, the wizard's and
+ * the add baseline's, never the schema's off.
  */
 function zonesAddRequest(args: string[]): Raw | null {
-  const [, , repo, ...rest] = args;
-  if (!repo || !REPO_ARG.test(repo)) return null;
-  const zone: Record<string, unknown> = { repo };
+  const [, , target, ...rest] = args;
+  if (!target) return null;
+  const zone: Record<string, unknown> = {};
+  if (target.startsWith('https://')) zone.project = target;
+  else if (REPO_ARG.test(target)) zone.repo = target;
+  else return null;
+  const gates: { name: string; run: string }[] = [];
   let egress = 'monitor';
   let resume = false;
   for (let i = 0; i < rest.length; i++) {
@@ -124,6 +133,10 @@ function zonesAddRequest(args: string[]): Raw | null {
     } else if (flag === '--preset') {
       if (!(PRESETS as readonly string[]).includes(value)) return null;
       zone.preset = value;
+    } else if (flag === '--gate') {
+      const eq = value.indexOf('=');
+      if (eq <= 0 || eq === value.length - 1) return null;
+      gates.push({ name: value.slice(0, eq), run: value.slice(eq + 1) });
     } else if (flag === '--identity') {
       if (value !== 'starter' && value !== 'two-bot') return null;
       zone.identity = value;
@@ -132,6 +145,7 @@ function zonesAddRequest(args: string[]): Raw | null {
       egress = value;
     } else return null;
   }
+  if (gates.length > 0) zone.gates = gates;
   zone.egress = { mode: egress };
   return { path: '/api/control/zones', body: { zone, ...(resume ? { resume: true } : {}) } };
 }
@@ -1727,12 +1741,13 @@ async function runCtlOn(
     const added = JSON.parse(text) as {
       zone: string;
       revision: number;
+      forge?: string;
       preset?: string;
       egress?: string;
       gates?: { name: string; run: string }[];
     };
     out(
-      `added zone ${added.zone} (revision ${added.revision}), preset ${added.preset ?? '(image)'}, egress ${added.egress ?? 'monitor'}`,
+      `added zone ${added.zone} (revision ${added.revision}),${added.forge ? ` forge ${added.forge},` : ''} preset ${added.preset ?? '(image)'}, egress ${added.egress ?? 'monitor'}`,
     );
     for (const g of added.gates ?? []) out(`  gate ${g.name}: ${g.run}`);
     return 0;
