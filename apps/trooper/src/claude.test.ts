@@ -1,6 +1,6 @@
 import { IMPLEMENT_OUTPUT_SCHEMA, REVIEW_OUTPUT_SCHEMA } from '@jumpmaster/protocol';
 import { expect, test } from 'vitest';
-import { buildClaudeArgs, parseStreamLine } from './claude.js';
+import { AGENT_DISALLOWED_TOOLS, buildClaudeArgs, parseStreamLine } from './claude.js';
 
 test('builds headless args with isolated settings', () => {
   const a = buildClaudeArgs({
@@ -206,4 +206,24 @@ test('buildClaudeArgs emits --add-dir once per directory', () => {
     outputSchema: IMPLEMENT_OUTPUT_SCHEMA,
   });
   expect(none).not.toContain('--add-dir');
+});
+
+test('buildClaudeArgs denies the tools that could wake a session after its answer (#745)', () => {
+  expect(AGENT_DISALLOWED_TOOLS).toBe(
+    'Monitor,ScheduleWakeup,Workflow,CronCreate,CronDelete,CronList,RemoteTrigger',
+  );
+  const a = buildClaudeArgs({
+    prompt: 'P',
+    model: 'm',
+    maxTurns: 1,
+    systemPromptFile: '/p.md',
+    settingsFile: '/s.json',
+    outputSchema: IMPLEMENT_OUTPUT_SCHEMA,
+    addDirs: ['/a'],
+  });
+  const i = a.indexOf('--disallowedTools');
+  expect(i).toBeGreaterThan(1);
+  expect(a[i + 1]).toBe(AGENT_DISALLOWED_TOOLS);
+  // The flag takes several values: the next argument must be another flag.
+  expect(a[i + 2]?.startsWith('--')).toBe(true);
 });

@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import type { GateResult, MergeOutcome } from '@jumpmaster/protocol';
 import type { TrooperDeps } from '../main.js';
 
@@ -20,7 +21,12 @@ export function roleWorld(
   } = {},
 ) {
   const calls: unknown[][] = [];
-  const claude = { runs: 0, args: [] as string[][] };
+  const claude = {
+    runs: 0,
+    args: [] as string[][],
+    env: [] as NodeJS.ProcessEnv[],
+    systemPrompts: [] as string[],
+  };
   let head = 'sha1';
   const rec =
     <T>(name: string, ret: (...a: unknown[]) => T) =>
@@ -52,10 +58,15 @@ export function roleWorld(
       sweepProcesses: () => false,
       cloneForGates: rec('cloneForGates', () => undefined),
       removeTree: rec('removeTree', () => undefined),
+      treeState: rec('treeState', () => 'clean'),
+      removeInstructionFiles: rec('removeInstructionFiles', () => []),
     },
-    async *runClaude(args: string[]) {
+    async *runClaude(args: string[], env: NodeJS.ProcessEnv) {
       claude.runs++;
       claude.args.push(args);
+      claude.env.push(env);
+      const file = args[args.indexOf('--append-system-prompt-file') + 1];
+      claude.systemPrompts.push(file ? readFileSync(file, 'utf8') : '');
       if (o.agentCommits) head = o.agentCommits;
       yield JSON.stringify({ type: 'system', subtype: 'init', session_id: 's' });
       if (o.rateLimited) {

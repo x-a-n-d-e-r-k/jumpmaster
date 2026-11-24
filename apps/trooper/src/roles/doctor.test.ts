@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DoctorDropPayload, GateResult, GateSpec } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
+import { AGENT_DISALLOWED_TOOLS } from '../claude.js';
 import type { TrooperDeps } from '../main.js';
 import { runDoctorRole } from './doctor.js';
 import type { RoleCtx } from './shared.js';
@@ -119,6 +120,11 @@ describe('the doctor role', () => {
     expect(args).not.toContain('--permission-mode');
     expect(args).not.toContain('--add-dir');
     expect(w.claude.env[0]?.CLAUDE_CODE_OAUTH_TOKEN).toBe(CLAUDE);
+    // The agent roles' foreground settings (#745) are theirs alone.
+    expect(args).not.toContain(AGENT_DISALLOWED_TOOLS);
+    expect(args).not.toContain('--disallowedTools');
+    expect(w.claude.env[0]?.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBeUndefined();
+    expect(w.claude.env[0]?.BASH_DEFAULT_TIMEOUT_MS).toBeUndefined();
     const cwd = w.claude.cwd[0] ?? '';
     expect(readdirSync(cwd)).toEqual([]);
     expect(statSync(cwd).mode & 0o777).toBe(0o755);
