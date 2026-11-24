@@ -27,6 +27,7 @@ import {
   REVIEW_OUTPUT_SCHEMA,
   RoleSchema,
   STICK_CAPABILITIES,
+  StickInfoSchema,
   StickStartingSchema,
   TriageOutputSchema,
   VerdictSchema,
@@ -1020,5 +1021,28 @@ describe('ForgeRemoteSchema (#716)', () => {
     ).toBe(false);
     const { owner: _o, ...noOwner } = p.repo;
     expect(DropPayloadSchema.safeParse({ ...p, repo: { ...noOwner, forge } }).success).toBe(false);
+  });
+});
+
+describe('StickInfoSchema egressCeiling (#780)', () => {
+  test('an absent field reads as null: an older stick has no ceiling', () => {
+    expect(StickInfoSchema.parse({}).egressCeiling).toBeNull();
+    expect(StickInfoSchema.parse({ egressCeiling: null }).egressCeiling).toBeNull();
+  });
+
+  test('a list of hosts is kept as sent', () => {
+    expect(
+      StickInfoSchema.parse({ egressCeiling: ['api.anthropic.com', 'registry.npmjs.org'] })
+        .egressCeiling,
+    ).toEqual(['api.anthropic.com', 'registry.npmjs.org']);
+  });
+
+  test('too many entries, an over-long or an empty entry is refused', () => {
+    const many = Array.from({ length: 257 }, (_, i) => `h${i}.example.com`);
+    expect(StickInfoSchema.safeParse({ egressCeiling: many }).success).toBe(false);
+    expect(StickInfoSchema.safeParse({ egressCeiling: many.slice(0, 256) }).success).toBe(true);
+    expect(StickInfoSchema.safeParse({ egressCeiling: ['a'.repeat(256)] }).success).toBe(false);
+    expect(StickInfoSchema.safeParse({ egressCeiling: ['a'.repeat(255)] }).success).toBe(true);
+    expect(StickInfoSchema.safeParse({ egressCeiling: [''] }).success).toBe(false);
   });
 });

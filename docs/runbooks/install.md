@@ -1115,19 +1115,27 @@ drop network, and no allow list or ceiling applies to it.
 ### The stick's egress ceiling
 
 Each stick can cap what any drop or push on it may reach, whatever the server sends: set
-`JM_EGRESS_CEILING` on the stick (in `.env` for the compose install) to a comma-separated list
+`JM_EGRESS_CEILING` on the stick (in `.env` for the compose install, on the pasted line for the
+one-line installer: see [Add a stick](#add-a-stick)) to a comma-separated list
 of host names, or `*.` plus a name for its subdomains (never its apex; no IPs, ports or URLs; at
 most 200). A drop on that stick reaches an extra host, a GitLab instance for example, only when
-both the zone's `egress.allow` and the stick's ceiling list it. The stick checks every drop and
-push container before it verifies, pulls or starts anything; one outside the ceiling fails with
-the reason, and an invalid setting stops the stick at start (its log names the ceiling, or says
-none is set).
+both the zone's `egress.allow` and the stick's ceiling list it. The stick reports its ceiling to
+the server with every lease, and the server never leases it a drop outside it: such a drop waits
+queued, its attempts untouched, for a stick that can run it. Status, the doctor
+([`stick.capabilities`](#stickcapabilities)) and the cannot-run lines on home and the sticks page
+name what is missing: the hosts to add to `JM_EGRESS_CEILING`, or the zone's egress mode. Add the
+hosts and restart the stick, and its next lease takes the drop. The sticks page shows each
+stick's ceiling, or none. The stick still checks every drop and push container before it
+verifies, pulls or starts anything, as the backstop: one outside the ceiling fails with the
+reason. An invalid setting stops the stick at start (its log names the ceiling, or says none is
+set).
 
 - The base hosts, `api.anthropic.com` and `github.com`, are always within the ceiling.
 - Once a ceiling is set, every other host a zone's drops allow must be in it: the preset's hosts
   (`registry.npmjs.org` for `node`, for example) as well as the zone's own `egress.allow`.
 - A stick with a ceiling runs only zones in `enforce`. A zone in `monitor` (which lets any public
-  host through) or `off` fails on it.
+  host through) or `off` is not leased to it: its drops wait for another stick, and status and
+  the doctor say the zone's egress must be set to enforce.
 - Pushes pending on the stick when a ceiling is first set wait, with their work kept, until their
   zone is in `enforce` or the ceiling is removed; until then they also hold up an in-place
   upgrade of the stick. A pushed result is never thrown away over a setting.
@@ -1381,6 +1389,24 @@ The result page shows only the form you chose:
   the same installer line. First replace `TS_AUTHKEY` with an auth key from your Tailscale admin
   console (Settings, Keys). A one-off, pre-approved key is enough.
 
+**To give the stick an egress ceiling** ([The stick's egress ceiling](#the-sticks-egress-ceiling)),
+set `JM_EGRESS_CEILING` on the pasted line, between `sudo` and `sh`:
+
+```sh
+curl -fsSL 'https://<address>/install/stick.sh' | sudo JM_EGRESS_CEILING=registry.npmjs.org,gitlab.example.com sh -s -- jm_enroll_…
+```
+
+Put it after `sudo`, before `sh`. Before `curl` it sets the variable for `curl` only, and sudo
+drops it anyway: it never reaches the script, and the stick gets no ceiling. The installer prints
+`Egress ceiling: <value>` (or `Egress ceiling: none`) before it uses the code, so check that line.
+It accepts only letters, digits, `.`, `*`, `-` and commas, at most 4000 characters, with no empty
+entry (a leading, trailing or doubled comma); anything else stops it with `JM_EGRESS_CEILING must
+be host names separated by commas`, the code unspent. The stick checks the rest when it starts: an
+entry it refuses (an IP address, say) stops it before it enrolls, and the installer removes the
+container, cancels the invite and prints the stick's reason. The server never sets the ceiling;
+the sticks page and the cloud-init text don't carry one. **To change it on an installed stick,**
+remove the stick (below), then install it again with a new code and the new value.
+
 **What the installer does** (the script is `GET /install/stick.sh`; it holds no secret):
 
 1. It refuses anything but Linux on x86_64 or aarch64, and a machine where a stick is already
@@ -1413,7 +1439,8 @@ The result page shows only the form you chose:
    - `JM_ENROLL_CODE_FILE`: the install token, written into the volume with mode 0600 (through
      stdin when the volume is in a VM); the stick enrolls with it as `{ "enrollCode": <token> }`;
    - `JM_IMAGE_SOURCE=server`;
-   - `JM_IMAGE_POLICY=signed`.
+   - `JM_IMAGE_POLICY=signed`;
+   - `JM_EGRESS_CEILING`, only when you gave one, exactly as given.
 7. It waits up to 60 seconds for the stick to enroll. Then it prints
    `Enrolled as <name>. Back to your browser.`, or the enrollment error, and deletes the token
    file. The stick also deletes the file itself once it enrolls. If a stick already has the invite's name (for example, one that
@@ -1736,7 +1763,9 @@ did not come back, Docker is not starting at boot, or the services were last sto
 **Action:** See the sticks on home (`/`).
 
 No live stick can run this project: the fix names what it lacks (`egress-v1`, `image-verify-v1`, the
-signed policy). See [Stick](#stick).
+signed policy, hosts missing from the stick's `JM_EGRESS_CEILING`, or `enforce` as the zone's egress
+mode when the stick has a ceiling). See [Stick](#stick) and
+[The stick's egress ceiling](#the-sticks-egress-ceiling).
 
 ### `stick.image-policy`
 

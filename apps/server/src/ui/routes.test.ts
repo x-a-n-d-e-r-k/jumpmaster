@@ -1337,6 +1337,23 @@ describe('external links open in a new tab, in-app links do not (#133)', () => {
     expect(await anon('/system/sticks')).toBe(work);
   });
 
+  test("the page shows the egress ceiling a stick's lease reported, and an unparseable one as covering nothing (#780)", async () => {
+    const h = await harness();
+    const page = async () => (await h.view('/system/sticks')).body;
+    expect(await page()).toContain('egress ceiling: none');
+    const res = await h.app.inject({
+      method: 'POST',
+      url: '/api/sticks/lease',
+      headers: h.stickHeaders(),
+      payload: { freeSlots: 0, egressCeiling: ['<b>x</b>.example.com', 'registry.npmjs.org'] },
+    });
+    expect(res.statusCode).toBeLessThan(300);
+    const html = await page();
+    expect(html).toContain('egress ceiling: &lt;b&gt;x&lt;/b&gt;.example.com, registry.npmjs.org');
+    h.db.prepare("UPDATE sticks SET egress_ceiling_json = 'not json' WHERE name = 'h'").run();
+    expect(await page()).toContain('egress ceiling: covers nothing');
+  });
+
   test("posting through the page's route changes the count the next lease answers with", async () => {
     const h = await harness();
     const id = (h.db.prepare("SELECT id FROM sticks WHERE name = 'h'").get() as { id: string }).id;

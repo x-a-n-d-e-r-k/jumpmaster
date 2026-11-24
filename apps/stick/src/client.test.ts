@@ -235,6 +235,7 @@ describe('capabilities and lease logging', () => {
       imagePolicy: 'allowlist',
       version: '1.2.3',
       pinnedImages: [pin],
+      egressCeiling: null,
     });
     expect(stickInfo({ JM_IMAGE_POLICY: 'signed' }, '1').imagePolicy).toBe('signed');
     expect(() => stickInfo({ JM_IMAGE_POLICY: 'open' }, '1')).toThrow(/JM_IMAGE_POLICY/);

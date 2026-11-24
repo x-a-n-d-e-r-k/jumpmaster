@@ -1,7 +1,16 @@
 import { describe, expect, test } from 'vitest';
 import { raiseBriefing } from './briefings.js';
+import type { Config } from './config.js';
 import { openDb } from './db/open.js';
-import { type Drop, type OutboxRow, setUsageState, setZoneMode, type WorkItem } from './db/repo.js';
+import {
+  type Drop,
+  insertStick,
+  type OutboxRow,
+  setUsageState,
+  setZoneMode,
+  stampStick,
+  type WorkItem,
+} from './db/repo.js';
 import type { DoctorCheck } from './doctor/checks.js';
 import {
   cannotRunText,
@@ -11,11 +20,13 @@ import {
   type Status,
   type StatusInput,
   type StatusZone,
+  statusInputOf,
   statusOf,
   type UsageFacts,
 } from './status.js';
 import { crewOn } from './test/crew.js';
 import type { FakeIssue } from './test/fakes.js';
+import { makeZone, usageCfg } from './test/fixtures.js';
 import { harness } from './test/flowHarness.js';
 import { plus, t0, tmpDbFile } from './test/helpers.js';
 import type { CredentialProblem } from './vault/problems.js';
@@ -1334,5 +1345,60 @@ describe("a GitLab zone's gitlab-pat problems on Home (issue #764)", () => {
       'web: no author token',
       'web: no gate secret NPM_TOKEN',
     ]);
+  });
+});
+
+describe('a stick whose egress ceiling a zone exceeds (#780)', () => {
+  const NPM = ['api.anthropic.com', 'github.com', 'registry.npmjs.org'];
+
+  test('cannotRunText says what is missing in words, for hosts and for the mode', () => {
+    expect(cannotRunText([{ name: 'a', missing: ['egress-ceiling:gitlab.example.com'] }])).toBe(
+      "no live stick has gitlab.example.com in the stick's JM_EGRESS_CEILING",
+    );
+    expect(cannotRunText([{ name: 'a', missing: ['egress-ceiling:mode'] }])).toBe(
+      "no live stick has egress set to enforce (the stick's JM_EGRESS_CEILING requires it)",
+    );
+    expect(
+      cannotRunText([
+        { name: 'a', missing: ['egress-ceiling:a.example.com+b.example.com+c.example.com+2'] },
+        { name: 'b', missing: ['egress-v1'] },
+      ]),
+    ).toBe(
+      "no live stick can run it (a lacks a.example.com, b.example.com, c.example.com and 2 more in the stick's JM_EGRESS_CEILING; b lacks egress-v1)",
+    );
+  });
+
+  test('the status read from the database names the host only the ceiling stick lacks', () => {
+    const db = openDb(tmpDbFile());
+    insertStick(db, { id: 's1', name: 'ceilinged', tokenHash: 'h1', slots: 1 });
+    const advert = {
+      capabilities: ['egress-v1'],
+      imagePolicy: 'allowlist' as const,
+      version: null,
+    };
+    stampStick(db, 's1', { ...advert, pinnedImages: [], egressCeiling: NPM }, t0);
+    const zoneCfg = makeZone({
+      egress: { mode: 'enforce', allow: ['registry.npmjs.org', 'gitlab.example.com'] },
+    });
+    const config = { dropZones: [zoneCfg], usage: usageCfg, secrets: {} } as unknown as Config;
+    const input = statusInputOf({
+      db,
+      config,
+      now: t0,
+      pages: { zones: true, settings: true, credentials: true },
+    });
+    expect(input.zones[0]?.cannotRun).toBe(
+      "no live stick has gitlab.example.com in the stick's JM_EGRESS_CEILING",
+    );
+    // A stick with no ceiling runs it.
+    stampStick(db, 's1', { ...advert, pinnedImages: [], egressCeiling: null }, t0);
+    expect(
+      statusInputOf({
+        db,
+        config,
+        now: t0,
+        pages: { zones: true, settings: true, credentials: true },
+      }).zones[0]?.cannotRun,
+    ).toBeUndefined();
   });
 });

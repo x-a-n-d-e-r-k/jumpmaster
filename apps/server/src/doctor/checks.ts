@@ -53,6 +53,7 @@ import { FORBIDDEN, type ZoneGuidance } from '../github/guidance.js';
 import { getGoals } from '../goals.js';
 import type { MirrorStatus } from '../images/mirror.js';
 import { doctorMayLease, missingFor, zoneRequirements } from '../leases.js';
+import { CEILING_MISSING, ceilingHosts, missingWords } from '../missing-words.js';
 import type { ForgePair } from '../outbox.js';
 import { egressFor } from '../payloads.js';
 import { DETECT_FILES, detectPreset } from '../presets.js';
@@ -727,6 +728,21 @@ const LACK_FIX: Record<string, string> = {
     'set JM_IMAGE_POLICY=signed on the stick (the published stick image sets it), or drop requireSignedImages from the config',
 };
 
+/**
+ * How to give a stick what it lacks. An `egress-ceiling:` item (#780) is matched by its prefix
+ * before the exact `LACK_FIX` lookup: its hosts go in the stick's JM_EGRESS_CEILING, or the zone's
+ * egress goes to enforce.
+ */
+function lackFix(lack: string): string {
+  if (lack.startsWith(CEILING_MISSING)) {
+    const hosts = ceilingHosts(lack);
+    return hosts === null
+      ? "set the zone's egress to enforce"
+      : `add ${hosts} to JM_EGRESS_CEILING on the stick and restart it`;
+  }
+  return `${lack}: ${LACK_FIX[lack] ?? 'upgrade the stick'}`;
+}
+
 function stickCapabilityCheck(d: DoctorDeps, zone: DropZoneConfig, sticks: Stick[]): DoctorCheck {
   const base = { id: 'stick.capabilities', zoneId: zone.id, doc: doc('stick') };
   const live = liveSticks(sticks, d.now());
@@ -751,8 +767,8 @@ function stickCapabilityCheck(d: DoctorDeps, zone: DropZoneConfig, sticks: Stick
   return {
     ...base,
     status: 'fail',
-    summary: `no live stick can run this project, so its drops stay queued (the project ${what}): ${judged.map((j) => `${j.s.name} lacks ${j.missing.join(', ')}`).join('; ')}`,
-    fix: lacks.map((l) => `${l}: ${LACK_FIX[l] ?? 'upgrade the stick'}`).join('. '),
+    summary: `no live stick can run this project, so its drops stay queued (the project ${what}): ${judged.map((j) => `${j.s.name} lacks ${j.missing.map(missingWords).join(', ')}`).join('; ')}`,
+    fix: lacks.map(lackFix).join('. '),
   };
 }
 

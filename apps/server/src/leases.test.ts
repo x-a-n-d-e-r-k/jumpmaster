@@ -28,6 +28,7 @@ import {
   releaseKill,
   zoneRequirements,
 } from './leases.js';
+import { missingWords } from './missing-words.js';
 import { makeZone } from './test/fixtures.js';
 import { plus, seedQueuedDrop, t0, workItem } from './test/helpers.js';
 import { setUsageOverride } from './usage.js';
@@ -504,6 +505,83 @@ describe('stick capabilities, per zone', () => {
       ),
     ).toEqual(['egress-v1']);
     expect(missingFor(m3, zoneRequirements(makeZone(), {}))).toEqual([]);
+  });
+
+  describe('the egress ceiling (#780)', () => {
+    const zone = (mode: 'off' | 'monitor' | 'enforce', allow: string[] = []) =>
+      makeZone({ egress: { mode, allow } });
+    const stick = (egressCeiling: string[] | null | undefined) => ({
+      capabilities: ['egress-v1'],
+      imagePolicy: 'allowlist' as const,
+      ...(egressCeiling === undefined ? {} : { egressCeiling }),
+    });
+    const ceiling = ['api.anthropic.com', 'github.com', 'registry.npmjs.org'];
+
+    test("zoneRequirements carries what egressFor gives the zone's drops", () => {
+      expect(zoneRequirements(zone('off'), {}).egress).toBeUndefined();
+      expect(zoneRequirements(zone('enforce', ['Registry.npmjs.org']), {}).egress).toEqual({
+        mode: 'enforce',
+        allow: ['api.anthropic.com', 'github.com', 'registry.npmjs.org'],
+      });
+      // The preset's hosts are in it too.
+      expect(
+        zoneRequirements(makeZone({ preset: 'go', egress: { mode: 'enforce' } }), {}).egress?.allow,
+      ).toContain('proxy.golang.org');
+    });
+
+    test('a stick with no ceiling (null or none sent) is judged as before', () => {
+      const need = zoneRequirements(zone('monitor', ['anything.example.com']), {});
+      expect(missingFor(stick(null), need)).toEqual([]);
+      expect(missingFor(stick(undefined), need)).toEqual([]);
+    });
+
+    test('hosts outside the ceiling are named; a covered zone is runnable', () => {
+      expect(missingFor(stick(ceiling), zoneRequirements(zone('enforce'), {}))).toEqual([]);
+      expect(
+        missingFor(
+          stick(ceiling),
+          zoneRequirements(zone('enforce', ['registry.npmjs.org', 'gitlab.example.com']), {}),
+        ),
+      ).toEqual(['egress-ceiling:gitlab.example.com']);
+    });
+
+    test('monitor, or off, with a ceiling: egress-ceiling:mode', () => {
+      expect(missingFor(stick(ceiling), zoneRequirements(zone('monitor'), {}))).toEqual([
+        'egress-ceiling:mode',
+      ]);
+      expect(missingFor(stick(ceiling), zoneRequirements(zone('off'), {}))).toEqual([
+        'egress-ceiling:mode',
+      ]);
+    });
+
+    test('at most 3 hosts, each cut to 100 characters, then +N', () => {
+      const long = `${'a'.repeat(120)}.example.com`;
+      const need = zoneRequirements(
+        zone('enforce', ['a.example.com', long, 'c.example.com', 'd.example.com', 'e.example.com']),
+        {},
+      );
+      expect(missingFor(stick(ceiling), need)).toEqual([
+        `egress-ceiling:a.example.com+${'a'.repeat(100)}+c.example.com+2`,
+      ]);
+    });
+
+    test('a lone host named mode is not read as the mode case', () => {
+      const item = missingFor(stick(ceiling), zoneRequirements(zone('enforce', ['mode']), {}));
+      expect(item).toEqual(['egress-ceiling:mode+']);
+      expect(item).not.toEqual(['egress-ceiling:mode']);
+      expect(missingWords(item[0]!)).toBe("mode in the stick's JM_EGRESS_CEILING");
+    });
+
+    test('invalid ceiling entries (a bare *, an IP) cover nothing', () => {
+      const need = zoneRequirements(zone('enforce', ['gitlab.example.com']), {});
+      expect(missingFor(stick(['*', '203.0.113.7', '*.*']), need)).toEqual([
+        'egress-ceiling:api.anthropic.com+github.com+gitlab.example.com',
+      ]);
+      // An empty ceiling (what an unparseable stored one reads as) covers nothing either.
+      expect(missingFor(stick([]), need)).toEqual([
+        'egress-ceiling:api.anthropic.com+github.com+gitlab.example.com',
+      ]);
+    });
   });
 
   function secondZone() {

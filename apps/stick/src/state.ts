@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import {
+  egressCeiling,
   type ImagePolicy,
   ImagePolicySchema,
   isReleaseVersion,
@@ -173,7 +174,8 @@ export function leaseTerms(o: {
 /**
  * What this stick advertises. `capabilities` are the ones its startup checks proved (`egress-v1`
  * when `egressCapability` passes, `image-verify-v1` when it starts under the signed policy). The
- * policy is `JM_IMAGE_POLICY` (unset: `allowlist`); the pins are the digest refs it allows.
+ * policy is `JM_IMAGE_POLICY` (unset: `allowlist`); the pins are the digest refs it allows. The
+ * egress ceiling is `JM_EGRESS_CEILING` parsed (base hosts included), null when unset (#780).
  */
 export function stickInfo(
   env: NodeJS.ProcessEnv,
@@ -188,6 +190,7 @@ export function stickInfo(
     imagePolicy: policy.data,
     version,
     pinnedImages: [...allowedImages(env)].filter((i) => DIGEST_REF.test(i)).sort(),
+    egressCeiling: egressCeiling(env.JM_EGRESS_CEILING),
   };
 }
 
