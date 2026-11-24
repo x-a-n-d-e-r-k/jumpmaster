@@ -11,6 +11,7 @@ import {
 } from '../briefings.js';
 import { type Focus, INSTALL_ZONE } from '../chat/focus.js';
 import { type ClaudePlan, type DropZoneConfig, STARTER_WARNING } from '../config.js';
+import { storedRefusals } from '../crew/refused.js';
 import type { CrewIssue } from '../crew/store.js';
 import type {
   AttemptKey,
@@ -1828,6 +1829,15 @@ function modelLines(drop: Drop): string {
   return `<p>Requested model: ${escapeHtml(requested ?? '-')}<br>Served model: ${escapeHtml(served ?? '-')}${mismatch}</p>`;
 }
 
+/** A lead drop's entries the server refused (#808), escaped, or nothing when it had none. */
+function refusedSection(drop: Drop): string {
+  if (drop.role !== 'crew-lead') return '';
+  const refused = storedRefusals(drop.resultJson)?.refused ?? [];
+  if (refused.length === 0) return '';
+  const items = refused.map((r) => `<li>${escapeHtml(r)}</li>`).join('');
+  return `<h3>Refused by the server</h3><ul class="refused">${items}</ul>`;
+}
+
 /** Denied first, then hosts monitor let through unlisted, then allowed; busiest first within each. */
 const EGRESS_ORDER: Record<string, number> = { deny: 0, unlisted: 1, allow: 2 };
 const MAX_EGRESS_ROWS = 200;
@@ -2094,6 +2104,7 @@ export function renderDrop(
       `<p><small><code>${id}</code></small></p>` +
       askButton({ kind: 'drop', zoneId: drop.dropZoneId, ref: drop.id }, `Drop ${short}`) +
       dropSummary(drop, item, project, known?.repo, now) +
+      refusedSection(drop) +
       egressSection(events) +
       transcriptSection(events, pruned) +
       `<details class="raw-events"><summary>Raw events (${events.length})</summary><table><tr><th>Seq</th><th>Time</th><th>Kind</th><th>Data</th></tr>${rows}</table></details>` +

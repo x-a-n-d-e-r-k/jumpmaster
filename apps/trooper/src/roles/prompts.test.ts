@@ -177,3 +177,31 @@ describe('a decision an issue leaves to Command (#800)', () => {
     expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   });
 });
+
+describe('what the last cycle had refused (#808)', () => {
+  const rule2 = (): string =>
+    prompt('crew-lead.md')
+      .split('\n')
+      .find((l) => l.startsWith('2. ')) ?? '';
+
+  test('rule 2 says a refused entry was not recorded, and what to do with it', () => {
+    const text = rule2();
+    expect(text).toContain(
+      'An entry in the "Refused in your last cycle" section was not recorded. Correct it and file it again if it is still needed, or raise a briefing when it can\'t be corrected.',
+    );
+    expect(text).toContain(
+      "A path the issue only mentions, and doesn't ask to change, is written without a code span.",
+    );
+    // What #784 added is unchanged.
+    expect(text).toContain('Rejected issues of the current objective');
+  });
+
+  test('the lead still has rules 1 to 12, in order', () => {
+    const numbers = prompt('crew-lead.md')
+      .split('\n')
+      .map((l) => /^(\d+)\. /.exec(l)?.[1])
+      .filter((n): n is string => n !== undefined)
+      .map(Number);
+    expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  });
+});
