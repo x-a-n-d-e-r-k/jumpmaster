@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import type { ChatEvent, ChatTurnRequest } from '@jumpmaster/protocol';
 import { afterAll, afterEach, describe, expect, test, vi } from 'vitest';
+import { AGENT_DISALLOWED_TOOLS } from '../claude.js';
 import type { TrooperIdentities } from '../privilege.js';
 import * as privilege from '../privilege.js';
 import { runChatTurn, toolSummary } from './turn.js';
@@ -211,11 +212,15 @@ describe('runChatTurn', () => {
     expect(argv).toContain(root);
     const addDirs = argv.flatMap((a, i) => (a === '--add-dir' ? [argv[i + 1]] : []));
     expect(addDirs).toEqual([join(root, 'main', 'work')]);
+    // The agent roles' foreground settings (#745) are theirs alone.
+    expect(argv).not.toContain(AGENT_DISALLOWED_TOOLS);
 
     const env = c.opts.env as NodeJS.ProcessEnv;
     expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe(CLAUDE_TOKEN);
     expect(env.JM_CHAT_MCP_TOKEN).toBe(MCP_TOKEN);
     expect(env.HOME).toBe(ids.agent.home);
+    expect(env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS).toBeUndefined();
+    expect(env.BASH_DEFAULT_TIMEOUT_MS).toBeUndefined();
     for (const [k, v] of Object.entries(env)) {
       for (const t of [ZONE_TOKEN, OTHER_ZONE_TOKEN]) expect(v, k).not.toBe(t);
       expect(v ?? '', k).not.toContain('ghs_');

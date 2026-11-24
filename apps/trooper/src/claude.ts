@@ -12,6 +12,20 @@ export interface ClaudeArgsOptions {
   addDirs?: string[];
 }
 
+/**
+ * Tools that run in the background or wake the session later. A run must end with one result, and
+ * these can make the agent answer again after its final answer (#745).
+ */
+export const AGENT_DISALLOWED_TOOLS = [
+  'Monitor',
+  'ScheduleWakeup',
+  'Workflow',
+  'CronCreate',
+  'CronDelete',
+  'CronList',
+  'RemoteTrigger',
+].join(',');
+
 export function buildClaudeArgs(o: ClaudeArgsOptions): string[] {
   return [
     '-p',
@@ -32,6 +46,9 @@ export function buildClaudeArgs(o: ClaudeArgsOptions): string[] {
     '--strict-mcp-config',
     '--mcp-config',
     '{"mcpServers":{}}',
+    // Takes several values: keep another flag right after it.
+    '--disallowedTools',
+    AGENT_DISALLOWED_TOOLS,
     '--permission-mode',
     'bypassPermissions',
     '--json-schema',
