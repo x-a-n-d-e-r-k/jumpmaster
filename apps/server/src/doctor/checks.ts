@@ -2213,6 +2213,145 @@ function onlyMergeBypass(rules: {
   return offending.length > 0 && offending.every((b) => b.name === MERGE_RULESET);
 }
 
+const GL_PROTECTED = 'Settings → Repository → Protected branches';
+const GL_APPROVALS = 'Settings → Merge requests → Merge request approvals';
+
+/**
+ * The guard's problem labels in GitLab words, for a GitLab zone's fail summary (issue #816). The
+ * labels themselves stay the guard's; only what the operator reads changes.
+ */
+const GITLAB_PROBLEM: Record<string, string> = {
+  'no ruleset': 'the branch is not protected',
+  'no pull request rule': 'the bot can push to the branch without a merge request',
+  'bot can bypass': 'a bot is allowed to push to the branch',
+  'bot is admin': 'a bot is a Maintainer or Owner',
+  'approvals < 1': 'no approval rule requires an approval',
+  'stale approvals not dismissed': 'approvals are not removed when a commit is added',
+  'approvals required in starter mode': 'an approval rule requires approvals in starter mode',
+  'no required checks': 'pipelines are not required to succeed',
+};
+const GITHUB_WORDS = /ruleset|GitHub|pull request|fine-grained|JM_GITHUB_/i;
+const gitlabProblem = (p: string): string =>
+  GITLAB_PROBLEM[p] ?? (GITHUB_WORDS.test(p) ? 'another rule problem' : p);
+
+/** The GitLab fix for one of the guard's problem labels; undefined for a label with none. */
+function gitlabRuleFix(p: string, zone: DropZoneConfig, b: string): string | undefined {
+  const starter = zone.identity === 'starter';
+  const pushNoOne = `On the protected branch ${b} (${GL_PROTECTED}), set Allowed to push and merge to No one, so every change reaches ${b} through a merge request.`;
+  switch (p) {
+    case 'no ruleset': {
+      const approvals = starter
+        ? ''
+        : ` Then add an approval rule requiring 1 approval on ${b} and turn on Remove all approvals when a commit is added (${GL_APPROVALS}).`;
+      const pipeline =
+        starter || zone.ciRequired
+          ? ' Turn on Pipelines must succeed (Settings → Merge requests).'
+          : '';
+      return `Protect ${b} (${GL_PROTECTED}): Allowed to merge Developers + Maintainers, Allowed to push and merge No one.${approvals}${pipeline}`;
+    }
+    case 'approvals < 1':
+      return `Add an approval rule on ${b} requiring 1 approval or more, or raise the existing one's required approvals (${GL_APPROVALS}).`;
+    case 'stale approvals not dismissed':
+      return `Turn on Remove all approvals when a commit is added (${GL_APPROVALS}).`;
+    case 'approvals required in starter mode':
+      return `Set each approval rule covering ${b} to 0 required approvals (${GL_APPROVALS}): in starter mode no second user can approve, so GitLab would refuse every merge (or add a reviewer identity and switch the project to two-bot).`;
+    case 'bot can bypass':
+    case 'no pull request rule':
+      return pushNoOne;
+    case 'bot is admin':
+      return `Give the ${starter ? 'author bot user' : 'bot users'} the Developer role, not Maintainer or Owner (Project → Manage → Members).`;
+    case 'no required checks':
+      return starter
+        ? 'Turn on Pipelines must succeed (Settings → Merge requests): in starter mode a required pipeline is what stands between the author token and a merge.'
+        : 'Turn on Pipelines must succeed (Settings → Merge requests), or set ciRequired: false in the project until CI exists.';
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * `forge.branch-rules` on a GitLab zone (issue #816): the guard's judgment, as on GitHub, worded for
+ * GitLab — protected branches, approval rules and "Pipelines must succeed" — with no GitHub plan,
+ * ruleset or variable in any line.
+ */
+async function gitlabBranchRulesCheck(
+  zone: DropZoneConfig,
+  r: ZoneReads,
+  base: { id: string; zoneId: string; doc: string },
+  branch: string,
+): Promise<DoctorCheck> {
+  if (!zone.requireBranchProtection)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `branch-protection checks are off for ${branch} (requireBranchProtection: false): Jumpmaster merges whatever passes its own guards, and nothing on GitLab stops a direct push`,
+      fix: `Protect ${branch} (${GL_PROTECTED}) with Allowed to push and merge set to No one, and set requireBranchProtection: true.`,
+    };
+  const rules = await r.rules();
+  const unreachable = (['author', 'reviewer'] as const).filter(
+    (who) => rules[who]?.kind === 'unreachable',
+  );
+  if (unreachable.length > 0) {
+    const tokens = unreachable.map((who) => `the ${who} token`).join(' and ');
+    const entries = unreachable.map((who) => `gitlab-pat/${zone.id}/${who}`).join(' and ');
+    return {
+      ...base,
+      status: 'fail',
+      summary: `${tokens} can't read the protection of ${branch} on ${zone.repo}: GitLab refused its read of the protected branches or of its bot user's member level on the project, so the rules can't be checked`,
+      fix: `Check that the token in ${entries} has the api scope and that its bot user has at least the Developer role on ${zone.repo} (Project → Manage → Members); store a new token in the entry if needed, then run the doctor again.`,
+    };
+  }
+  const problems = branchProtectionProblems(rules, zone);
+  if (problems === null)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `could not read the branch rules for ${branch} (GitLab was rate-limited or unavailable); the check did not run`,
+      fix: `Check the server can reach ${zone.gitlab?.baseUrl ?? 'the GitLab instance'}, then run the doctor again in a few minutes.`,
+    };
+  for (const read of [rules.author, rules.reviewer])
+    if (read?.kind === 'ok' && read.rules.requiresPullRequest === false)
+      if (!problems.includes('no pull request rule')) problems.push('no pull request rule');
+  if (problems.length > 0) {
+    const fixes = [...new Set(problems.flatMap((p) => gitlabRuleFix(p, zone, branch) ?? []))];
+    return {
+      ...base,
+      status: 'fail',
+      summary: `the rules on ${branch} are unsafe for unattended merges: ${[...new Set(problems.map(gitlabProblem))].join('; ')}`,
+      ...(fixes.length > 0 ? { fix: fixes.join(' ') } : {}),
+    };
+  }
+  const ok = rules.author.kind === 'ok' ? rules.author.rules : null;
+  const pipeline = ok?.requiredChecks.includes('pipeline')
+    ? 'the pipeline must succeed'
+    : 'no pipeline is required';
+  if (zone.identity === 'starter')
+    return {
+      ...base,
+      status: 'pass',
+      summary: `${branch} is protected and requires a merge request, with no approval (starter mode), and ${pipeline}; the author can't push to the branch`,
+    };
+  // GitLab Free refuses approval rules: the guard waives the approval checks (ruling 120), so
+  // the merge rests on the reviewer bot's verdict alone. Safe enough to run, worth a warning.
+  if (
+    [rules.author, rules.reviewer].some(
+      (read) => read?.kind === 'ok' && read.rules.approvalRules === 'unavailable',
+    )
+  )
+    return {
+      ...base,
+      status: 'warn',
+      summary: `${branch} is otherwise safe, but GitLab enforces no approval on this project (approval rules need a paid GitLab tier), so Jumpmaster merges on its reviewer bot's verdict alone`,
+      fix: `On a GitLab tier that offers approval rules, add an approval rule requiring 1 approval on ${branch} and turn on resetting approvals on push (Settings → Merge requests → Merge request approvals); or accept this warning.`,
+    };
+  const n = ok?.requiredApprovals ?? 1;
+  return {
+    ...base,
+    status: 'pass',
+    summary: `${branch} is protected and requires a merge request with ${n} approval${n === 1 ? '' : 's'} counted from its approval rules, removes approvals when a commit is added, ${pipeline}, and neither bot can push to the branch`,
+  };
+}
+
 async function branchRulesCheck(
   d: DoctorDeps,
   zone: DropZoneConfig,
@@ -2220,6 +2359,7 @@ async function branchRulesCheck(
 ): Promise<DoctorCheck> {
   const base = { id: 'forge.branch-rules', zoneId: zone.id, doc: doc('branch-rules') };
   const branch = await r.branch();
+  if (forgeKind(zone) === 'gitlab') return gitlabBranchRulesCheck(zone, r, base, branch);
   if (!zone.requireBranchProtection)
     return {
       ...base,
