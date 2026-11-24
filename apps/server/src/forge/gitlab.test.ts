@@ -261,6 +261,29 @@ describe('markers', () => {
     expect(listed.at(-1)?.query).toMatchObject({ updated_after: since });
   });
 
+  test('findIssueByMarker finds this viewer’s issue updated exactly at since', async () => {
+    const { gl, forge } = setup();
+    const since = '2024-01-01T00:00:00.000Z';
+    gl.seedIssue({
+      iid: 1,
+      title: 'before',
+      description: `x\n${MARK}`,
+      author: 'agent',
+      createdAt: '2023-12-31T23:59:59.999Z',
+      updatedAt: '2023-12-31T23:59:59.999Z',
+    });
+    expect(await forge.findIssueByMarker(MARK, since)).toBeNull();
+    gl.seedIssue({
+      iid: 2,
+      title: 'boundary',
+      description: `x\n${MARK}`,
+      author: 'agent',
+      createdAt: since,
+      updatedAt: since,
+    });
+    expect(await forge.findIssueByMarker(MARK, since)).toEqual({ number: 2 });
+  });
+
   test('findIssueByMarker pages', async () => {
     const { gl, forge } = setup();
     gl.seedIssue({ iid: 1, title: 'mine', description: MARK, author: 'agent' });
