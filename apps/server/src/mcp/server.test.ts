@@ -18,6 +18,7 @@ import { insertCrewIssue, listCrewIssues } from '../crew/store.js';
 import {
   insertDrop,
   insertOutbox,
+  recordUsageWindows,
   setKilled,
   setUsageState,
   setWorkItemState,
@@ -30,6 +31,7 @@ import { opMarker } from '../outbox.js';
 import { crewOn, crewWorld, ISSUE_BODY } from '../test/crew.js';
 import { makeZone, usageCfg } from '../test/fixtures.js';
 import { operatorSession, plus, t0 } from '../test/helpers.js';
+import { gateReason, gateReasonText } from '../usage.js';
 import { mintMcpToken, revokeMcpToken } from './tokens.js';
 
 const OP = 'o'.repeat(32);
@@ -569,6 +571,19 @@ describe('write tools', () => {
     const later = await call(s.write, 'file_staged_issues', { issues: [issue()] });
     expect(later.isError).toBeFalsy();
     expect(listCrewIssues(s.db, 'main')).toHaveLength(1);
+  });
+
+  test('under a threshold hold get_queue names the window, its figure and the threshold (#753)', async () => {
+    const s = await setup();
+    const reset = plus(t0, 3 * 60 * 60 * 1000).toISOString();
+    recordUsageWindows(s.db, { seven_day: { utilization: 0.93, resetsAt: reset } }, t0, null);
+    const q = JSON.parse(textOf(await call(s.read, 'get_queue'))) as {
+      gate: string;
+      reason: string;
+    };
+    expect(q.gate).toBe('finishing_only');
+    expect(q.reason).toBe(gateReasonText(gateReason(s.db, usageCfg, t0)));
+    expect(q.reason).toBe('7-day usage at 93% is at or above the 90% throttle');
   });
 
   // Red team §7.5.

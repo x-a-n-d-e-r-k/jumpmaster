@@ -138,7 +138,7 @@ import { registerSetupPages, wizardActive } from './ui/setup.js';
 import { renderInviteResult, renderStickImages, renderSticks, type StickRow } from './ui/sticks.js';
 import { zoneTextNamer } from './ui/zone-name.js';
 import { projectHeaderFor, registerZonesPages } from './ui/zones.js';
-import { dispatchGate, usageWarning } from './usage.js';
+import { dispatchGate, gateReason, usageWarning } from './usage.js';
 
 const ATTEMPT_KEYS: AttemptKey[] = [
   'heal',
@@ -277,6 +277,7 @@ function usageView(db: Db, config: Config, at: Date): NonNullable<HomeState['usa
     overageStatus:
       typeof last === 'string' ? last : (creditSignal(state)?.rateLimit.overageStatus ?? null),
     warning: usageWarning(db, at),
+    reason: gateReason(db, config.usage, at),
   };
 }
 

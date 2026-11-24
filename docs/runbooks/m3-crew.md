@@ -363,8 +363,9 @@ this zone's items and that a revoked or expired token gets 401.
 
 - **Read** (`read` and `write` tokens): `get_goals`, `list_work` (titles, states, PRs, park
   reasons; no bodies), `get_work_item` (one issue with its body), `list_briefings`,
-  `list_rulings`, `get_queue` (zone mode, kill switch, the global usage gate with any credits
-  stop, the zone's queued and active drops and unresolved forge writes). Text from the forge or
+  `list_rulings`, `get_queue` (zone mode, kill switch, the global usage gate and the reason in
+  words for what holds it, any credits stop, the zone's queued and active drops and unresolved
+  forge writes). Per-model holds are not part of the reason: they never hold the gate. Text from the forge or
   from agents comes fenced and labelled `(data)` or `(data, untrusted)`; your ruling notes and
   `GOAL.md` are labelled `(trusted)`. Jumpmaster op markers are removed and configured secrets
   redacted.

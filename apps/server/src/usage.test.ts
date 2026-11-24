@@ -26,12 +26,16 @@ import { fakeForgePair } from './test/fakes.js';
 import { tmpDbFile } from './test/helpers.js';
 import {
   dispatchGate,
+  type GateReason,
+  gateReason,
+  gateReasonText,
   heldModelFamilies,
   ingestRateLimit,
   liveAccountWindows,
   type RateLimitSource,
   rateLimitFromEvent,
   releaseProbe,
+  setUsageOverride,
   usageWarning,
 } from './usage.js';
 
@@ -1165,5 +1169,151 @@ describe('allowed_warning holds only an unreported window, until its reset (#748
       plus(t0, MIN),
     );
     expect(dispatchGate(db, cfg, plus(t0, MIN))).toBe('finishing_only');
+  });
+});
+
+describe('gateReason names what holds dispatch (#753)', () => {
+  const ingest = (data: RateLimitEventData, when = t0) =>
+    ingestRateLimit(db, data, src('d1', null), cfg, when, zero);
+  const reset = '2026-10-23T00:00:00Z';
+  /** The gate a reason's kind stands for. */
+  const gateOf = (r: GateReason): string =>
+    r.kind === 'threshold' || r.kind === 'warning' ? 'finishing_only' : r.kind;
+  const reasonAt = (when = t0): GateReason => {
+    const r = gateReason(db, cfg, when);
+    expect(gateOf(r)).toBe(dispatchGate(db, cfg, when));
+    return r;
+  };
+
+  test('open', () => {
+    ingest({ status: 'allowed', unifiedWindows: { seven_day: { utilization: 0.2 } } });
+    expect(reasonAt()).toEqual({ kind: 'open' });
+  });
+
+  test('a seven_day window over the threshold', () => {
+    ingest({
+      status: 'allowed',
+      unifiedWindows: {
+        five_hour: { utilization: 0.4, resetsAt: future },
+        seven_day: { utilization: 0.934, resetsAt: reset },
+      },
+    });
+    const r = reasonAt();
+    expect(r).toEqual({
+      kind: 'threshold',
+      window: 'seven_day',
+      utilization: 0.934,
+      threshold: 0.9,
+      resetsAt: reset,
+    });
+    expect(gateReasonText(r)).toBe('7-day usage at 93% is at or above the 90% throttle');
+  });
+
+  test('five_hour and seven_day both over: the higher is named', () => {
+    ingest({
+      status: 'allowed',
+      unifiedWindows: {
+        five_hour: { utilization: 0.97, resetsAt: future },
+        seven_day: { utilization: 0.92, resetsAt: reset },
+      },
+    });
+    const r = reasonAt();
+    expect(r).toMatchObject({ kind: 'threshold', window: 'five_hour', utilization: 0.97 });
+    expect(gateReasonText(r)).toBe('5-hour usage at 97% is at or above the 90% throttle');
+  });
+
+  test('the warning fallback naming a window', () => {
+    ingest({ status: 'allowed_warning', rateLimitType: 'five_hour', resetsAt: future });
+    const r = reasonAt();
+    expect(r).toEqual({
+      kind: 'warning',
+      window: 'five_hour',
+      resetsAt: new Date(future).toISOString(),
+    });
+    expect(gateReasonText(r)).toBe('Claude warned of 5-hour usage and reported no figure for it');
+  });
+
+  test('the warning fallback naming no window', () => {
+    ingest({ status: 'allowed_warning' });
+    const r = reasonAt();
+    expect(r).toEqual({ kind: 'warning', window: null, resetsAt: null });
+    expect(gateReasonText(r)).toBe(
+      'Claude warned that usage is high and reported no figure for any window',
+    );
+  });
+
+  test('a warning whose window reports a figure under the threshold is open', () => {
+    ingest({
+      status: 'allowed_warning',
+      rateLimitType: 'seven_day',
+      resetsAt: reset,
+      unifiedWindows: { seven_day: { utilization: 0.5, resetsAt: reset } },
+    });
+    expect(reasonAt()).toEqual({ kind: 'open' });
+  });
+
+  test('a pause: closed until the later of the pause and the probe backoff', () => {
+    setUsageState(
+      db,
+      { pausedUntil: '2026-10-20T12:00:00.000Z', probeNotBefore: '2026-10-20T12:01:00.000Z' },
+      t0,
+    );
+    expect(reasonAt()).toEqual({ kind: 'closed', until: '2026-10-20T12:01:00.000Z' });
+  });
+
+  test('a probe', () => {
+    setUsageState(db, { status: 'rejected' }, t0);
+    expect(reasonAt()).toEqual({ kind: 'probe' });
+  });
+
+  test('a credits stop', () => {
+    setUsageState(
+      db,
+      {
+        overageStoppedAt: t0.toISOString(),
+        overageDropId: 'd9',
+        overageUntil: '2026-10-20T15:00:00.000Z',
+      },
+      t0,
+    );
+    const r = reasonAt();
+    expect(r).toEqual({ kind: 'stopped', dropId: 'd9', until: '2026-10-20T15:00:00.000Z' });
+    expect(gateReasonText(r)).toBe('drop d9 ran on usage credits');
+  });
+
+  test('credits resume', () => {
+    setUsageState(
+      db,
+      {
+        overageResumeUntil: '2026-10-20T14:00:00.000Z',
+        overageResumeWorkItemId: 7,
+        overageResumedAt: t0.toISOString(),
+      },
+      t0,
+    );
+    expect(reasonAt()).toEqual({
+      kind: 'credits_resume',
+      workItemId: 7,
+      until: '2026-10-20T14:00:00.000Z',
+    });
+  });
+
+  test('an override over a threshold hold', () => {
+    ingest({
+      status: 'allowed',
+      unifiedWindows: { seven_day: { utilization: 0.91, resetsAt: reset } },
+    });
+    setUsageOverride(db, { starts: 5, hours: 3, by: 'session' }, t0);
+    const r = reasonAt();
+    expect(r).toEqual({
+      kind: 'override',
+      held: expect.objectContaining({ kind: 'threshold', window: 'seven_day', utilization: 0.91 }),
+      startsLeft: 5,
+      starts: 5,
+      until: plus(t0, 3 * H).toISOString(),
+    });
+    expect(gateReasonText(r)).toBe(
+      "7-day usage at 91% is at or above the 90% throttle; Command's override has 5 of 5 starts left",
+    );
   });
 });

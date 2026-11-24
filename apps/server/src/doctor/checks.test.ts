@@ -18,6 +18,7 @@ import {
   appendEvents,
   insertDrop,
   insertStick,
+  recordUsageWindows,
   setKilled,
   setUsageState,
   setZoneMode,
@@ -32,6 +33,7 @@ import { makeZone } from '../test/fixtures.js';
 import { tmpDbFile } from '../test/helpers.js';
 import { addTranscriptDrop } from '../test/transcriptWorld.js';
 import { prunePass } from '../transcripts.js';
+import { gateReason, gateReasonText } from '../usage.js';
 import { type Resolved, shadowedAppEntries } from '../vault/credentials.js';
 import {
   type AppEntryRead,
@@ -291,6 +293,63 @@ describe('global checks', () => {
       status: 'warn',
       summary: expect.stringContaining(`3 of 5 starts left, until ${until}`),
       fix: expect.stringContaining('ctl usage override --clear'),
+    });
+  });
+
+  describe('usage.gate names what holds the throttle (#753)', () => {
+    const reset = new Date(NOW.getTime() + 2 * 3_600_000).toISOString();
+    const reason = (w: ReturnType<typeof world>) =>
+      gateReasonText(gateReason(w.db, w.config.usage, NOW));
+
+    test('a threshold hold names the window, its figure and the threshold', async () => {
+      const w = world();
+      w.config.usage = { ...w.config.usage, throttleUtilization: 0.8 };
+      recordUsageWindows(
+        w.db,
+        {
+          five_hour: { utilization: 0.2, resetsAt: reset },
+          seven_day: { utilization: 0.834, resetsAt: reset },
+        },
+        NOW,
+        null,
+      );
+      const c = one(await w.run(), 'usage.gate');
+      expect(c.status).toBe('warn');
+      expect(c.summary).toBe(
+        '7-day usage at 83% is at or above the 80% throttle: only finishing work (review, heal, resolve) dispatches',
+      );
+      expect(c.summary).toContain(reason(w));
+    });
+
+    test("the warning fallback says it is Claude's warning with no figure", async () => {
+      const w = world();
+      setUsageState(
+        w.db,
+        { status: 'allowed_warning', warningWindow: 'five_hour', warningAt: NOW.toISOString() },
+        NOW,
+      );
+      const c = one(await w.run(), 'usage.gate');
+      expect(c.summary).toBe(
+        'Claude warned of 5-hour usage and reported no figure for it: only finishing work (review, heal, resolve) dispatches',
+      );
+    });
+
+    test('an override over a threshold hold names the hold it lifts', async () => {
+      const w = world();
+      w.config.usage = { ...w.config.usage, throttleUtilization: 0.8 };
+      recordUsageWindows(w.db, { seven_day: { utilization: 0.834, resetsAt: reset } }, NOW, null);
+      const until = new Date(NOW.getTime() + 3_600_000).toISOString();
+      setUsageState(
+        w.db,
+        { overrideUntil: until, overrideStarts: 5, overrideStartsLeft: 3, overrideBy: 'token' },
+        NOW,
+      );
+      const c = one(await w.run(), 'usage.gate');
+      expect(c.status).toBe('warn');
+      expect(c.summary).toBe(
+        `7-day usage at 83% is at or above the 80% throttle; Command's override has 3 of 5 starts left, until ${until}`,
+      );
+      expect(c.summary).toBe(`${reason(w)}, until ${until}`);
     });
   });
 
