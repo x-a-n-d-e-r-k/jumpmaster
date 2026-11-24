@@ -700,11 +700,14 @@ describe('GitHubForge', () => {
         status: conclusion === null ? 'in_progress' : 'completed',
         conclusion,
       });
-      const runs = (ids: number[]) =>
+      const runs = (ids: number[], status: (id: number) => string = () => 'completed') =>
         nock(api)
           .get('/repos/o/r/actions/runs')
           .query((q) => q.head_sha === 'sha1')
-          .reply(200, { total_count: ids.length, workflow_runs: ids.map((id) => ({ id })) });
+          .reply(200, {
+            total_count: ids.length,
+            workflow_runs: ids.map((id) => ({ id, status: status(id) })),
+          });
       const jobs = (id: number, js: unknown[]) =>
         nock(api)
           .get(`/repos/o/r/actions/runs/${id}/jobs`)
@@ -717,14 +720,66 @@ describe('GitHubForge', () => {
         jobs(12, [job('lint', 'failure')]);
         jobs(13, [job('images', 'success')]);
         const post = nock(api).post('/repos/o/r/actions/runs/11/rerun-failed-jobs').reply(201, {});
-        expect(await forge.rerunFailedChecks(5, 'sha1', ['images'])).toEqual({ runIds: [11] });
+        expect(await forge.rerunFailedChecks(5, 'sha1', ['images'])).toEqual({
+          runIds: [11],
+          running: false,
+        });
         expect(post.isDone()).toBe(true);
       });
 
       test('no failed run of a named check: no POST', async () => {
         runs([11]);
         jobs(11, [job('images', 'success')]);
-        expect(await forge.rerunFailedChecks(5, 'sha1', ['images'])).toEqual({ runIds: [] });
+        expect(await forge.rerunFailedChecks(5, 'sha1', ['images'])).toEqual({
+          runIds: [],
+          running: false,
+        });
+      });
+
+      test('a matching run still in progress with a failed job (#772) → running, no POST', async () => {
+        runs([11], () => 'in_progress');
+        jobs(11, [job('images', 'failure'), job('lint', null)]);
+        // No POST is mocked and the network is off: a POST would reject.
+        expect(await forge.rerunFailedChecks(5, 'sha1', ['images'])).toEqual({
+          runIds: [],
+          running: true,
+        });
+        expect(nock.pendingMocks()).toEqual([]);
+      });
+
+      test('two matching runs, one completed and one in progress (#772) → no POST', async () => {
+        runs([11, 12], (id) => (id === 11 ? 'completed' : 'in_progress'));
+        jobs(11, [job('images', 'failure')]);
+        jobs(12, [job('images', 'failure')]);
+        expect(await forge.rerunFailedChecks(5, 'sha1', ['images'])).toEqual({
+          runIds: [],
+          running: true,
+        });
+        expect(nock.pendingMocks()).toEqual([]);
+      });
+
+      test('a run in progress that does not match does not hold back the re-run (#772)', async () => {
+        runs([11, 12], (id) => (id === 11 ? 'completed' : 'in_progress'));
+        jobs(11, [job('images', 'failure')]);
+        jobs(12, [job('lint', null)]);
+        const post = nock(api).post('/repos/o/r/actions/runs/11/rerun-failed-jobs').reply(201, {});
+        expect(await forge.rerunFailedChecks(5, 'sha1', ['images'])).toEqual({
+          runIds: [11],
+          running: false,
+        });
+        expect(post.isDone()).toBe(true);
+      });
+
+      test('a POST refused 403 "already running" (#772) → running', async () => {
+        runs([11]);
+        jobs(11, [job('images', 'failure')]);
+        nock(api)
+          .post('/repos/o/r/actions/runs/11/rerun-failed-jobs')
+          .reply(403, { message: 'This workflow is already running' });
+        expect(await forge.rerunFailedChecks(5, 'sha1', ['images'])).toEqual({
+          runIds: [],
+          running: true,
+        });
       });
 
       test('a refused re-run rejects with its status', async () => {

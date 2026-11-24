@@ -362,14 +362,16 @@ export interface Forge {
   /**
    * A write (#420): re-runs the failed jobs (`POST …/actions/runs/{run_id}/rerun-failed-jobs`) of
    * each GitHub Actions workflow run on `headSha`, PR `prNumber`'s head, that has a failed job
-   * named in `names`; once per run. Returns the runs it re-ran. A refusal (403, 404) or any other
-   * error rejects; runs re-run before it stay re-run.
+   * named in `names`; once per run. Returns the runs it re-ran. A matching run whose `status` is not
+   * `completed` re-runs none of them (GitHub refuses a run still in progress) and returns
+   * `running: true`, as does a POST refused 403 "already running" (#772). Any other refusal (403,
+   * 404) or error rejects; runs re-run before it stay re-run.
    */
   rerunFailedChecks(
     prNumber: number,
     headSha: string,
     names: string[],
-  ): Promise<{ runIds: number[] }>;
+  ): Promise<{ runIds: number[]; running: boolean }>;
   getBranchRules(branch: string): Promise<BranchRulesRead>;
   getFileAt(ref: string, path: string): Promise<string | null>;
   listReviews(number: number): Promise<ForgeReview[]>;
@@ -1322,7 +1324,7 @@ export class GitHubForge implements Forge {
     _prNumber: number,
     headSha: string,
     names: string[],
-  ): Promise<{ runIds: number[] }> {
+  ): Promise<{ runIds: number[]; running: boolean }> {
     const wanted = new Set(names);
     const workflowRuns = await this.octokit.paginate(
       this.octokit.rest.actions.listWorkflowRunsForRepo,
@@ -1344,19 +1346,28 @@ export class GitHubForge implements Forge {
           j.conclusion !== null &&
           FAILED_CONCLUSIONS.has(j.conclusion),
       );
-      if (failed && !runIds.includes(run.id)) runIds.push(run.id);
+      if (!failed) continue;
+      // Every matching run is checked before the first POST: one still in progress re-runs none.
+      if (run.status !== 'completed') return { runIds: [], running: true };
+      if (!runIds.includes(run.id)) runIds.push(run.id);
     }
     for (const id of runIds) {
-      await this.octokit.request(
-        'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs',
-        {
-          owner: this.owner,
-          repo: this.repo,
-          run_id: id,
-        },
-      );
+      try {
+        await this.octokit.request(
+          'POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs',
+          {
+            owner: this.owner,
+            repo: this.repo,
+            run_id: id,
+          },
+        );
+      } catch (e) {
+        // The run started again between the read and the POST.
+        if (isAlreadyRunning(e)) return { runIds: [], running: true };
+        throw e;
+      }
     }
-    return { runIds };
+    return { runIds, running: false };
   }
 
   async getBranchRules(branch: string): Promise<BranchRulesRead> {
@@ -1772,4 +1783,13 @@ export class GitHubForge implements Forge {
     }
     return out;
   }
+}
+
+/** GitHub's 403 refusing to re-run a workflow run that is still running (#772). */
+function isAlreadyRunning(e: unknown): boolean {
+  const err = e as { status?: unknown; message?: unknown; response?: { data?: unknown } } | null;
+  if (err?.status !== 403) return false;
+  const data = err.response?.data as { message?: unknown } | undefined;
+  const text = [err.message, data?.message].filter((m) => typeof m === 'string').join(' ');
+  return /already running/i.test(text);
 }
