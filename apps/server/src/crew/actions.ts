@@ -32,7 +32,13 @@ export type ApplyOptions = { objective?: string; allOrNothing?: boolean; ownBrie
 class Refused extends Error {}
 
 /** Crew issues that hold a slot: not yet promoted, and not rejected or failed. */
-const OPEN_STATES: CrewIssueState[] = ['filing', 'staged', 'promote_held', 'promoting', 'revising'];
+export const OPEN_STATES: readonly CrewIssueState[] = [
+  'filing',
+  'staged',
+  'promote_held',
+  'promoting',
+  'revising',
+];
 
 const HEADING = /^#{1,6}\s+(.+?)\s*#*\s*$/;
 const UNCHECKED = /^\s*[-*+]\s+\[ \]\s+\S/;

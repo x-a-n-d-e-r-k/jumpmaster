@@ -27,7 +27,7 @@ import { log } from '../log.js';
 import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
 import type { CrewInputJson } from '../payloads.js';
 import { dispatchGate, gateQueuesCrew } from '../usage.js';
-import { crewIssueSlots, isSecurityTouching } from './actions.js';
+import { crewIssueSlots, isSecurityTouching, OPEN_STATES } from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
 import { fetchIssueImages, type ImageFetchOpts } from './images.js';
 import {
@@ -69,6 +69,40 @@ export type CrewWork = CrewInputJson['work'];
 export type CrewNext = Exclude<CrewWork, { role: 'audit' }> | { role: 'audit' };
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** How long after the last lead cycle an emptied queue may start an early one (#757). */
+export const EARLY_CYCLE_MS = 10 * 60_000;
+
+/**
+ * Whether the zone's queue emptied since the lead cycle created at `lastAt`, so the lead may file
+ * what just became possible: at least `EARLY_CYCLE_MS` since that cycle, no work item `ready`,
+ * `in_flight` or `pr_open`, no crew issue in an open state, and an item `done` after that cycle.
+ * The early cycle's own drop makes the last condition false again: at most one per emptying.
+ */
+function queueEmptied(db: Db, zoneId: string, lastAt: string, now: Date): boolean {
+  if (now.getTime() - Date.parse(lastAt) < EARLY_CYCLE_MS) return false;
+  const busy = db
+    .prepare(
+      `SELECT 1 FROM work_items WHERE drop_zone_id = ?
+         AND state IN ('ready', 'in_flight', 'pr_open') LIMIT 1`,
+    )
+    .get(zoneId);
+  if (busy) return false;
+  const filing = db
+    .prepare(
+      `SELECT 1 FROM crew_issues WHERE zone_id = ?
+         AND state IN (${OPEN_STATES.map(() => '?').join(', ')}) LIMIT 1`,
+    )
+    .get(zoneId, ...OPEN_STATES);
+  if (filing) return false;
+  const finished = db
+    .prepare(
+      `SELECT 1 FROM work_items WHERE drop_zone_id = ? AND state = 'done' AND updated_at > ?
+       LIMIT 1`,
+    )
+    .get(zoneId, lastAt);
+  return finished !== undefined;
+}
 
 const isUniqueViolation = (e: unknown): boolean =>
   e instanceof Error && /UNIQUE constraint failed/.test(e.message);
@@ -244,7 +278,8 @@ export function nextDiagnose(
  * (`nextDiagnose`); then refute a staged crew issue whose current body is unrefuted (within `maxRefute`), arbitrate one whose
  * refutes ran out (with `crew.arbiter` on, Fable available, at least one stored verdict, and no
  * arbitration of this text yet), triage the oldest open triage request (within `maxTriage`, with a
- * slot free), then the lead cycle when it is due, then an audit of a merged commit (`auditDue`). An
+ * slot free), then the lead cycle when it is due (by time, a ruling, a request, or the queue
+ * emptying: `queueEmptied`), then an audit of a merged commit (`auditDue`). An
  * exhausted issue that may not be arbitrated, or whose arbitration of this text is settled, is put
  * to Command instead.
  */
@@ -321,6 +356,7 @@ export function nextCrewWork(
     .get(zone.id, last.at);
   const requested = cycleRequests.get(zone.id);
   if (ruled || (requested !== undefined && requested > last.at)) return { role: 'crew-lead' };
+  if (queueEmptied(db, zone.id, last.at, now)) return { role: 'crew-lead' };
   return auditDue(db, zone, last) ? { role: 'audit' } : null;
 }
 
