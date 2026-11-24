@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { MAX_PENDING_PUSHES } from './push.js';
-import { advertisedCapabilities, canUpgrade, healthLine, leaseTerms } from './state.js';
+import { advertisedCapabilities, canUpgrade, healthLine, leaseTerms, stickInfo } from './state.js';
 import { VOLUME_FREE_FLOOR_BYTES } from './volumes.js';
 
 const healthy = { selfCheck: true, freeBytes: VOLUME_FREE_FLOOR_BYTES };
@@ -109,5 +109,20 @@ describe('upgrade-v1 (issue #430)', () => {
     expect(advertisedCapabilities({ egress: false, policy: 'allowlist', upgrade: true })).toEqual(
       [],
     );
+  });
+});
+
+describe('egressCeiling in the advert (#780)', () => {
+  test('no JM_EGRESS_CEILING: null, so the server leases it as ever', () => {
+    expect(stickInfo({}, '1').egressCeiling).toBeNull();
+    expect(stickInfo({ JM_EGRESS_CEILING: '  ' }, '1').egressCeiling).toBeNull();
+  });
+
+  test('the parsed ceiling, base hosts included', () => {
+    expect(stickInfo({ JM_EGRESS_CEILING: 'Registry.npmjs.org' }, '1').egressCeiling).toEqual([
+      'api.anthropic.com',
+      'github.com',
+      'registry.npmjs.org',
+    ]);
   });
 });

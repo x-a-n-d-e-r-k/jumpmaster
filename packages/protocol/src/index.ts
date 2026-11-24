@@ -86,6 +86,12 @@ export const StickInfoSchema = z.object({
   imagePolicy: ImagePolicySchema.default('allowlist'),
   version: z.string().min(1).max(64).optional(),
   pinnedImages: z.array(z.string().min(1).max(512)).max(256).default([]),
+  /**
+   * The stick's egress ceiling (`JM_EGRESS_CEILING`, issue #780), base hosts included, or null
+   * when it has none. An older stick sends none: no ceiling. The server only reads it, to leave
+   * drops outside it queued; the stick's own check stays the control.
+   */
+  egressCeiling: z.array(z.string().min(1).max(255)).max(256).nullable().default(null),
 });
 export type StickInfo = z.infer<typeof StickInfoSchema>;
 
