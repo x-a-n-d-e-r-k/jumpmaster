@@ -1348,6 +1348,22 @@ describe('models on the drop page', () => {
   });
 });
 
+describe('why a review ran on Fable, on the drop page (#836)', () => {
+  test('each reason shows beside the requested model; none for a drop not on Fable by review', () => {
+    for (const reason of ['every review', 'security paths', 'file list unknown']) {
+      const html = renderDrop(
+        { ...drop, role: 'review', requestedModel: 'claude-fable-5-2', fableReason: reason },
+        [],
+      );
+      expect(html, reason).toContain(
+        `On Fable because: <span class="fable-reason">${reason}</span>`,
+      );
+    }
+    expect(renderDrop({ ...drop, fableReason: null }, [])).not.toContain('On Fable because');
+    expect(renderDrop({ ...drop, fableReason: '<i>x</i>' }, [])).toContain('&lt;i&gt;x&lt;/i&gt;');
+  });
+});
+
 describe('home crew line', () => {
   test('Home has no crew table: it is on Goals (#625)', () => {
     const html = renderHome({ zones: [z], items: [], drops: [] });

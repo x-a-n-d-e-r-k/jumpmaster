@@ -64,6 +64,7 @@ const zone = {
   maxTurns: 200,
   protectedPaths: ['.github/**', 'CLAUDE.md'],
   privateKeyPaths: [],
+  securityPaths: [],
   reviewReadToken: false,
 } as unknown as DropZoneConfig;
 

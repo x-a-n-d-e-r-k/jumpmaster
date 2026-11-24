@@ -1826,7 +1826,10 @@ function modelLines(drop: Drop): string {
     requested !== null && served !== null && requested !== served
       ? ` (mismatch: requested ${escapeHtml(requested)})`
       : '';
-  return `<p>Requested model: ${escapeHtml(requested ?? '-')}<br>Served model: ${escapeHtml(served ?? '-')}${mismatch}</p>`;
+  const why = drop.fableReason
+    ? `<br>On Fable because: <span class="fable-reason">${escapeHtml(drop.fableReason)}</span>`
+    : '';
+  return `<p>Requested model: ${escapeHtml(requested ?? '-')}${why}<br>Served model: ${escapeHtml(served ?? '-')}${mismatch}</p>`;
 }
 
 /** A lead drop's entries the server refused (#808), escaped, or nothing when it had none. */

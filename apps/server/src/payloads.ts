@@ -10,6 +10,7 @@ import {
   isCrewRole,
   isOwnerName,
   isRepoName,
+  protectedPathMatches,
   type Role,
   redact,
   type TriageImage,
@@ -24,9 +25,16 @@ import {
 } from './config.js';
 import { appliedItemArbitration, getCrewRetry } from './crew/store.js';
 import type { Db } from './db/open.js';
-import { type Drop, getPullRequest, listWorkItems, updateDrop, type WorkItem } from './db/repo.js';
+import {
+  type Drop,
+  getPullRequest,
+  getWorkItemPrFiles,
+  listWorkItems,
+  updateDrop,
+  type WorkItem,
+} from './db/repo.js';
 import { egressFor } from './egress-for.js';
-import { resolveModel } from './fable.js';
+import { chooseModel, type ModelChoice, type SecurityReason } from './fable.js';
 import type { CodeScanning, Feedback } from './flow/decide.js';
 import { malformedDrops } from './flow/malformed.js';
 import { forgeKind } from './forge/kind.js';
@@ -652,6 +660,42 @@ const DEFAULT_CLAUDE: ClaudeConfig = {
 };
 
 /**
+ * Whether a review drop's change is security-sensitive (#836), from what the forge reported: the
+ * item's stored file list (both sides of a rename, when stored) against the zone's `securityPaths`.
+ * No paths: no. A stored file matching a glob: `security paths`. An unknown list: `file list
+ * unknown`, since the change can't be shown to be outside the paths. Never read from the issue's,
+ * the PR's or an agent's text. Any other role: no.
+ */
+export function reviewSecurity(
+  db: Db,
+  zone: DropZoneConfig,
+  drop: Pick<Drop, 'role' | 'workItemId'>,
+): SecurityReason | null {
+  const globs = zone.securityPaths ?? [];
+  if (drop.role !== 'review' || globs.length === 0) return null;
+  const files = drop.workItemId === null ? null : getWorkItemPrFiles(db, drop.workItemId);
+  if (files === null) return 'file list unknown';
+  return files.some((f) => globs.some((g) => protectedPathMatches(f, g))) ? 'security paths' : null;
+}
+
+/**
+ * The model a drop runs on when it is leased at `now`, with why a review runs on Fable: what
+ * buildPayload resolves and records as `requested_model`.
+ */
+export function leaseChoice(
+  db: Db,
+  zone: DropZoneConfig,
+  drop: Pick<Drop, 'role' | 'inputJson' | 'workItemId'>,
+  claude: ClaudeConfig | undefined,
+  now: Date,
+): ModelChoice {
+  return chooseModel(db, { claude: claude ?? DEFAULT_CLAUDE }, zone, drop.role as Role, now, {
+    fable: fableWanted(drop),
+    security: reviewSecurity(db, zone, drop),
+  });
+}
+
+/**
  * The model a drop runs on when it is leased at `now`: what buildPayload resolves and records as
  * `requested_model`. A queued drop has no `requested_model` yet; the lease route reads this to hold
  * drops on a model whose own usage window is at the threshold (#747).
@@ -659,13 +703,11 @@ const DEFAULT_CLAUDE: ClaudeConfig = {
 export function leaseModel(
   db: Db,
   zone: DropZoneConfig,
-  drop: Pick<Drop, 'role' | 'inputJson'>,
+  drop: Pick<Drop, 'role' | 'inputJson' | 'workItemId'>,
   claude: ClaudeConfig | undefined,
   now: Date,
 ): string {
-  return resolveModel(db, { claude: claude ?? DEFAULT_CLAUDE }, zone, drop.role as Role, now, {
-    fable: fableWanted(drop),
-  });
+  return leaseChoice(db, zone, drop, claude, now).model;
 }
 
 /**
@@ -689,9 +731,10 @@ export function buildPayload(
   secrets: Config['secrets'],
   o: { claude?: ClaudeConfig; now?: Date; readToken?: string } = {},
 ): DropPayload {
-  const model = leaseModel(db, zone, drop, o.claude, o.now ?? new Date());
-  // Records requested_model on the drop as a side effect (the Fable weekly cap counts it).
-  updateDrop(db, drop.id, { requestedModel: model });
+  const { model, fableReason } = leaseChoice(db, zone, drop, o.claude, o.now ?? new Date());
+  // Records requested_model on the drop as a side effect (the Fable weekly cap counts it), and why
+  // a review runs on Fable (#836), for the drop's page.
+  updateDrop(db, drop.id, { requestedModel: model, fableReason });
   // A GitLab zone's drops carry no forge token at all (issue #765): no GitHub token names its
   // remote, and whether its agent containers may hold a GitLab credential is for Command.
   const gitlab = forgeKind(zone) === 'gitlab';

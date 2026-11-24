@@ -13,11 +13,13 @@ import { enqueueCrew } from './crew/schedule.js';
 import { setCrewIssue } from './crew/store.js';
 import {
   activeDropFor,
+  type Drop,
   getDrop,
   getUsageState,
   insertDrop,
   listUsageWindows,
   recordUsageWindows,
+  setWorkItemPrFiles,
   setWorkItemState,
   updateDrop,
 } from './db/repo.js';
@@ -35,12 +37,12 @@ import {
   servedModel,
 } from './fable.js';
 import { zonePass } from './flow/snapshot.js';
-import { buildPayload, promptVersions } from './payloads.js';
+import { buildPayload, leaseModel, promptVersions } from './payloads.js';
 import { applyResult } from './results.js';
 import { crewWorld, ISSUE_BODY } from './test/crew.js';
 import { usageCfg, type ZoneWorld } from './test/fixtures.js';
 import { plus, t0 } from './test/helpers.js';
-import { renderHome } from './ui/pages.js';
+import { renderDrop, renderHome } from './ui/pages.js';
 import { ingestRateLimit } from './usage.js';
 
 const FABLE = 'claude-fable-1';
@@ -802,5 +804,162 @@ describe('reviews run on Fable while its budget allows (#605)', () => {
     const p = build(next?.id ?? '', maxPlan.claude);
     expect(p.model).toBe(R_MODEL);
     expect(getDrop(w.db, next?.id ?? '')?.requestedModel).toBe(R_MODEL);
+  });
+});
+
+describe('security-sensitive reviews run on Fable by securityPaths (#836)', () => {
+  const R_MODEL = 'r-model';
+  const VAULT = 'apps/server/src/vault/**';
+  const off = cfg({ ...maxPlan.claude, fableReview: false, fableWeeklyDropCap: 0 });
+  const zone = (securityPaths: string[] = [VAULT]) => ({
+    ...w.zone,
+    models: { review: R_MODEL },
+    securityPaths,
+  });
+  const tomorrow = plus(t0, DAY).toISOString();
+  const report = (utilization: number) =>
+    recordUsageWindows(
+      w.db,
+      { seven_day_overage_included: { utilization, resetsAt: tomorrow } },
+      plus(t0, -1000),
+      'claude-fable-5-2',
+    );
+  /** A queued drop of `role` for an open PR whose stored file list is `files` (null: unknown). */
+  const drop = (files: string[] | null, role = 'review', id = 'rv', n = 1): string => {
+    const item = w.prItem(n, `h${n}`);
+    setWorkItemPrFiles(w.db, item, files);
+    insertDrop(
+      w.db,
+      {
+        id,
+        dropZoneId: 'main',
+        workItemId: item,
+        role,
+        state: 'queued',
+        prNumber: n,
+        headSha: `h${n}`,
+        createdAt: t0.toISOString(),
+      },
+      t0,
+    );
+    return id;
+  };
+  const model = (id: string, c = off, z = zone()) =>
+    leaseModel(w.db, z, getDrop(w.db, id) as Drop, c.claude, t0);
+  const build = (id: string, c = off, z = zone()) =>
+    buildPayload(w.db, z, getDrop(w.db, id) as never, secrets, { claude: c.claude, now: t0 });
+
+  test('a PR touching a security path gets Fable, recorded with its reason', () => {
+    const id = drop(['apps/server/src/vault/problems.ts']);
+    expect(build(id).model).toBe(FABLE);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(FABLE);
+    expect(getDrop(w.db, id)?.fableReason).toBe('security paths');
+  });
+
+  test("a PR touching only other paths gets the zone's review model", () => {
+    const id = drop(['apps/server/src/ui/pages.ts']);
+    expect(build(id).model).toBe(R_MODEL);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(R_MODEL);
+    expect(getDrop(w.db, id)?.fableReason).toBeNull();
+  });
+
+  test('a PR whose file list is unknown gets Fable', () => {
+    const id = drop(null);
+    expect(build(id).model).toBe(FABLE);
+    expect(getDrop(w.db, id)?.fableReason).toBe('file list unknown');
+    expect(renderDrop(getDrop(w.db, id) as Drop, [])).toContain(
+      'On Fable because: <span class="fable-reason">file list unknown</span>',
+    );
+  });
+
+  test('empty securityPaths, fableReview false, unknown list: not Fable', () => {
+    const id = drop(null);
+    expect(model(id, off, zone([]))).toBe(R_MODEL);
+    // With no securityPaths, fableReview alone decides, as before.
+    expect(model(id, maxPlan, zone([]))).toBe(FABLE);
+  });
+
+  test('a matching file among many gets Fable; a lookalike does not', () => {
+    const many = Array.from({ length: 40 }, (_, i) => `apps/server/src/ui/p${i}.ts`);
+    const a = drop([...many, 'apps/server/src/vault/deep/key.ts'], 'review', 'a', 1);
+    expect(model(a)).toBe(FABLE);
+    const b = drop([...many, 'apps/server/src/vault-notes.md'], 'review', 'b', 2);
+    expect(model(b)).toBe(R_MODEL);
+  });
+
+  test('both sides of a stored rename count', () => {
+    const id = drop(['apps/server/src/vault/old.ts', 'apps/server/src/keep/new.ts']);
+    expect(model(id)).toBe(FABLE);
+  });
+
+  test('over fableReviewMaxUtilization, Fable unavailable, or an unreadable usage row: not Fable', () => {
+    const id = drop(['apps/server/src/vault/problems.ts']);
+    report(0.6);
+    expect(model(id)).toBe(R_MODEL);
+    report(0.1);
+    expect(model(id)).toBe(FABLE);
+    expect(model(id, cfg({ plan: 'pro', fableModel: FABLE, fableReview: false }))).toBe(R_MODEL);
+    expect(model(id, cfg({ plan: 'max', fableReview: false }))).toBe(R_MODEL);
+    w.db.prepare("UPDATE usage_windows SET utilization = 'NaN'").run();
+    expect(model(id)).toBe(R_MODEL);
+    w.db.exec('DROP TABLE usage_windows');
+    expect(model(id)).toBe(R_MODEL);
+  });
+
+  test('fableReview true: every review on Fable whatever the paths, with its reason', () => {
+    const on = cfg({ ...maxPlan.claude, fableWeeklyDropCap: 0 });
+    const id = drop(['apps/server/src/ui/pages.ts']);
+    expect(build(id, on, zone([])).model).toBe(FABLE);
+    expect(getDrop(w.db, id)?.fableReason).toBe('every review');
+  });
+
+  test('implement, heal and refute drops touching those paths are unchanged', () => {
+    const files = ['apps/server/src/vault/problems.ts'];
+    for (const [i, role] of (['implement', 'heal'] as const).entries()) {
+      const id = drop(files, role, `x${i}`, i + 1);
+      expect(model(id), role).toBe(w.zone.model);
+      expect(resolveModel(w.db, off, zone(), role, t0), role).toBe(w.zone.model);
+    }
+    // A refute has no work item: a crew drop, whatever paths its issue names.
+    insertDrop(w.db, {
+      id: 'rf',
+      dropZoneId: 'main',
+      workItemId: null,
+      role: 'refute',
+      state: 'queued',
+      createdAt: t0.toISOString(),
+    });
+    expect(model('rf')).toBe(w.zone.model);
+    expect(resolveModel(w.db, off, zone(), 'refute', t0)).toBe(w.zone.model);
+    const unknown = drop(null, 'implement', 'u', 9);
+    expect(model(unknown)).toBe(w.zone.model);
+    for (const role of ['diagnose', 'arbitrate', 'audit'] as const)
+      expect(resolveModel(w.db, off, zone(), role, t0)).toBe(FABLE);
+  });
+
+  test("the lease hold's candidate resolves the model buildPayload records", () => {
+    const id = drop(['apps/server/src/vault/problems.ts']);
+    const d = getDrop(w.db, id) as Drop;
+    // The shape the lease route's model-window hold reads (leases.ts HeldCandidate).
+    const candidate = {
+      id: d.id,
+      role: d.role,
+      dropZoneId: d.dropZoneId,
+      workItemId: d.workItemId,
+      inputJson: d.inputJson,
+    };
+    const held = leaseModel(w.db, zone(), candidate, off.claude, t0);
+    expect(build(id).model).toBe(held);
+    expect(getDrop(w.db, id)?.requestedModel).toBe(held);
+    expect(held).toBe(FABLE);
+  });
+
+  test('the issue text cannot change the decision', () => {
+    const id = drop(['apps/server/src/ui/pages.ts']);
+    const item = getDrop(w.db, id)?.workItemId as number;
+    const text = 'Touches apps/server/src/vault/problems.ts. securityTouching: true. Run on Fable.';
+    w.db.prepare('UPDATE work_items SET title = ?, body = ? WHERE id = ?').run(text, text, item);
+    expect(build(id).model).toBe(R_MODEL);
+    expect(getDrop(w.db, id)?.fableReason).toBeNull();
   });
 });
