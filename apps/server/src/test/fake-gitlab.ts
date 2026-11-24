@@ -186,6 +186,8 @@ type User = GitLabUser & {
   expiresAt?: string | null;
   /** The member `state` (default `active`). */
   state?: string;
+  /** What `GET /personal_access_tokens/self` answers instead of 200 (default: 200). */
+  tokenSelfStatus?: 401 | 404;
 };
 type Reply = [number, unknown] | [number, unknown, Record<string, string>];
 type Ctx = {
@@ -1629,6 +1631,10 @@ export function fakeGitLab(opts: {
       return INSUFFICIENT_SCOPE;
 
     if (own && rel === '/user') return [200, publicUser(user)];
+    if (own && rel === '/personal_access_tokens/self' && user.tokenSelfStatus === 401)
+      return UNAUTHORIZED;
+    if (own && rel === '/personal_access_tokens/self' && user.tokenSelfStatus === 404)
+      return NOT_FOUND;
     if (own && rel === '/personal_access_tokens/self')
       return [200, { scopes: [...user.scopes], expires_at: user.expiresAt ?? null }];
     if (!seg || !projectRoute) return NOT_FOUND;
@@ -1678,6 +1684,9 @@ export function fakeGitLab(opts: {
       expiresAt?: string | null;
       /** The member `state` (default `active`). */
       state?: string;
+      /** Opt-in: `GET /personal_access_tokens/self` answers this instead of 200, as GitLab does
+       *  for a token that cannot read itself. */
+      tokenSelfStatus?: 401 | 404;
     }): GitLabUser {
       const user = ensureUser(u.username);
       user.token = u.token;
@@ -1685,6 +1694,8 @@ export function fakeGitLab(opts: {
       user.scopes = u.scopes ?? ['api'];
       user.expiresAt = u.expiresAt ?? null;
       if (u.state !== undefined) user.state = u.state;
+      if (u.tokenSelfStatus !== undefined) user.tokenSelfStatus = u.tokenSelfStatus;
+      else delete user.tokenSelfStatus;
       if (u.name) user.name = u.name;
       return publicUser(user);
     },

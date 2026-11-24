@@ -1904,6 +1904,9 @@ describe('resend after a clean read-back (issue #787)', () => {
   test('the migration reads existing outbox rows as resent 0 times', () => {
     const file = tmpDbFile();
     const raw = new Database(file);
+    // A scratch file: skip the fsync per statement, which made 62 migrations outrun the timeout
+    // under a full parallel run. The migrated open below is the code under test and is untouched.
+    raw.pragma('synchronous = OFF');
     raw.exec('CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
     for (const m of MIGRATIONS.filter((m) => m.version <= 62)) {
       raw.exec(m.sql);
