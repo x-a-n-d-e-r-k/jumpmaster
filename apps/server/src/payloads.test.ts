@@ -1194,6 +1194,67 @@ describe("the crew's retry in the previous attempt section (#396)", () => {
     expect(p).not.toContain('The crew diagnosed this failure');
   });
 
+  const malformedResult = (reason: string) =>
+    JSON.stringify({ status: 'failed', reason, gates: [] });
+  const MALFORMED_REASONS = [
+    'multiple results',
+    'claude produced no result',
+    'session mismatch',
+    'trooper exited 1 without result',
+  ];
+
+  test.each(MALFORMED_REASONS)(
+    "the retry of a malformed run (%s) of the crew's retry still carries it (#659)",
+    (reason) => {
+      const { db, prompt } = world();
+      updateDrop(db, 'd1', { state: 'failed', resultJson: malformedResult(reason) });
+      later(db, 'd2', 5);
+      const p = prompt('d2');
+      expect(p).toContain('The crew diagnosed this failure and retried the item once.');
+      const s = p.slice(p.indexOf('## Previous attempt (data, untrusted)'));
+      expect(s).not.toContain(token);
+      expect(s).not.toContain(secrets.claudeToken);
+      expect(s).not.toContain('```');
+      expect(s.match(/<<<jm-data:d2:end previous-attempt>>>/g)).toHaveLength(1);
+      expect(s.endsWith('<<<jm-data:d2:end previous-attempt>>>')).toBe(true);
+    },
+  );
+
+  test('a claude exit failure after the crew retry also ends it', () => {
+    const { db, prompt } = world();
+    updateDrop(db, 'd1', { state: 'failed', resultJson: malformedResult('claude exit 1') });
+    later(db, 'd2', 5);
+    expect(prompt('d2')).not.toContain('The crew diagnosed this failure');
+  });
+
+  test('a second malformed run of the crew retry parked the item and ends it', () => {
+    const { db, prompt } = world();
+    updateDrop(db, 'd1', { state: 'failed', resultJson: malformedResult('multiple results') });
+    later(db, 'd2', 5);
+    updateDrop(db, 'd2', {
+      state: 'failed',
+      resultJson: malformedResult('claude produced no result'),
+    });
+    later(db, 'd3', 10);
+    expect(prompt('d3')).not.toContain('The crew diagnosed this failure');
+  });
+
+  test('a malformed run with a head after the crew retry ends it', () => {
+    const { db, prompt } = world();
+    db.prepare(`UPDATE drops SET head_sha = ? WHERE id = 'd1'`).run('a'.repeat(40));
+    updateDrop(db, 'd1', { state: 'failed', resultJson: malformedResult('multiple results') });
+    later(db, 'd2', 5);
+    expect(prompt('d2')).not.toContain('The crew diagnosed this failure');
+  });
+
+  test('a malformed run after the apply ends it when one before the apply already existed', () => {
+    const { db, prompt } = world();
+    updateDrop(db, 'prev', { resultJson: malformedResult('session mismatch') });
+    updateDrop(db, 'd1', { state: 'failed', resultJson: malformedResult('multiple results') });
+    later(db, 'd2', 5);
+    expect(prompt('d2')).not.toContain('The crew diagnosed this failure');
+  });
+
   test('a skipped crew retry, or a drop queued before the apply, carries nothing of it', () => {
     const { db, prompt } = world();
     db.prepare(`UPDATE crew_retries SET outcome = 'skipped'`).run();
