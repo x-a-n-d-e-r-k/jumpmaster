@@ -320,10 +320,11 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
    * The read token minted for this drop alone, held until the drop ends: the reviewer app's for a
    * review, crew or doctor drop of an app-reviewer zone (issue #237), the author app's for an
    * implement, heal or resolve drop of an app-author zone (issue #249). Undefined when the drop
-   * fetches as before. Rejects when the mint fails: there is no PAT fallback.
+   * fetches as before. Rejects when the mint fails: there is no PAT fallback. A GitLab zone's drop
+   * gets none, and nothing is minted (issue #765): a GitHub app token does not reach its remote.
    */
   const dropReadToken = async (zone: DropZoneConfig, drop: Drop): Promise<string | undefined> => {
-    if (!deps.appTokens) return undefined;
+    if (!deps.appTokens || forgeKind(zone) === 'gitlab') return undefined;
     const apps = deps.resolvedApps?.() ?? new Map();
     let fresh: Awaited<ReturnType<AppTokenSource['fresh']>>;
     if (readsAsReviewer(drop.role) && isAppReviewerZone(zone, apps))

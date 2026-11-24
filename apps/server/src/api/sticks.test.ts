@@ -3,6 +3,8 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  type DropPayload,
+  DropPayloadSchema,
   FEATURES_HEADER,
   IMAGE_MIRROR_FEATURE,
   PushGrantSchema,
@@ -10,6 +12,7 @@ import {
   SLOTS_HEADER,
 } from '@jumpmaster/protocol';
 import Fastify, { type FastifyInstance } from 'fastify';
+import nock from 'nock';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createApp } from '../app.js';
 import { listAudit } from '../auth/audit.js';
@@ -46,6 +49,7 @@ import {
   upsertPullRequest,
   upsertWorkItem,
 } from '../db/repo.js';
+import type { AppTokenSource } from '../forge/app-tokens.js';
 import { ScrubSet } from '../forge/scrub-set.js';
 import { StickFetches } from '../images/fetches.js';
 import { ImageMirror } from '../images/mirror.js';
@@ -54,6 +58,7 @@ import { buildPayload, promptVersions } from '../payloads.js';
 import { type FakeImage, type FakeRegistry, startFakeRegistry } from '../test/fake-registry.js';
 import { fakeForge } from '../test/fakes.js';
 import { plus, t0, tmpDbFile, workItem } from '../test/helpers.js';
+import type { ResolvedApps } from '../vault/resolution.js';
 import { registerStickRoutes } from './sticks.js';
 
 const config: Config = {
@@ -119,6 +124,8 @@ function setup(
     logs?: string[];
     images?: ImageMirror;
     fetches?: StickFetches;
+    appTokens?: Pick<AppTokenSource, 'fresh'>;
+    resolvedApps?: () => ResolvedApps;
   } = {},
 ) {
   const db = openDb(tmpDbFile());
@@ -160,6 +167,8 @@ function setup(
     leasePollMs: opts.leasePollMs ?? 10,
     ...(opts.images ? { images: opts.images } : {}),
     ...(opts.fetches ? { fetches: opts.fetches } : {}),
+    ...(opts.appTokens ? { appTokens: opts.appTokens } : {}),
+    ...(opts.resolvedApps ? { resolvedApps: opts.resolvedApps } : {}),
   });
   return { db, forge, wi, forgeZones };
 }
@@ -2421,5 +2430,68 @@ describe('stick auth before the body is read (issue #644)', () => {
     expect(own.json()).toMatchObject({ stale: true });
     expect(other.statusCode).toBe(409);
     expect(other.json()).toMatchObject({ stale: true });
+  });
+});
+
+describe('a GitLab zone drop (#765)', () => {
+  const appEntry = {
+    source: 'vault',
+    fingerprint: 'fp',
+    entry: { appId: '42', slug: 'jm-app', clientId: 'c', pem: 'pem', importedAt: '2026-11-01' },
+  } as const;
+  const apps: ResolvedApps = new Map([['octo', { author: appEntry, reviewer: appEntry }]]);
+  const appZone = {
+    ...config.dropZones[0]!,
+    identity: 'two-bot',
+    githubApp: { repositoryId: 6660, installations: { author: 77, reviewer: 88 } },
+    reviewReadToken: true,
+  } as Config['dropZones'][number];
+  const withZone = (zone: Config['dropZones'][number]): Config => ({
+    ...config,
+    dropZones: [zone],
+    secrets: { ...config.secrets, githubReadToken: 'gh-read' },
+  });
+  const minted = (calls: string[]): Pick<AppTokenSource, 'fresh'> => ({
+    fresh: async (zoneId, role) => {
+      calls.push(`${zoneId}:${role}`);
+      return { token: 'minted-app-token', expiresAt: plus(t0, 3_600_000).toISOString() } as never;
+    },
+  });
+
+  afterEach(() => nock.enableNetConnect());
+
+  test('the app-zone fixture mints for a GitHub zone', async () => {
+    const calls: string[] = [];
+    setup({ config: withZone(appZone), appTokens: minted(calls), resolvedApps: () => apps });
+    const { stickToken } = await enroll();
+    const res = await lease(stickToken);
+    expect(res.statusCode).toBe(200);
+    expect(calls).toEqual(['main:author']);
+  });
+
+  test('is leased with the GitLab remote, no forge credential and no minted token', async () => {
+    nock.disableNetConnect();
+    const calls: string[] = [];
+    const gitlab = {
+      ...appZone,
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    } as Config['dropZones'][number];
+    setup({ config: withZone(gitlab), appTokens: minted(calls), resolvedApps: () => apps });
+    const { stickToken } = await enroll();
+    const res = await lease(stickToken);
+    expect(res.statusCode).toBe(200);
+    const payload = res.json() as DropPayload;
+    expect(DropPayloadSchema.parse(payload)).toEqual(payload);
+    expect(payload.repo.forge).toEqual({
+      kind: 'gitlab',
+      origin: 'https://gitlab.example.com',
+      projectPath: 'octo/demo',
+    });
+    expect(payload.credentials).toEqual({ claudeToken: 'claude-secret' });
+    expect(calls).toEqual([]);
+    for (const t of ['minted-app-token', 'gh-read', 'gh-secret', 'gh-reviewer'])
+      expect(res.body).not.toContain(t);
+    expect(nock.pendingMocks()).toEqual([]);
   });
 });
