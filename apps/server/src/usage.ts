@@ -246,7 +246,6 @@ export function ingestRateLimit(
           causeDropId: null,
           causeWorkItemId: null,
         } satisfies Partial<UsageStateRow>);
-        if (data.status === 'allowed_warning') patch.observedAt = now.toISOString();
       }
     }
     if (Object.keys(patch).length > 0) setUsageState(db, patch, now);
@@ -366,12 +365,44 @@ function accountAt(db: Db, share: number, t: number): boolean {
   return liveAccountWindows(db, new Date(t)).some((w) => w.utilization >= share);
 }
 
-function throttled(db: Db, u: UsageStateRow, cfg: UsageConfig, t: number): boolean {
-  const observed = ms(u.observedAt);
-  if (u.status === 'allowed_warning' && observed !== null && t < observed + FIVE_HOURS) {
-    return true;
-  }
-  return accountAt(db, cfg.throttleUtilization, t);
+/**
+ * Whether a window's figure counts at `t`: a row of `key` with a utilization whose window has not
+ * ended (the rule liveAccountWindows uses).
+ */
+function reportsUtilization(db: Db, key: string, t: number): boolean {
+  return listUsageWindows(db).some((w) => {
+    if (w.key !== key || w.utilization === null) return false;
+    const end = windowEnd(w);
+    return end !== null && t < end;
+  });
+}
+
+/**
+ * Whether Claude's warning holds all dispatch (#748): only while it is current, names an
+ * account-wide window (or none), and that window reports no utilization. The threshold is the
+ * control; a warning only stands in for a figure Claude did not give.
+ */
+function warningHolds(db: Db, t: number): boolean {
+  const w = usageWarning(db, new Date(t));
+  if (w === null) return false;
+  if (w.window === null) return liveAccountWindows(db, new Date(t)).length === 0;
+  return accountWide(w.window) && !reportsUtilization(db, w.window, t);
+}
+
+function throttled(db: Db, cfg: UsageConfig, t: number): boolean {
+  return accountAt(db, cfg.throttleUtilization, t) || warningHolds(db, t);
+}
+
+/**
+ * When the throttle's hold began, for the status: the latest usage report while a window at or
+ * above the threshold holds, else the warning's time while the warning holds (#748); null when
+ * nothing holds.
+ */
+export function throttleSince(db: Db, cfg: UsageConfig, now: Date): string | null {
+  const t = now.getTime();
+  if (accountAt(db, cfg.throttleUtilization, t)) return getUsageState(db).observedAt;
+  if (warningHolds(db, t)) return usageWarning(db, now)?.at ?? null;
+  return null;
 }
 
 /**
@@ -485,7 +516,7 @@ function baseGate(
   if ((until !== null && t < until) || (notBefore !== null && t < notBefore)) return 'closed';
   if (credits && creditsResumeInForce(u, now)) return 'credits_resume';
   if (u.status === 'rejected' || (credits && creditsProbing(u, now))) return 'probe';
-  return throttled(db, u, cfg, t) ? 'finishing_only' : 'open';
+  return throttled(db, cfg, t) ? 'finishing_only' : 'open';
 }
 
 /** Called when a drop becomes terminal: frees the probe slot, backing off if nothing cleared it. */

@@ -40,13 +40,18 @@ beforeEach(() => {
   db.prepare("UPDATE drops SET role = 'implement' WHERE id = 'd1'").run();
 });
 
-/** Claude's warning, as a live report leaves it: a hold for five hours from the report. */
+/**
+ * Claude's warning, as a live report leaves it: a stored five_hour warning with no reset, and no
+ * five_hour utilization reported, so it holds for five hours from the report (#748).
+ */
 const warned = (over: Parameters<typeof setUsageState>[1] = {}) =>
   setUsageState(
     db,
     {
       status: 'allowed_warning',
-      observedAt: iso(0),
+      warningWindow: 'five_hour',
+      warningAt: iso(0),
+      warningResetsAt: null,
       sevenDayUtil: 0.81,
       sevenDayResetsAt: iso(36 * H),
       ...over,
@@ -95,6 +100,18 @@ describe('the usage override and the gate (#728)', () => {
     expect(gateQueuesImplement('override')).toBe(true);
     expect(gateQueuesCrew('override')).toBe(true);
     expect(doctorMayLease('override')).toBe(true);
+  });
+
+  test('a warning does not hold while its window reports utilization under the threshold (#748)', () => {
+    ingestRateLimit(
+      db,
+      report({ unifiedWindows: { seven_day: { utilization: 0.5, resetsAt: iso(36 * H) } } }),
+      src,
+      cfg,
+      t0,
+    );
+    expect(throttleHolds(db, cfg, t0)).toBe(false);
+    expect(dispatchGate(db, cfg, t0)).toBe('open');
   });
 
   test('with no throttle the gate is open, never override', () => {
@@ -390,7 +407,11 @@ describe('an override ends early (#728)', () => {
     grant();
     ingestRateLimit(
       db,
-      report({ unifiedWindows: { seven_day: { utilization: 0.82, resetsAt: iso(36 * H) } } }),
+      // Warned on five_hour, which it does not report: the warning still holds (#748).
+      report({
+        rateLimitType: 'five_hour',
+        unifiedWindows: { seven_day: { utilization: 0.82, resetsAt: iso(36 * H) } },
+      }),
       src,
       cfg,
       t0,

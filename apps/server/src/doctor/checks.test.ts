@@ -278,7 +278,8 @@ describe('global checks', () => {
       w.db,
       {
         status: 'allowed_warning',
-        observedAt: NOW.toISOString(),
+        warningWindow: 'five_hour',
+        warningAt: NOW.toISOString(),
         overrideUntil: until,
         overrideStarts: 5,
         overrideStartsLeft: 3,
@@ -1205,7 +1206,15 @@ describe('zone.doctor-drop', () => {
     const summary = async () => one(await w.run(), 'zone.doctor-drop').summary;
     expect(await summary()).toContain('waiting for a free stick slot');
     // The throttle (finishing_only) no longer holds a doctor drop.
-    setUsageState(w.db, { status: 'allowed_warning', observedAt: ago(60_000).toISOString() }, NOW);
+    setUsageState(
+      w.db,
+      {
+        status: 'allowed_warning',
+        warningWindow: 'five_hour',
+        warningAt: ago(60_000).toISOString(),
+      },
+      NOW,
+    );
     expect(await summary()).toContain('waiting for a free stick slot');
     setUsageState(w.db, { pausedUntil: new Date(NOW.getTime() + 3_600_000).toISOString() }, NOW);
     expect(await summary()).toContain('held: usage paused until 2026-11-09T13:00:00.000Z');

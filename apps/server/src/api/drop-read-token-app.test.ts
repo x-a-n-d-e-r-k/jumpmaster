@@ -673,7 +673,11 @@ describe('a mint failure', () => {
     const { db } = setup({ apps: withAuthorApp });
     const { stickToken } = await enroll();
     queue(db, 'd1', 'implement');
-    setUsageState(db, { status: 'allowed_warning', observedAt: t0.toISOString() }, t0);
+    setUsageState(
+      db,
+      { status: 'allowed_warning', warningWindow: 'five_hour', warningAt: t0.toISOString() },
+      t0,
+    );
     setUsageOverride(db, { starts: 2, hours: 3, by: 'token' }, t0);
     gh.state.mint = 500;
     for (let i = 0; i < 3; i++) {

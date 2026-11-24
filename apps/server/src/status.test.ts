@@ -1167,7 +1167,17 @@ describe('the usage throttle holding the crew, queued work or not (#727)', () =>
     });
     const observedAt = h.now().toISOString();
     const throttle = () =>
-      setUsageState(h.db, { pausedUntil: null, status: 'allowed_warning', observedAt }, h.now());
+      setUsageState(
+        h.db,
+        {
+          pausedUntil: null,
+          status: 'allowed_warning',
+          observedAt,
+          warningWindow: 'five_hour',
+          warningAt: observedAt,
+        },
+        h.now(),
+      );
     const brief = () =>
       raiseBriefing(
         h.db,
@@ -1200,6 +1210,25 @@ describe('the usage throttle holding the crew, queued work or not (#727)', () =>
     );
     expect(s.waitingOn).toBe('claude');
     expect(s.since).toBe(w.observedAt);
+  });
+
+  test('a hold from the warning alone dates from the warning, not an older usage report (#748)', async () => {
+    const w = await world();
+    const warnedAt = new Date(w.h.now().getTime() - 20 * 60_000).toISOString();
+    setUsageState(
+      w.h.db,
+      {
+        pausedUntil: null,
+        status: 'allowed_warning',
+        observedAt: new Date(w.h.now().getTime() - 3 * 60 * 60_000).toISOString(),
+        warningWindow: 'five_hour',
+        warningAt: warnedAt,
+      },
+      w.h.now(),
+    );
+    const s = await w.status();
+    expect(s.headline).toBe(CREW_HEADLINE);
+    expect(s.since).toBe(warnedAt);
   });
 
   test('with an open briefing: waiting on you leads, and the crew hold is an also item', async () => {
