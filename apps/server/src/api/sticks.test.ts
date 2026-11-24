@@ -1731,6 +1731,143 @@ describe('push container routes', () => {
     });
   });
 
+  describe('push-plan for a GitLab zone (#783)', () => {
+    type Mode = 'enforce' | 'monitor' | 'off';
+    const glZone = (baseUrl: string, allow: string[], mode: Mode = 'enforce'): Config => ({
+      ...config,
+      dropZones: [
+        {
+          ...config.dropZones[0]!,
+          forge: 'gitlab',
+          gitlab: { baseUrl },
+          egress: { mode, allow },
+        },
+      ],
+    });
+    const planFor = async (cfg: Config, logs: string[] = []) => {
+      const { db } = setup({ queued: false, config: cfg, logs });
+      const { stickId, stickToken } = await enroll();
+      pending(db, stickId);
+      return { db, res: await plan(stickToken) };
+    };
+    const REFUSED = { refused: 'egress', retryable: true };
+
+    test.each([
+      ['https://GitLab.Example.com/', ['gitlab.example.com'], 'enforce'],
+      ['https://gitlab.example.com', ['*.example.com'], 'enforce'],
+      ['https://gitlab.example.com', ['gitlab.example.com'], 'monitor'],
+    ] as const)(
+      'baseUrl %s allowed by %j in %s plans exactly its host',
+      async (url, allow, mode) => {
+        const { res } = await planFor(glZone(url, [...allow], mode));
+        expect(res.statusCode).toBe(200);
+        expect(PushPlanSchema.parse(res.json()).egress).toEqual({
+          mode,
+          allow: ['gitlab.example.com'],
+        });
+      },
+    );
+
+    test('a zone whose list allows neither host is refused, retryable, and the log names the host', async () => {
+      const logs: string[] = [];
+      const { res } = await planFor(
+        glZone('https://gitlab.example.com', ['other.example.org']),
+        logs,
+      );
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(REFUSED);
+      expect(logs.join('\n')).toMatch(/gitlab\.example\.com/);
+      expect(logs.join('\n')).toMatch(/egress\.allow/);
+    });
+
+    test('a monitor zone whose list lacks the host is refused the same', async () => {
+      const { res } = await planFor(glZone('https://gitlab.example.com', [], 'monitor'));
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(REFUSED);
+    });
+
+    test('a port other than 443 is refused with egress on, the log naming it; planned with egress off', async () => {
+      const logs: string[] = [];
+      const url = 'https://gitlab.example.com:8443';
+      const { res } = await planFor(glZone(url, ['gitlab.example.com']), logs);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(REFUSED);
+      expect(logs.join('\n')).toMatch(/8443/);
+      const off = await planFor(glZone(url, ['gitlab.example.com'], 'off'));
+      expect(off.res.statusCode).toBe(200);
+      expect(off.res.json()).not.toHaveProperty('egress');
+    });
+
+    test('an explicit :443 is the default port and planned', async () => {
+      const { res } = await planFor(
+        glZone('https://gitlab.example.com:443', ['gitlab.example.com']),
+      );
+      expect(res.statusCode).toBe(200);
+      expect(res.json().egress.allow).toEqual(['gitlab.example.com']);
+    });
+
+    test.each(['https://10.0.0.5', 'https://[::1]'])('an IP baseUrl %s is refused', async (url) => {
+      const { res } = await planFor(glZone(url, ['gitlab.example.com']));
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(REFUSED);
+    });
+
+    test.each([
+      ['https://gitlab.example.com', ['gitlab.example.com.evil.net']],
+      ['https://gitlab.example.com', ['notgitlab.example.com']],
+      ['https://gitlab.example.com', ['example.com']],
+      ['https://notgitlab.example.com', ['gitlab.example.com']],
+    ])('a lookalike does not satisfy the check: %s with %j', async (url, allow) => {
+      const { res } = await planFor(glZone(url, allow));
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(REFUSED);
+    });
+
+    test('github.com is on no GitLab plan, even when the zone lists it', async () => {
+      const { res } = await planFor(
+        glZone('https://gitlab.example.com', ['github.com', 'gitlab.example.com']),
+      );
+      expect(res.statusCode).toBe(200);
+      expect(res.json().egress.allow).toEqual(['gitlab.example.com']);
+    });
+
+    test('the refusal leaves an existing reservation as it was and starts nothing', async () => {
+      const logs: string[] = [];
+      const { db } = setup({
+        queued: false,
+        config: glZone('https://gitlab.example.com', []),
+        logs,
+      });
+      const { stickId, stickToken } = await enroll();
+      pending(db, stickId);
+      expect(reserveGrant(db, 'd1', 1, t0)).toBe('ok');
+      const res = await plan(stickToken);
+      expect(res.statusCode).toBe(403);
+      expect(liveGrants(db)).toBe(1);
+      expect(getDrop(db, 'd1')?.state).toBe('push_pending');
+      const everything = res.body + JSON.stringify(listAudit(db)) + logs.join('\n');
+      for (const t of ['gh-secret', 'gh-reviewer']) expect(everything).not.toContain(t);
+    });
+  });
+
+  test('a GitHub zone whose egress.allow has extra hosts still plans exactly github.com (#783)', async () => {
+    const extra: Config = {
+      ...config,
+      dropZones: [
+        {
+          ...config.dropZones[0]!,
+          egress: { mode: 'monitor', allow: ['gitlab.example.com', '*.example.com'] },
+        },
+      ],
+    };
+    const { db } = setup({ queued: false, config: extra });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const res = await plan(stickToken);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().egress).toEqual({ mode: 'monitor', allow: ['github.com'] });
+  });
+
   test('a GitHub zone PAT-mode grant is unchanged: the author PAT, no forge (#782)', async () => {
     const { db } = setup({ queued: false, resolvedGitlabPats: () => new Map() });
     const { stickId, stickToken } = await enroll();

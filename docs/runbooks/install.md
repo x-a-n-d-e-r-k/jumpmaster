@@ -1100,6 +1100,14 @@ What egress does not stop: anything sent to an allowed host. An implement drop p
 `github.com` with the author token (held by the trooper's root process, not the agent), and the
 agent's Claude token reaches `api.anthropic.com`.
 
+**A GitLab zone** needs its GitLab host (the host of `gitlab.baseUrl`, for example
+`gitlab.example.com`) in its `egress.allow`, for the clone and for the push. With egress on, a
+GitLab zone's push container reaches that one host and nothing else (not `github.com`), and only
+when the zone's `egress.allow` lists it, by name or by a `*.` entry. The egress proxy allows port
+443 only, so a `gitlab.baseUrl` on another port, or on an IP address, cannot push while egress is
+on. Until the host is allowed, each push is refused (`egress`) and retried; the work waits on the
+stick, and the server log names the host to add. A stick's ceiling must list the host too (below).
+
 Egress rules cover what a drop's containers reach, not how their images arrive: pulling the
 trooper's image or a service's is done by the Docker engine or the stick itself, outside any
 drop network, and no allow list or ceiling applies to it.
