@@ -1,5 +1,6 @@
 import type { Config, DropZoneConfig } from '../config.js';
 import type { AppTokenSource } from '../forge/app-tokens.js';
+import { forgeKind } from '../forge/kind.js';
 import { isAppReviewerZone, type ResolvedApps } from '../vault/resolution.js';
 
 /** A read credential one chat turn fetches a zone with, and how to give it back. */
@@ -17,6 +18,8 @@ const noRelease = async (): Promise<void> => {};
  * - an app-reviewer zone gets a reviewer `contents: read` token minted for this turn alone, which
  *   `release` revokes; a failed mint (or no token source) is null, never a PAT fallback, as for a
  *   drop (`dropReadToken` in `api/sticks.ts`);
+ * - a GitLab zone gets null: its `repo` is a GitLab project path, and no GitHub credential (read
+ *   PAT or App token) is ever handed out for it (issue #805);
  * - any other zone gets the install's `githubReadToken`, or null without one. Never the author
  *   token: the chat service holds no GitHub write credential.
  */
@@ -26,6 +29,7 @@ export async function chatReadCredential(
   apps: ResolvedApps,
   appTokens?: Pick<AppTokenSource, 'fresh'>,
 ): Promise<ChatReadCredential | null> {
+  if (forgeKind(zone) === 'gitlab') return null;
   if (isAppReviewerZone(zone, apps)) {
     if (!appTokens) return null;
     try {
