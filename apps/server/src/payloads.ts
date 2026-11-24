@@ -636,6 +636,23 @@ const DEFAULT_CLAUDE: ClaudeConfig = {
 };
 
 /**
+ * The model a drop runs on when it is leased at `now`: what buildPayload resolves and records as
+ * `requested_model`. A queued drop has no `requested_model` yet; the lease route reads this to hold
+ * drops on a model whose own usage window is at the threshold (#747).
+ */
+export function leaseModel(
+  db: Db,
+  zone: DropZoneConfig,
+  drop: Pick<Drop, 'role' | 'inputJson'>,
+  claude: ClaudeConfig | undefined,
+  now: Date,
+): string {
+  return resolveModel(db, { claude: claude ?? DEFAULT_CLAUDE }, zone, drop.role as Role, now, {
+    fable: fableWanted(drop),
+  });
+}
+
+/**
  * The payload for a leased drop. The model comes from `resolveModel` (Fable only where the declared
  * plan includes it) and is recorded on the drop as `requested_model`.
  *
@@ -653,14 +670,7 @@ export function buildPayload(
   secrets: Config['secrets'],
   o: { claude?: ClaudeConfig; now?: Date; readToken?: string } = {},
 ): DropPayload {
-  const model = resolveModel(
-    db,
-    { claude: o.claude ?? DEFAULT_CLAUDE },
-    zone,
-    drop.role as Role,
-    o.now ?? new Date(),
-    { fable: fableWanted(drop) },
-  );
+  const model = leaseModel(db, zone, drop, o.claude, o.now ?? new Date());
   // Records requested_model on the drop as a side effect (the Fable weekly cap counts it).
   updateDrop(db, drop.id, { requestedModel: model });
   // The clone token of review, crew and doctor drops (never an author's).

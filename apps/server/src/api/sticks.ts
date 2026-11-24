@@ -70,6 +70,7 @@ import {
   upgradeBehind,
   upgradeEligible,
 } from '../db/repo.js';
+import { modelFamily } from '../fable.js';
 import type { AppBrokers } from '../forge/app-brokers.js';
 import type { AppTokenSource } from '../forge/app-tokens.js';
 import { GitHubAppError } from '../forge/github-app.js';
@@ -83,13 +84,21 @@ import type { StickFetches } from '../images/fetches.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { layoutFor } from '../images/serve.js';
 import { codeHash, ENROLL_CODE, INSTALL_TOKEN } from '../install/invite.js';
-import { heartbeat, leaseNextDrop, missingFor, zoneRequirements, zonesWaiting } from '../leases.js';
+import {
+  type HeldCandidate,
+  heartbeat,
+  leaseNextDrop,
+  missingFor,
+  zoneRequirements,
+  zonesWaiting,
+} from '../leases.js';
 import { log as serverLog } from '../log.js';
 import type { ForgePair } from '../outbox.js';
-import { buildPayload, egressFor, ownZoneSecrets } from '../payloads.js';
+import { buildPayload, egressFor, leaseModel, ownZoneSecrets } from '../payloads.js';
 import { applyResult, applyUsage, type ResultDeps } from '../results.js';
 import {
   dispatchGate,
+  heldModelFamilies,
   ingestRateLimit,
   rateLimitFromEvent,
   refundOverrideStart,
@@ -240,6 +249,27 @@ function withoutPush(body: unknown): { body: unknown; hadPush: boolean } {
   }
   const { push: _push, ...rest } = result as Record<string, unknown>;
   return { body: { ...body, result: rest }, hadPush: true };
+}
+
+/**
+ * The per-model hold of one poll (#747): with some model's own window at the threshold, a queued
+ * drop is held when the model buildPayload would resolve for it at lease time is of a held family.
+ * Its requested_model is not read: that is written only after the lease. A drop of an unknown zone
+ * is not held (the unknown-zone path releases it). Undefined when no family is held.
+ */
+function modelHeldBy(
+  db: Db,
+  config: Config,
+  now: Date,
+): ((drop: HeldCandidate) => boolean) | undefined {
+  const held = heldModelFamilies(db, config.usage, now);
+  if (held.size === 0) return undefined;
+  return (drop) => {
+    const zone = config.dropZones.find((z) => z.id === drop.dropZoneId);
+    if (!zone) return false;
+    const family = modelFamily(leaseModel(db, zone, drop, config.claude, now))?.toLowerCase();
+    return family !== undefined && held.has(family);
+  };
 }
 
 /** What a pending push of this drop may push: the kind its role may ask for, with its SHA. */
@@ -610,6 +640,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           dispatchGate(db, config.usage, at),
           exclude,
           excludeRoles,
+          modelHeldBy(db, config, at),
         );
         if (leased) {
           reportSkips(reply, stick, cannot);

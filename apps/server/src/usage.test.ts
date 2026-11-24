@@ -12,6 +12,7 @@ import {
   insertStick,
   listUsageWindows,
   type NewDrop,
+  recordUsageWindows,
   setUsageState,
   setWorkItemState,
   updateDrop,
@@ -25,6 +26,7 @@ import { fakeForgePair } from './test/fakes.js';
 import { tmpDbFile } from './test/helpers.js';
 import {
   dispatchGate,
+  heldModelFamilies,
   ingestRateLimit,
   liveAccountWindows,
   type RateLimitSource,
@@ -617,6 +619,71 @@ describe('the gate reads every account-wide window (#738)', () => {
       seven_day_overage_included: { utilization: 0.9, resetsAt: future },
     });
     expect(liveAccountWindows(db, t0).map((w) => w.key)).toEqual(['seven_day']);
+  });
+});
+
+describe('heldModelFamilies (#747)', () => {
+  const held = (when = t0) => [...heldModelFamilies(db, cfg, when)];
+
+  test('a key-named window at or above the threshold holds its family', () => {
+    recordUsageWindows(db, { seven_day_opus: { utilization: 0.95, resetsAt: future } }, t0, null);
+    expect(held()).toEqual(['opus']);
+    recordUsageWindows(db, { seven_day_opus: { utilization: 0.9, resetsAt: future } }, t0, null);
+    expect(held()).toEqual(['opus']);
+  });
+
+  test('a key-named window below the threshold holds nothing', () => {
+    recordUsageWindows(db, { seven_day_opus: { utilization: 0.5, resetsAt: future } }, t0, null);
+    expect(held()).toEqual([]);
+  });
+
+  test('seven_day_overage_included counts for its stored model, case-insensitively', () => {
+    recordUsageWindows(
+      db,
+      { seven_day_overage_included: { utilization: 0.95, resetsAt: future } },
+      t0,
+      'claude-fable-5-2',
+    );
+    expect(held()).toEqual(['fable']);
+  });
+
+  test('seven_day_overage_included with a null model holds nothing', () => {
+    recordUsageWindows(
+      db,
+      { seven_day_overage_included: { utilization: 0.95, resetsAt: future } },
+      t0,
+      null,
+    );
+    expect(held()).toEqual([]);
+  });
+
+  test('an expired window holds nothing', () => {
+    recordUsageWindows(
+      db,
+      { seven_day_opus: { utilization: 0.95, resetsAt: '2026-10-20T10:59:00Z' } },
+      t0,
+      null,
+    );
+    expect(held()).toEqual([]);
+    // No reset: seven days from its own observation.
+    recordUsageWindows(db, { seven_day_sonnet: { utilization: 0.95 } }, plus(t0, -6 * DAY), null);
+    expect(held()).toEqual(['sonnet']);
+    expect(held(plus(t0, 2 * DAY))).toEqual([]);
+  });
+
+  test('account-wide windows hold no family, and the gate stays open for a per-model one', () => {
+    recordUsageWindows(
+      db,
+      {
+        seven_day: { utilization: 0.95, resetsAt: future },
+        seven_day_opus: { utilization: 0.95, resetsAt: future },
+      },
+      t0,
+      null,
+    );
+    expect(held()).toEqual(['opus']);
+    recordUsageWindows(db, { seven_day_opus: { utilization: 0.95, resetsAt: future } }, t0, null);
+    expect(dispatchGate(db, cfg, t0)).toBe('open');
   });
 });
 

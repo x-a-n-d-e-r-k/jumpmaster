@@ -30,6 +30,7 @@ import {
 } from './leases.js';
 import { makeZone } from './test/fixtures.js';
 import { plus, seedQueuedDrop, t0, workItem } from './test/helpers.js';
+import { setUsageOverride } from './usage.js';
 
 let db: Db;
 beforeEach(() => {
@@ -69,6 +70,76 @@ describe('leaseNextDrop', () => {
       createdAt: plus(t0, 1000).toISOString(),
     });
     expect(leaseNextDrop(db, 's1', t0, 'open')?.dropId).toBe('early');
+  });
+});
+
+describe('leaseNextDrop and a per-model hold (#747)', () => {
+  const queue = (id: string, role: string, at: number) => {
+    const crew = ['crew-lead', 'refute', 'diagnose', 'triage', 'arbitrate', 'audit', 'doctor'];
+    const wi = crew.includes(role)
+      ? { id: null }
+      : (db
+          .prepare(
+            `INSERT INTO work_items (drop_zone_id, issue_number, title, body, author, issue_created_at, updated_at)
+         VALUES ('main', ?, 't', 'b', 'a', 'x', 'x') RETURNING id`,
+          )
+          .get(100 + at) as { id: number });
+    insertDrop(db, {
+      id,
+      dropZoneId: 'main',
+      workItemId: wi.id,
+      role,
+      state: 'queued',
+      createdAt: plus(t0, at).toISOString(),
+    });
+  };
+  const holdA = (d: { id: string }) => d.id === 'A';
+  beforeEach(() => {
+    db.prepare("UPDATE drops SET state = 'succeeded' WHERE id = 'd1'").run();
+  });
+
+  test('a held implement drop is skipped for the next, and stays queued, untouched', () => {
+    queue('A', 'implement', 1000);
+    queue('B', 'implement', 2000);
+    const before = getDrop(db, 'A');
+    expect(leaseNextDrop(db, 's1', t0, 'open', [], [], holdA)?.dropId).toBe('B');
+    expect(getDrop(db, 'A')).toEqual(before);
+    expect(getDrop(db, 'A')?.state).toBe('queued');
+    expect(leaseNextDrop(db, 's1', t0, 'open', [], [], holdA)).toBeNull();
+  });
+
+  test('the predicate is shown the drop it judges', () => {
+    queue('A', 'implement', 1000);
+    const seen: unknown[] = [];
+    leaseNextDrop(db, 's1', t0, 'open', [], [], (d) => {
+      seen.push(d);
+      return true;
+    });
+    expect(seen).toEqual([{ id: 'A', role: 'implement', dropZoneId: 'main', inputJson: null }]);
+  });
+
+  test.each(['review', 'heal', 'resolve', 'doctor'])(
+    'a %s drop it would hold still leases',
+    (role) => {
+      queue('A', role, 1000);
+      expect(leaseNextDrop(db, 's1', t0, 'open', [], [], () => true)?.dropId).toBe('A');
+    },
+  );
+
+  test('under override a held drop takes no start, and the next eligible drop is leased', () => {
+    setUsageOverride(db, { starts: 3, hours: 3, by: 'token' }, t0);
+    queue('A', 'implement', 1000);
+    queue('B', 'implement', 2000);
+    expect(leaseNextDrop(db, 's1', t0, 'override', [], [], holdA)?.dropId).toBe('B');
+    expect(getUsageState(db).overrideStartsLeft).toBe(2);
+    expect(getDrop(db, 'A')?.state).toBe('queued');
+    expect(leaseNextDrop(db, 's1', t0, 'override', [], [], holdA)).toBeNull();
+    expect(getUsageState(db).overrideStartsLeft).toBe(2);
+  });
+
+  test('with no predicate nothing is held', () => {
+    queue('A', 'implement', 1000);
+    expect(leaseNextDrop(db, 's1', t0, 'open')?.dropId).toBe('A');
   });
 });
 
