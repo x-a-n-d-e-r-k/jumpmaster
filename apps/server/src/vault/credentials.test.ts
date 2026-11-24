@@ -20,7 +20,7 @@ import {
   testCredential,
 } from './credentials.js';
 import { appEntryName, type GitHubAppEntry, serializeAppEntry } from './github-app-entries.js';
-import { gitlabPatEntryName } from './gitlab-pat-entries.js';
+import { gitlabPatEntryName, gitlabReadEntryName } from './gitlab-pat-entries.js';
 import {
   type ResolvedApps,
   type ResolvedGitlabPats,
@@ -314,6 +314,23 @@ describe('shadowing, fingerprints and dates', () => {
     expect(removed).toBe(rotated);
     for (const f of [added, rotated, both])
       for (const t of [GL_AUTHOR, GL_ROTATED, GL_REVIEWER]) expect(f).not.toContain(t);
+  });
+
+  test('credentialFingerprint changes when a read entry is added or replaced, and is unchanged without one (issue #831)', () => {
+    const r = resolveCredentials({ JM_GITHUB_AUTHOR_TOKEN: AUTHOR }, undefined, 'disabled');
+    const v = vault();
+    const zones = [{ id: 'web', forge: 'gitlab' as const }];
+    const pats = () => resolveGitlabPatEntries(zones, { vault: v, scrubSet: new ScrubSet() });
+    v.put(gitlabPatEntryName('web', 'author'), 'gl-author-value-000000001', { now: t0 });
+    const before = credentialFingerprint(r, undefined, pats());
+    v.put(gitlabReadEntryName('web'), 'gitlab+deploy-token-1:deploy-value-0000001', { now: t0 });
+    const added = credentialFingerprint(r, undefined, pats());
+    v.put(gitlabReadEntryName('web'), 'gitlab+deploy-token-1:deploy-value-0000002', { now: t0 });
+    const replaced = credentialFingerprint(r, undefined, pats());
+    v.delete(gitlabReadEntryName('web'));
+    const removed = credentialFingerprint(r, undefined, pats());
+    expect(new Set([before, added, replaced]).size).toBe(3);
+    expect(removed).toBe(before);
   });
 
   test("credentialCreatedAt: a vault credential's date (declared, else set) in either mode; claude.tokenCreatedAt for one the vault does not hold", () => {

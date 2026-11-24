@@ -1,13 +1,23 @@
+import { gitlabBasicAuthAs } from '@jumpmaster/protocol';
 import nock from 'nock';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
 import { ScrubSet } from '../forge/scrub-set.js';
 import { fakeGitLab } from '../test/fake-gitlab.js';
 import {
+  GITLAB_PAT_BAD_ZONE,
+  GITLAB_PAT_NOT_GITLAB_ZONE,
   GITLAB_PAT_REJECTED,
+  GITLAB_PAT_UNREACHABLE,
+  GITLAB_READ_BAD_VALUE,
+  GITLAB_READ_REJECTED,
   gitlabPatEntryFingerprints,
   gitlabPatEntryName,
+  gitlabReadEntryName,
   parseGitlabPatEntryName,
+  parseGitlabReadEntryName,
+  parseGitlabReadValue,
   testGitlabPatEntry,
+  testGitlabReadEntry,
 } from './gitlab-pat-entries.js';
 import { fingerprintOf } from './vault.js';
 
@@ -208,5 +218,226 @@ describe('gitlabPatEntryFingerprints', () => {
     expect([...lines].sort()).toEqual(lines);
     for (const v of [a, b, c]) expect(lines.join('\n').includes(v)).toBe(false);
     expect(gitlabPatEntryFingerprints({})).toEqual([]);
+  });
+});
+
+describe('gitlabPatEntryFingerprints with read entries (issue #831)', () => {
+  test('a read entry adds its own line; the existing lines are unchanged', () => {
+    const a = glpat('a');
+    const b = glpat('b');
+    const dt = glpat('d');
+    const without = gitlabPatEntryFingerprints({ alpha: { author: a, reviewer: b } });
+    const withRead = gitlabPatEntryFingerprints({
+      alpha: { author: a, reviewer: b, read: { username: 'gitlab+deploy-token-5', token: dt } },
+    });
+    expect(withRead).toEqual(
+      [...without, `gitlab-pat/alpha/read=${fingerprintOf(`gitlab+deploy-token-5:${dt}`)}`].sort(),
+    );
+    for (const v of [dt, 'gitlab+deploy-token-5']) expect(withRead.join('\n')).not.toContain(v);
+  });
+});
+
+describe('gitlabReadEntryName and parseGitlabReadEntryName (issue #831)', () => {
+  test('round-trip', () => {
+    const name = gitlabReadEntryName('my-zone');
+    expect(name).toBe('gitlab-pat/my-zone/read');
+    expect(parseGitlabReadEntryName(name)).toEqual({ zoneId: 'my-zone' });
+  });
+
+  test('throws without echoing a bad zone id', () => {
+    for (const id of [`Bad_${GOOD}`, '', '-x']) {
+      let message = '';
+      try {
+        gitlabReadEntryName(id);
+      } catch (e) {
+        message = String((e as Error).message);
+      }
+      expect(message).not.toBe('');
+      expect(message.includes(GOOD)).toBe(false);
+      if (id) expect(message.includes(id)).toBe(false);
+    }
+  });
+
+  test('parse returns undefined for anything else; the PAT parse refuses read', () => {
+    expect(parseGitlabPatEntryName('gitlab-pat/z/read')).toBeUndefined();
+    for (const n of [
+      'gitlab-pat/z/author',
+      'gitlab-pat/Z/read',
+      'gitlab-pat/z/read/x',
+      'gitlab-pat//read',
+      'x/gitlab-pat/z/read',
+      '',
+    ])
+      expect(parseGitlabReadEntryName(n)).toBeUndefined();
+  });
+});
+
+describe('parseGitlabReadValue (issue #831)', () => {
+  test('splits on the first colon', () => {
+    expect(parseGitlabReadValue(`gitlab+deploy-token-3:${GOOD}`)).toEqual({
+      username: 'gitlab+deploy-token-3',
+      token: GOOD,
+    });
+    expect(parseGitlabReadValue('user:to:ken:x')).toEqual({ username: 'user', token: 'to:ken:x' });
+  });
+
+  test('no colon, an empty username or an empty token is undefined', () => {
+    for (const v of [GOOD, `:${GOOD}`, 'user:', ':', ''])
+      expect(parseGitlabReadValue(v)).toBeUndefined();
+  });
+});
+
+describe('testGitlabReadEntry (issue #831)', () => {
+  const USER = 'gitlab+deploy-token-42';
+  const TOKEN = ['gldt', 'R'.repeat(20)].join('-');
+  const VALUE = `${USER}:${TOKEN}`;
+  const BASIC = gitlabBasicAuthAs(USER, TOKEN);
+  const PATH = `/${PROJECT}.git/info/refs`;
+  const QUERY = { service: 'git-upload-pack' };
+  const ADVERT = { 'content-type': 'application/x-git-upload-pack-advertisement' };
+
+  const clean = (r: unknown) => expectClean(r, TOKEN, USER, BASIC, VALUE);
+  const holds = (scrub: ScrubSet) =>
+    expect(scrub.values()).toEqual(expect.arrayContaining([TOKEN, VALUE, BASIC]));
+
+  test('200 with the upload-pack advertisement is ok, sent with basic auth', async () => {
+    const scope = nock(BASE, { reqheaders: { authorization: `Basic ${BASIC}` } })
+      .get(PATH)
+      .query(QUERY)
+      .reply(200, '001e# service=git-upload-pack\n', ADVERT);
+    const scrub = new ScrubSet();
+    const r = await testGitlabReadEntry(VALUE, zone(), { scrub });
+    expect(r).toEqual({ ok: true, result: 'ok', live: true });
+    expect(scope.isDone()).toBe(true);
+    clean(r);
+    holds(scrub);
+  });
+
+  test('a base URL with a trailing slash hits the single-slash path', async () => {
+    const scope = nock(BASE).get(PATH).query(QUERY).reply(200, '', ADVERT);
+    const r = await testGitlabReadEntry(VALUE, zone({ gitlab: { baseUrl: `${BASE}/` } }), {
+      scrub: new ScrubSet(),
+    });
+    expect(r).toEqual({ ok: true, result: 'ok', live: true });
+    expect(scope.isDone()).toBe(true);
+  });
+
+  test('200 of another content type is not ok', async () => {
+    nock(BASE)
+      .get(PATH)
+      .query(QUERY)
+      .reply(200, `<html>${PROJECT}</html>`, { 'content-type': 'text/html' });
+    const scrub = new ScrubSet();
+    const r = await testGitlabReadEntry(VALUE, zone(), { scrub });
+    expect(r).toEqual({ ok: false, status: null, problem: GITLAB_PAT_UNREACHABLE });
+    clean(r);
+    holds(scrub);
+  });
+
+  test.each([401, 403])('%i is the rejected problem with its status', async (status) => {
+    nock(BASE).get(PATH).query(QUERY).reply(status, `denied ${USER}`);
+    const scrub = new ScrubSet();
+    const r = await testGitlabReadEntry(VALUE, zone(), { scrub });
+    expect(r).toEqual({ ok: false, status, problem: GITLAB_READ_REJECTED });
+    expect(GITLAB_READ_REJECTED).toBe('GitLab rejected this deploy token');
+    clean(r);
+    holds(scrub);
+  });
+
+  test('another status is unreachable', async () => {
+    nock(BASE).get(PATH).query(QUERY).reply(500, `oops ${PROJECT}`);
+    const r = await testGitlabReadEntry(VALUE, zone(), { scrub: new ScrubSet() });
+    expect(r).toEqual({ ok: false, status: null, problem: GITLAB_PAT_UNREACHABLE });
+    clean(r);
+  });
+
+  test('a 302 elsewhere is not followed and sends no Authorization there', async () => {
+    nock(BASE)
+      .get(PATH)
+      .query(QUERY)
+      .reply(302, '', { location: 'https://elsewhere.example.test/steal' });
+    let elsewhere = 0;
+    nock('https://elsewhere.example.test')
+      .get(/.*/)
+      .reply(function () {
+        elsewhere += 1;
+        return [200, '', ADVERT];
+      })
+      .persist();
+    const scrub = new ScrubSet();
+    const r = await testGitlabReadEntry(VALUE, zone(), { scrub });
+    expect(r).toEqual({ ok: false, status: null, problem: GITLAB_PAT_UNREACHABLE });
+    expect(elsewhere).toBe(0);
+    clean(r);
+    holds(scrub);
+  });
+
+  test('a network error is unreachable and never throws', async () => {
+    nock(BASE).get(PATH).query(QUERY).replyWithError(`boom ${VALUE} ${BASE}`);
+    const scrub = new ScrubSet();
+    const r = await testGitlabReadEntry(VALUE, zone(), { scrub });
+    expect(r).toEqual({ ok: false, status: null, problem: GITLAB_PAT_UNREACHABLE });
+    clean(r);
+    holds(scrub);
+  });
+
+  test('uses an injected fetch with manual redirects', async () => {
+    const calls: RequestInit[] = [];
+    const r = await testGitlabReadEntry(VALUE, zone(), {
+      scrub: new ScrubSet(),
+      fetch: async (_url, init) => {
+        calls.push(init ?? {});
+        return new Response('', { status: 200, headers: ADVERT });
+      },
+    });
+    expect(r).toEqual({ ok: true, result: 'ok', live: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.redirect).toBe('manual');
+  });
+
+  test('a GitHub zone is refused without a request', async () => {
+    for (const z of [zone({ forge: undefined }), zone({ forge: 'github' })]) {
+      const r = await testGitlabReadEntry(VALUE, z, {
+        scrub: new ScrubSet(),
+        fetch: async () => {
+          throw new Error('no request expected');
+        },
+      });
+      expect(r).toEqual({ ok: false, status: null, problem: GITLAB_PAT_NOT_GITLAB_ZONE });
+      clean(r);
+    }
+  });
+
+  test('a bad project path or base URL is refused without a request', async () => {
+    for (const z of [
+      zone({ repo: `bad path ${TOKEN}` }),
+      zone({ gitlab: { baseUrl: `http://${TOKEN}@x` } }),
+      zone({ gitlab: undefined }),
+    ]) {
+      const scrub = new ScrubSet();
+      const r = await testGitlabReadEntry(VALUE, z, {
+        scrub,
+        fetch: async () => {
+          throw new Error('no request expected');
+        },
+      });
+      expect(r).toEqual({ ok: false, status: null, problem: GITLAB_PAT_BAD_ZONE });
+      clean(r);
+      expect(JSON.stringify(r)).not.toContain('bad path');
+      holds(scrub);
+    }
+  });
+
+  test('an unparseable value is a fixed problem without a request', async () => {
+    for (const v of [TOKEN, `:${TOKEN}`, `${USER}:`]) {
+      const r = await testGitlabReadEntry(v, zone(), {
+        scrub: new ScrubSet(),
+        fetch: async () => {
+          throw new Error('no request expected');
+        },
+      });
+      expect(r).toEqual({ ok: false, status: null, problem: GITLAB_READ_BAD_VALUE });
+      clean(r);
+    }
   });
 });

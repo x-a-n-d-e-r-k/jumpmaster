@@ -9,7 +9,14 @@ import {
   ownerOfRepo,
   readAppEntry,
 } from './github-app-entries.js';
-import { GITLAB_PAT_ROLES, gitlabPatEntryName } from './gitlab-pat-entries.js';
+import {
+  GITLAB_PAT_ROLES,
+  type GitlabReadValue,
+  gitlabPatEntryName,
+  gitlabReadEntryName,
+  gitlabReadSecretForms,
+  parseGitlabReadValue,
+} from './gitlab-pat-entries.js';
 import { type Vault, VaultKeyError } from './vault.js';
 
 /**
@@ -169,15 +176,17 @@ export type ZoneForGitlabPats = Pick<ZoneForCredentials, 'identity'> & {
   forge?: ForgeKind | undefined;
 };
 
-/** Each GitLab zone's present `gitlab-pat` values, by zone id; a missing role is absent. */
-export type ResolvedGitlabPats = ReadonlyMap<
-  string,
-  Readonly<{ author?: string; reviewer?: string }>
->;
+/**
+ * Each GitLab zone's present `gitlab-pat` values, by zone id; a missing role is absent. `read` is
+ * the zone's parsed read deploy token (`gitlab-pat/<zoneId>/read`, issue #831), for the clone
+ * container only: everything that iterates the author and reviewer roles ignores it.
+ */
+export type GitlabPats = { author?: string; reviewer?: string; read?: GitlabReadValue };
+export type ResolvedGitlabPats = ReadonlyMap<string, Readonly<GitlabPats>>;
 
 /**
  * The `gitlab-pat/<zoneId>/<role>` vault entries of every GitLab zone (§9): the author always, the
- * reviewer for a two-bot zone only. A disabled vault, an absent entry and one that won't decrypt
+ * reviewer for a two-bot zone only, and the read deploy token in either mode. A disabled vault, an absent entry and one that won't decrypt
  * all read as missing, without a throw or a log line. Each present value is pinned in the scrub
  * set before resolution returns: configured, long-lived credentials are never evicted.
  */
@@ -186,16 +195,25 @@ export function resolveGitlabPatEntries(
   o: { vault: Vault | 'disabled'; scrubSet?: ScrubSet },
 ): ResolvedGitlabPats {
   const set = o.scrubSet ?? serverScrubSet;
-  const out = new Map<string, { author?: string; reviewer?: string }>();
+  const out = new Map<string, GitlabPats>();
   for (const z of zones) {
     if (forgeKind(z) !== 'gitlab' || out.has(z.id)) continue;
-    const roles: { author?: string; reviewer?: string } = {};
+    const roles: GitlabPats = {};
     for (const role of GITLAB_PAT_ROLES) {
       if (role === 'reviewer' && !isTwoBot(z)) continue;
       const v = readGitlabPat(o.vault, gitlabPatEntryName(z.id, role));
       if (v === undefined) continue;
       set.pin(v);
       roles[role] = v;
+    }
+    // The read deploy token, in either mode; an unparseable value is left absent.
+    const raw = readGitlabPat(o.vault, gitlabReadEntryName(z.id));
+    // The raw value is pinned even when unparseable: it may be a bare token.
+    if (raw !== undefined) set.pin(raw);
+    const read = raw === undefined ? undefined : parseGitlabReadValue(raw);
+    if (read) {
+      for (const f of gitlabReadSecretForms(read)) set.pin(f);
+      roles.read = read;
     }
     out.set(z.id, roles);
   }

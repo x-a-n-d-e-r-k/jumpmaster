@@ -2,6 +2,7 @@ import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gitlabBasicAuthAs } from '@jumpmaster/protocol';
 import { describe, expect, test, vi } from 'vitest';
 import { openDb } from '../db/open.js';
 import { ScrubSet } from '../forge/scrub-set.js';
@@ -14,7 +15,7 @@ import {
   readAppEntry,
   serializeAppEntry,
 } from './github-app-entries.js';
-import { gitlabPatEntryName } from './gitlab-pat-entries.js';
+import { gitlabPatEntryName, gitlabReadEntryName } from './gitlab-pat-entries.js';
 import {
   appInstallationFor,
   credentialFor,
@@ -402,7 +403,11 @@ describe('resolveGitlabPatEntries (§9, issue #719)', () => {
       scrubSet: new ScrubSet(),
     });
     expect([...r]).toEqual([['web', { author: AUTHOR }]]);
-    expect(get.mock.calls).toEqual([[gitlabPatEntryName('web', 'author')]]);
+    // The reviewer is never read; the read deploy token is, in either mode (issue #831).
+    expect(get.mock.calls).toEqual([
+      [gitlabPatEntryName('web', 'author')],
+      [gitlabReadEntryName('web')],
+    ]);
   });
 
   test('a GitHub zone is not read for', () => {
@@ -459,5 +464,53 @@ describe('resolveGitlabPatEntries (§9, issue #719)', () => {
     expect(scrub(`a ${AUTHOR} r ${REVIEWER}`, undefined, [], set)).toBe(
       'a [redacted] r [redacted]',
     );
+  });
+
+  describe('the read deploy token (issue #831)', () => {
+    const USER = 'gitlab+deploy-token-9';
+    const TOKEN = 'deploy-token-value-00000000003';
+    const VALUE = `${USER}:${TOKEN}`;
+    const READ = { username: USER, token: TOKEN };
+
+    test('a GitLab zone resolves read in two-bot and starter modes; author and reviewer as before', () => {
+      const { vault } = setup();
+      putBoth(vault, 'web');
+      vault.put(gitlabReadEntryName('web'), VALUE, { now: t0 });
+      const two = resolveGitlabPatEntries([gitlab('web')], { vault, scrubSet: new ScrubSet() });
+      expect([...two]).toEqual([['web', { author: AUTHOR, reviewer: REVIEWER, read: READ }]]);
+      const st = resolveGitlabPatEntries([gitlab('web', 'starter')], {
+        vault,
+        scrubSet: new ScrubSet(),
+      });
+      expect([...st]).toEqual([['web', { author: AUTHOR, read: READ }]]);
+    });
+
+    test('a malformed value resolves none', () => {
+      const { vault } = setup();
+      putBoth(vault, 'web');
+      for (const bad of [TOKEN, `:${TOKEN}`, `${USER}:`]) {
+        vault.put(gitlabReadEntryName('web'), bad, { now: t0 });
+        const r = resolveGitlabPatEntries([gitlab('web')], { vault, scrubSet: new ScrubSet() });
+        expect([...r]).toEqual([['web', { author: AUTHOR, reviewer: REVIEWER }]]);
+      }
+    });
+
+    test('a GitHub zone never gets read', () => {
+      const { vault } = setup();
+      vault.put(gitlabReadEntryName('web'), VALUE, { now: t0 });
+      const zones = [{ id: 'web' }, { id: 'web', forge: 'github' as const }];
+      expect(resolveGitlabPatEntries(zones, { vault, scrubSet: new ScrubSet() }).size).toBe(0);
+    });
+
+    test('the token, the whole value and its basic-auth form are pinned', () => {
+      const { vault } = setup();
+      vault.put(gitlabReadEntryName('web'), VALUE, { now: t0 });
+      const set = new ScrubSet(2, () => {});
+      resolveGitlabPatEntries([gitlab('web')], { vault, scrubSet: set });
+      for (let i = 0; i < 5; i += 1) set.add(`minted-token-value-${i}-0000000000`);
+      const basic = gitlabBasicAuthAs(USER, TOKEN);
+      expect(set.values()).toEqual(expect.arrayContaining([TOKEN, VALUE, basic]));
+      expect(scrub(`t ${TOKEN} b ${basic}`, undefined, [], set)).toBe('t [redacted] b [redacted]');
+    });
   });
 });
