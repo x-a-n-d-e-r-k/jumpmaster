@@ -22,7 +22,7 @@ import {
   protectedPathsNamed,
   validateIssueSpec,
 } from './actions.js';
-import { flushCrewOps } from './flush.js';
+import { crewBodySha, flushCrewOps } from './flush.js';
 import { getCrewIssue, listCrewIssues, setCrewIssue } from './store.js';
 
 const GOAL = `# Goals
@@ -590,5 +590,218 @@ describe('goalChange', () => {
     expect(apply({ goalChange: CHANGE }).refused).toEqual(['goalChange: kill switch is engaged']);
     expect(listGoalChanges(w.db, 'main')).toEqual([]);
     expect(getGoalChange(w.db, 1)).toBeUndefined();
+  });
+});
+
+describe('refiling a rejected issue with `replaces` (#784)', () => {
+  const DAY = 24 * 3600_000;
+  const CORRECTED = `${BODY}\nThe arbiter's wording is applied.\n`;
+
+  /** Files `o` and rejects it as a refute or the arbiter does, with no ruling of Command's. */
+  const fileRejected = (o: Partial<Issue> = {}): number => {
+    const r = apply({ fileIssues: [issue(o)] });
+    const id = r.filed[0];
+    if (id === undefined) throw new Error(`not filed: ${r.refused.join('; ')}`);
+    setCrewIssue(w.db, id, { state: 'rejected', number: 700 + id }, t0);
+    return id;
+  };
+
+  /** Command rules Reject on the issue's briefing, and the ruling is applied. */
+  const commandRejects = async (id: number): Promise<void> => {
+    setCrewIssue(w.db, id, { state: 'staged' }, t0);
+    const b = raiseBriefing(
+      w.db,
+      {
+        zoneId: 'main',
+        kind: 'refute_exhausted',
+        subject: `issue:${id}`,
+        decision: 'Promote or reject?',
+        why: 'w',
+        options: [
+          { id: 'promote', label: 'Promote', effect: 'promote_issue' },
+          { id: 'reject', label: 'Reject', effect: 'reject_issue' },
+        ],
+        source: 'server',
+      },
+      t0,
+    );
+    if (!ruleBriefing(w.db, b, 'reject', 'Not this way', t0).ok) throw new Error('not ruled');
+    await applyPendingRulings(w.db, { forges: () => w.forges, zone: () => w.zone }, 'main', t0);
+    setCrewIssue(w.db, id, { state: 'rejected' }, t0);
+  };
+
+  const soon = plus(t0, DAY);
+
+  test('the same title with `replaces` is filed and stores what it replaces; without it, refused', () => {
+    fileRejected({ key: 'gitlab-push-grant' });
+    const without = apply(
+      { fileIssues: [issue({ key: 'gitlab-push-grant-2', body: CORRECTED })] },
+      soon,
+    );
+    expect(without.refused).toEqual([
+      'gitlab-push-grant-2: duplicate of a crew issue rejected in the last 7 days',
+    ]);
+    const r = apply(
+      {
+        fileIssues: [
+          issue({ key: 'gitlab-push-grant-2', body: CORRECTED, replaces: 'gitlab-push-grant' }),
+        ],
+      },
+      soon,
+    );
+    expect(r.refused).toEqual([]);
+    expect(r.filed).toHaveLength(1);
+    expect(getCrewIssue(w.db, r.filed[0] ?? -1)).toMatchObject({
+      key: 'gitlab-push-grant-2',
+      replaces: 'gitlab-push-grant',
+      state: 'filing',
+    });
+  });
+
+  test('the new issue still needs its own key', () => {
+    fileRejected({ key: 'grant' });
+    const r = apply(
+      { fileIssues: [issue({ key: 'grant', body: CORRECTED, replaces: 'grant' })] },
+      soon,
+    );
+    expect(r.refused).toEqual(['grant: key already used']);
+  });
+
+  test('an unknown key, another zone’s, another objective’s or a promoted issue is refused', () => {
+    // Another zone's rejected issue of the same key and objective.
+    w.db
+      .prepare(
+        `INSERT INTO crew_issues (zone_id, key, source, objective, title, title_norm, body, state,
+           created_at, updated_at)
+         VALUES ('other', 'elsewhere', 'drop', 'document-every-endpoint', 'Add docs', 'add docs',
+           'b', 'rejected', ?, ?)`,
+      )
+      .run(t0.toISOString(), t0.toISOString());
+    fileRejected({ key: 'cli', objective: 'ship-the-cli' });
+    const promoted = apply({ fileIssues: [issue({ key: 'live', title: 'Other' })] }).filed[0];
+    setCrewIssue(w.db, promoted ?? -1, { state: 'promoted' }, t0);
+    const r = apply(
+      {
+        fileIssues: [
+          issue({ key: 'n1', body: CORRECTED, replaces: 'nope' }),
+          issue({ key: 'n2', body: CORRECTED, replaces: 'elsewhere' }),
+          issue({ key: 'n3', body: CORRECTED, replaces: 'cli' }),
+          issue({ key: 'n4', body: CORRECTED, replaces: 'live' }),
+        ],
+      },
+      soon,
+    );
+    expect(r.filed).toEqual([]);
+    expect(r.refused).toEqual([
+      'n1: replaces nope: no such crew issue',
+      'n2: replaces elsewhere: no such crew issue',
+      "n3: replaces cli: another objective's issue",
+      'n4: replaces live: not a rejected issue',
+    ]);
+  });
+
+  test('an issue Command rejected cannot be replaced, even with a corrected body', async () => {
+    const id = fileRejected({ key: 'vetoed' });
+    await commandRejects(id);
+    const r = apply(
+      { fileIssues: [issue({ key: 'vetoed-2', body: CORRECTED, replaces: 'vetoed' })] },
+      soon,
+    );
+    expect(r.filed).toEqual([]);
+    expect(r.refused).toEqual(['vetoed-2: replaces vetoed: Command rejected it']);
+  });
+
+  test('an identical body is refused', () => {
+    fileRejected({ key: 'same' });
+    const r = apply({ fileIssues: [issue({ key: 'same-2', replaces: 'same' })] }, soon);
+    expect(r.refused).toEqual(['same-2: replaces same: the body is unchanged']);
+  });
+
+  test('an identical body as the server hashed it is refused too', () => {
+    const id = fileRejected({ key: 'hashed' });
+    const stored = getCrewIssue(w.db, id);
+    // As the flush records it: the body sanitised, its sha stored; the raw body here differs only
+    // in line endings and trailing space.
+    setCrewIssue(w.db, id, { bodySha: crewBodySha(BODY) }, t0);
+    expect(stored?.body).toBe(BODY);
+    const crlf = `${BODY.replace(/\n/g, '\r\n')}   `;
+    const r = apply(
+      { fileIssues: [issue({ key: 'hashed-2', body: crlf, replaces: 'hashed' })] },
+      soon,
+    );
+    expect(r.refused).toEqual(['hashed-2: replaces hashed: the body is unchanged']);
+  });
+
+  test('an issue already replaced cannot be replaced again', () => {
+    fileRejected({ key: 'once' });
+    const first = apply(
+      { fileIssues: [issue({ key: 'once-2', body: CORRECTED, replaces: 'once' })] },
+      soon,
+    );
+    expect(first.filed).toHaveLength(1);
+    setCrewIssue(w.db, first.filed[0] ?? -1, { state: 'promoted' }, soon);
+    const again = apply(
+      {
+        fileIssues: [
+          issue({ key: 'once-3', title: 'Docs again', body: `${CORRECTED}x\n`, replaces: 'once' }),
+        ],
+      },
+      soon,
+    );
+    expect(again.refused).toEqual(['once-3: replaces once: already replaced']);
+  });
+
+  test('two issues replacing the same key in one result: only the first is filed', () => {
+    fileRejected({ key: 'twin' });
+    const r = apply(
+      {
+        fileIssues: [
+          issue({ key: 'twin-a', body: CORRECTED, replaces: 'twin' }),
+          issue({ key: 'twin-b', title: 'Docs B', body: `${CORRECTED}b\n`, replaces: 'twin' }),
+        ],
+      },
+      soon,
+    );
+    expect(r.filed).toHaveLength(1);
+    expect(getCrewIssue(w.db, r.filed[0] ?? -1)?.key).toBe('twin-a');
+    expect(r.refused).toEqual(['twin-b: replaces twin: already replaced']);
+  });
+
+  test('the database holds one replacement per key, whatever the caller', () => {
+    fileRejected({ key: 'solo' });
+    const insert = (key: string) =>
+      w.db
+        .prepare(
+          `INSERT INTO crew_issues (zone_id, key, source, objective, title, title_norm, body,
+             state, replaces, created_at, updated_at)
+           VALUES ('main', ?, 'drop', 'document-every-endpoint', 't', 't', 'b', 'filing', 'solo',
+             ?, ?)`,
+        )
+        .run(key, t0.toISOString(), t0.toISOString());
+    insert('solo-a');
+    expect(() => insert('solo-b')).toThrow(/UNIQUE/);
+  });
+
+  test('a chain ends after 2 replacements: the third is refused with the briefing message', () => {
+    fileRejected({ key: 'v1' });
+    let at = soon;
+    for (const [key, prev] of [
+      ['v2', 'v1'],
+      ['v3', 'v2'],
+    ] as const) {
+      const r = apply(
+        { fileIssues: [issue({ key, body: `${CORRECTED}${key}\n`, replaces: prev })] },
+        at,
+      );
+      expect(r.refused).toEqual([]);
+      setCrewIssue(w.db, r.filed[0] ?? -1, { state: 'rejected' }, at);
+      at = plus(at, 3600_000);
+    }
+    const third = apply(
+      { fileIssues: [issue({ key: 'v4', body: `${CORRECTED}v4\n`, replaces: 'v3' })] },
+      at,
+    );
+    expect(third.filed).toEqual([]);
+    expect(third.refused).toEqual(['v4: replaced twice already: raise a briefing']);
   });
 });
