@@ -597,7 +597,7 @@ export async function enqueueCrew(
       work.role === 'audit'
         ? auditInput(db, zone, work, id)
         : work.role === 'crew-lead'
-          ? await crewLeadInput(db, forges, zone, pass, now, id)
+          ? await crewLeadInput(db, forges, zone, pass, now, id, opts.secrets ?? [])
           : work.role === 'refute'
             ? refuteInput(db, zone, work.crewIssueId, id)
             : work.role === 'arbitrate'

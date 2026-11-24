@@ -118,3 +118,16 @@ describe("a ruling's note (#767)", () => {
     expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   });
 });
+
+describe('refiling a rejected issue (#784)', () => {
+  test('rule 2 says to file a corrected issue with `replaces`, or raise a briefing, never nothing', () => {
+    const rule2 =
+      prompt('crew-lead.md')
+        .split('\n')
+        .find((l) => l.startsWith('2. ')) ?? '';
+    expect(rule2).toContain(
+      "If a rejected issue is still needed for the objective, file a corrected one that answers the reason given and set `replaces` to the rejected issue's key, or raise a briefing saying why it can't be corrected. Never leave the objective without it and say nothing.",
+    );
+    expect(rule2).toContain('Rejected issues of the current objective');
+  });
+});
