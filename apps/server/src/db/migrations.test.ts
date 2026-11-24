@@ -1887,3 +1887,16 @@ test('v62 adds egress_ceiling_json to sticks: existing rows read as no ceiling (
   expect(getStick(db, 's1')).toMatchObject({ id: 's1', egressCeiling: null });
   db.close();
 });
+
+test('v64 adds changed_at to goals: existing rows read as null (#832)', () => {
+  const f = dbAt(63, (raw) =>
+    raw.exec(
+      `INSERT INTO goals (zone_id, sha256, parser_version, raw, parse_json, read_at)
+         VALUES ('main', 'h', 1, 'x', '{}', 'a');`,
+    ),
+  );
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT changed_at AS c FROM goals').get()).toEqual({ c: null });
+  db.close();
+});

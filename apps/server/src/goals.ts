@@ -215,19 +215,36 @@ export function getGoals(db: Db, zoneId: string): GoalRow | undefined {
   return { ...rest, parse: JSON.parse(parseJson) as GoalParse };
 }
 
+/**
+ * When the zone's stored goal file last changed (#832): a new text replacing a stored one. Null
+ * when it never has (a first read, a re-read of the same text and a re-parse don't count).
+ */
+export function goalsChangedAt(db: Db, zoneId: string): string | null {
+  const r = db.prepare('SELECT changed_at AS c FROM goals WHERE zone_id = ?').get(zoneId) as
+    | { c: string | null }
+    | undefined;
+  return r?.c ?? null;
+}
+
+/**
+ * Stores the row. `changed_at` is set to `readAt` when the new sha256 differs from a stored,
+ * non-null one, and left as it was otherwise.
+ */
 function putGoals(db: Db, row: GoalRow): void {
   db.prepare(
     `INSERT INTO goals (zone_id, sha256, parser_version, raw, parse_json, read_at)
      VALUES (@zoneId, @sha256, @parserVersion, @raw, @parseJson, @readAt)
      ON CONFLICT (zone_id) DO UPDATE SET sha256 = excluded.sha256,
        parser_version = excluded.parser_version, raw = excluded.raw,
-       parse_json = excluded.parse_json, read_at = excluded.read_at`,
+       parse_json = excluded.parse_json, read_at = excluded.read_at,
+       changed_at = CASE WHEN goals.sha256 IS NOT NULL AND excluded.sha256 IS NOT goals.sha256
+         THEN excluded.read_at ELSE goals.changed_at END`,
   ).run({ ...row, parseJson: JSON.stringify(row.parse) });
 }
 
 /**
  * Reads the zone's goal file at `ref` and stores its parse. The parse is redone only when the
- * file's sha256 or `PARSER_VERSION` changed. A failed read throws and leaves the stored row as it
+ * file's sha256 or `PARSER_VERSION` changed; a changed sha256 also stamps `changed_at`. A failed read throws and leaves the stored row as it
  * was; a missing file is stored as a parse error.
  */
 export async function refreshGoals(

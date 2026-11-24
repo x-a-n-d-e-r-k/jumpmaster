@@ -1668,6 +1668,14 @@ const V63_SQL = `
 ALTER TABLE outbox ADD COLUMN resends INTEGER NOT NULL DEFAULT 0;
 `;
 
+/**
+ * v64: when the stored goal file last changed (#832): set when a new text replaces a stored one,
+ * so the crew lead starts a cycle on it. Existing rows read as null (no change recorded).
+ */
+const V64_SQL = `
+ALTER TABLE goals ADD COLUMN changed_at TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1732,6 +1740,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 61, sql: V61_SQL },
   { version: 62, sql: V62_SQL },
   { version: 63, sql: V63_SQL },
+  { version: 64, sql: V64_SQL },
 ];
 
 /**
