@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { redactTokenShapes } from '@jumpmaster/protocol';
 import type { Db } from './db/open.js';
 import {
+  claimOutboxResend,
   getOutbox,
   insertOutbox,
   isKilled,
@@ -967,8 +968,69 @@ export async function runOp(
 }
 
 /**
+ * Kinds whose effect reads back exactly and that the forge refuses or ignores a second time, so a
+ * write lost to a dropped connection may be sent again (#787). Not here: `create_issue`,
+ * `comment_issue` and `post_review`, where a late first write could leave two, and
+ * `update_branch`, which its caller sends again.
+ */
+export const RESENDABLE_KINDS: ReadonlySet<OpKind> = new Set<OpKind>([
+  'create_pr',
+  'merge',
+  'set_labels',
+  'update_issue',
+  'create_labels',
+  'add_blocked_by',
+]);
+/** The least time between two sends of one write, counted from the last (`updated_at`). */
+export const RESEND_AFTER_MS = 2 * 60_000;
+/** The most times one write is sent again. */
+export const MAX_RESENDS = 3;
+
+/**
+ * Whether an `unknown` row whose read-back came back clean and empty may be sent again now: a
+ * resendable kind, under the cap, 2 minutes after its last send, kill switch off, zone active, and
+ * for a PR, its branch still at the head SHA the op is keyed by (a failed read of it proves
+ * nothing, so it holds the resend too).
+ */
+async function mayResend(db: Db, forges: ForgePair, row: OutboxRow, now: Date): Promise<boolean> {
+  if (!RESENDABLE_KINDS.has(row.kind) || row.resends >= MAX_RESENDS) return false;
+  if (now.getTime() - Date.parse(row.updatedAt) < RESEND_AFTER_MS) return false;
+  if (isKilled(db) || zoneMode(db, row.zoneId) !== 'active') return false;
+  if (row.kind !== 'create_pr') return true;
+  const keySha = row.opKey.split(':').at(-1);
+  const p = JSON.parse(row.payloadJson) as CreatePrPayload;
+  try {
+    return keySha !== undefined && (await forges.author.branchSha(p.head)) === keySha;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Sends an `unknown` write again, once this pass has claimed it (one sender of two passes), through
+ * `execute`, which looks once more before it writes. Null when the claim was lost.
+ */
+async function resend(
+  db: Db,
+  forges: ForgePair,
+  row: OutboxRow,
+  now: Date,
+): Promise<OpResult | null> {
+  if (!claimOutboxResend(db, row.opKey, row.resends, now)) return null;
+  const op: Op = {
+    kind: row.kind,
+    opKey: row.opKey,
+    zoneId: row.zoneId,
+    itemId: row.workItemId,
+    payload: JSON.parse(row.payloadJson),
+  };
+  return execute(db, forges, op, now);
+}
+
+/**
  * Read-back for every `unknown` row of one zone; returns how many became `done`. A row still
- * unresolved `maxAgeMinutes` after it was created becomes `failed`.
+ * unresolved `maxAgeMinutes` after it was created becomes `failed`. Before that, a resendable
+ * write the read-back cleanly did not find is sent again (`mayResend`, #787).
  */
 export async function resolveUnknown(
   db: Db,
@@ -997,7 +1059,11 @@ export async function resolveUnknown(
         { state: 'failed', error: `unresolved after ${maxAgeMinutes} min` },
         now,
       );
+      continue;
     }
+    // A read that failed proves nothing: only a clean, empty read-back may lead to a resend.
+    if (r.error !== undefined || !(await mayResend(db, forges, row, now))) continue;
+    if ((await resend(db, forges, row, now))?.state === 'done') resolved++;
   }
   return resolved;
 }
