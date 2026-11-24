@@ -111,6 +111,8 @@ services:
       JM_EGRESS_IMAGE: "{{image jumpmaster-egress}}"
       # Each egress-controlled drop takes a /28 from this pool (empty: the stick's default).
       JM_DROP_SUBNET_POOL: ${JM_DROP_SUBNET_POOL:-}
+      # The stick's egress ceiling: the most any drop or push here may reach (empty: none).
+      JM_EGRESS_CEILING: ${JM_EGRESS_CEILING:-}
       # The enrollment, the Sigstore trust root and the verify cache.
       JM_STATE_DIR: /state
     volumes:

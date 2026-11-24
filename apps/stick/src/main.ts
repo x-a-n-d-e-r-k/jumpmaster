@@ -1,6 +1,6 @@
 import { leaseLogger, StickClient } from './client.js';
 import { DockerDriver, ownContainerId } from './docker.js';
-import { egressCapability, egressImage } from './egress.js';
+import { ceilingLine, egressCapability, egressImage, stickCeiling } from './egress.js';
 import { stickPlatform } from './fetch-image.js';
 import { StickImages } from './image-gc.js';
 import { runLeaseLoop } from './lease-loop.js';
@@ -43,6 +43,9 @@ async function main() {
   // JM_SLOTS is the count asked for at enrollment; the server's count (capped here) wins after.
   const slots = enrolledSlots(process.env);
   const maxSlots = maxSlotsFor(process.env, slots);
+  // The stick's egress ceiling (JM_EGRESS_CEILING), read once: an invalid value stops the start.
+  // Drops, push containers and proxies outside it never start, whatever the server sends.
+  const ceiling = stickCeiling(undefined, process.env);
   const target = new SlotTarget(slots, maxSlots);
   const dir = stateDir(process.env);
   const saved = loadEnrollment(dir, serverUrl);
@@ -137,6 +140,7 @@ async function main() {
   );
   client.advertise(info);
   console.log(`troopers: ${target.target} at once to start, at most ${maxSlots}`);
+  console.log(ceilingLine(ceiling));
   const leaseLog = leaseLogger((line) => console.error(line));
   if (!enrolled) await enroll();
 
@@ -212,7 +216,15 @@ async function main() {
   // No push container runs from a base image the latest check refused: entries wait, queued.
   const pushLoop = createPushLoop(
     pending,
-    (entry) => pushOnce(entry, { client, driver, stickId: id, image: TROOPER_IMAGE, pending }),
+    (entry) =>
+      pushOnce(entry, {
+        client,
+        driver,
+        stickId: id,
+        image: TROOPER_IMAGE,
+        pending,
+        ceiling,
+      }),
     { ready: () => health.latest().base.ok },
   );
   let sweeping = false;
@@ -263,6 +275,7 @@ async function main() {
         trooperImage: TROOPER_IMAGE,
         images,
         baseImage: () => health.latest().base,
+        ceiling,
         heartbeatMs: 15_000,
         ...(process.env.JM_LOST_SERVER_KILL_BEATS
           ? { lostServerKillBeats: Number(process.env.JM_LOST_SERVER_KILL_BEATS) }

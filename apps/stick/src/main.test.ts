@@ -135,6 +135,22 @@ describe('stick entry point', () => {
     expect(child.stderr).toContain('JM_MAX_SLOTS must be an integer of 1 or more, not abc');
     expect(child.status).toBe(1);
   });
+
+  test.each(['10.0.0.1', 'a.example.com,,b.example.com', '*'])(
+    'an invalid JM_EGRESS_CEILING (%s) stops the stick at start, never read as no ceiling',
+    (v) => {
+      expect(existsSync(dist), 'build first: npx tsc -b').toBe(true);
+      const env = {
+        ...process.env,
+        JM_SERVER_URL: 'http://127.0.0.1:1',
+        JM_EGRESS_CEILING: v,
+        JM_STATE_DIR: fresh(),
+      };
+      const child = spawnSync(process.execPath, [dist], { encoding: 'utf8', env, timeout: 10_000 });
+      expect(child.stderr).toMatch(/^JM_EGRESS_CEILING/m);
+      expect(child.status).toBe(1);
+    },
+  );
 });
 
 describe('the version the stick reports', () => {
