@@ -15,6 +15,7 @@ import {
   insertDrop,
   insertStick,
   listObservations,
+  recordUsageWindows,
   setKilled,
   setUsageState,
   setWorkItemState,
@@ -129,13 +130,10 @@ describe('enqueueCrew', () => {
     expect(await enqueue()).toBeNull();
     setKilled(w.db, false, t0);
 
-    setUsageState(
-      w.db,
-      { status: 'allowed', fiveHourUtil: 0.95, observedAt: t0.toISOString() },
-      t0,
-    );
+    setUsageState(w.db, { status: 'allowed', observedAt: t0.toISOString() }, t0);
+    recordUsageWindows(w.db, { five_hour: { utilization: 0.95 } }, t0, null);
     expect(await enqueue()).toBeNull(); // finishing_only
-    setUsageState(w.db, { fiveHourUtil: 0.1 }, t0);
+    recordUsageWindows(w.db, { five_hour: { utilization: 0.1 } }, t0, null);
 
     const capped = { ...w.zone, crew: { ...crewOn, maxDropsPerDay: 2, cycleMinutes: 1 } };
     let at = t0;
