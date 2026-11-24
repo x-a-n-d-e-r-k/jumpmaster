@@ -48,7 +48,8 @@ function setup(throttle = true) {
       db,
       {
         status: 'allowed_warning',
-        observedAt: iso(0),
+        warningWindow: 'five_hour',
+        warningAt: iso(0),
         sevenDayUtil: 0.81,
         sevenDayResetsAt: iso(36 * H),
       },
@@ -232,7 +233,7 @@ describe('the status says an override is on (#728)', () => {
     setKilled(db, true, t0);
     expect(said()).not.toContain('Usage override');
     setKilled(db, false, t0);
-    setUsageState(db, { status: 'allowed' }, t0);
+    setUsageState(db, { status: 'allowed', warningWindow: null, warningAt: null }, t0);
     expect(said()).not.toContain('Usage override');
     setUsageState(db, { status: 'allowed_warning', overrideStartsLeft: 0 }, t0);
     expect(said()).not.toContain('Usage override');

@@ -1167,7 +1167,17 @@ describe('the usage throttle holding the crew, queued work or not (#727)', () =>
     });
     const observedAt = h.now().toISOString();
     const throttle = () =>
-      setUsageState(h.db, { pausedUntil: null, status: 'allowed_warning', observedAt }, h.now());
+      setUsageState(
+        h.db,
+        {
+          pausedUntil: null,
+          status: 'allowed_warning',
+          observedAt,
+          warningWindow: 'five_hour',
+          warningAt: observedAt,
+        },
+        h.now(),
+      );
     const brief = () =>
       raiseBriefing(
         h.db,

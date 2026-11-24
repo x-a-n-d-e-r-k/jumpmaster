@@ -466,7 +466,12 @@ describe('enqueue', () => {
     expect(enqueueNext(db, zone, 'v1', cfg, t0)).toBeNull();
     setUsageState(
       db,
-      { pausedUntil: null, status: 'allowed_warning', observedAt: t0.toISOString() },
+      {
+        pausedUntil: null,
+        status: 'allowed_warning',
+        warningWindow: 'five_hour',
+        warningAt: t0.toISOString(),
+      },
       t0,
     );
     expect(enqueueNext(db, zone, 'v1', cfg, t0)).toBeNull();
@@ -1059,5 +1064,106 @@ describe('the stored allowed_warning (#739)', () => {
       at: t0.toISOString(),
       resetsAt: new Date(reset).toISOString(),
     });
+  });
+});
+
+describe('allowed_warning holds only an unreported window, until its reset (#748)', () => {
+  const ingest = (data: RateLimitEventData, when = t0, s = src('d1', null)) =>
+    ingestRateLimit(db, data, s, cfg, when, zero);
+  const reset = '2026-10-23T00:00:00Z';
+
+  test('a warning while the warned window reports low utilization is open', () => {
+    ingest({
+      status: 'allowed_warning',
+      rateLimitType: 'seven_day',
+      resetsAt: reset,
+      unifiedWindows: { seven_day: { utilization: 0.5, resetsAt: reset } },
+    });
+    expect(dispatchGate(db, cfg, t0)).toBe('open');
+  });
+
+  test('a warning on an unreported window holds until its reset, then opens', () => {
+    ingest({ status: 'allowed_warning', rateLimitType: 'seven_day', resetsAt: reset });
+    expect(dispatchGate(db, cfg, t0)).toBe('finishing_only');
+    expect(dispatchGate(db, cfg, plus(new Date(reset), -1))).toBe('finishing_only');
+    expect(dispatchGate(db, cfg, new Date(reset))).toBe('open');
+    expect(dispatchGate(db, cfg, plus(new Date(reset), DAY))).toBe('open');
+  });
+
+  test('a five_hour warning after a report that forgot five_hour holds until its reset', () => {
+    ingest({
+      status: 'allowed',
+      unifiedWindows: { five_hour: { utilization: 0.4, resetsAt: '2026-10-20T15:00:00Z' } },
+    });
+    ingest(
+      {
+        status: 'allowed',
+        unifiedWindows: { seven_day: { utilization: 0.3, resetsAt: reset } },
+      },
+      plus(t0, MIN),
+    );
+    ingest(
+      { status: 'allowed_warning', rateLimitType: 'five_hour', resetsAt: '2026-10-20T14:00:00Z' },
+      plus(t0, 2 * MIN),
+    );
+    expect(dispatchGate(db, cfg, plus(t0, 2 * MIN))).toBe('finishing_only');
+    expect(dispatchGate(db, cfg, at('13:59:59'))).toBe('finishing_only');
+    expect(dispatchGate(db, cfg, at('14:00:00'))).toBe('open');
+  });
+
+  test('a null-window warning holds until an account-wide window is reported under the threshold', () => {
+    ingest({ status: 'allowed_warning' });
+    expect(dispatchGate(db, cfg, t0)).toBe('finishing_only');
+    ingest(
+      {
+        status: 'allowed',
+        rateLimitType: 'five_hour',
+        unifiedWindows: { seven_day: { utilization: 0.2, resetsAt: reset } },
+      },
+      plus(t0, MIN),
+      src('d2', null),
+    );
+    expect(usageWarning(db, plus(t0, MIN))).not.toBeNull();
+    expect(dispatchGate(db, cfg, plus(t0, MIN))).toBe('open');
+  });
+
+  test('a warning naming seven_day_overage_included with nothing else reported is open', () => {
+    ingest({ status: 'allowed_warning', rateLimitType: 'seven_day_overage_included' });
+    expect(usageWarning(db, t0)?.window).toBe('seven_day_overage_included');
+    expect(dispatchGate(db, cfg, t0)).toBe('open');
+  });
+
+  test('chat-turn warnings after a drop report at 0.5 never hold nor move observedAt', () => {
+    const d = drop({ id: 'real', workItemId: item(1) });
+    ingest(
+      { status: 'allowed', unifiedWindows: { seven_day: { utilization: 0.5, resetsAt: reset } } },
+      t0,
+      src(d, 'completed'),
+    );
+    const observed = getUsageState(db).observedAt;
+    expect(observed).toBe(t0.toISOString());
+    for (let m = 10; m <= 6 * 60; m += 10) {
+      const when = plus(t0, m * MIN);
+      ingest(
+        { status: 'allowed_warning', rateLimitType: 'seven_day', resetsAt: reset },
+        when,
+        src('chat-turn-no-drop', null, null, 0),
+      );
+      expect(dispatchGate(db, cfg, when)).toBe('open');
+      expect(getUsageState(db).observedAt).toBe(observed);
+    }
+  });
+
+  test('utilization at or above the threshold holds with or without a warning', () => {
+    ingest({
+      status: 'allowed',
+      unifiedWindows: { seven_day: { utilization: 0.9, resetsAt: reset } },
+    });
+    expect(dispatchGate(db, cfg, t0)).toBe('finishing_only');
+    ingest(
+      { status: 'allowed_warning', rateLimitType: 'seven_day', resetsAt: reset },
+      plus(t0, MIN),
+    );
+    expect(dispatchGate(db, cfg, plus(t0, MIN))).toBe('finishing_only');
   });
 });

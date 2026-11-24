@@ -40,7 +40,8 @@ async function world(o: { throttle?: boolean; override?: boolean } = {}) {
       h.db,
       {
         status: 'allowed_warning',
-        observedAt: at(0),
+        warningWindow: 'five_hour',
+        warningAt: at(0),
         sevenDayUtil: 0.81,
         sevenDayResetsAt: at(36 * H + 30 * 60_000),
       },
