@@ -284,11 +284,11 @@ function warningPatch(
   return {};
 }
 
+/** Claude's last `allowed_warning` while current: the window it named, when, and its reset. */
+export type UsageWarning = { window: string | null; at: string; resetsAt: string | null };
+
 /** Claude's last `allowed_warning`, while it is current: until its reset, else its fallback span. */
-export function usageWarning(
-  db: Db,
-  now: Date,
-): { window: string | null; at: string; resetsAt: string | null } | null {
+export function usageWarning(db: Db, now: Date): UsageWarning | null {
   const u = getUsageState(db);
   const at = ms(u.warningAt);
   if (u.warningAt === null || at === null) return null;

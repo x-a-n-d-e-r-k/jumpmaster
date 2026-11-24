@@ -34,6 +34,7 @@ import { opMarker } from '../outbox.js';
 import { crewOn, GOAL } from '../test/crew.js';
 import { harness, toPrOpen } from '../test/flowHarness.js';
 import { operatorSession } from '../test/helpers.js';
+import { DEFAULT_USAGE_CONFIG, ingestRateLimit } from '../usage.js';
 import { renderSticks } from './sticks.js';
 
 const get = async (h: Awaited<ReturnType<typeof harness>>, url: string) => h.view(url);
@@ -114,6 +115,28 @@ describe('UI routes', () => {
     expect(html).toMatch(
       /new-stick: 0 of 1 troopers busy( <small class="muted">offline<\/small>)?<\/li>/,
     );
+  });
+
+  test("Home shows Claude's current allowed_warning as information, gone past its reset (#749)", async () => {
+    const h = await harness();
+    const reset = new Date(h.now().getTime() + 3 * 24 * 3_600_000).toISOString();
+    ingestRateLimit(
+      h.db,
+      { status: 'allowed_warning', rateLimitType: 'seven_day', resetsAt: reset },
+      { dropId: 'd1', workItemId: null, startedAt: h.now().toISOString(), outcome: null },
+      DEFAULT_USAGE_CONFIG,
+      h.now(),
+      () => 0,
+    );
+    const html = (await get(h, '/')).body;
+    const line = /<p class="usage-warning">(.*?)<\/p>/.exec(html)?.[1] ?? '';
+    expect(line).toContain('Claude warned that 7-day usage is high; it resets ');
+    expect(line).toContain(`datetime="${new Date(reset).toISOString()}"`);
+    expect(line).not.toMatch(/seven_day|allowed_warning|finishing_only|warningWindow/);
+    h.at(3 * 24 * 60 + 1);
+    const later = (await get(h, '/')).body;
+    expect(later).not.toContain('usage-warning');
+    expect(later).not.toContain('Claude warned');
   });
 
   test('/briefings/<n> resolves About and crew keys and shows one briefing (#226)', async () => {

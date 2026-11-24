@@ -32,7 +32,7 @@ import { currentObjective, type GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import { sliceWhole } from '../slice-whole.js';
 import type { Status } from '../status.js';
-import type { Gate } from '../usage.js';
+import type { Gate, UsageWarning } from '../usage.js';
 import {
   type FailingCheck,
   floorCounts,
@@ -117,6 +117,8 @@ export interface HomeState {
     creditDropsSinceResume?: number;
     /** The account's `overageStatus` as last reported (raw, pending rehearsal). */
     overageStatus?: string | null;
+    /** Claude's current `allowed_warning` (#749), as `usageWarning` reads it; absent or null when none. */
+    warning?: UsageWarning | null;
   };
   /** Outbox ops needing attention (`unknown` or `failed`): counted on the zone cards. */
   outbox?: OutboxRow[];
@@ -298,6 +300,23 @@ export function gateWords(u: NonNullable<HomeState['usage']>, now: Date): string
   }
 }
 
+/** A warned window in words: `seven_day` reads `7-day`, `seven_day_opus` `Opus (7-day)`. */
+function warnedWindow(key: string | null): string {
+  if (key === null) return '';
+  const period = PERIODS.find(([p]) => p === key)?.[1];
+  return period ?? windowLabel(key);
+}
+
+/**
+ * Claude's current usage warning (#749), as information under any gate: the window it named and
+ * when that resets. It never says dispatch is held; that is the gate's words.
+ */
+export function warningWords(w: UsageWarning, now: Date): string {
+  const name = warnedWindow(w.window);
+  const reset = w.resetsAt ? `; it resets ${at(w.resetsAt, now)}` : '';
+  return `Claude warned that ${name ? `${escapeHtml(name)} usage` : 'usage'} is high${reset}`;
+}
+
 /** The later of two ISO times, either possibly absent. */
 const laterOf = (a?: string | null, b?: string | null): string | null =>
   a == null ? (b ?? null) : b == null ? a : Date.parse(a) >= Date.parse(b) ? a : b;
@@ -310,7 +329,7 @@ function capacitySection(state: HomeState, now: Date): string {
   const u = state.usage;
   const bars = u ? usageMeters(u) : '<p class="empty">No usage reported yet.</p>';
   const gate = u
-    ? `<p class="gate-words">${gateWords(u, now)}.</p>${usageOverrideControl(u, now)}`
+    ? `<p class="gate-words">${gateWords(u, now)}.</p>${u.warning ? `<p class="usage-warning">${warningWords(u.warning, now)}.</p>` : ''}${usageOverrideControl(u, now)}`
     : '';
   const sticks = state.sticks ?? [];
   const live = new Set(liveSticks(sticks, now).map((s) => s.id));
