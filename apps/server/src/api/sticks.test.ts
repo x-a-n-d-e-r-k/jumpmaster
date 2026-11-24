@@ -49,6 +49,7 @@ import {
   upsertPullRequest,
   upsertWorkItem,
 } from '../db/repo.js';
+import type { AppBrokers } from '../forge/app-brokers.js';
 import type { AppTokenSource } from '../forge/app-tokens.js';
 import { ScrubSet } from '../forge/scrub-set.js';
 import { StickFetches } from '../images/fetches.js';
@@ -58,7 +59,7 @@ import { buildPayload, promptVersions } from '../payloads.js';
 import { type FakeImage, type FakeRegistry, startFakeRegistry } from '../test/fake-registry.js';
 import { fakeForge } from '../test/fakes.js';
 import { plus, t0, tmpDbFile, workItem } from '../test/helpers.js';
-import type { ResolvedApps } from '../vault/resolution.js';
+import type { ResolvedApps, ResolvedGitlabPats } from '../vault/resolution.js';
 import { registerStickRoutes } from './sticks.js';
 
 const config: Config = {
@@ -126,6 +127,8 @@ function setup(
     fetches?: StickFetches;
     appTokens?: Pick<AppTokenSource, 'fresh'>;
     resolvedApps?: () => ResolvedApps;
+    resolvedGitlabPats?: () => ResolvedGitlabPats;
+    appBrokers?: AppBrokers;
   } = {},
 ) {
   const db = openDb(tmpDbFile());
@@ -169,6 +172,8 @@ function setup(
     ...(opts.fetches ? { fetches: opts.fetches } : {}),
     ...(opts.appTokens ? { appTokens: opts.appTokens } : {}),
     ...(opts.resolvedApps ? { resolvedApps: opts.resolvedApps } : {}),
+    ...(opts.resolvedGitlabPats ? { resolvedGitlabPats: opts.resolvedGitlabPats } : {}),
+    ...(opts.appBrokers ? { appBrokers: opts.appBrokers } : {}),
   });
   return { db, forge, wi, forgeZones };
 }
@@ -1505,26 +1510,377 @@ describe('push container routes', () => {
     expect(liveGrants(db)).toBe(0);
   });
 
-  test('push-token refuses a GitLab zone, even with a valid owner/name path (issue #667)', async () => {
-    const gitlab: Config = {
+  describe('push-token for a GitLab zone (#782)', () => {
+    const GL_AUTHOR = 'gl-author-pat-secret';
+    const GL_REVIEWER = 'gl-reviewer-pat-secret';
+    const glConfig = (baseUrl = 'https://gitlab.example.com', repo = 'octo/demo'): Config => ({
+      ...config,
+      dropZones: [{ ...config.dropZones[0]!, repo, forge: 'gitlab', gitlab: { baseUrl } }],
+    });
+    const pats =
+      (roles: { author?: string; reviewer?: string } = { author: GL_AUTHOR }) =>
+      (): ResolvedGitlabPats =>
+        new Map([['main', roles]]);
+
+    test('grants the author gitlab-pat with the GitLab remote and placeholders', async () => {
+      const logs: string[] = [];
+      const { db } = setup({
+        queued: false,
+        config: glConfig(),
+        logs,
+        resolvedGitlabPats: pats({ author: GL_AUTHOR, reviewer: GL_REVIEWER }),
+      });
+      const { stickId, stickToken } = await enroll();
+      pending(db, stickId);
+      const res = await grant(stickToken);
+      expect(res.statusCode).toBe(200);
+      const g = PushGrantSchema.parse(res.json().grant);
+      expect(g.forge).toEqual({
+        kind: 'gitlab',
+        origin: 'https://gitlab.example.com',
+        projectPath: 'octo/demo',
+      });
+      expect(g).toMatchObject({ owner: 'gitlab', name: 'project', token: GL_AUTHOR });
+      expect(g.branch).toBe('agent/issue-7');
+      expect(g.secrets).toEqual(expect.arrayContaining([GL_AUTHOR, GL_REVIEWER]));
+      // The drop's agent container held no GitHub token, so the push container is sent none.
+      for (const gh of ['gh-secret', 'gh-reviewer']) {
+        expect(JSON.stringify(g.secrets)).not.toContain(gh);
+      }
+      expect(liveGrants(db)).toBe(1);
+      const rows = listAudit(db).filter((a) => a.action === 'push-token');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        via: 'system',
+        detail: { drop: 'd1', epoch: 1, kind: 'final', credential: 'gitlab-pat' },
+      });
+      const everything = JSON.stringify(listAudit(db)) + logs.join('\n');
+      expect(everything).not.toContain(GL_AUTHOR);
+      expect(everything).not.toContain(GL_REVIEWER);
+    });
+
+    test.each([
+      ['https://gitlab.example.com/', 'https://gitlab.example.com'],
+      ['https://GitLab.Example.com', 'https://gitlab.example.com'],
+      ['https://gitlab.example.com:8443', 'https://gitlab.example.com:8443'],
+    ])('baseUrl %s gives origin %s', async (baseUrl, origin) => {
+      const { db } = setup({
+        queued: false,
+        config: glConfig(baseUrl),
+        resolvedGitlabPats: pats(),
+      });
+      const { stickId, stickToken } = await enroll();
+      pending(db, stickId);
+      const res = await grant(stickToken);
+      expect(res.statusCode).toBe(200);
+      expect(PushGrantSchema.parse(res.json().grant).forge?.origin).toBe(origin);
+    });
+
+    test('a repo that is not a GitLab project path is refused', async () => {
+      const { db } = setup({
+        queued: false,
+        config: glConfig(undefined, 'octo/demo.git'),
+        resolvedGitlabPats: pats(),
+      });
+      db.prepare('UPDATE drop_zones SET repo = ?').run('octo/demo.git');
+      const { stickId, stickToken } = await enroll();
+      pending(db, stickId);
+      const res = await grant(stickToken);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual({ refused: 'repo name', retryable: false });
+      expect(liveGrants(db)).toBe(0);
+    });
+
+    test.each([
+      ['the dep is absent', undefined],
+      ['the zone has no author', pats({ reviewer: GL_REVIEWER })],
+      ['the zone has no entry', () => new Map() as ResolvedGitlabPats],
+    ])('no author gitlab-pat is refused when %s, leaving no reservation', async (_, dep) => {
+      const logs: string[] = [];
+      const { db } = setup({
+        queued: false,
+        config: glConfig(),
+        logs,
+        ...(dep ? { resolvedGitlabPats: dep } : {}),
+      });
+      const { stickId, stickToken } = await enroll();
+      pending(db, stickId);
+      const res = await grant(stickToken);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual({ refused: 'gitlab token', retryable: false });
+      expect(liveGrants(db)).toBe(0);
+      const everything = res.body + JSON.stringify(listAudit(db)) + logs.join('\n');
+      for (const t of [GL_REVIEWER, 'gh-secret', 'gh-reviewer']) {
+        expect(everything).not.toContain(t);
+      }
+    });
+
+    test('kill switch, observe, role and repo mismatch refuse as on GitHub', async () => {
+      const { db } = setup({ queued: false, config: glConfig(), resolvedGitlabPats: pats() });
+      const { stickId, stickToken } = await enroll();
+      pending(db, stickId);
+      setKilled(db, true, t0);
+      let res = await grant(stickToken);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual({ refused: 'killed', retryable: true });
+      setKilled(db, false, t0);
+      setZoneMode(db, 'main', 'observe', t0);
+      res = await grant(stickToken);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual({ refused: 'zone observe', retryable: true });
+      setZoneMode(db, 'main', 'active', t0);
+      db.prepare('UPDATE drop_zones SET repo = ?').run('octo/elsewhere');
+      res = await grant(stickToken);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual({ refused: 'repo mismatch', retryable: false });
+      expect(liveGrants(db)).toBe(0);
+
+      const { db: db2 } = setup({ queued: false, config: glConfig(), resolvedGitlabPats: pats() });
+      const s2 = await enroll();
+      openPr(db2);
+      pending(db2, s2.stickId, { id: 'r1', role: 'review', prNumber: 1, headSha: PRIOR });
+      res = await grant(s2.stickToken, 'r1');
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual({ refused: 'role', retryable: false });
+      expect(liveGrants(db2)).toBe(0);
+    });
+
+    test('one reservation per drop epoch', async () => {
+      const { db } = setup({ queued: false, config: glConfig(), resolvedGitlabPats: pats() });
+      const { stickId, stickToken } = await enroll();
+      pending(db, stickId);
+      const [a, b] = await Promise.all([grant(stickToken), grant(stickToken)]);
+      expect([a.statusCode, b.statusCode].sort()).toEqual([200, 409]);
+      const refused = a.statusCode === 409 ? a : b;
+      expect(refused.json()).toEqual({ refused: 'reserved', retryable: true });
+      expect(liveGrants(db)).toBe(1);
+    });
+
+    test('no app broker is consulted, and the token is never a GitHub one', async () => {
+      const calls: string[] = [];
+      const broker = {
+        mint: async () => {
+          calls.push('mint');
+          return { token: 'minted-gh-token' };
+        },
+        revoke: async () => {
+          calls.push('revoke');
+        },
+      };
+      const appBrokers = {
+        brokerFor: () => {
+          calls.push('brokerFor');
+          return broker;
+        },
+        verifiedInstallation: async () => {
+          calls.push('verifiedInstallation');
+          return { broker, installationId: 1, repositoryId: 1 };
+        },
+      } as unknown as AppBrokers;
+      const config = glConfig();
+      const appZone = {
+        ...config.dropZones[0]!,
+        identity: 'two-bot',
+        githubApp: { repositoryId: 1, installations: { author: 1 } },
+      } as Config['dropZones'][number];
+      const { db } = setup({
+        queued: false,
+        config: {
+          ...config,
+          dropZones: [appZone],
+          secrets: { ...config.secrets, githubReadToken: 'gh-read' },
+        },
+        appBrokers,
+        resolvedApps: () =>
+          new Map([
+            [
+              'octo',
+              {
+                author: {
+                  source: 'vault',
+                  fingerprint: 'fp',
+                  entry: {
+                    appId: '1',
+                    slug: 's',
+                    clientId: 'c',
+                    pem: 'pem',
+                    importedAt: '2026-11-01',
+                  },
+                },
+                reviewer: { source: 'missing' },
+              },
+            ],
+          ]) as ResolvedApps,
+        resolvedGitlabPats: pats(),
+      });
+      const { stickId, stickToken } = await enroll();
+      pending(db, stickId);
+      const res = await grant(stickToken);
+      expect(res.statusCode).toBe(200);
+      const g = PushGrantSchema.parse(res.json().grant);
+      expect(g.token).toBe(GL_AUTHOR);
+      expect(['gh-secret', 'gh-read', 'minted-gh-token']).not.toContain(g.token);
+      // The result releases the reservation: still no broker call (nothing held to revoke).
+      const done = await pushResult(stickToken, {
+        status: 'pushed',
+        headSha: SHA_A,
+        alreadyThere: false,
+      });
+      expect(done.statusCode).toBe(200);
+      expect(calls).toEqual([]);
+    });
+  });
+
+  describe('push-plan for a GitLab zone (#783)', () => {
+    type Mode = 'enforce' | 'monitor' | 'off';
+    const glZone = (baseUrl: string, allow: string[], mode: Mode = 'enforce'): Config => ({
       ...config,
       dropZones: [
         {
           ...config.dropZones[0]!,
           forge: 'gitlab',
-          gitlab: { baseUrl: 'https://gitlab.example.com' },
+          gitlab: { baseUrl },
+          egress: { mode, allow },
+        },
+      ],
+    });
+    const planFor = async (cfg: Config, logs: string[] = []) => {
+      const { db } = setup({ queued: false, config: cfg, logs });
+      const { stickId, stickToken } = await enroll();
+      pending(db, stickId);
+      return { db, res: await plan(stickToken) };
+    };
+    const REFUSED = { refused: 'egress', retryable: true };
+
+    test.each([
+      ['https://GitLab.Example.com/', ['gitlab.example.com'], 'enforce'],
+      ['https://gitlab.example.com', ['*.example.com'], 'enforce'],
+      ['https://gitlab.example.com', ['gitlab.example.com'], 'monitor'],
+    ] as const)(
+      'baseUrl %s allowed by %j in %s plans exactly its host',
+      async (url, allow, mode) => {
+        const { res } = await planFor(glZone(url, [...allow], mode));
+        expect(res.statusCode).toBe(200);
+        expect(PushPlanSchema.parse(res.json()).egress).toEqual({
+          mode,
+          allow: ['gitlab.example.com'],
+        });
+      },
+    );
+
+    test('a zone whose list allows neither host is refused, retryable, and the log names the host', async () => {
+      const logs: string[] = [];
+      const { res } = await planFor(
+        glZone('https://gitlab.example.com', ['other.example.org']),
+        logs,
+      );
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(REFUSED);
+      expect(logs.join('\n')).toMatch(/gitlab\.example\.com/);
+      expect(logs.join('\n')).toMatch(/egress\.allow/);
+    });
+
+    test('a monitor zone whose list lacks the host is refused the same', async () => {
+      const { res } = await planFor(glZone('https://gitlab.example.com', [], 'monitor'));
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(REFUSED);
+    });
+
+    test('a port other than 443 is refused with egress on, the log naming it; planned with egress off', async () => {
+      const logs: string[] = [];
+      const url = 'https://gitlab.example.com:8443';
+      const { res } = await planFor(glZone(url, ['gitlab.example.com']), logs);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(REFUSED);
+      expect(logs.join('\n')).toMatch(/8443/);
+      const off = await planFor(glZone(url, ['gitlab.example.com'], 'off'));
+      expect(off.res.statusCode).toBe(200);
+      expect(off.res.json()).not.toHaveProperty('egress');
+    });
+
+    test('an explicit :443 is the default port and planned', async () => {
+      const { res } = await planFor(
+        glZone('https://gitlab.example.com:443', ['gitlab.example.com']),
+      );
+      expect(res.statusCode).toBe(200);
+      expect(res.json().egress.allow).toEqual(['gitlab.example.com']);
+    });
+
+    test.each(['https://10.0.0.5', 'https://[::1]'])('an IP baseUrl %s is refused', async (url) => {
+      const { res } = await planFor(glZone(url, ['gitlab.example.com']));
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(REFUSED);
+    });
+
+    test.each([
+      ['https://gitlab.example.com', ['gitlab.example.com.evil.net']],
+      ['https://gitlab.example.com', ['notgitlab.example.com']],
+      ['https://gitlab.example.com', ['example.com']],
+      ['https://notgitlab.example.com', ['gitlab.example.com']],
+    ])('a lookalike does not satisfy the check: %s with %j', async (url, allow) => {
+      const { res } = await planFor(glZone(url, allow));
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(REFUSED);
+    });
+
+    test('github.com is on no GitLab plan, even when the zone lists it', async () => {
+      const { res } = await planFor(
+        glZone('https://gitlab.example.com', ['github.com', 'gitlab.example.com']),
+      );
+      expect(res.statusCode).toBe(200);
+      expect(res.json().egress.allow).toEqual(['gitlab.example.com']);
+    });
+
+    test('the refusal leaves an existing reservation as it was and starts nothing', async () => {
+      const logs: string[] = [];
+      const { db } = setup({
+        queued: false,
+        config: glZone('https://gitlab.example.com', []),
+        logs,
+      });
+      const { stickId, stickToken } = await enroll();
+      pending(db, stickId);
+      expect(reserveGrant(db, 'd1', 1, t0)).toBe('ok');
+      const res = await plan(stickToken);
+      expect(res.statusCode).toBe(403);
+      expect(liveGrants(db)).toBe(1);
+      expect(getDrop(db, 'd1')?.state).toBe('push_pending');
+      const everything = res.body + JSON.stringify(listAudit(db)) + logs.join('\n');
+      for (const t of ['gh-secret', 'gh-reviewer']) expect(everything).not.toContain(t);
+    });
+  });
+
+  test('a GitHub zone whose egress.allow has extra hosts still plans exactly github.com (#783)', async () => {
+    const extra: Config = {
+      ...config,
+      dropZones: [
+        {
+          ...config.dropZones[0]!,
+          egress: { mode: 'monitor', allow: ['gitlab.example.com', '*.example.com'] },
         },
       ],
     };
-    const { db } = setup({ queued: false, config: gitlab });
+    const { db } = setup({ queued: false, config: extra });
+    const { stickId, stickToken } = await enroll();
+    pending(db, stickId);
+    const res = await plan(stickToken);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().egress).toEqual({ mode: 'monitor', allow: ['github.com'] });
+  });
+
+  test('a GitHub zone PAT-mode grant is unchanged: the author PAT, no forge (#782)', async () => {
+    const { db } = setup({ queued: false, resolvedGitlabPats: () => new Map() });
     const { stickId, stickToken } = await enroll();
     pending(db, stickId);
     const res = await grant(stickToken);
-    expect(res.statusCode).toBe(403);
-    expect(res.json()).toEqual({ refused: 'forge', retryable: false });
-    expect(res.body).not.toContain(config.dropZones[0]!.repo);
-    expect(res.body).not.toContain('gitlab.example.com');
-    expect(liveGrants(db)).toBe(0);
+    expect(res.statusCode).toBe(200);
+    const g = PushGrantSchema.parse(res.json().grant);
+    expect(g.token).toBe('gh-secret');
+    expect(g).toMatchObject({ owner: 'octo', name: 'demo' });
+    expect('forge' in g).toBe(false);
+    expect(listAudit(db).find((a) => a.action === 'push-token')?.detail).toMatchObject({
+      credential: 'pat',
+    });
   });
 
   test('one live reservation per drop', async () => {

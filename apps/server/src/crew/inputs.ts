@@ -1,4 +1,4 @@
-import type { CrewRole } from '@jumpmaster/protocol';
+import { type CrewRole, redact } from '@jumpmaster/protocol';
 import { refuteVerdicts } from '../briefings.js';
 import type { DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
@@ -20,7 +20,14 @@ import {
 } from '../payloads.js';
 import { isCrewFiled } from '../sync.js';
 import { crewIssueSlots } from './actions.js';
-import { getCrewIssue, getTriageRequest, listCrewIssues } from './store.js';
+import {
+  type CrewIssue,
+  commandRejection,
+  getCrewIssue,
+  getTriageRequest,
+  issueArbitrationSubject,
+  listCrewIssues,
+} from './store.js';
 
 /** The most a crew prompt (template plus input) may weigh, in UTF-8 bytes. */
 export const MAX_CREW_PROMPT_BYTES = 100_000;
@@ -203,6 +210,87 @@ function openCrewBriefings(db: Db, zoneId: string): OpenBriefingLine[] {
     .all(zoneId) as OpenBriefingLine[];
 }
 
+/** How many rejected issues the lead's input explains, and how far back (#784). */
+export const MAX_REJECTED_SHOWN = 5;
+const REJECTED_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+/** The most characters of one rejection's reason the lead sees, counted after redaction. */
+export const MAX_REJECTION_REASON = 2000;
+
+/**
+ * Why a rejected crew issue was rejected, in the order the spec gives: Command's ruling, if it
+ * rejected it (with its note, since it can't be replaced); then the latest ruled arbitration's
+ * `because` and `instruction`, else the issue's latest refute findings.
+ */
+function rejectionReason(db: Db, issue: CrewIssue): string {
+  const parts: string[] = [];
+  const command = commandRejection(db, issue);
+  if (command) parts.push(`Rejected by Command${command.note ? `; note: ${command.note}` : '.'}`);
+  const arbitration = db
+    .prepare(
+      `SELECT because, instruction FROM arbitrations
+         WHERE zone_id = ? AND subject = ? AND state = 'ruled'
+         ORDER BY updated_at DESC, id DESC LIMIT 1`,
+    )
+    .get(issue.zoneId, issueArbitrationSubject(issue.id)) as
+    | { because: string | null; instruction: string | null }
+    | undefined;
+  if (arbitration) {
+    parts.push(
+      `The arbiter ruled: ${arbitration.because ?? '(no reason given)'}`,
+      ...(arbitration.instruction ? [`Its instruction: ${arbitration.instruction}`] : []),
+    );
+  } else if (issue.findingsJson !== null) {
+    let findings: string[] = [];
+    try {
+      const parsed = JSON.parse(issue.findingsJson) as unknown;
+      if (Array.isArray(parsed)) findings = parsed.filter((f) => typeof f === 'string');
+    } catch {
+      findings = [];
+    }
+    parts.push(
+      'The last review found:',
+      ...(findings.length === 0 ? ['(no findings)'] : findings.map((f) => `- ${f}`)),
+    );
+  }
+  return parts.length === 0 ? 'No reason was recorded.' : parts.join('\n');
+}
+
+/**
+ * The zone's crew issues of the current objective rejected in the last 7 days, newest first, at
+ * most `MAX_REJECTED_SHOWN`, each with its reason: redacted with `secrets` and the scrub set and
+ * cut to `MAX_REJECTION_REASON` characters here, neutralised and fenced by `assemble`.
+ */
+function rejectedIssuesText(
+  db: Db,
+  zoneId: string,
+  objective: string | null,
+  now: Date,
+  secrets: string[],
+): string {
+  if (objective === null) return 'No objective is open.';
+  const since = new Date(now.getTime() - REJECTED_WINDOW_MS).toISOString();
+  const rows = (
+    db
+      .prepare(
+        `SELECT id FROM crew_issues WHERE zone_id = ? AND objective = ? AND state = 'rejected'
+           AND updated_at > ? ORDER BY updated_at DESC, id DESC LIMIT ?`,
+      )
+      .all(zoneId, objective, since, MAX_REJECTED_SHOWN) as { id: number }[]
+  ).flatMap((r) => getCrewIssue(db, r.id) ?? []);
+  if (rows.length === 0)
+    return 'No issue of the current objective was rejected in the last 7 days.';
+  const scrub = [...secrets, ...serverScrubSet.values()];
+  return rows
+    .map((c) => {
+      const reason = [...redact(rejectionReason(db, c), scrub)]
+        .slice(0, MAX_REJECTION_REASON)
+        .join('');
+      const number = c.number !== null ? ` (#${c.number})` : '';
+      return `- ${c.key}: ${c.title}${number}\n  Reason:\n${reason}`;
+    })
+    .join('\n\n');
+}
+
 /**
  * The lead's input: GOAL.md, the current objective and Command's rulings as instructions; the crew
  * issues, free slots and trusted open issues as data. Issues by untrusted authors (or whose trust
@@ -214,8 +302,9 @@ export async function crewLeadInput(
   forges: ForgePair,
   zone: DropZoneConfig,
   _pass: ZonePass,
-  _now: Date,
+  now: Date,
   dropId: string,
+  secrets: string[] = [],
 ): Promise<string> {
   const current = zoneObjective(db, zone.id);
   const ruled = rulings(db, zone.id);
@@ -324,6 +413,12 @@ export async function crewLeadInput(
               .join('\n\n'),
     },
     { title: 'Crew issues', name: 'crew-issues', kind: 'data', text: crewText },
+    {
+      title: 'Rejected issues of the current objective',
+      name: 'rejected-issues',
+      kind: 'data',
+      text: rejectedIssuesText(db, zone.id, current?.key ?? null, now, secrets),
+    },
     { title: 'Open issues', name: 'open-issues', kind: 'data', text: issuesText },
   ]);
 }

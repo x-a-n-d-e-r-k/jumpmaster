@@ -1922,6 +1922,90 @@ describe('image trust: verify, then pull, then create', () => {
     );
     expect(e.order).toEqual([`pull ${pin}`, ...VOLUME_START, 'trooper', ...VOLUME_END]);
   });
+
+  describe('the stick egress ceiling (JM_EGRESS_CEILING)', () => {
+    const ceiling = ['api.anthropic.com', 'github.com', 'gitlab.example.com', 'registry.npmjs.org'];
+    const covered: DropPayload = {
+      ...signedPayload,
+      egress: {
+        mode: 'enforce',
+        allow: ['api.anthropic.com', 'github.com', 'gitlab.example.com', 'registry.npmjs.org'],
+      },
+    };
+    /** Runs `p` on a stick with `ceil`, recording every engine, cosign and base-image call. */
+    const run = async (p: DropPayload, ceil: string[] | null) => {
+      const d = fakeDriver([done], { present: () => false });
+      const c = cosignFor([dg('1'), dg('2'), dg('3')], d.order);
+      const client = fakeClient();
+      let baseRead = 0;
+      await runDrop(p, {
+        ...deps(d, trust(c.cosign), client),
+        ceiling: ceil,
+        baseImage: () => {
+          baseRead++;
+          return { ok: true };
+        },
+      });
+      return { d, client, baseRead };
+    };
+    const nothingStarted = (r: Awaited<ReturnType<typeof run>>) => {
+      // No image verified (cosign calls land in order), pulled or inspected; no network, volume,
+      // proxy, service or trooper.
+      expect(r.d.order).toEqual([]);
+      expect(r.d.images).toEqual([]);
+      expect(r.d.inspected).toEqual([]);
+      expect(r.d.net).toBeUndefined();
+      expect(r.d.proxy).toBeUndefined();
+      expect(r.d.services).toBeUndefined();
+      expect(r.d.started).toBeUndefined();
+      expect(r.baseRead).toBe(0);
+    };
+
+    test('an uncovered host fails the drop with the reason, and nothing is verified, pulled or started', async () => {
+      const r = await run(
+        {
+          ...covered,
+          egress: { mode: 'enforce', allow: [...covered.egress!.allow, 'evil.example.net'] },
+        },
+        ceiling,
+      );
+      expect(r.client.result).toMatchObject({ status: 'failed' });
+      expect(r.client.result?.reason).toMatch(/JM_EGRESS_CEILING.*evil\.example\.net/);
+      nothingStarted(r);
+    });
+
+    test.each([
+      [
+        'monitor',
+        { ...covered, egress: { mode: 'monitor' as const, allow: covered.egress!.allow } },
+        '"monitor"',
+      ],
+      ['no egress at all', { ...covered, egress: undefined }, '"off"'],
+    ])('%s fails the drop the same way', async (_name, p, mode) => {
+      const r = await run(p, ceiling);
+      expect(r.client.result).toMatchObject({ status: 'failed' });
+      expect(r.client.result?.reason).toContain(mode);
+      nothingStarted(r);
+    });
+
+    test("a covered drop runs, and the proxy gets the payload's own list", async () => {
+      const r = await run(covered, ceiling);
+      expect(r.client.result).toMatchObject({ status: 'completed' });
+      expect(r.d.proxy?.env).toMatchObject({
+        JM_EGRESS_MODE: 'enforce',
+        JM_EGRESS_ALLOW: 'api.anthropic.com,github.com,gitlab.example.com,registry.npmjs.org',
+      });
+    });
+
+    test('without a ceiling a monitor drop runs as today', async () => {
+      const r = await run(
+        { ...covered, egress: { mode: 'monitor', allow: ['anything.example.net'] } },
+        null,
+      );
+      expect(r.client.result).toMatchObject({ status: 'completed' });
+      expect(r.d.proxy?.env).toMatchObject({ JM_EGRESS_MODE: 'monitor' });
+    });
+  });
 });
 
 describe('push containers: the agent run on a volume', () => {

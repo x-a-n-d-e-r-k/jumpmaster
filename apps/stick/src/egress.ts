@@ -1,7 +1,12 @@
 // Egress, stick side: one proxy per drop, started on the drop's own network and waited for before
 // anything else runs there. A proxy that never says it is ready fails the drop, so a drop under
 // egress never runs without its only exit being the proxy.
-import type { DropPayload, TrooperEvent } from '@jumpmaster/protocol';
+import {
+  ceilingRefusal,
+  type DropPayload,
+  egressCeiling,
+  type TrooperEvent,
+} from '@jumpmaster/protocol';
 import type { ContainerDriver, DropNet, IsolationFacts, ProxyHandle } from './driver.js';
 import { fetchFromServer, fromServer } from './fetch-image.js';
 import { pullImage } from './pull.js';
@@ -40,6 +45,22 @@ export function trooperEgressRefusal(image: string, labels: Record<string, strin
   const shown = value.replace(/[^\x20-\x7e]/g, '?').slice(0, 32);
   return `image ${image} declares egress support ${TROOPER_EGRESS_LABEL}=${shown}, but this stick runs only ${want}: the image and the stick come from different releases. Use a trooper image from the stick's release (or a stick that supports ${shown}), or set the zone's egress mode to "off".`;
 }
+
+/**
+ * The stick's egress ceiling as a caller passed it: `undefined` reads `JM_EGRESS_CEILING` from the
+ * environment (so no caller can forget it), `null` means none. main reads it once at startup,
+ * where an invalid value stops the stick.
+ */
+export const stickCeiling = (
+  ceiling: string[] | null | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): string[] | null => (ceiling === undefined ? egressCeiling(env.JM_EGRESS_CEILING) : ceiling);
+
+/** How the startup log names the ceiling. */
+export const ceilingLine = (ceiling: string[] | null): string =>
+  ceiling === null
+    ? 'egress ceiling: none set (JM_EGRESS_CEILING)'
+    : `egress ceiling: ${ceiling.join(', ')} (only drops in enforce mode within it run)`;
 
 export const EGRESS_READY_MS = 30_000;
 /** Hosts itemised per decision per drop; the rest are counted in one overflow event each. */
@@ -162,8 +183,12 @@ export async function startEgress(
     /** Where the proxy limits come from (default process.env). */
     env?: NodeJS.ProcessEnv;
   },
+  ceiling?: string[] | null,
 ): Promise<EgressSession> {
   const env = o.env ?? process.env;
+  // The same check drops and pushes make first; here too, so no proxy ever starts outside it.
+  const refusal = ceilingRefusal(o.egress, stickCeiling(ceiling, env));
+  if (refusal) throw new Error(refusal);
   const limits = Object.fromEntries(
     ['JM_EGRESS_MAX_TUNNELS', 'JM_EGRESS_MAX_CONNECTIONS'].flatMap((k) =>
       env[k] ? [[k, env[k] as string]] : [],

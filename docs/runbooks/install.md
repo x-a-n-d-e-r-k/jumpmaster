@@ -1100,6 +1100,39 @@ What egress does not stop: anything sent to an allowed host. An implement drop p
 `github.com` with the author token (held by the trooper's root process, not the agent), and the
 agent's Claude token reaches `api.anthropic.com`.
 
+**A GitLab zone** needs its GitLab host (the host of `gitlab.baseUrl`, for example
+`gitlab.example.com`) in its `egress.allow`, for the clone and for the push. With egress on, a
+GitLab zone's push container reaches that one host and nothing else (not `github.com`), and only
+when the zone's `egress.allow` lists it, by name or by a `*.` entry. The egress proxy allows port
+443 only, so a `gitlab.baseUrl` on another port, or on an IP address, cannot push while egress is
+on. Until the host is allowed, each push is refused (`egress`) and retried; the work waits on the
+stick, and the server log names the host to add. A stick's ceiling must list the host too (below).
+
+Egress rules cover what a drop's containers reach, not how their images arrive: pulling the
+trooper's image or a service's is done by the Docker engine or the stick itself, outside any
+drop network, and no allow list or ceiling applies to it.
+
+### The stick's egress ceiling
+
+Each stick can cap what any drop or push on it may reach, whatever the server sends: set
+`JM_EGRESS_CEILING` on the stick (in `.env` for the compose install) to a comma-separated list
+of host names, or `*.` plus a name for its subdomains (never its apex; no IPs, ports or URLs; at
+most 200). A drop on that stick reaches an extra host, a GitLab instance for example, only when
+both the zone's `egress.allow` and the stick's ceiling list it. The stick checks every drop and
+push container before it verifies, pulls or starts anything; one outside the ceiling fails with
+the reason, and an invalid setting stops the stick at start (its log names the ceiling, or says
+none is set).
+
+- The base hosts, `api.anthropic.com` and `github.com`, are always within the ceiling.
+- Once a ceiling is set, every other host a zone's drops allow must be in it: the preset's hosts
+  (`registry.npmjs.org` for `node`, for example) as well as the zone's own `egress.allow`.
+- A stick with a ceiling runs only zones in `enforce`. A zone in `monitor` (which lets any public
+  host through) or `off` fails on it.
+- Pushes pending on the stick when a ceiling is first set wait, with their work kept, until their
+  zone is in `enforce` or the ceiling is removed; until then they also hold up an in-place
+  upgrade of the stick. A pushed result is never thrown away over a setting.
+- A stick older than this release ignores the setting.
+
 ## Doctor drop
 
 `jumpmaster ctl doctor <zone> --drop` asks for one doctor drop: on the zone's real stick, image,

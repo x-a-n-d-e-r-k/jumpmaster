@@ -483,6 +483,14 @@ export const CrewLeadOutputSchema = z.strictObject({
         title: z.string().min(1).max(120),
         body: z.string().min(1).max(12000),
         priority: z.enum(PRIORITIES).optional(),
+        /**
+         * The key of a rejected crew issue this one files again in corrected form (#784): the
+         * server lifts the 7-day duplicate-title refusal only for a valid replacement.
+         */
+        replaces: z
+          .string()
+          .regex(/^[a-z0-9-]{1,40}$/)
+          .optional(),
       }),
     )
     .max(5),

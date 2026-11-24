@@ -19,6 +19,7 @@ import {
   type CrewIssue,
   type CrewIssuePatch,
   type CrewIssueState,
+  commandRejection,
   getCrewIssue,
   INTAKE_SOURCE,
   listCrewIssues,
@@ -179,19 +180,8 @@ async function reject(
 }
 
 /** Whether Command rejected the issue by a ruling that has been applied (not a refute verdict). */
-function rejectedByCommand(db: Db, row: CrewIssue): boolean {
-  return (
-    db
-      .prepare(
-        `SELECT 1 FROM rulings r JOIN briefings b ON b.id = r.briefing_id, json_each(b.options_json) o
-         WHERE b.zone_id = ? AND b.subject = ? AND r.applied_at IS NOT NULL
-           AND json_extract(o.value, '$.id') = r.choice
-           AND json_extract(o.value, '$.effect') = 'reject_issue'
-         LIMIT 1`,
-      )
-      .get(row.zoneId, subjectOf(row)) !== undefined
-  );
-}
+const rejectedByCommand = (db: Db, row: CrewIssue): boolean =>
+  commandRejection(db, row)?.applied === true;
 
 /**
  * Moves crew issues along by their forge writes, all through the outbox as the author identity.

@@ -6,12 +6,15 @@ import {
   DropResultSchema,
   dropSecrets,
   FEATURES_HEADER,
+  hostAllowed,
   IMAGE_MIRROR_FEATURE,
   ImageFetchSchema,
   isCrewRole,
+  isGitLabProjectPath,
   isRepoFullName,
   isSafeBranchName,
   type LeaseSkip,
+  normalizeHost,
   type PushGrant,
   type PushPlan,
   PushResultSchema,
@@ -109,6 +112,7 @@ import {
   isAppAuthorZone,
   isAppReviewerZone,
   type ResolvedApps,
+  type ResolvedGitlabPats,
 } from '../vault/resolution.js';
 import { upgradeTargetOf } from './stick-upgrade.js';
 
@@ -144,6 +148,11 @@ export interface StickRouteDeps {
   appBrokers?: AppBrokers;
   /** The app entries as they resolved now (`ConfigStore.resolvedApps`); absent, none. */
   resolvedApps?: () => ResolvedApps;
+  /**
+   * Each GitLab zone's `gitlab-pat` entries as they resolved now (`ConfigStore.resolvedGitlabPats`,
+   * issue #782): a GitLab zone pushes with its author's. Absent, no zone has one.
+   */
+  resolvedGitlabPats?: () => ResolvedGitlabPats;
   /**
    * The server's GitHub App token source (spec §4.2, issue #237): with it, a review, crew or doctor
    * drop of an app-reviewer zone clones with a reviewer `contents: read` token minted for the drop
@@ -225,8 +234,38 @@ const PushResultBody = z.object({ epoch: z.number(), result: PushResultSchema })
 
 /** The roles whose work a push container pushes. */
 const PUSHING_ROLES: readonly Role[] = ['implement', 'heal', 'resolve'];
-/** A push container reaches GitHub and nothing else. */
+/** A GitHub zone's push container reaches GitHub and nothing else. */
 const PUSH_EGRESS = ['github.com'];
+
+/**
+ * The one host a GitLab zone's push container reaches under egress (issue #783, Ruling 117): its
+ * GitLab host, in canonical form, when it is a DNS name on port 443 that the zone's own guarded
+ * list allows. Otherwise why not, naming what the operator would change.
+ */
+const gitlabPushHost = (
+  baseUrl: string,
+  zoneAllow: string[],
+): { host: string } | { why: string } => {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return { why: 'its gitlab.baseUrl is not a URL' };
+  }
+  const port =
+    url.port || (url.protocol === 'https:' ? '443' : url.protocol === 'http:' ? '80' : '');
+  if (port !== '443') {
+    return {
+      why: `the egress proxy allows port 443 only, and its GitLab host is on port ${port || 'unknown'}`,
+    };
+  }
+  const host = normalizeHost(url.hostname);
+  if (host === null) return { why: `its GitLab host ${url.hostname} is not a DNS name` };
+  if (!hostAllowed(host, zoneAllow)) {
+    return { why: `its GitLab host is not allowed: add ${host} to the zone's egress.allow` };
+  }
+  return { host };
+};
 
 const LIVE: readonly DropState[] = ['leased', 'running'];
 /** The roles that clone with the reviewer's read token (§4.2): never an author's. */
@@ -468,11 +507,11 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         .prepare('SELECT repo, default_branch AS base FROM drop_zones WHERE id = ?')
         .get(drop.dropZoneId) as { repo: string; base: string } | undefined;
       if (!row || row.repo !== zone.repo) return { refused: 'repo mismatch', retryable: false };
-      // Issue #667: a GitLab zone has no push grant until GitLabForge lands; its project path
-      // is never made a GitHub remote, whatever its shape.
-      if (forgeKind(zone) === 'gitlab') return { refused: 'forge', retryable: false };
-      // The grant's owner and name become a git remote: the one name rule (issue #265).
-      if (!isRepoFullName(zone.repo)) return { refused: 'repo name', retryable: false };
+      // The grant's remote is built from the repo: GitHub's owner/name (the one name rule, issue
+      // #265), or a GitLab zone's project path (issue #782).
+      const named =
+        forgeKind(zone) === 'gitlab' ? isGitLabProjectPath(zone.repo) : isRepoFullName(zone.repo);
+      if (!named) return { refused: 'repo name', retryable: false };
       if (!pushKindValid(drop)) return { refused: 'kind', retryable: false };
       const item = drop.workItemId === null ? undefined : getWorkItem(db, drop.workItemId);
       if (!item) return { refused: 'branch', retryable: false };
@@ -858,15 +897,26 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       // only to be turned away. The grant checks again (Ruling 20).
       const held = pushHeld(zone.id);
       if (held) return reply.code(403).send(held);
+      const egress = egressFor(zone);
+      let pushAllow = PUSH_EGRESS;
+      if (egress && forgeKind(zone) === 'gitlab') {
+        // Refused before anything is revoked: the branch waits in its volume while the operator
+        // fixes the zone's list, and the push is retried as a held one is.
+        const target = gitlabPushHost(zone.gitlab?.baseUrl ?? '', egress.allow);
+        if ('why' in target) {
+          log(`push of drop ${drop.id} refused in zone ${zone.id}: ${target.why}`);
+          return reply.code(403).send({ refused: 'egress', retryable: true });
+        }
+        pushAllow = [target.host];
+      }
       // A new attempt: a reservation left by one that died is no longer held against it.
       revokeGrants(db, drop.id, now());
       revokeHeld(drop.id);
-      const egress = egressFor(zone);
       const plan: PushPlan = {
         branch: agentBranch(item.issueNumber),
         salvage: drop.pushKind === 'salvage',
         limits: zone.limits,
-        ...(egress ? { egress: { mode: egress.mode, allow: PUSH_EGRESS } } : {}),
+        ...(egress ? { egress: { mode: egress.mode, allow: pushAllow } } : {}),
       };
       return plan;
     });
@@ -885,10 +935,17 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         return reply.code(checked.refused === 'reserved' ? 409 : 403).send(checked);
       }
       const { secrets } = config;
+      const gitlab = forgeKind(zone) === 'gitlab';
+      // A GitLab zone pushes with its author gitlab-pat (issue #782): no GitHub token, no broker.
+      const gitlabPats = gitlab ? deps.resolvedGitlabPats?.().get(zone.id) : undefined;
+      if (gitlab && !gitlabPats?.author) {
+        revokeGrants(db, drop.id, at);
+        return reply.code(403).send({ refused: 'gitlab token', retryable: false });
+      }
       // App mode (§4.2): a contents: write token minted for this push, never the PAT instead.
-      let token = secrets.githubAuthorToken;
-      let credential: 'app' | 'pat' = 'pat';
-      if (deps.appBrokers) {
+      let token = gitlabPats?.author ?? secrets.githubAuthorToken;
+      let credential: 'app' | 'pat' | 'gitlab-pat' = gitlab ? 'gitlab-pat' : 'pat';
+      if (deps.appBrokers && !gitlab) {
         const resolution = credentialFor(zone, 'author', deps.resolvedApps?.() ?? new Map());
         if (resolution.ref.kind === 'github-app') {
           credential = 'app';
@@ -949,13 +1006,30 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           heldTokens.set(drop.id, { epoch: drop.epoch, owner: appOwner, token });
         }
       }
-      // checkGrant refused a zone.repo that isn't owner/name, so this split always succeeds.
-      const { owner, name } = splitRepoFullName(zone.repo) ?? { owner: '', name: '' };
+      // checkGrant refused a zone.repo that isn't owner/name (a GitLab project path for a GitLab
+      // zone), so this split always succeeds. A GitLab grant's owner and name are placeholders the
+      // schema requires: its remote is `forge`, never derived from the project path.
+      const { owner, name } = gitlab
+        ? { owner: 'gitlab', name: 'project' }
+        : (splitRepoFullName(zone.repo) ?? { owner: '', name: '' });
       const gateSecrets = ownZoneSecrets(secrets, zone.id);
+      const gitlabSecrets = gitlabPats
+        ? [gitlabPats.author, gitlabPats.reviewer].filter((v): v is string => !!v)
+        : [];
       const grant: PushGrant = {
         token,
         owner,
         name,
+        // The strict origin ForgeRemoteSchema requires: no trailing slash, a lower-case host.
+        ...(gitlab
+          ? {
+              forge: {
+                kind: 'gitlab' as const,
+                origin: new URL(zone.gitlab?.baseUrl ?? '').origin,
+                projectPath: zone.repo,
+              },
+            }
+          : {}),
         branch: checked.branch,
         base: checked.base,
         // The lease the agent would have pushed with: none for a new branch, the resumed SHA, or
@@ -966,15 +1040,19 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         // Sent only when set, so a trooper from before the field still accepts the grant.
         ...(zone.privateKeyPaths.length > 0 ? { privateKeyPaths: zone.privateKeyPaths } : {}),
         secrets: [
-          ...new Set(
-            dropSecrets({
+          ...new Set([
+            ...dropSecrets({
               // The forge token the drop's agent container held (Ruling 1), and the author token.
-              forgeToken: secrets.githubReadToken ?? secrets.githubAuthorToken,
+              // A GitLab zone's agent container held none (issue #765).
+              ...(gitlab
+                ? {}
+                : { forgeToken: secrets.githubReadToken ?? secrets.githubAuthorToken }),
               authorToken: token,
               claudeToken: secrets.claudeToken,
               ...(gateSecrets ? { gateSecrets } : {}),
             }),
-          ),
+            ...gitlabSecrets,
+          ]),
         ],
       };
       markMinted(db, drop.id, drop.epoch, at);
@@ -988,7 +1066,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           detail: { drop: drop.id, epoch: drop.epoch, kind: drop.pushKind, credential },
         },
         at,
-        secretList(secrets),
+        [...secretList(secrets), ...gitlabSecrets],
       );
       return { grant };
     });

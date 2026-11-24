@@ -141,6 +141,7 @@ describe('the released compose file', () => {
     const env = read('deploy/.env.example');
     // Optional: commented out, with the default named.
     expect(env).toMatch(/^#JM_UID=1000$/m);
+    expect(env).toMatch(/^#JM_EGRESS_CEILING=$/m);
     expect(env).toMatch(/^#JM_GID=1000$/m);
     expect(env).not.toMatch(/^JM_UID=/m);
     expect(env).toMatch(/optional/i);
@@ -152,6 +153,7 @@ describe('the released compose file', () => {
       'JM_SLOTS',
       'JM_MAX_SLOTS',
       'JM_DROP_SUBNET_POOL',
+      'JM_EGRESS_CEILING',
       'JM_ALLOWED_IMAGES',
     ])
       expect(env).toContain(v);
@@ -312,6 +314,8 @@ describe('the released compose file', () => {
       JM_SLOTS: '${JM_SLOTS:-1}',
       JM_MAX_SLOTS: '${JM_MAX_SLOTS:-}',
       JM_DROP_SUBNET_POOL: '${JM_DROP_SUBNET_POOL:-}',
+      // Empty: no ceiling, as before; an operator sets it in .env.
+      JM_EGRESS_CEILING: '${JM_EGRESS_CEILING:-}',
       JM_EGRESS_IMAGE: `ghcr.io/x-a-n-d-e-r-k/jumpmaster-egress@${LOCK.images['jumpmaster-egress']}`,
     });
     expect(s.volumes).toContain('jm-stick:/state');

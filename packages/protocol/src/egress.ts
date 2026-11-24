@@ -61,6 +61,87 @@ export function hostAllowed(host: string, list: string[]): boolean {
   return false;
 }
 
+/**
+ * Hosts every drop under egress reaches: the Claude API and GitHub (clone and push). The monitor
+ * rehearsal may extend this; the commit that does records the hosts it observed. Compiled into the
+ * stick too, so a stick's egress ceiling always allows them.
+ */
+export const BASE_EGRESS = ['api.anthropic.com', 'github.com'];
+
+/** Most entries `JM_EGRESS_CEILING` may list. */
+export const MAX_CEILING_ENTRIES = 200;
+
+/** A valid entry in canonical form: a name, or `*.` plus a name. */
+function canonical(entry: string): string {
+  return entry.startsWith('*.')
+    ? `*.${normalizeHost(entry.slice(2)) as string}`
+    : (normalizeHost(entry) as string);
+}
+
+/** Operator text shown in a message: printable ASCII only, cut short. */
+const shown = (s: string, max = 100): string => s.replace(/[^\x20-\x7e]/g, '?').slice(0, max);
+
+/**
+ * A stick's egress ceiling (`JM_EGRESS_CEILING`): null when unset or blank (no ceiling), else its
+ * entries, canonical, plus `BASE_EGRESS`, deduplicated and sorted. Throws, with a message that
+ * starts with the setting's name, on anything else: an empty item, an entry that isn't a host name
+ * or `*.` plus one (an IP, a port, a URL, a bare `*`), or more than 200 entries.
+ */
+export function egressCeiling(raw: string | undefined): string[] | null {
+  if (raw === undefined || raw.trim() === '') return null;
+  const items = raw.split(',').map((s) => s.trim());
+  if (items.length > MAX_CEILING_ENTRIES)
+    throw new Error(
+      `JM_EGRESS_CEILING lists ${items.length} entries; at most ${MAX_CEILING_ENTRIES} are allowed`,
+    );
+  for (const item of items) {
+    if (item === '')
+      throw new Error('JM_EGRESS_CEILING has an empty entry: separate host names with one comma');
+    if (!validAllowEntry(item))
+      throw new Error(
+        `JM_EGRESS_CEILING entry "${shown(item)}" is not a host name or *. plus a host name (no IPs, ports or URLs)`,
+      );
+  }
+  return [...new Set([...BASE_EGRESS, ...items].map(canonical))].sort();
+}
+
+/**
+ * Whether the allow-list entry `entry` is within `ceiling`. An entry that isn't valid is never
+ * covered (the list reaches the proxy joined with commas, so `*.evil.net,a.example.com` must not
+ * pass as one wildcard). A host name is covered as the proxy would allow it; `*.x` only by a valid
+ * `*.y` where x is y or a subdomain of it. An invalid ceiling entry covers nothing.
+ */
+export function entryCovered(entry: string, ceiling: string[]): boolean {
+  if (!validAllowEntry(entry)) return false;
+  if (!entry.startsWith('*.')) return hostAllowed(entry, ceiling);
+  const x = normalizeHost(entry.slice(2)) as string;
+  return ceiling.some((c) => {
+    if (!c.startsWith('*.') || !validAllowEntry(c)) return false;
+    const y = normalizeHost(c.slice(2)) as string;
+    return x === y || x.endsWith(`.${y}`);
+  });
+}
+
+/**
+ * Why a stick with `ceiling` refuses a drop (or push) with `egress`, or null when it may run. No
+ * ceiling refuses nothing. With one, only `enforce` runs (in `monitor` the proxy lets any public
+ * host through, so it would be no ceiling), and only when every allow entry is covered.
+ */
+export function ceilingRefusal(
+  egress: { mode: string; allow: string[] } | undefined,
+  ceiling: string[] | null,
+): string | null {
+  if (ceiling === null) return null;
+  const mode = egress?.mode ?? 'off';
+  if (!egress || mode !== 'enforce')
+    return `this stick's JM_EGRESS_CEILING runs only drops whose egress mode is "enforce"; this one's is "${shown(mode, 32)}"`;
+  const outside = egress.allow.filter((e) => !entryCovered(e, ceiling));
+  if (outside.length === 0) return null;
+  const named = outside.slice(0, 10).map((e) => shown(e));
+  const more = outside.length > 10 ? ` and ${outside.length - 10} more` : '';
+  return `egress allows hosts outside this stick's JM_EGRESS_CEILING: ${named.join(', ')}${more}`;
+}
+
 const V4_REFUSED: [string, number][] = [
   ['0.0.0.0', 8],
   ['10.0.0.0', 8],

@@ -1642,6 +1642,16 @@ ALTER TABLE usage_state ADD COLUMN warning_at TEXT;
 ALTER TABLE usage_state ADD COLUMN warning_resets_at TEXT;
 `;
 
+/**
+ * v61 (#784): the rejected crew issue a crew issue replaces (its key), or null. One replacement per
+ * key in a zone, held by a unique index as well as by `applyCrewActions`.
+ */
+const V61_SQL = `
+ALTER TABLE crew_issues ADD COLUMN replaces TEXT;
+CREATE UNIQUE INDEX crew_issues_one_replacement ON crew_issues(zone_id, replaces)
+  WHERE replaces IS NOT NULL;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1703,6 +1713,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 58, sql: V58_SQL },
   { version: 59, sql: V59_SQL },
   { version: 60, sql: V60_SQL },
+  { version: 61, sql: V61_SQL },
 ];
 
 /**
