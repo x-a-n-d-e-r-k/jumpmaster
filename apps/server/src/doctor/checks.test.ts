@@ -1620,6 +1620,124 @@ describe('fix pass', () => {
   });
 });
 
+describe('zone.egress on a GitLab zone checks its GitLab host (issue #820)', () => {
+  const gitlabZone = (
+    egress: { mode: 'off' | 'monitor' | 'enforce'; allow: string[] },
+    baseUrl = 'https://gitlab.example.com',
+  ) =>
+    world({
+      zone: { repo: 'group/project', forge: 'gitlab', gitlab: { baseUrl }, egress },
+    });
+
+  test.each(['enforce', 'monitor'] as const)(
+    'egress %s without the host in egress.allow fails, naming the host to add',
+    async (mode) => {
+      const c = one(await gitlabZone({ mode, allow: [] }).run(), 'zone.egress');
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('pushes and clones of the project are held');
+      expect(c.summary).toContain(
+        "its GitLab host is not allowed: add gitlab.example.com to the zone's egress.allow",
+      );
+      expect(c.fix).toContain("Add gitlab.example.com to the zone's egress.allow");
+      expect(`${c.summary} ${c.fix}`).not.toContain('group/project');
+    },
+  );
+
+  test.each([['gitlab.example.com'], ['*.example.com']])(
+    'with %s in egress.allow, the existing path runs',
+    async (entry) => {
+      const enforce = one(
+        await gitlabZone({ mode: 'enforce', allow: [entry] }).run(),
+        'zone.egress',
+      );
+      expect(enforce.status).toBe('pass');
+      expect(enforce.summary).toContain('egress is enforced');
+      const monitor = one(
+        await gitlabZone({ mode: 'monitor', allow: [entry] }).run(),
+        'zone.egress',
+      );
+      expect(monitor.status).toBe('warn');
+      expect(monitor.summary).toContain('egress is in monitor mode');
+    },
+  );
+
+  test('a GitLab host on port 8443 fails with the port reason', async () => {
+    const c = one(
+      await gitlabZone(
+        { mode: 'enforce', allow: ['gitlab.example.com'] },
+        'https://gitlab.example.com:8443',
+      ).run(),
+      'zone.egress',
+    );
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('port 443 only, and its GitLab host is on port 8443');
+    expect(c.fix).toContain('a DNS name on port 443');
+    expect(c.fix).toContain('gitlab.baseUrl');
+    expect(c.fix).toContain('"off"');
+  });
+
+  test('a GitLab host on an IP address fails with the IP reason', async () => {
+    const c = one(
+      await gitlabZone({ mode: 'enforce', allow: [] }, 'https://10.0.0.5').run(),
+      'zone.egress',
+    );
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('its GitLab host 10.0.0.5 is not a DNS name');
+    expect(c.fix).toContain('a DNS name on port 443');
+    expect(c.fix).toContain('"off"');
+  });
+
+  test('the summary and fix carry no token from the baseUrl', async () => {
+    const c = one(
+      await gitlabZone(
+        { mode: 'enforce', allow: [] },
+        'https://glpat-secret@gitlab.example.com',
+      ).run(),
+      'zone.egress',
+    );
+    expect(c.status).toBe('fail');
+    expect(`${c.summary} ${c.fix}`).not.toContain('glpat-secret');
+  });
+
+  test('egress off on a GitLab zone gives the result it gave before', async () => {
+    const c = one(await gitlabZone({ mode: 'off', allow: [] }).run(), 'zone.egress');
+    expect(c).toEqual({
+      id: 'zone.egress',
+      zoneId: 'main',
+      doc: expect.any(String),
+      status: 'warn',
+      summary: 'egress is off: a drop can reach any host on the internet',
+      fix: 'Set egress.mode to "monitor", run a doctor drop (jumpmaster ctl doctor main --drop) to see the hosts it uses, add any it needs to egress.allow, then set "enforce".',
+    });
+  });
+
+  test("a GitHub zone's zone.egress is unchanged", async () => {
+    const enforce = one(await world().run(), 'zone.egress');
+    expect(enforce).toEqual({
+      id: 'zone.egress',
+      zoneId: 'main',
+      doc: expect.any(String),
+      status: 'pass',
+      summary: expect.stringMatching(
+        /^egress is enforced \(\d+ allowed host entries\); no host was denied in 0 drop\(s\) in the last \d+ days$/,
+      ),
+    });
+    const monitor = one(
+      await world({ zone: { egress: { mode: 'monitor', allow: [] } } }).run(),
+      'zone.egress',
+    );
+    expect(monitor).toEqual({
+      id: 'zone.egress',
+      zoneId: 'main',
+      doc: expect.any(String),
+      status: 'warn',
+      summary:
+        'egress is in monitor mode, and no drop has run under it yet, so no host has been observed',
+      fix: 'Run a doctor drop (jumpmaster ctl doctor main --drop), then run the doctor again; flip to enforce when this is empty.',
+    });
+  });
+});
+
 describe('config store checks', () => {
   const status = (o: Partial<ConfigStatus> = {}): ConfigStatus => ({
     mode: 'db',
