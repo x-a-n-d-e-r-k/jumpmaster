@@ -389,7 +389,9 @@ describe('issues', () => {
     expect(await titles('state=closed')).toEqual(['c']);
     expect(await titles('state=opened')).toEqual(['a', 'b', 'd']);
     expect(await titles('state=all')).toEqual(['a', 'b', 'c', 'd']);
-    expect(await titles('updated_after=2026-02-01T00:00:00Z')).toEqual(['c', 'd']);
+    // GitLab: "Return issues updated on or after the given time".
+    expect(await titles('updated_after=2026-02-01T00:00:00Z')).toEqual(['b', 'c', 'd']);
+    expect(await titles('updated_after=2026-02-01T00:00:00.001Z')).toEqual(['c', 'd']);
   });
 
   test('PUT with state_event=close and add_labels is stored and read back', async () => {
