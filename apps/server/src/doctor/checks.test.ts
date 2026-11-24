@@ -4464,3 +4464,147 @@ describe('forge.branch-rules on a two-bot GitLab zone (issue #803, ruling 120)',
     expect(c.summary).not.toContain('stale approvals not dismissed');
   });
 });
+
+describe('forge.ci on a GitLab zone (issue #809)', () => {
+  const GL = 'https://gitlab.example.com';
+  const PATH = 'acme/demo';
+  // Made-up tokens, built at run time so no token-shaped literal sits in the tracked file.
+  const glpat = (c: string) => ['glpat', c.repeat(20)].join('-');
+  const A_TOKEN = glpat('A');
+  const R_TOKEN = glpat('R');
+  let gl: FakeGitLab | undefined;
+
+  beforeAll(() => nock.disableNetConnect());
+  afterEach(() => {
+    gl?.stop();
+    gl = undefined;
+    nock.cleanAll();
+  });
+  afterAll(() => nock.enableNetConnect());
+
+  async function ci(o: {
+    ciRequired: boolean;
+    pipelinesMustSucceed: boolean;
+    gitlabCi: boolean;
+    /** The author token's scopes (default `api`). */
+    authorScopes?: string[];
+  }) {
+    const w = world({
+      zone: { repo: PATH, forge: 'gitlab', gitlab: { baseUrl: GL }, ciRequired: o.ciRequired },
+    });
+    gl = fakeGitLab({
+      baseUrl: GL,
+      project: {
+        id: 7,
+        path: PATH,
+        visibility: 'private',
+        onlyAllowMergeIfPipelineSucceeds: o.pipelinesMustSucceed,
+      },
+    });
+    gl.addUser({
+      username: 'jm-author',
+      token: A_TOKEN,
+      accessLevel: ACCESS.developer,
+      scopes: o.authorScopes ?? ['api'],
+    });
+    gl.addUser({
+      username: 'jm-reviewer',
+      token: R_TOKEN,
+      accessLevel: ACCESS.developer,
+      scopes: ['api'],
+    });
+    gl.seedCommit({
+      branch: 'main',
+      message: 'init',
+      files: {
+        'README.md': 'hi\n',
+        'src/index.ts': 'export {};\n',
+        ...(o.gitlabCi ? { '.gitlab-ci.yml': 'test:\n  script: npm test\n' } : {}),
+      },
+    });
+    gl.protectBranch({
+      name: 'main',
+      pushAccessLevels: [ACCESS.maintainer],
+      mergeAccessLevels: [ACCESS.developer],
+    });
+    w.deps.forges = () => ({
+      author: new GitLabForge(GL, PATH, A_TOKEN),
+      reviewer: new GitLabForge(GL, PATH, R_TOKEN),
+    });
+    const c = one(await zoneChecks(w.deps, w.zone, []), 'forge.ci');
+    // The GitHub workflows directory is never read on a GitLab zone.
+    const workflowReads = gl.requests.filter(
+      (q) =>
+        q.path.includes('.github') || Object.values(q.query).some((v) => v.includes('.github')),
+    );
+    expect(workflowReads).toEqual([]);
+    // The branch root was listed.
+    expect(
+      gl.requests.some((q) => q.path.endsWith('/repository/tree') && (q.query.path ?? '') === ''),
+    ).toBe(true);
+    // No token in any summary or fix.
+    const text = `${c.summary}\n${c.fix ?? ''}\n${JSON.stringify(c)}`;
+    for (const t of [A_TOKEN, R_TOKEN]) expect(text).not.toContain(t);
+    expect(text).not.toMatch(/glpat-/);
+    expect(text).not.toContain('GitHub');
+    expect(text).not.toContain('.github/workflows');
+    return c;
+  }
+
+  test('ciRequired: false warns, with the GitLab fix', async () => {
+    const c = await ci({ ciRequired: false, pipelinesMustSucceed: false, gitlabCi: false });
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('ciRequired: false');
+    expect(c.fix).toContain('Pipelines must succeed');
+    expect(c.fix).toContain('Settings → Merge requests');
+    expect(c.fix).toContain('ciRequired: true');
+  });
+
+  test('Pipelines must succeed on and .gitlab-ci.yml present passes, naming both', async () => {
+    const c = await ci({ ciRequired: true, pipelinesMustSucceed: true, gitlabCi: true });
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('Pipelines must succeed');
+    expect(c.summary).toContain('.gitlab-ci.yml');
+    expect(c.fix).toBeUndefined();
+  });
+
+  test('Pipelines must succeed on but no .gitlab-ci.yml warns of a pipeline that never runs', async () => {
+    const c = await ci({ ciRequired: true, pipelinesMustSucceed: true, gitlabCi: false });
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('no .gitlab-ci.yml');
+    expect(c.summary).toContain('external CI');
+    expect(c.summary).toContain('every merge request would wait for a pipeline that never runs');
+    expect(c.fix).toContain('Add .gitlab-ci.yml');
+    expect(c.fix).toContain('ciRequired: false');
+    expect(c.fix).toContain('Pipelines must succeed');
+  });
+
+  test.each([true, false])(
+    'ciRequired: true with Pipelines must succeed off fails (.gitlab-ci.yml present: %s)',
+    async (gitlabCi) => {
+      const c = await ci({ ciRequired: true, pipelinesMustSucceed: false, gitlabCi });
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('Pipelines must succeed is off');
+      expect(c.fix).toContain('Settings → Merge requests → Pipelines must succeed');
+      if (gitlabCi) expect(c.fix).not.toMatch(/add \.gitlab-ci\.yml/i);
+      else expect(c.fix).toMatch(/add \.gitlab-ci\.yml/i);
+    },
+  );
+
+  test('a refused root listing is a read failure with GitLab wording, never a pass', async () => {
+    const c = await ci({
+      ciRequired: true,
+      pipelinesMustSucceed: true,
+      gitlabCi: true,
+      authorScopes: ['read_user'],
+    });
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('list the root of main');
+    expect(c.summary).toContain('HTTP 403');
+    expect(c.summary).toContain('api scope');
+    expect(c.summary).not.toContain('Contents: read');
+    expect(c.fix).toContain('api scope');
+    expect(c.fix).toContain(`gitlab-pat/main/author`);
+    expect(c.fix).not.toContain('Fine-grained');
+  });
+});
