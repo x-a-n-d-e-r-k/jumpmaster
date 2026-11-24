@@ -1040,6 +1040,68 @@ describe('branchProtectionProblems', () => {
 
   test('safe rules give no problems', () =>
     expect(branchProtectionProblems({ author: rules(), reviewer: rules() }, zone)).toEqual([]));
+
+  describe('GitLab Free: approval rules unreadable (ruling 120)', () => {
+    const free = (r: Partial<BranchRules> = {}) =>
+      rules({
+        approvalRules: 'unavailable',
+        requiredApprovals: 0,
+        dismissStaleOnPush: false,
+        ...r,
+      });
+
+    test('waives approvals < 1 and stale approvals not dismissed', () =>
+      expect(branchProtectionProblems({ author: free(), reviewer: free() }, zone)).toEqual([]));
+
+    test('still reports a bot that can bypass', () =>
+      expect(
+        branchProtectionProblems(
+          { author: free(), reviewer: free({ viewerCanBypass: true }) },
+          zone,
+        ),
+      ).toEqual(['bot can bypass']));
+
+    test('still reports every other problem', () =>
+      expect(
+        branchProtectionProblems(
+          {
+            author: free({ viewerIsAdmin: true, requiredChecks: [] }),
+            reviewer: { kind: 'none' },
+          },
+          zone,
+        ),
+      ).toEqual(['bot is admin', 'no required checks', 'no ruleset']));
+
+    test('waives only where the read was unavailable', () =>
+      expect(
+        branchProtectionProblems(
+          { author: free(), reviewer: rules({ requiredApprovals: 0 }) },
+          zone,
+        ),
+      ).toEqual(['approvals < 1']));
+
+    test('approval rules read that require none still report approvals < 1', () =>
+      expect(
+        branchProtectionProblems(
+          {
+            author: rules({ approvalRules: 'read', requiredApprovals: 0 }),
+            reviewer: rules({ approvalRules: 'read', requiredApprovals: 0 }),
+          },
+          zone,
+        ),
+      ).toContain('approvals < 1'));
+
+    test('a GitHub read (approvalRules absent) is judged as before', () =>
+      expect(
+        branchProtectionProblems(
+          {
+            author: rules({ requiredApprovals: 0, dismissStaleOnPush: false }),
+            reviewer: rules(),
+          },
+          zone,
+        ),
+      ).toEqual(['approvals < 1', 'stale approvals not dismissed']));
+  });
   describe('a required code owner review the reviewer bot cannot give', () => {
     const owned = {
       ...zone,

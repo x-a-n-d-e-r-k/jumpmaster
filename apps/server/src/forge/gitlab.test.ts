@@ -2918,11 +2918,9 @@ describe('branch rules: getBranchRules', () => {
       expect(branchProtectionProblems(rules, makeZone({ ciRequired: true }))).toEqual([]);
     });
 
-    test('on the Free tier the same set-up reports approvals < 1', async () => {
+    test('on the Free tier the same set-up waives the approval checks (ruling 120)', async () => {
       const rules = await twoBotReads({ tier: 'free' });
-      expect(branchProtectionProblems(rules, makeZone({ ciRequired: false }))).toContain(
-        'approvals < 1',
-      );
+      expect(branchProtectionProblems(rules, makeZone({ ciRequired: false }))).toEqual([]);
     });
   });
 });

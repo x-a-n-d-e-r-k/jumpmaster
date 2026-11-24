@@ -4382,3 +4382,85 @@ describe('forge.author and forge.reviewer on a GitLab zone (issue #778)', () => 
     expect(reviewer.status).toBe('skip');
   });
 });
+
+describe('forge.branch-rules on a two-bot GitLab zone (issue #803, ruling 120)', () => {
+  const GL = 'https://gitlab.example.com';
+  const PATH = 'acme/demo';
+  // Made-up tokens, built at run time so no token-shaped literal sits in the tracked file.
+  const glpat = (c: string) => ['glpat', c.repeat(20)].join('-');
+  const A_TOKEN = glpat('A');
+  const R_TOKEN = glpat('R');
+  let gl: FakeGitLab | undefined;
+
+  beforeAll(() => nock.disableNetConnect());
+  afterEach(() => {
+    gl?.stop();
+    gl = undefined;
+    nock.cleanAll();
+  });
+  afterAll(() => nock.enableNetConnect());
+
+  async function branchRules(o: {
+    tier: 'free' | 'premium';
+    approvalRule?: number;
+    pushAccess?: number;
+  }) {
+    const w = world({ zone: { repo: PATH, forge: 'gitlab', gitlab: { baseUrl: GL } } });
+    gl = fakeGitLab({
+      baseUrl: GL,
+      project: { id: 7, path: PATH, visibility: 'private', onlyAllowMergeIfPipelineSucceeds: true },
+      approvals: { resetOnPush: true },
+    });
+    for (const [username, token] of [
+      ['jm-author', A_TOKEN],
+      ['jm-reviewer', R_TOKEN],
+    ] as const)
+      gl.addUser({ username, token, accessLevel: ACCESS.developer, scopes: ['api'] });
+    gl.protectBranch({
+      name: 'main',
+      pushAccessLevels: [o.pushAccess ?? ACCESS.maintainer],
+      mergeAccessLevels: [ACCESS.developer],
+    });
+    if (o.approvalRule !== undefined)
+      gl.seedApprovalRule({
+        name: 'review',
+        approvalsRequired: o.approvalRule,
+        protectedBranches: ['main'],
+      });
+    gl.setTier(o.tier);
+    w.deps.forges = () => ({
+      author: new GitLabForge(GL, PATH, A_TOKEN),
+      reviewer: new GitLabForge(GL, PATH, R_TOKEN),
+    });
+    const c = one(await zoneChecks(w.deps, w.zone, []), 'forge.branch-rules');
+    const text = `${c.summary}\n${c.fix ?? ''}\n${JSON.stringify(c)}`;
+    for (const t of [A_TOKEN, R_TOKEN]) expect(text).not.toContain(t);
+    expect(text).not.toMatch(/glpat-/);
+    return c;
+  }
+
+  test('approval rules refused (Free): warns that the merge rests on the reviewer bot', async () => {
+    const c = await branchRules({ tier: 'free' });
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('GitLab enforces no approval on this project');
+    expect(c.summary).toContain('approval rules need a paid GitLab tier');
+    expect(c.summary).toContain("Jumpmaster merges on its reviewer bot's verdict alone");
+    expect(c.fix).toContain('approval rule requiring 1 approval');
+    expect(c.fix).toContain('resetting approvals on push');
+    expect(c.fix).toContain('GitLab tier that offers approval rules');
+    expect(c.fix).toContain('accept this warning');
+  });
+
+  test('an approval rule of 1 and reset-on-push passes', async () => {
+    const c = await branchRules({ tier: 'premium', approvalRule: 1 });
+    expect(c.status).toBe('pass');
+  });
+
+  test('another problem fails, and the waived approval problems are not listed', async () => {
+    const c = await branchRules({ tier: 'free', pushAccess: ACCESS.developer });
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('bot can bypass');
+    expect(c.summary).not.toContain('approvals < 1');
+    expect(c.summary).not.toContain('stale approvals not dismissed');
+  });
+});

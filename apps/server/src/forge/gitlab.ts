@@ -178,7 +178,9 @@
 //     holding a matching entry's `id`. 0 when none applies. The deprecated project-level
 //     `approvals_before_merge` is never counted. Approval rules are a paid feature: on the Free
 //     tier (403 or 404 there) GitLab enforces no approvals, so `requiredApprovals` is 0 and the read
-//     still succeeds; the two-bot guard then reports `approvals < 1`, the safe reading.
+//     still succeeds. The two-bot guard waives `approvals < 1` and `stale approvals not
+//     dismissed` for such a read (ruling 120): Jumpmaster merges on its reviewer bot's verdict
+//     alone, and the doctor's forge.branch-rules warns.
 //   - `approvalRules` (GitLab only) says which: `'read'` when `GET approval_rules` answered (with
 //     or without rules), `'unavailable'` when it was refused with 403 or 404, so a `requiredApprovals`
 //     of 0 there means nothing can be required, not that the rules ask for none. Any other error
