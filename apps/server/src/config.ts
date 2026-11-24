@@ -437,6 +437,12 @@ export const DropZoneObject = z
      */
     privateKeyPaths: z.array(z.string()).default([]),
     /**
+     * Globs (matched like protectedPaths) whose changes are reviewed on Fable even with
+     * `claude.fableReview` off (#836), from the PR's file list as the forge reported it; an unknown
+     * list counts as matching. Changes only which model reviews. Empty: as `fableReview` says.
+     */
+    securityPaths: z.array(z.string()).default([]),
+    /**
      * Logins (with write access) whose approval of the exact head lets a gate script or gate tool
      * change through, besides anyone with maintain or admin. Protected paths are never overridden.
      */

@@ -443,6 +443,14 @@ describe('loadConfig', () => {
     expect(set.dropZones[0]?.privateKeyPaths).toEqual(['test/fixtures/**']);
   });
 
+  test('securityPaths defaults to none, keeps its globs and refuses a non-string entry (#836)', () => {
+    expect(loadConfig(minimal, fullEnv).dropZones[0]?.securityPaths).toEqual([]);
+    const set = loadConfig(withZone({ securityPaths: ['apps/server/src/vault/**'] }), fullEnv);
+    expect(set.dropZones[0]?.securityPaths).toEqual(['apps/server/src/vault/**']);
+    expect(() => loadConfig(withZone({ securityPaths: ['a/**', 3] }), fullEnv)).toThrow();
+    expect(() => loadConfig(withZone({ securityPaths: 'a/**' }), fullEnv)).toThrow();
+  });
+
   test('read token is optional and passed through', () => {
     expect(loadConfig(minimal, fullEnv).secrets.githubReadToken).toBeUndefined();
     expect(
@@ -1478,6 +1486,7 @@ describe('githubApp (spec §4.2: installation and repository ids, not secret)', 
       identity: 'two-bot',
       protectedPaths: DEFAULT_PROTECTED_PATHS,
       privateKeyPaths: [],
+      securityPaths: [],
       overrideApprovers: [],
       trustPnpmBuildBlocking: false,
       gateCi: true,
@@ -1545,7 +1554,7 @@ describe('zone forge kind (issue #667)', () => {
     const stored = canonicalJson(zone);
     expect(stored).not.toMatch(/"forge"|"gitlab"/);
     expect(`${createHash('sha256').update(stored).digest('hex')} ${stored.length}`).toBe(
-      'aac304e153b92403e0f35693120faeba4e5eb75672654e5673387e96abee8278 2287',
+      '903be4c7fc799428c892760e67b1e00d1d31eec56e04498f5e60952d0423b396 2310',
     );
     // And it round-trips: parsing the stored document again gives the same bytes.
     const again = parseEditable({ dropZones: [JSON.parse(stored)] }, noLock);

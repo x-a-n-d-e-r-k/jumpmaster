@@ -630,3 +630,41 @@ describe('per-role models on the advanced settings page (#672)', () => {
     for (const m of inputs) expect(m[0]).toMatch(/ disabled/);
   });
 });
+
+describe('securityPaths on the advanced settings page (#836)', () => {
+  test('the list saves without a confirmation, and the page shows it escaped', async () => {
+    const w = await world();
+    expect(rowHtml((await w.get('/projects/jm/flags')).body, 'securityPaths')).toContain(
+      'Review changes to these paths on Fable',
+    );
+    const { fn } = pageScript();
+    const patch = fn<Record<string, unknown>>('jmFlagsPatch')([
+      field('securityPaths', 'list', 'apps/server/src/vault/**\n<b>x</b>/**', [], false),
+    ]);
+    expect(patch).toEqual({ securityPaths: ['apps/server/src/vault/**', '<b>x</b>/**'] });
+    const r = await w.patch({
+      patch: { dropZones: [{ id: 'jm', ...patch }] },
+      expectRevision: w.store.revision(),
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(zoneOf(w.store, 'jm').securityPaths).toEqual([
+      'apps/server/src/vault/**',
+      '<b>x</b>/**',
+    ]);
+    const row = rowHtml((await w.get('/projects/jm/flags')).body, 'securityPaths');
+    expect(row).toContain('apps/server/src/vault/**');
+    expect(row).not.toContain('<b>x</b>');
+    expect(row).toContain('&lt;b&gt;x&lt;/b&gt;/**');
+  });
+
+  test('a non-string entry is refused and nothing changes', async () => {
+    const w = await world();
+    const before = w.store.revision();
+    const r = await w.patch({
+      patch: { dropZones: [{ id: 'jm', securityPaths: ['a/**', 3] }] },
+      expectRevision: before,
+    });
+    expect(r.statusCode).toBe(400);
+    expect(w.store.revision()).toBe(before);
+  });
+});

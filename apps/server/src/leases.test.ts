@@ -116,7 +116,16 @@ describe('leaseNextDrop and a per-model hold (#747)', () => {
       seen.push(d);
       return true;
     });
-    expect(seen).toEqual([{ id: 'A', role: 'implement', dropZoneId: 'main', inputJson: null }]);
+    expect(seen).toEqual([
+      {
+        id: 'A',
+        role: 'implement',
+        dropZoneId: 'main',
+        workItemId: getDrop(db, 'A')?.workItemId,
+        inputJson: null,
+      },
+    ]);
+    expect(typeof (seen[0] as { workItemId: unknown }).workItemId).toBe('number');
   });
 
   test.each(['review', 'heal', 'resolve', 'doctor'])(

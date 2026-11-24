@@ -95,6 +95,8 @@ export interface Drop {
   requestedModel: string | null;
   /** The model that actually served the drop, as its result reported. */
   servedModel: string | null;
+  /** Why a review ran on Fable (#836), recorded with requestedModel; null otherwise. */
+  fableReason: string | null;
   /** Set when the drop went `push_pending`: what its push container is to push. */
   pushKind: PushKind | null;
   pushExpectSha: string | null;
@@ -191,7 +193,8 @@ const DROP_COLS = `id, drop_zone_id AS dropZoneId, work_item_id AS workItemId, r
   epoch, lease_expires_at AS leaseExpiresAt, prompt_version AS promptVersion, image,
   result_json AS resultJson, created_at AS createdAt, started_at AS startedAt, finished_at AS finishedAt,
   fingerprint, pr_number AS prNumber, head_sha AS headSha, input_json AS inputJson, charged_key AS chargedKey,
-  requested_model AS requestedModel, served_model AS servedModel, push_kind AS pushKind,
+  requested_model AS requestedModel, served_model AS servedModel, fable_reason AS fableReason,
+  push_kind AS pushKind,
   push_expect_sha AS pushExpectSha, push_deadline AS pushDeadline, running_at AS runningAt,
   usage_applied AS usageApplied, was_probe AS wasProbe,
   rate_limit_requeue AS rateLimitRequeue`;
@@ -552,6 +555,7 @@ const DROP_COLUMN: Record<keyof DropPatch, string> = {
   chargedKey: 'charged_key',
   requestedModel: 'requested_model',
   servedModel: 'served_model',
+  fableReason: 'fable_reason',
   pushKind: 'push_kind',
   pushExpectSha: 'push_expect_sha',
   pushDeadline: 'push_deadline',

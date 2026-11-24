@@ -10,7 +10,7 @@ import { fakeForge } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
 import { M0_SCHEMA_SQL, MIGRATIONS, migrate } from './migrations.js';
 import { type Db, openDb } from './open.js';
-import { getStick, getUsageState } from './repo.js';
+import { getDrop, getStick, getUsageState } from './repo.js';
 
 const tmpDbFile = () => join(mkdtempSync(join(tmpdir(), 'jm-mig-')), 'jm.sqlite');
 const maxVersion = (db: Db) =>
@@ -627,7 +627,7 @@ const insDrop = (db: Db, id: string, role: string, item: number | null, state = 
 test('v17 rebuilds drops keeping every row and column, with foreign keys intact', () => {
   const f = v16Db();
   const before = new Database(f);
-  // v22, v23 and v31 add columns; the rows as v17 left them are what must survive.
+  // v22, v23, v31 and v65 add columns; the rows as v17 left them are what must survive.
   const NEW_V22 = [
     'push_kind',
     'push_expect_sha',
@@ -638,6 +638,7 @@ test('v17 rebuilds drops keeping every row and column, with foreign keys intact'
     'rate_limit_requeue',
     'transcript_pruned_at',
     'transcript_archive',
+    'fable_reason',
   ];
   const all = (db: Db | Database.Database) =>
     (db.prepare('SELECT * FROM drops ORDER BY id').all() as Record<string, unknown>[]).map((r) =>
@@ -1898,5 +1899,19 @@ test('v64 adds changed_at to goals: existing rows read as null (#832)', () => {
   const db = openDb(f);
   expect(maxVersion(db)).toBe(MIGRATIONS.length);
   expect(db.prepare('SELECT changed_at AS c FROM goals').get()).toEqual({ c: null });
+  db.close();
+});
+
+test('v65 adds fable_reason to drops: existing rows read as null (#836)', () => {
+  const f = dbAt(64, (raw) =>
+    raw.exec(
+      `INSERT INTO drop_zones (id, repo, default_branch, config_json) VALUES ('main', 'o/r', 'main', '{}');
+       INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, created_at)
+         VALUES ('d1', 'main', NULL, 'doctor', 'succeeded', 'a');`,
+    ),
+  );
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(getDrop(db, 'd1')?.fableReason).toBeNull();
   db.close();
 });

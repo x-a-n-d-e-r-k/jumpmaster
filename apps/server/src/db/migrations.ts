@@ -1676,6 +1676,11 @@ const V64_SQL = `
 ALTER TABLE goals ADD COLUMN changed_at TEXT;
 `;
 
+/** Why a review ran on Fable (#836): `every review`, `security paths` or `file list unknown`. */
+const V65_SQL = `
+ALTER TABLE drops ADD COLUMN fable_reason TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1741,6 +1746,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 62, sql: V62_SQL },
   { version: 63, sql: V63_SQL },
   { version: 64, sql: V64_SQL },
+  { version: 65, sql: V65_SQL },
 ];
 
 /**
