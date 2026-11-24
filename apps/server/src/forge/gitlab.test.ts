@@ -2587,6 +2587,7 @@ describe('branch rules: getBranchRules', () => {
     viewerIsAdmin: false,
     requiresPullRequest: true,
     requireCodeOwnerReview: false,
+    approvalRules: 'read',
   };
 
   test('an unprotected branch reads none', async () => {
@@ -2740,7 +2741,42 @@ describe('branch rules: getBranchRules', () => {
     gl.seedApprovalRule({ name: 'all', approvalsRequired: 2 });
     gl.setApprovalSettings({ approvals_before_merge: 2 });
     gl.setTier('free');
-    expect(await forge.getBranchRules('trunk')).toEqual({ kind: 'ok', rules: BASE_RULES });
+    expect(await forge.getBranchRules('trunk')).toEqual({
+      kind: 'ok',
+      rules: { ...BASE_RULES, approvalRules: 'unavailable' },
+    });
+  });
+
+  test('premium with no approval rules reads approvalRules read and requiredApprovals 0', async () => {
+    const { gl, forge } = rulesSetup();
+    gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+    gl.setTier('premium');
+    expect(await forge.getBranchRules('trunk')).toMatchObject({
+      kind: 'ok',
+      rules: { approvalRules: 'read', requiredApprovals: 0 },
+    });
+  });
+
+  test('premium with a rule requiring 1 reads approvalRules read and requiredApprovals 1', async () => {
+    const { gl, forge } = rulesSetup();
+    gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+    gl.seedApprovalRule({ name: 'review', approvalsRequired: 1, protectedBranches: ['trunk'] });
+    gl.setTier('premium');
+    expect(await forge.getBranchRules('trunk')).toMatchObject({
+      kind: 'ok',
+      rules: { approvalRules: 'read', requiredApprovals: 1 },
+    });
+  });
+
+  test('free reads approvalRules unavailable and requiredApprovals 0', async () => {
+    const { gl, forge } = rulesSetup();
+    gl.protectBranch({ name: 'trunk', pushAccessLevels: [0] });
+    gl.seedApprovalRule({ name: 'review', approvalsRequired: 1, protectedBranches: ['trunk'] });
+    gl.setTier('free');
+    expect(await forge.getBranchRules('trunk')).toMatchObject({
+      kind: 'ok',
+      rules: { approvalRules: 'unavailable', requiredApprovals: 0 },
+    });
   });
 
   test('a 404 on approval_rules gives requiredApprovals 0 and still reads', async () => {
@@ -2753,7 +2789,7 @@ describe('branch rules: getBranchRules', () => {
     gl.seedApprovalRule({ name: 'all', approvalsRequired: 2 });
     expect(await forge.getBranchRules('trunk')).toMatchObject({
       kind: 'ok',
-      rules: { requiredApprovals: 0 },
+      rules: { requiredApprovals: 0, approvalRules: 'unavailable' },
     });
   });
 
