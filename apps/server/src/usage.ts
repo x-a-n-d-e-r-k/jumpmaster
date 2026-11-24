@@ -23,7 +23,7 @@ import {
   type UsageStateRow,
   type UsageWindowRow,
 } from './db/repo.js';
-import { isFableRateLimit, PER_MODEL_WINDOWS, pauseFableFor } from './fable.js';
+import { isFableRateLimit, modelFamily, PER_MODEL_WINDOWS, pauseFableFor } from './fable.js';
 
 /**
  * `stopped`: a drop ran on usage credits (credits.ts); nothing leases, of any role.
@@ -332,6 +332,33 @@ export function liveAccountWindows(
     const end = windowEnd(w);
     return end !== null && t < end;
   });
+}
+
+/**
+ * The model family a per-model window belongs to, lower case: the family its key names, or for a
+ * PER_MODEL_WINDOWS key the family of its stored model. Null for an account-wide window, and for a
+ * PER_MODEL_WINDOWS row with no model (it names none).
+ */
+function windowFamily(w: UsageWindowRow): string | null {
+  if (PER_MODEL_WINDOWS.has(w.key)) return modelFamily(w.model)?.toLowerCase() ?? null;
+  return w.key.split('_').find((part) => MODEL_FAMILIES.includes(part)) ?? null;
+}
+
+/**
+ * The model families (lower case) whose live per-model window reports a utilization at or above
+ * `cfg.throttleUtilization` (#747). Such a window holds new drops on its model only, never the
+ * account: dispatchGate does not read it.
+ */
+export function heldModelFamilies(db: Db, cfg: UsageConfig, now: Date): Set<string> {
+  const t = now.getTime();
+  const held = new Set<string>();
+  for (const w of listUsageWindows(db)) {
+    if (w.utilization === null || w.utilization < cfg.throttleUtilization) continue;
+    const family = windowFamily(w);
+    const end = windowEnd(w);
+    if (family !== null && end !== null && t < end) held.add(family);
+  }
+  return held;
 }
 
 /** Whether some live account-wide window is at or above `share`. */

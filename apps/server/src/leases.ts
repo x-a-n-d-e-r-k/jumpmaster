@@ -53,6 +53,14 @@ export function doctorMayLease(gate: Gate): boolean {
   return gate === 'open' || gate === 'finishing_only' || gate === 'override';
 }
 
+/** What `leaseNextDrop`'s `modelHeld` predicate is shown of a queued drop. */
+export type HeldCandidate = {
+  id: string;
+  role: string;
+  dropZoneId: string;
+  inputJson: string | null;
+};
+
 /** Queued drops wait while their zone is paused or observing. */
 const ZONE_ACTIVE = `AND drop_zone_id NOT IN (SELECT zone_id FROM zone_controls WHERE mode <> 'active')`;
 
@@ -101,7 +109,9 @@ const NOT_EXCLUDED = `AND drop_zone_id NOT IN (SELECT value FROM json_each(@excl
  * `excludeRoles` (pushing roles, for a stick that can't take them), are never picked, under any
  * gate: they stay queued, untouched, for a capable stick. A stick that is gone or removed is leased
  * nothing (issue #255), checked in the same transaction as the lease, so a removal racing it either
- * comes first (nothing leased) or ends the lease it finds.
+ * comes first (nothing leased) or ends the lease it finds. Under `open` and `override`, a drop the
+ * throttle would hold is skipped while `modelHeld` says its model's own window is at the threshold
+ * (#747), before any override start is taken: the override lifts the account throttle only.
  */
 export function leaseNextDrop(
   db: Db,
@@ -110,6 +120,7 @@ export function leaseNextDrop(
   gate: Gate,
   exclude: readonly string[] = [],
   excludeRoles: readonly Role[] = [],
+  modelHeld: (drop: HeldCandidate) => boolean = () => false,
 ): { dropId: string; epoch: number; overrideUntil?: string } | null {
   const ex = JSON.stringify(exclude);
   const exRoles = JSON.stringify(excludeRoles);
@@ -162,15 +173,21 @@ export function leaseNextDrop(
       case 'open':
       case 'finishing_only':
       case 'override': {
-        const pick = (filter: string) =>
-          db
-            .prepare(
-              `SELECT id, role FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} ${NOT_EXCLUDED}${filter}
-               ORDER BY ${ROLE_CLASS}, created_at, rowid LIMIT 1`,
-            )
-            .get({ exclude: ex, excludeRoles: exRoles }) as
-            | { id: string; role: string }
-            | undefined;
+        /**
+         * The first queued candidate in order that its model's own window does not hold: a drop
+         * the throttle would hold is skipped while `modelHeld` says its model is at the threshold
+         * (#747). Skipped drops stay queued, untouched.
+         */
+        const pick = (filter: string): HeldCandidate | undefined =>
+          (
+            db
+              .prepare(
+                `SELECT id, role, drop_zone_id AS dropZoneId, input_json AS inputJson
+               FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} ${NOT_EXCLUDED}${filter}
+               ORDER BY ${ROLE_CLASS}, created_at, rowid`,
+              )
+              .all({ exclude: ex, excludeRoles: exRoles }) as HeldCandidate[]
+          ).find((row) => UNTHROTTLED.has(row.role) || !modelHeld(row));
         // Above the throttle only finishing work starts, and doctor drops (doctorMayLease): an
         // operator-asked readiness check, still last by ROLE_CLASS.
         const doctor = doctorMayLease(gate) ? '' : " AND role <> 'doctor'";

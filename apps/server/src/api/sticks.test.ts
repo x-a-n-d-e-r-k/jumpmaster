@@ -31,6 +31,7 @@ import {
   insertStickInvite,
   listEvents,
   reclaimableDropFor,
+  recordUsageWindows,
   removeStick,
   reserveGrant,
   type Stick,
@@ -709,6 +710,76 @@ describe('the trooper count (x-jumpmaster-slots)', () => {
     expect(old.headers[SLOTS_HEADER]).toBe('3');
     const invalid = await leaseWith(stickToken, { freeSlots: 1, slots: 0 });
     expect(invalid.statusCode).toBe(400);
+  });
+});
+
+describe('a per-model window holds new drops on its model (#747)', () => {
+  // `main` runs implement on Opus (claude-opus-5-5); `side` on Sonnet.
+  const side = {
+    ...config.dropZones[0]!,
+    id: 'side',
+    repo: 'octo/side',
+    model: 'claude-sonnet-5-5',
+  };
+  const twoZones: Config = { ...config, dropZones: [config.dropZones[0]!, side] };
+  const opusAt = (db: Db, utilization: number) =>
+    recordUsageWindows(
+      db,
+      { seven_day_opus: { utilization, resetsAt: plus(t0, 86_400_000).toISOString() } },
+      t0,
+      null,
+    );
+  const sideDrop = (db: Db) => {
+    upsertDropZone(db, { id: 'side', repo: 'octo/side', defaultBranch: 'main', configJson: '{}' });
+    const w = upsertWorkItem(db, {
+      dropZoneId: 'side',
+      issueNumber: 9,
+      title: 'Side work',
+      body: 'b',
+      author: 'a',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    setWorkItemState(db, w.id, 'in_flight');
+    insertDrop(db, {
+      id: 's1',
+      dropZoneId: 'side',
+      workItemId: w.id,
+      role: 'implement',
+      state: 'queued',
+      createdAt: plus(t0, 1000).toISOString(),
+    });
+  };
+
+  test('an Opus window at the threshold holds the Opus implement drop: 204', async () => {
+    const { db } = setup();
+    opusAt(db, 0.9);
+    expect(getDrop(db, 'd1')?.requestedModel).toBeNull();
+    const { stickToken } = await enroll();
+    const res = await lease(stickToken);
+    expect(res.statusCode).toBe(204);
+    expect(getDrop(db, 'd1')?.state).toBe('queued');
+  });
+
+  test("another zone's non-Opus drop leases in its place", async () => {
+    const { db } = setup({ config: twoZones });
+    sideDrop(db);
+    opusAt(db, 0.95);
+    const { stickToken } = await enroll();
+    const res = await lease(stickToken);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ dropId: 's1', model: 'claude-sonnet-5-5' });
+    expect(getDrop(db, 'd1')?.state).toBe('queued');
+  });
+
+  test('under the threshold the same poll leases it', async () => {
+    const { db } = setup();
+    opusAt(db, 0.5);
+    const { stickToken } = await enroll();
+    const res = await lease(stickToken);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ dropId: 'd1', model: 'claude-opus-5-5' });
   });
 });
 
