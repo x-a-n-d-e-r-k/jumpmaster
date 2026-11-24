@@ -2840,12 +2840,21 @@ describe('the crew acts once on a parked PR on its own diagnosis (#420)', () => 
       author: { ...h.forge.author, rerunFailedChecks: gh.rerunFailedChecks.bind(gh) },
     });
     const ghDeps = (h: Harness) => ({ forges: () => withGitHub(h), zone: () => h.zone });
-    /** Workflow run 11 on `sha` has a failed `images` job, run 12 a passing `lint` job. */
-    function actionsOn(sha: string): void {
+    /**
+     * Workflow run 11 on `sha` has a failed `images` job, run 12 a passing `lint` job; run 11 is
+     * `status11` (completed unless said).
+     */
+    function actionsOn(sha: string, status11 = 'completed'): void {
       nock(api)
         .get('/repos/o/r/actions/runs')
         .query((q) => q.head_sha === sha)
-        .reply(200, { total_count: 2, workflow_runs: [{ id: 11 }, { id: 12 }] });
+        .reply(200, {
+          total_count: 2,
+          workflow_runs: [
+            { id: 11, status: status11 },
+            { id: 12, status: 'completed' },
+          ],
+        });
       nock(api)
         .get('/repos/o/r/actions/runs/11/jobs')
         .query(true)
@@ -2923,17 +2932,79 @@ describe('the crew acts once on a parked PR on its own diagnosis (#420)', () => 
       expect(await applyCrewRetries(h.db, ghDeps(h), 'main', h.now())).toBe(0);
       expect(getCrewRetry(h.db, 1)).toMatchObject({
         outcome: 'skipped',
-        reason: 'the token lacks the Actions write permission',
+        reason:
+          'GitHub refused the re-run (HTTP 403): the token may lack the Actions write permission',
       });
       await h.reconcile();
       expect(item(h)?.state).toBe('parked');
       expect(openBriefing(h)?.why).toMatch(
-        /^The crew tried to re-run images: the token lacks the Actions write permission\./,
+        /^The crew tried to re-run images: GitHub refused the re-run \(HTTP 403\): the token may lack the Actions write permission\./,
       );
       // It was the item's one crew action.
       expect(crewMayRetry(h.db, h.zone, 1)).toBe(false);
       expect(rows(h)).toBe(1);
       noRulings(h);
+    });
+
+    test('a run still in progress (#772) → waits unclaimed; once it completes, exactly one re-run and the item is retried', async () => {
+      const h = await rerunRecorded(['images']);
+      actionsOn(headN(1), 'in_progress');
+      // No POST is mocked and the network is off: a POST on this pass would reject.
+      expect(await applyCrewRetries(h.db, ghDeps(h), 'main', h.now())).toBe(0);
+      // Run 11 in progress stops the read: run 12's jobs are not read.
+      nock.cleanAll();
+      expect(getCrewRetry(h.db, 1)).toMatchObject({
+        appliedAt: null,
+        outcome: null,
+        rerunAt: null,
+      });
+      expect(item(h)?.state).toBe('parked');
+      actionsOn(headN(1));
+      const post = nock(api).post('/repos/o/r/actions/runs/11/rerun-failed-jobs').reply(201, {});
+      const later = plus(h.now(), 5 * 60_000);
+      // Two passes together: the claim decides which posts.
+      const n = await Promise.all([
+        applyCrewRetries(h.db, ghDeps(h), 'main', later),
+        applyCrewRetries(h.db, ghDeps(h), 'main', later),
+      ]);
+      expect(n[0] + n[1]).toBe(1);
+      expect(post.isDone()).toBe(true);
+      expect(nock.pendingMocks()).toEqual([]);
+      expect(getCrewRetry(h.db, 1)).toMatchObject({ outcome: 'retried' });
+      expect(getCrewRetry(h.db, 1)?.rerunAt).not.toBeNull();
+      expect(item(h)?.state).toBe('pr_open');
+      noRulings(h);
+    });
+
+    test('still running 61 minutes after the row was recorded (#772) → skipped, and the item stays parked', async () => {
+      const h = await rerunRecorded(['images']);
+      actionsOn(headN(1), 'in_progress');
+      const late = plus(h.now(), 61 * 60_000);
+      expect(await applyCrewRetries(h.db, ghDeps(h), 'main', late)).toBe(0);
+      expect(getCrewRetry(h.db, 1)).toMatchObject({
+        outcome: 'skipped',
+        reason: 'the workflow run is still in progress',
+      });
+      syncParkBriefings(h.db, h.zone, late);
+      expect(item(h)?.state).toBe('parked');
+      expect(openBriefing(h)?.why).toContain(
+        'The crew tried to re-run images: the workflow run is still in progress',
+      );
+      noRulings(h);
+    });
+
+    test('a head that moved while waiting (#772) → skipped with the head reason', async () => {
+      const h = await rerunRecorded(['images']);
+      actionsOn(headN(1), 'in_progress');
+      expect(await applyCrewRetries(h.db, ghDeps(h), 'main', h.now())).toBe(0);
+      expect(getCrewRetry(h.db, 1)).toMatchObject({ appliedAt: null, outcome: null });
+      h.forge.state.setHead(prNumber(h), headN(2));
+      expect(await applyCrewRetries(h.db, ghDeps(h), 'main', plus(h.now(), 60_000))).toBe(0);
+      expect(getCrewRetry(h.db, 1)).toMatchObject({
+        outcome: 'skipped',
+        reason: "the pull request's head moved",
+      });
+      expect(item(h)?.state).toBe('parked');
     });
 
     test('the forge throwing → the same as 403, never a retry', async () => {

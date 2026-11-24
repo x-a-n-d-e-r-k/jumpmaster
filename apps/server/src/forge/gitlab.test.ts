@@ -2070,8 +2070,9 @@ describe('checks: rerunFailedChecks', () => {
     }).pipeline;
     const b = gl.seedPipeline({ sha, jobs: [{ name: 'e2e', status: 'canceled' }] }).pipeline;
     gl.seedPipeline({ sha, jobs: [{ name: 'other', status: 'failed' }] });
-    const { runIds } = await forge.rerunFailedChecks(1, sha, ['test', 'lint', 'e2e']);
+    const { runIds, running } = await forge.rerunFailedChecks(1, sha, ['test', 'lint', 'e2e']);
     expect(runIds).toEqual([b.id, a.id]);
+    expect(running).toBe(false);
     expect(retries(gl)).toEqual([`${PIPELINES}/${b.id}/retry`, `${PIPELINES}/${a.id}/retry`]);
   });
 
@@ -2080,7 +2081,7 @@ describe('checks: rerunFailedChecks', () => {
     const sha = checksRepo(gl);
     gl.seedPipeline({ sha, jobs: [{ name: 'test', status: 'failed' }] });
     gl.seedPipeline({ sha, jobs: [{ name: 'test', status: 'success' }] });
-    expect(await forge.rerunFailedChecks(1, sha, ['test'])).toEqual({ runIds: [] });
+    expect(await forge.rerunFailedChecks(1, sha, ['test'])).toEqual({ runIds: [], running: false });
     expect(retries(gl)).toEqual([]);
   });
 
@@ -2088,7 +2089,10 @@ describe('checks: rerunFailedChecks', () => {
     const { gl, forge } = setup();
     const sha = checksRepo(gl);
     gl.seedPipeline({ sha, jobs: [{ name: 'flaky', status: 'failed', allowFailure: true }] });
-    expect(await forge.rerunFailedChecks(1, sha, ['flaky'])).toEqual({ runIds: [] });
+    expect(await forge.rerunFailedChecks(1, sha, ['flaky'])).toEqual({
+      runIds: [],
+      running: false,
+    });
     expect(retries(gl)).toEqual([]);
   });
 
@@ -2096,7 +2100,7 @@ describe('checks: rerunFailedChecks', () => {
     const { gl, forge } = setup();
     const sha = checksRepo(gl);
     gl.seedPipeline({ sha, jobs: [{ name: 'test', status: 'failed' }] });
-    expect(await forge.rerunFailedChecks(1, sha, ['nope'])).toEqual({ runIds: [] });
+    expect(await forge.rerunFailedChecks(1, sha, ['nope'])).toEqual({ runIds: [], running: false });
     expect(retries(gl)).toEqual([]);
   });
 
