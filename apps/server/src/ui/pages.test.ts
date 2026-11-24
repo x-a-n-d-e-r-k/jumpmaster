@@ -23,7 +23,7 @@ import { STARTER_WARNING } from '../config.js';
 import { type CrewIssue, getCrewIssue, insertCrewIssue, setCrewIssue } from '../crew/store.js';
 import type { Drop, StoredEvent, UsageWindowRow, WorkItem } from '../db/repo.js';
 import { insertDrop, setKilled, updateDrop, upsertDropZone, upsertWorkItem } from '../db/repo.js';
-import type { GoalChange } from '../goal-change.js';
+import type { CrewProposalStanding, GoalChange, GoalChangeWithStanding } from '../goal-change.js';
 import type { GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import { statusOf } from '../status.js';
@@ -1156,8 +1156,12 @@ describe('goal ladder', () => {
     expect(html).toMatch(/Second<\/td><td>staged<\/td><td>#8<\/td><td>-/);
   });
 
-  test('#645 a crew-proposed change waits for its ruling; a chat-proposed one opens at the next pass', () => {
-    const change = (id: number, source: GoalChange['source']): GoalChange => ({
+  test('#645 #754 a crew-proposed change waits for its ruling only while its briefing is open', () => {
+    const change = (
+      id: number,
+      source: GoalChange['source'],
+      standing?: CrewProposalStanding,
+    ): GoalChangeWithStanding => ({
       id,
       zoneId: z.id,
       source,
@@ -1174,6 +1178,7 @@ describe('goal ladder', () => {
       error: null,
       createdAt: '2026-01-01T00:00:00.000Z',
       updatedAt: '2026-01-01T00:00:00.000Z',
+      ...(standing === undefined ? {} : { standing }),
     });
     const html = renderGoals({
       zone: z,
@@ -1183,7 +1188,13 @@ describe('goal ladder', () => {
       items: [],
       skippedCrewUnpromoted: [],
       doneByRuling: new Map(),
-      goalChanges: [change(1, 'chat'), change(2, 'crew')],
+      goalChanges: [
+        change(1, 'chat'),
+        change(2, 'crew', 'awaiting_ruling'),
+        change(3, 'crew', 'opening'),
+        change(4, 'crew', 'unbriefed'),
+        change(5, 'crew'),
+      ],
     });
     expect(html).toContain(
       '<li>Goal change 1, from the chat: Its pull request opens at the next pass.</li>',
@@ -1191,6 +1202,14 @@ describe('goal ladder', () => {
     expect(html).toContain(
       '<li>Goal change 2, from the crew: Waits for your ruling on its briefing.</li>',
     );
+    expect(html).toContain(
+      '<li>Goal change 3, from the crew: You ruled to open it; its pull request opens at a coming pass.</li>',
+    );
+    const unbriefed = 'No briefing is open for it, so it is not in front of you and does not open.';
+    expect(html).toContain(`<li>Goal change 4, from the crew: ${unbriefed}</li>`);
+    // Not knowing of an open briefing never claims one.
+    expect(html).toContain(`<li>Goal change 5, from the crew: ${unbriefed}</li>`);
+    expect(html.match(/Waits for your ruling/g)).toHaveLength(1);
   });
 
   test('marker-bearing issues skipped at intake are listed on the zone page', () => {

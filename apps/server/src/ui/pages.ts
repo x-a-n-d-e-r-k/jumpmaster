@@ -27,7 +27,7 @@ import type {
 import { ACTIVE_DROP_STATES } from '../db/repo.js';
 import { CHECK_IDS, type DoctorAction } from '../doctor/checks.js';
 import { fableWindow, isFableWindow, modelFamily, PER_MODEL_WINDOWS } from '../fable.js';
-import type { GoalChange } from '../goal-change.js';
+import type { GoalChange, GoalChangeWithStanding } from '../goal-change.js';
 import { currentObjective, type GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import { sliceWhole } from '../slice-whole.js';
@@ -710,7 +710,7 @@ const ENDED_GOAL_CHANGES = 3;
  * The zone's goal changes still in flight, each with what happens next (an open one: its Approve
  * and merge link), and the last few that ended, with why.
  */
-function goalChangesBlock(changes: readonly GoalChange[]): string {
+function goalChangesBlock(changes: readonly GoalChangeWithStanding[]): string {
   const live = changes.filter((c) => ['proposed', 'open', 'confirmed'].includes(c.state));
   const ended = changes
     .filter((c) => !live.includes(c))
@@ -719,13 +719,20 @@ function goalChangesBlock(changes: readonly GoalChange[]): string {
   if (live.length === 0 && ended.length === 0) return '';
   const pr = (c: GoalChange) =>
     c.prNumber === null ? '' : ` (pull request #${escapeHtml(c.prNumber)})`;
-  const next = (c: GoalChange): string => {
+  const next = (c: GoalChangeWithStanding): string => {
     switch (c.state) {
       case 'proposed':
-        // A crew proposal opens only once Command rules on its goal-change briefing (#645).
-        return c.source === 'crew'
-          ? 'Waits for your ruling on its briefing.'
-          : 'Its pull request opens at the next pass.';
+        if (c.source !== 'crew') return 'Its pull request opens at the next pass.';
+        // A crew proposal opens only once Command rules on its goal-change briefing (#645), and
+        // waits for that ruling only while the briefing is open (#754).
+        switch (c.standing) {
+          case 'awaiting_ruling':
+            return 'Waits for your ruling on its briefing.';
+          case 'opening':
+            return 'You ruled to open it; its pull request opens at a coming pass.';
+          default:
+            return 'No briefing is open for it, so it is not in front of you and does not open.';
+        }
       case 'open':
         return `<a href="/goal-changes/${escapeHtml(c.id)}/confirm">Approve and merge</a>`;
       case 'confirmed':
@@ -757,7 +764,7 @@ export function renderGoals(s: {
   /** Objectives Command marked done by a ruling: key to the ruling's id. */
   doneByRuling: ReadonlyMap<string, number>;
   /** The zone's goal changes (#363), oldest first. */
-  goalChanges?: readonly GoalChange[];
+  goalChanges?: readonly GoalChangeWithStanding[];
   /** The zone's current mode, for the project header (#616); its configured mode when absent. */
   mode?: string;
   /** The zone's open briefings, counted in the project header. */

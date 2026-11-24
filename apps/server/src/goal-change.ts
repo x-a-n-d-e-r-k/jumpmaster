@@ -76,6 +76,43 @@ export function listGoalChanges(db: Db, zoneId: string, state?: GoalChangeState)
   ) as GoalChange[];
 }
 
+/**
+ * Where a crew proposal still `proposed` stands with Command (#754): `awaiting_ruling` while an
+ * open `goal-change:<id>` briefing asks for it; `opening` once Command ruled "Open the PR" and that
+ * ruling waits to be applied (kill switch, zone not active, forge error); `unbriefed` otherwise
+ * (its briefing dismissed or withdrawn, or a "leave the goals" ruling about to close it): nothing
+ * is in front of Command and nothing opens it.
+ */
+export type CrewProposalStanding = 'awaiting_ruling' | 'opening' | 'unbriefed';
+
+/** A goal change with, for a crew proposal still `proposed`, where it stands with Command. */
+export type GoalChangeWithStanding = GoalChange & { standing?: CrewProposalStanding };
+
+export function crewProposalStanding(db: Db, zoneId: string, id: number): CrewProposalStanding {
+  const subject = `${GOAL_CHANGE_PREFIX}${id}`;
+  const open = db
+    .prepare(`SELECT 1 FROM briefings WHERE zone_id = ? AND subject = ? AND state = 'open' LIMIT 1`)
+    .get(zoneId, subject);
+  if (open) return 'awaiting_ruling';
+  const opening = db
+    .prepare(
+      `SELECT 1 FROM rulings r JOIN briefings b ON b.id = r.briefing_id
+       WHERE b.zone_id = ? AND b.subject = ? AND r.choice_effect = 'open_goal_change'
+         AND r.applied_at IS NULL AND r.apply_error IS NULL LIMIT 1`,
+    )
+    .get(zoneId, subject);
+  return opening ? 'opening' : 'unbriefed';
+}
+
+/** A zone's goal changes, oldest first, each crew proposal with its standing. */
+export function listGoalChangesWithStanding(db: Db, zoneId: string): GoalChangeWithStanding[] {
+  return listGoalChanges(db, zoneId).map((c) =>
+    c.source === 'crew' && c.state === 'proposed'
+      ? { ...c, standing: crewProposalStanding(db, zoneId, c.id) }
+      : c,
+  );
+}
+
 type Patch = Partial<
   Pick<GoalChange, 'baseSha' | 'branch' | 'prNumber' | 'headSha' | 'state' | 'error'>
 >;

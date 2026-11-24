@@ -7,7 +7,7 @@ import type { Feedback } from '../flow/decide.js';
 import type { ZonePass } from '../flow/snapshot.js';
 import { serverScrubSet } from '../forge/scrub-set.js';
 import { failureText, newestFailure } from '../gate-output.js';
-import { type GoalChange, listGoalChanges } from '../goal-change.js';
+import { type GoalChange, listGoalChangesWithStanding } from '../goal-change.js';
 import { getGoals, objectivesDone, zoneObjective } from '../goals.js';
 import { type ForgePair, unsanitizeForgeText } from '../outbox.js';
 import {
@@ -152,21 +152,32 @@ function rulings(db: Db, zoneId: string, limit = 20): RulingLine[] {
 
 type OpenBriefingLine = { id: number; subject: string; decision: string; optionsJson: string };
 
-/** The zone's open briefings raised by the crew, oldest first. */
 /**
  * The zone's goal changes in flight (#645), one line each in the server's own words: ids, states
- * and PR numbers only, never the proposed text.
+ * and PR numbers only, never the proposed text. A crew proposal is in flight only while it is in
+ * front of Command (#754): its briefing open, or Command's "Open the PR" ruling waiting to apply.
+ * One whose briefing was dismissed or withdrawn is left out: nothing will rule on it or open it.
  */
 function goalChangesText(db: Db, zoneId: string): string {
   const pr = (c: GoalChange) => (c.prNumber === null ? '' : ` (pull request #${c.prNumber})`);
-  const lines = listGoalChanges(db, zoneId).flatMap((c): string[] => {
+  const lines = listGoalChangesWithStanding(db, zoneId).flatMap((c): string[] => {
     switch (c.state) {
       case 'proposed':
-        return [
-          c.source === 'crew'
-            ? `Goal change ${c.id}: proposed; waits for Command's ruling on its goal-change briefing.`
-            : `Goal change ${c.id}: proposed; its pull request opens at the next pass.`,
-        ];
+        if (c.source !== 'crew') {
+          return [`Goal change ${c.id}: proposed; its pull request opens at the next pass.`];
+        }
+        switch (c.standing) {
+          case 'awaiting_ruling':
+            return [
+              `Goal change ${c.id}: proposed; waits for Command's ruling on its goal-change briefing.`,
+            ];
+          case 'opening':
+            return [
+              `Goal change ${c.id}: proposed; Command ruled to open it, and its pull request opens at a coming pass.`,
+            ];
+          default:
+            return [];
+        }
       case 'open':
         return [
           `Goal change ${c.id}${pr(c)}: open; waits for Command to approve and merge it in Jumpmaster. Work under the objectives it adds waits until it merges.`,
@@ -182,6 +193,7 @@ function goalChangesText(db: Db, zoneId: string): string {
   return lines.length === 0 ? 'No goal changes in flight.' : lines.join('\n');
 }
 
+/** The zone's open briefings raised by the crew, oldest first. */
 function openCrewBriefings(db: Db, zoneId: string): OpenBriefingLine[] {
   return db
     .prepare(
