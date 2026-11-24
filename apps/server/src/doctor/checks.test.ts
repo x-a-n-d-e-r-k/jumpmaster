@@ -4706,3 +4706,236 @@ describe('forge.ci on a GitLab zone (issue #809)', () => {
     expect(c.fix).not.toContain('Fine-grained');
   });
 });
+
+describe('forge.codeowners on a GitLab zone (issue #815)', () => {
+  const GL = 'https://gitlab.example.com';
+  const PATH = 'acme/demo';
+  // Made-up tokens, built at run time so no token-shaped literal sits in the tracked file.
+  const glpat = (c: string) => ['glpat', c.repeat(20)].join('-');
+  const A_TOKEN = glpat('A');
+  const R_TOKEN = glpat('R');
+  let gl: FakeGitLab | undefined;
+
+  beforeAll(() => nock.disableNetConnect());
+  afterEach(() => {
+    gl?.stop();
+    gl = undefined;
+    nock.cleanAll();
+  });
+  afterAll(() => nock.enableNetConnect());
+
+  async function codeowners(o: {
+    required: boolean;
+    files?: Record<string, string>;
+    starter?: boolean;
+    /** The author token's scopes (default `api`). */
+    authorScopes?: string[];
+  }) {
+    const w = world({
+      zone: {
+        repo: PATH,
+        forge: 'gitlab',
+        gitlab: { baseUrl: GL },
+        protectedPaths: ['.github/**', 'CODEOWNERS', '.gitlab/**'],
+        ...(o.starter ? { identity: 'starter' as const } : {}),
+      },
+    });
+    gl = fakeGitLab({ baseUrl: GL, project: { id: 7, path: PATH, visibility: 'private' } });
+    gl.addUser({
+      username: 'jm-author',
+      token: A_TOKEN,
+      accessLevel: ACCESS.developer,
+      scopes: o.authorScopes ?? ['api'],
+    });
+    gl.addUser({
+      username: 'jm-reviewer',
+      token: R_TOKEN,
+      accessLevel: ACCESS.developer,
+      scopes: ['api'],
+    });
+    gl.seedCommit({
+      branch: 'main',
+      message: 'init',
+      files: { 'README.md': 'hi\n', 'src/index.ts': 'export {};\n', ...o.files },
+    });
+    gl.protectBranch({
+      name: 'main',
+      pushAccessLevels: [ACCESS.maintainer],
+      mergeAccessLevels: [ACCESS.developer],
+      codeOwnerApprovalRequired: o.required,
+    });
+    w.deps.forges = () => ({
+      author: new GitLabForge(GL, PATH, A_TOKEN),
+      reviewer: o.starter ? null : new GitLabForge(GL, PATH, R_TOKEN),
+    });
+    const c = one(await zoneChecks(w.deps, w.zone, []), 'forge.codeowners');
+    // .github/CODEOWNERS is never read on a GitLab zone.
+    const githubReads = gl.requests.filter(
+      (q) =>
+        decodeURIComponent(q.path).includes('.github/CODEOWNERS') ||
+        Object.values(q.query).some((v) => v.includes('.github/CODEOWNERS')),
+    );
+    expect(githubReads).toEqual([]);
+    // No token in any summary or fix, and no GitHub wording.
+    const text = `${c.summary}\n${c.fix ?? ''}\n${JSON.stringify(c)}`;
+    for (const t of [A_TOKEN, R_TOKEN]) expect(text).not.toContain(t);
+    expect(text).not.toMatch(/glpat-/);
+    const said = `${c.summary}\n${c.fix ?? ''}`;
+    expect(said).not.toContain('GitHub');
+    expect(said).not.toMatch(/pull request/);
+    expect(said).not.toMatch(/Contents: read|JM_GITHUB_|\/setup\/|guidance/);
+    return { c, reads: gl.requests.map((q) => decodeURIComponent(q.path)) };
+  }
+
+  const fileReads = (reads: string[]) =>
+    reads.filter((p) => p.includes('/repository/files/')).map((p) => p.split('/files/')[1]);
+
+  test('code owner approval not required: pass', async () => {
+    const { c } = await codeowners({ required: false });
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('code owner approval');
+  });
+
+  test('required with no CODEOWNERS: warn, naming .gitlab/CODEOWNERS; GitLab order read', async () => {
+    const { c, reads } = await codeowners({ required: true });
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('no CODEOWNERS file');
+    expect(c.fix).toContain('.gitlab/CODEOWNERS');
+    expect(c.fix).toContain('Code owner approval');
+    const order = fileReads(reads).map((p) => p.replace(/\/raw$/, ''));
+    const firsts = order.filter((p, i) => order.indexOf(p) === i);
+    expect(firsts).toEqual(['CODEOWNERS', 'docs/CODEOWNERS', '.gitlab/CODEOWNERS']);
+  });
+
+  test('.gitlab/CODEOWNERS with protected paths people-only and the rest on the reviewer: pass', async () => {
+    const { c } = await codeowners({
+      required: true,
+      files: {
+        '.gitlab/CODEOWNERS': [
+          '* @jm-reviewer',
+          '/.github/ @alice',
+          '/CODEOWNERS @alice',
+          '/.gitlab/ @alice',
+        ].join('\n'),
+      },
+    });
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('merge request');
+    expect(c.summary).toContain('GitLab');
+  });
+
+  test('a non-protected owned path with people only: fail', async () => {
+    const { c } = await codeowners({
+      required: true,
+      files: {
+        '.gitlab/CODEOWNERS': [
+          '* @jm-reviewer',
+          '/src/ @alice',
+          '/.github/ @alice',
+          '/CODEOWNERS @alice',
+          '/.gitlab/ @alice',
+        ].join('\n'),
+      },
+    });
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('line 2 (/src/)');
+    expect(c.summary).toContain('merge request');
+    expect(c.fix).toContain('@jm-reviewer');
+    expect(c.fix).toContain('.gitlab/CODEOWNERS');
+    expect(c.fix).toContain('Code owner approval');
+  });
+
+  test("a section's default owners own its path lines that name none", async () => {
+    const ok = await codeowners({
+      required: true,
+      files: {
+        CODEOWNERS: [
+          '[Everything] @jm-reviewer',
+          '*',
+          '[Protected][2] @alice @bob',
+          '/.github/',
+          '/CODEOWNERS',
+          '/.gitlab/',
+        ].join('\n'),
+      },
+    });
+    expect(ok.c.status).toBe('pass');
+    gl?.stop();
+    const bad = await codeowners({
+      required: true,
+      files: {
+        CODEOWNERS: [
+          '[People] @alice',
+          '/src/',
+          '[Everything] @jm-reviewer',
+          '*',
+          '[Protected] @alice',
+          '/.github/',
+          '/CODEOWNERS',
+          '/.gitlab/',
+        ].join('\n'),
+      },
+    });
+    // /src/ takes [People]'s @alice: its own section, so the later * in another section does not
+    // override it, and GitLab waits for a person on every merge request touching src.
+    expect(bad.c.status).toBe('fail');
+    expect(bad.c.summary).toContain('line 2 (/src/)');
+  });
+
+  test("an optional ^[...] section's owners don't count", async () => {
+    const { c } = await codeowners({
+      required: true,
+      files: {
+        '.gitlab/CODEOWNERS': [
+          '* @jm-reviewer',
+          '/.github/ @alice',
+          '/CODEOWNERS @alice',
+          '/.gitlab/ @alice',
+          '^[Docs] @carol',
+          '/docs/',
+          '/src/ @dave',
+        ].join('\n'),
+      },
+    });
+    expect(c.status).toBe('pass');
+  });
+
+  test('a group owner warns', async () => {
+    const { c } = await codeowners({
+      required: true,
+      files: {
+        '.gitlab/CODEOWNERS': [
+          '* @jm-reviewer',
+          '/src/ @acme/devs',
+          '/.github/ @alice',
+          '/CODEOWNERS @alice',
+          '/.gitlab/ @alice',
+        ].join('\n'),
+      },
+    });
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('line 2 (/src/)');
+    expect(c.summary).toContain('group');
+    expect(c.fix).toContain('.gitlab/CODEOWNERS');
+  });
+
+  test('starter with code owner approval required: warn with GitLab wording; without: pass', async () => {
+    const on = await codeowners({ required: true, starter: true });
+    expect(on.c.status).toBe('warn');
+    expect(on.c.summary).toContain('GitLab');
+    expect(on.c.summary).toContain('merge request');
+    expect(on.c.fix).toContain('Code owner approval');
+    gl?.stop();
+    const off = await codeowners({ required: false, starter: true });
+    expect(off.c.status).toBe('pass');
+  });
+
+  test('a refused file read is a read failure in GitLab wording, never a pass', async () => {
+    const { c } = await codeowners({ required: true, authorScopes: ['read_user'] });
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('read CODEOWNERS');
+    expect(c.summary).toContain('api scope');
+    expect(c.fix).toContain('gitlab-pat/main/author');
+    expect(c.fix).not.toContain('Fine-grained');
+  });
+});
