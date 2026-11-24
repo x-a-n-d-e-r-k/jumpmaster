@@ -63,7 +63,7 @@ Install (GitHub Apps first for two-bot, tokens for starter and as the alternativ
 rotation, adding a repository or an owner, pending pushes), troubleshooting by check id, the key's
 reach.
 
-### Usage gate decides on reported utilization
+### Usage gate decides on reported utilization (done)
 
 The dispatch gate (`apps/server/src/usage.ts`) holds new work on the owner's threshold
 (`usage.throttleUtilization`) applied to the utilization Claude reports, and on nothing looser.
@@ -108,8 +108,13 @@ GitHub PAT path. Parts, in this order:
   `testCredential` that reads `GET /user`, fingerprints, and `pairFor` building a `GitLabForge`
   pair for a GitLab zone.
 - **Clone and push**: the trooper's git auth scope and the push container accept the zone's
-  GitLab host, and the token reaches only the push container, as on GitHub. A change to egress
-  allowlists, CI or another protected path goes to Command as a briefing, not an issue.
+  GitLab host, and the GitLab token reaches only the clone and push containers, in which no agent
+  runs. Private and internal projects are cloned by the clone container of
+  `docs/superpowers/specs/2026-11-24-clone-container.md` (Command ruling 121), built in that
+  spec's order: it uses `gitlab-pat/<zone>/read` (a project deploy token, `read_repository`
+  only) when set, else the author token, and exits before the agent starts. No GitLab token ever
+  enters a container an agent runs in. A change to egress allowlists, CI, SECURITY.md or another
+  protected path goes to Command as a briefing, not an issue.
 - **Wizard and doctor**: the project step accepts a GitLab project URL, and the doctor's forge
   checks have a GitLab column (token valid, access level Developer or above, no `sudo` or
   `admin_mode` scope, approvals counted where approval rules exist).
