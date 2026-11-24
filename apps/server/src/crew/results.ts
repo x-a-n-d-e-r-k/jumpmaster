@@ -27,6 +27,7 @@ import {
 import { ranOnFable } from '../fable.js';
 import { chargeBudget, fingerprint } from '../flow/budgets.js';
 import type { Feedback } from '../flow/decide.js';
+import { log as serverLog } from '../log.js';
 import type { ForgePair } from '../outbox.js';
 import { type CrewInputJson, promptVersions } from '../payloads.js';
 import { type ResultDeps, STALE_REASON } from '../results.js';
@@ -39,6 +40,7 @@ import {
 } from './actions.js';
 import { PROMOTE_OPTIONS, subjectOf } from './flush.js';
 import { lastHealFeedback } from './inputs.js';
+import { cutChars, MAX_REFUSED_CHARS } from './refused.js';
 import {
   briefItemRuling,
   HEAL_EXHAUSTED,
@@ -1075,6 +1077,12 @@ export async function applyCrewResult(
         state: 'succeeded',
         resultJson: JSON.stringify({ ...result, crewReport: report }),
       });
+      // One line per refusal: the zone and the entry (a key and the server's reason), never a body.
+      for (const entry of report.refused) {
+        serverLog(
+          `zone ${deps.zone.id}: crew lead proposal refused: ${cutChars(entry, MAX_REFUSED_CHARS)}`,
+        );
+      }
       return;
     }
     if (role === 'refute' && work?.role === 'refute') {

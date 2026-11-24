@@ -21,6 +21,13 @@ import {
 import { isCrewFiled } from '../sync.js';
 import { crewIssueSlots } from './actions.js';
 import {
+  cutChars,
+  MAX_REFUSED_CHARS,
+  MAX_REFUSED_SHOWN,
+  refusedKey,
+  storedRefusals,
+} from './refused.js';
+import {
   type CrewIssue,
   commandRejection,
   getCrewIssue,
@@ -312,6 +319,40 @@ function needsCommandLines(body: string, scrub: string[]): string[] {
 }
 
 /**
+ * What the server refused in the zone's latest earlier lead cycle that stored a report (#808): its
+ * `crewReport.refused` entries, at most `MAX_REFUSED_SHOWN`, one per line, an issue's entry followed
+ * by the title it proposed, cut to `MAX_REFUSED_CHARS`. Redacted with `scrub` here, neutralised and
+ * fenced by `assemble`. A stored result that does not parse or holds no report is "Not known.",
+ * never "Nothing was refused.".
+ */
+function refusedText(db: Db, zoneId: string, dropId: string, scrub: string[]): string {
+  // Only a succeeded lead drop stores its report (`applyCrewResult`).
+  const row = db
+    .prepare(
+      `SELECT result_json AS resultJson FROM drops
+         WHERE drop_zone_id = ? AND role = 'crew-lead' AND state = 'succeeded' AND id != ?
+           AND result_json IS NOT NULL
+         ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    )
+    .get(zoneId, dropId) as { resultJson: string } | undefined;
+  if (!row) return 'Nothing was refused.';
+  const stored = storedRefusals(row.resultJson);
+  if (!stored) return 'Not known.';
+  if (stored.refused.length === 0) return 'Nothing was refused.';
+  return stored.refused
+    .slice(0, MAX_REFUSED_SHOWN)
+    .map((entry) => {
+      const key = refusedKey(entry, stored.titles);
+      const title = key === null ? undefined : stored.titles.get(key);
+      const line = redact(entry, scrub).replace(/\s+/g, ' ');
+      if (title === undefined) return line;
+      const shown = cutChars(redact(title, scrub).replace(/\s+/g, ' ').trim(), MAX_REFUSED_CHARS);
+      return `${line} (${shown})`;
+    })
+    .join('\n');
+}
+
+/**
  * The lead's input: GOAL.md, the current objective and Command's rulings as instructions; the crew
  * issues, free slots and trusted open issues as data. Issues by untrusted authors (or whose trust
  * lookup failed) appear only as a count, crew-filed issues only from the database, and no comment
@@ -444,6 +485,12 @@ export async function crewLeadInput(
       name: 'rejected-issues',
       kind: 'data',
       text: rejectedIssuesText(db, zone.id, current?.key ?? null, now, secrets),
+    },
+    {
+      title: 'Refused in your last cycle',
+      name: 'refused',
+      kind: 'data',
+      text: refusedText(db, zone.id, dropId, scrub),
     },
     { title: 'Open issues', name: 'open-issues', kind: 'data', text: issuesText },
   ]);
