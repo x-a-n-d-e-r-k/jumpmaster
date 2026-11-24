@@ -8,6 +8,7 @@ import { ctlRequest } from '../ctl.js';
 import { openDb } from '../db/open.js';
 import {
   getUsageState,
+  recordUsageWindows,
   setKilled,
   setUsageState,
   setZoneMode,
@@ -118,7 +119,7 @@ describe('POST and DELETE /api/control/usage/override (#728)', () => {
 
   test('usage already at the ceiling is refused rather than set and never in force', async () => {
     const { db, send } = setup();
-    setUsageState(db, { sevenDayUtil: 0.95 }, t0);
+    recordUsageWindows(db, { seven_day: { utilization: 0.95 } }, t0, null);
     const r = await send('POST');
     expect(r.statusCode).toBe(409);
     expect(r.json().error).toMatch(/95%/);

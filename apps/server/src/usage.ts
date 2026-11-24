@@ -15,12 +15,14 @@ import type { Db } from './db/open.js';
 import {
   getDrop,
   getUsageState,
+  listUsageWindows,
   NO_OVERRIDE,
   recordUsageWindows,
   setUsageState,
   type UsageStateRow,
+  type UsageWindowRow,
 } from './db/repo.js';
-import { isFableRateLimit, pauseFableFor } from './fable.js';
+import { isFableRateLimit, PER_MODEL_WINDOWS, pauseFableFor } from './fable.js';
 
 /**
  * `stopped`: a drop ran on usage credits (credits.ts); nothing leases, of any role.
@@ -158,7 +160,7 @@ export function ingestRateLimit(
   now: Date,
   rand: () => number = Math.random,
 ): void {
-  // Every reported window is kept for the floor (#144); only five_hour and seven_day feed the gate.
+  // Every reported window is kept (#144); the account-wide ones feed the gate (#738).
   const windows = usageWindowsOf(data.unifiedWindows);
   if (windows) {
     // A per-model window does not name its model; the reporting drop's model does (#377).
@@ -249,32 +251,51 @@ export function ingestRateLimit(
   })();
 }
 
-/** Whether a window's last reported figure still counts: its reset has not passed. */
-function windowLive(u: UsageStateRow, resetsAt: string | null, fallback: number, t: number) {
-  const observed = ms(u.observedAt);
-  const end = ms(resetsAt) ?? (observed === null ? null : observed + fallback);
-  return end !== null && t < end;
+/** Model families a window key may name; such a window is one model's, never the account's. */
+const MODEL_FAMILIES = ['fable', 'opus', 'sonnet', 'haiku'];
+
+/** Whether a window covers the whole account: not a per-model window, and no part names a model. */
+function accountWide(key: string): boolean {
+  if (PER_MODEL_WINDOWS.has(key)) return false;
+  return !key.split('_').some((part) => MODEL_FAMILIES.includes(part));
 }
 
-function throttled(u: UsageStateRow, cfg: UsageConfig, t: number): boolean {
+/**
+ * When a window's figure stops counting: its reset, else its own observation plus the window's
+ * span (five hours for `five_hour*`, seven days for any other); null when it has neither time.
+ */
+function windowEnd(w: UsageWindowRow): number | null {
+  const reset = ms(w.resetsAt);
+  if (reset !== null) return reset;
+  const observed = ms(w.observedAt);
+  if (observed === null) return null;
+  return observed + (w.key.startsWith('five_hour') ? FIVE_HOURS : SEVEN_DAYS);
+}
+
+/** The account-wide windows whose reported utilization still counts at `now` (#738). */
+export function liveAccountWindows(
+  db: Db,
+  now: Date,
+): (UsageWindowRow & { utilization: number })[] {
+  const t = now.getTime();
+  return listUsageWindows(db).filter((w): w is UsageWindowRow & { utilization: number } => {
+    if (w.utilization === null || !accountWide(w.key)) return false;
+    const end = windowEnd(w);
+    return end !== null && t < end;
+  });
+}
+
+/** Whether some live account-wide window is at or above `share`. */
+function accountAt(db: Db, share: number, t: number): boolean {
+  return liveAccountWindows(db, new Date(t)).some((w) => w.utilization >= share);
+}
+
+function throttled(db: Db, u: UsageStateRow, cfg: UsageConfig, t: number): boolean {
   const observed = ms(u.observedAt);
-  const live = (resetsAt: string | null, fallback: number): boolean =>
-    windowLive(u, resetsAt, fallback, t);
   if (u.status === 'allowed_warning' && observed !== null && t < observed + FIVE_HOURS) {
     return true;
   }
-  if (
-    u.fiveHourUtil !== null &&
-    u.fiveHourUtil >= cfg.throttleUtilization &&
-    live(u.fiveHourResetsAt, FIVE_HOURS)
-  ) {
-    return true;
-  }
-  return (
-    u.sevenDayUtil !== null &&
-    u.sevenDayUtil >= cfg.throttleUtilization &&
-    live(u.sevenDayResetsAt, SEVEN_DAYS)
-  );
+  return accountAt(db, cfg.throttleUtilization, t);
 }
 
 /**
@@ -296,19 +317,11 @@ function reachesCeiling(data: RateLimitEventData, now: Date): boolean {
 export type UsageOverride = { startsLeft: number; starts: number; until: string };
 
 /** The override in `u`, when it is in force at `t`: in time, with a start left, under the ceiling. */
-function overrideIn(u: UsageStateRow, t: number): UsageOverride | null {
+function overrideIn(db: Db, u: UsageStateRow, t: number): UsageOverride | null {
   const until = ms(u.overrideUntil);
   if (until === null || t >= until) return null;
   if (u.overrideStartsLeft === null || u.overrideStartsLeft <= 0) return null;
-  if (
-    (u.fiveHourUtil !== null &&
-      u.fiveHourUtil >= OVERRIDE_CEILING &&
-      windowLive(u, u.fiveHourResetsAt, FIVE_HOURS, t)) ||
-    (u.sevenDayUtil !== null &&
-      u.sevenDayUtil >= OVERRIDE_CEILING &&
-      windowLive(u, u.sevenDayResetsAt, SEVEN_DAYS, t))
-  )
-    return null;
+  if (accountAt(db, OVERRIDE_CEILING, t)) return null;
   return {
     startsLeft: u.overrideStartsLeft,
     starts: u.overrideStarts ?? u.overrideStartsLeft,
@@ -318,7 +331,7 @@ function overrideIn(u: UsageStateRow, t: number): UsageOverride | null {
 
 /** Command's override of the usage throttle, while it is in force (#728). */
 export function usageOverride(db: Db, now: Date): UsageOverride | null {
-  return overrideIn(getUsageState(db), now.getTime());
+  return overrideIn(db, getUsageState(db), now.getTime());
 }
 
 /** Sets Command's override, replacing any. Only the control route calls this: no chat or MCP path. */
@@ -369,19 +382,24 @@ export function refundOverrideStart(db: Db, until: string | undefined, now: Date
 
 /** Whether the throttle holds new work now, override or not: what an override would lift. */
 export function throttleHolds(db: Db, cfg: UsageConfig, now: Date): boolean {
-  return baseGate(getUsageState(db), cfg, now) === 'finishing_only';
+  return baseGate(db, getUsageState(db), cfg, now) === 'finishing_only';
 }
 
 /** What the scheduler and the lease route may start right now. A credits stop wins over all. */
 export function dispatchGate(db: Db, cfg: UsageConfig, now: Date): Gate {
   const u = getUsageState(db);
-  const gate = baseGate(u, cfg, now);
+  const gate = baseGate(db, u, cfg, now);
   // An override lifts the throttle alone: a stop, a pause and a probe win over it.
-  return gate === 'finishing_only' && overrideIn(u, now.getTime()) ? 'override' : gate;
+  return gate === 'finishing_only' && overrideIn(db, u, now.getTime()) ? 'override' : gate;
 }
 
 /** The gate without Command's override. */
-function baseGate(u: UsageStateRow, cfg: UsageConfig, now: Date): Exclude<Gate, 'override'> {
+function baseGate(
+  db: Db,
+  u: UsageStateRow,
+  cfg: UsageConfig,
+  now: Date,
+): Exclude<Gate, 'override'> {
   // The credits stop and what follows it apply only while configured (stopOnOverage).
   const credits = stopsOnOverage(cfg);
   if (credits && creditsStopInForce(u, now)) return 'stopped';
@@ -391,7 +409,7 @@ function baseGate(u: UsageStateRow, cfg: UsageConfig, now: Date): Exclude<Gate, 
   if ((until !== null && t < until) || (notBefore !== null && t < notBefore)) return 'closed';
   if (credits && creditsResumeInForce(u, now)) return 'credits_resume';
   if (u.status === 'rejected' || (credits && creditsProbing(u, now))) return 'probe';
-  return throttled(u, cfg, t) ? 'finishing_only' : 'open';
+  return throttled(db, u, cfg, t) ? 'finishing_only' : 'open';
 }
 
 /** Called when a drop becomes terminal: frees the probe slot, backing off if nothing cleared it. */
