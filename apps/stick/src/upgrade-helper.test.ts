@@ -8,6 +8,7 @@ import {
   type ContainerSpec,
   INSTALLED_TAG,
   NoSuchContainer,
+  nextSpec,
   runUpgrade,
   type UpgradeDeps,
   type UpgradeDocker,
@@ -770,5 +771,24 @@ describe('the dockerode wiring', () => {
     expect(splitRepoTag(INSTALLED_TAG)).toEqual({ repo: 'jumpmaster-stick', tag: 'installed' });
     expect(splitRepoTag('localhost:5000/s:1')).toEqual({ repo: 'localhost:5000/s', tag: '1' });
     expect(splitRepoTag('localhost:5000/s')).toEqual({ repo: 'localhost:5000/s', tag: 'latest' });
+  });
+});
+
+describe('nextSpec keeps the egress ceiling', () => {
+  test('JM_EGRESS_CEILING on the old container is on the new one, so an upgrade cannot drop it', () => {
+    const spec = nextSpec(
+      {
+        id: 'c1',
+        imageId: 'sha256:old',
+        env: ['PATH=/usr/bin', 'JM_EGRESS_CEILING=gitlab.example.com,*.example.net'],
+        labels: {},
+        hostConfig: {},
+        running: true,
+        restartCount: 0,
+      },
+      { id: 'sha256:old', env: ['PATH=/usr/bin'], labels: {} },
+      'stick:new',
+    );
+    expect(spec.Env).toEqual(['JM_EGRESS_CEILING=gitlab.example.com,*.example.net']);
   });
 });

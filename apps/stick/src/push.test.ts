@@ -586,3 +586,39 @@ describe('a GitLab grant (#716)', () => {
     expect(grantSecrets(GL_GRANT)).toEqual([TOKEN, GL_BASIC]);
   });
 });
+
+describe('the stick egress ceiling (JM_EGRESS_CEILING)', () => {
+  const ceiling = ['api.anthropic.com', 'github.com', 'gitlab.example.com'];
+
+  test.each([
+    ['an uncovered plan', { mode: 'enforce' as const, allow: ['github.com', 'evil.example.net'] }],
+    ['a monitor plan', { mode: 'monitor' as const, allow: ['github.com'] }],
+    ['a plan without egress', undefined],
+  ])('%s starts nothing, keeps the volume and the entry, and retries', async (_name, egress) => {
+    const s = setup([{ before: [READY_LINE], after: [PUSHED] }], {
+      plan: { ...PLAN, ...(egress ? { egress } : {}) },
+    });
+    expect(await pushOnce(s.entry, { ...s.deps, egressImage: 'egress:1', ceiling })).toBe('retry');
+    // No network, proxy or container; nothing removed.
+    expect(s.d.order).toEqual([]);
+    expect(s.d.starts).toEqual([]);
+    expect(s.d.removedVolumes).toEqual([]);
+    expect(s.client.grantCalls).toBe(0);
+    expect(s.client.posted).toEqual([]);
+    expect(s.pending.get('d1')).toMatchObject({ epoch: 3, volume: VOLUME });
+    expect(
+      s.logs.some(
+        (l) => l.includes('plan refused by the egress ceiling') && l.includes('JM_EGRESS_CEILING'),
+      ),
+    ).toBe(true);
+  });
+
+  test('a covered plan pushes', async () => {
+    const s = setup([{ before: [READY_LINE], after: [PUSHED] }], {
+      plan: { ...PLAN, egress: { mode: 'enforce', allow: ['api.anthropic.com', 'github.com'] } },
+    });
+    expect(await pushOnce(s.entry, { ...s.deps, egressImage: 'egress:1', ceiling })).toBe('done');
+    expect(s.d.order).toContain('proxy api.anthropic.com,github.com');
+    expect(s.d.starts).toHaveLength(1);
+  });
+});

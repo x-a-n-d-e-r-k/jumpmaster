@@ -1,4 +1,5 @@
 import {
+  ceilingRefusal,
   gitlabBasicAuth,
   type PushGrant,
   type PushPayload,
@@ -12,7 +13,7 @@ import {
 } from '@jumpmaster/protocol';
 import type { PlanReply, PushClient } from './client.js';
 import type { ContainerDriver, ContainerHandle, DropNet } from './driver.js';
-import { type EgressSession, egressImage, startEgress } from './egress.js';
+import { type EgressSession, egressImage, startEgress, stickCeiling } from './egress.js';
 import { dropSubnetPool } from './subnets.js';
 import { REMOVE_TIMEOUT_MS, REPO_MOUNT } from './volumes.js';
 
@@ -136,6 +137,11 @@ export type PushDeps = {
   egressReadyMs?: number;
   /** Defaults to `JM_DROP_SUBNET_POOL`. */
   subnetPool?: string;
+  /**
+   * The stick's egress ceiling (main reads `JM_EGRESS_CEILING` once at startup): `undefined`
+   * reads it from the environment, `null` means none.
+   */
+  ceiling?: string[] | null;
 };
 
 type Line = { line: string } | 'end' | 'timeout' | 'aborted';
@@ -176,6 +182,22 @@ export async function pushOnce(entry: PushEntry, deps: PushDeps): Promise<PushOu
     });
     return 'retry';
   }
+  // The stick's egress ceiling, as for a drop. A plan's hosts are within the base today, so only
+  // its mode refuses it: the push waits, volume kept, until its zone is in enforce or the ceiling
+  // is removed. A pushed result is never thrown away over a setting.
+  let ceiling: string[] | null;
+  let outside: string | null;
+  try {
+    ceiling = stickCeiling(deps.ceiling);
+    outside = ceilingRefusal(plan.egress, ceiling);
+  } catch (e) {
+    ceiling = [];
+    outside = message(e);
+  }
+  if (outside) {
+    say('plan refused by the egress ceiling', { reason: outside });
+    return 'retry';
+  }
 
   const labels = {
     'jumpmaster.drop': dropId,
@@ -195,15 +217,19 @@ export async function pushOnce(entry: PushEntry, deps: PushDeps): Promise<PushOu
         labels,
         deps.subnetPool ?? dropSubnetPool(process.env),
       );
-      session = await startEgress(driver, {
-        dropId,
-        epoch,
-        egress: plan.egress,
-        net,
-        image: deps.egressImage ?? egressImage(process.env),
-        labels,
-        ...(deps.egressReadyMs !== undefined ? { readyMs: deps.egressReadyMs } : {}),
-      });
+      session = await startEgress(
+        driver,
+        {
+          dropId,
+          epoch,
+          egress: plan.egress,
+          net,
+          image: deps.egressImage ?? egressImage(process.env),
+          labels,
+          ...(deps.egressReadyMs !== undefined ? { readyMs: deps.egressReadyMs } : {}),
+        },
+        ceiling,
+      );
     }
     const payload: PushPayload = PushPayloadSchema.parse({
       protocol: 1,
