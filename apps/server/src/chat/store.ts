@@ -1,3 +1,4 @@
+import { PENDING_MS } from '../config/confirm.js';
 import type { Db } from '../db/open.js';
 
 /**
@@ -317,6 +318,58 @@ export function setThreadTitle(db: Db, id: number, title: string, now: Date): vo
     now.toISOString(),
     id,
   );
+}
+
+/**
+ * The owner's rename (#833): sets the title of a thread the `viewer` may see and returns it;
+ * undefined, and nothing changed, when it is unknown or another session's. A rename is not
+ * activity, so the thread keeps its place in the list. A title other than the default one keeps
+ * the first-message auto-title off it; see the messages route.
+ */
+export function renameThread(
+  db: Db,
+  id: number,
+  title: string,
+  viewer?: string,
+): ChatThread | undefined {
+  const v = viewer ?? null;
+  return db
+    .prepare(
+      `UPDATE chat_threads SET title = ? WHERE id = ? AND ${VISIBLE} RETURNING ${THREAD_COLS}`,
+    )
+    .get(title, id, v, v) as ChatThread | undefined;
+}
+
+/** What `deleteThread` did: deleted it, or why not. */
+export type DeleteThreadResult = 'deleted' | 'unknown' | 'busy' | 'pending';
+
+/**
+ * Deletes a thread the `viewer` may see, with its messages and cards, in one transaction (#833).
+ * Refused (nothing deleted) while a turn of it waits or runs, or while one of its cards is pending
+ * and its change has not lapsed (`createdAt + PENDING_MS` after `now`): that change still waits
+ * on its confirm page, which finds its thread through the card. A lapsed pending card does not
+ * block. Only the chat's record goes: what the thread's turns already changed (config, labels,
+ * issues) stays as it is.
+ */
+export function deleteThread(db: Db, id: number, now: Date, viewer?: string): DeleteThreadResult {
+  const v = viewer ?? null;
+  const cutoff = new Date(now.getTime() - PENDING_MS).toISOString();
+  return db.transaction((): DeleteThreadResult => {
+    if (!db.prepare(`SELECT 1 FROM chat_threads WHERE id = ? AND ${VISIBLE}`).get(id, v, v))
+      return 'unknown';
+    if (threadBusy(db, id)) return 'busy';
+    const live = db
+      .prepare(
+        `SELECT 1 FROM chat_cards WHERE thread_id = ? AND state = 'pending' AND created_at > ?
+         LIMIT 1`,
+      )
+      .get(id, cutoff);
+    if (live) return 'pending';
+    db.prepare('DELETE FROM chat_cards WHERE thread_id = ?').run(id);
+    db.prepare('DELETE FROM chat_messages WHERE thread_id = ?').run(id);
+    db.prepare('DELETE FROM chat_threads WHERE id = ?').run(id);
+    return 'deleted';
+  })();
 }
 
 /** Whether the thread has an owner message. */

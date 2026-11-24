@@ -9,6 +9,7 @@ import { Backoff } from '../auth/backoff.js';
 import { registerGuard } from '../auth/guard.js';
 import { SetupMode } from '../auth/operator.js';
 import { loadBoot } from '../config/boot.js';
+import { PENDING_MS } from '../config/confirm.js';
 import { ConfigStore } from '../config/store.js';
 import type { Config } from '../config.js';
 import { openDb } from '../db/open.js';
@@ -37,7 +38,10 @@ afterEach(async () => {
   app = undefined;
 });
 
-function world(o: { chatTurns?: Parameters<typeof createApp>[0]['chatTurns'] } = {}) {
+function world(
+  o: { chatTurns?: Parameters<typeof createApp>[0]['chatTurns']; now?: () => Date } = {},
+) {
+  const now = o.now ?? (() => t0);
   const db = openDb(tmpDbFile());
   const dir = mkdtempSync(join(tmpdir(), 'jm-chat-'));
   const env = {
@@ -61,7 +65,7 @@ function world(o: { chatTurns?: Parameters<typeof createApp>[0]['chatTurns'] } =
     forgesFor: () => {
       throw new Error('no forge');
     },
-    now: () => t0,
+    now,
     setup: new SetupMode(() => {}),
     backoff: new Backoff(),
     leaseWaitMs: 0,
@@ -72,7 +76,7 @@ function world(o: { chatTurns?: Parameters<typeof createApp>[0]['chatTurns'] } =
   const s = operatorSession(db, t0);
   const session = { host: HOST, ...s.headers };
   const bearer = { host: HOST, authorization: `Bearer ${TOKEN}` };
-  return { db, app: a, s, session, bearer, enqueued };
+  return { db, app: a, s, session, bearer, enqueued, store };
 }
 
 describe('/api/chat', () => {
@@ -927,5 +931,211 @@ describe('tool steps (#502)', () => {
     ]);
     expect(res.body).not.toContain('"text":"out"');
     for (const e of tools.slice(1)) expect(e.data).not.toHaveProperty('resultPrunedAt');
+  });
+});
+
+describe('rename and delete a thread (#833)', () => {
+  const patch = (
+    w: ReturnType<typeof world>,
+    id: number | string,
+    payload: unknown,
+    headers = w.session,
+  ) =>
+    w.app.inject({
+      method: 'PATCH',
+      url: `/api/chat/threads/${id}`,
+      headers,
+      payload: payload as object,
+    });
+  const del = (w: ReturnType<typeof world>, id: number | string, headers = w.session) =>
+    w.app.inject({ method: 'DELETE', url: `/api/chat/threads/${id}`, headers, payload: {} });
+  const get = (w: ReturnType<typeof world>, id: number) =>
+    w.app.inject({ method: 'GET', url: `/api/chat/threads/${id}`, headers: w.session });
+  const ownedByOther = (w: ReturnType<typeof world>) => {
+    const other = operatorSession(w.db, t0);
+    const owner = createHash('sha256').update(other.id).digest('hex');
+    return createThread(w.db, { title: 'theirs', owner }, t0);
+  };
+
+  test('PATCH renames and trims the title; the list and the thread page show it', async () => {
+    const w = world();
+    const th = createThread(w.db, { title: 'old' }, t0);
+    const res = await patch(w, th.id, { title: '  Release <plan>  ' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ thread: { id: th.id, title: 'Release <plan>' } });
+    expect(getThread(w.db, th.id)?.title).toBe('Release <plan>');
+    const list = await w.app.inject({ method: 'GET', url: '/chat', headers: w.session });
+    expect(list.body).toContain('Release &lt;plan&gt;');
+    const page = await w.app.inject({ method: 'GET', url: `/chat/${th.id}`, headers: w.session });
+    expect(page.body).toContain('Release &lt;plan&gt;');
+    expect(page.body).not.toContain('Release <plan>');
+  });
+
+  test('an empty, whitespace-only or 201-character title, or a bad body, is 400', async () => {
+    const w = world();
+    const th = createThread(w.db, { title: 'kept' }, t0);
+    for (const payload of [
+      { title: '' },
+      { title: '   ' },
+      { title: 'x'.repeat(201) },
+      {},
+      { title: 5 },
+    ]) {
+      const res = await patch(w, th.id, payload);
+      expect(res.statusCode, JSON.stringify(payload)).toBe(400);
+      expect(res.json().error).toMatch(/1 to 200/);
+    }
+    expect((await patch(w, th.id, { title: 'x'.repeat(200) })).statusCode).toBe(200);
+    expect(getThread(w.db, th.id)?.title).toBe('x'.repeat(200));
+  });
+
+  test('an unknown or malformed id is 404 for PATCH and DELETE', async () => {
+    const w = world();
+    const th = createThread(w.db, { title: 't' }, t0);
+    for (const id of [th.id + 1, 'nope', '0', '-1']) {
+      expect((await patch(w, id, { title: 'x' })).statusCode, String(id)).toBe(404);
+      expect((await del(w, id)).statusCode, String(id)).toBe(404);
+    }
+    expect(getThread(w.db, th.id)?.title).toBe('t');
+  });
+
+  test("another session's session-bound thread is 404 to PATCH and DELETE, and is left unchanged", async () => {
+    const w = world();
+    const th = ownedByOther(w);
+    expect((await patch(w, th.id, { title: 'mine now' })).statusCode).toBe(404);
+    expect((await del(w, th.id)).statusCode).toBe(404);
+    expect(getThread(w.db, th.id)).toEqual(th);
+  });
+
+  test('PATCH and DELETE need the browser session and its CSRF token', async () => {
+    const w = world();
+    const th = createThread(w.db, { title: 't' }, t0);
+    const noCsrf = { host: HOST, cookie: w.s.cookie };
+    for (const headers of [w.bearer, { host: HOST }, noCsrf]) {
+      expect([401, 403]).toContain((await patch(w, th.id, { title: 'x' }, headers)).statusCode);
+      expect([401, 403]).toContain((await del(w, th.id, headers)).statusCode);
+    }
+    expect(getThread(w.db, th.id)).toEqual(th);
+  });
+
+  test('a renamed thread keeps its title when its first owner message arrives', async () => {
+    const w = world();
+    const th = createThread(w.db, { title: 'New chat' }, t0);
+    expect((await patch(w, th.id, { title: 'Mine' })).statusCode).toBe(200);
+    const posted = await w.app.inject({
+      method: 'POST',
+      url: `/api/chat/threads/${th.id}/messages`,
+      headers: w.session,
+      payload: { text: 'What is next on the backlog?' },
+    });
+    expect(posted.statusCode).toBe(202);
+    expect(getThread(w.db, th.id)?.title).toBe('Mine');
+  });
+
+  test('a thread renamed to "New chat" is still titled by its first message', async () => {
+    const w = world();
+    const th = createThread(w.db, { title: 'Something' }, t0);
+    expect((await patch(w, th.id, { title: ' New chat ' })).statusCode).toBe(200);
+    await w.app.inject({
+      method: 'POST',
+      url: `/api/chat/threads/${th.id}/messages`,
+      headers: w.session,
+      payload: { text: 'What is next?' },
+    });
+    expect(getThread(w.db, th.id)?.title).toBe('What is next?');
+  });
+
+  test('DELETE removes the thread, and a later GET is 404', async () => {
+    const w = world();
+    const th = createThread(w.db, { title: 't' }, t0);
+    appendMessage(w.db, th.id, { role: 'owner', text: 'hi', state: 'done' }, t0);
+    const res = await del(w, th.id);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ deleted: th.id });
+    expect((await get(w, th.id)).statusCode).toBe(404);
+    expect(listMessages(w.db, th.id)).toEqual([]);
+  });
+
+  test.each(['queued', 'running'] as const)(
+    'DELETE is 409 while a message is %s',
+    async (state) => {
+      const w = world();
+      const th = createThread(w.db, { title: 't' }, t0);
+      appendMessage(w.db, th.id, { role: 'owner', text: 'hi', state }, t0);
+      const res = await del(w, th.id);
+      expect(res.statusCode).toBe(409);
+      expect(res.json().error).toMatch(/turn/);
+      expect((await get(w, th.id)).statusCode).toBe(200);
+    },
+  );
+
+  test("DELETE is 409 while a card's change waits for Confirm, and succeeds once it has lapsed", async () => {
+    let now = t0;
+    const w = world({ now: () => now });
+    const th = createThread(w.db, { title: 't' }, t0);
+    const m = appendMessage(w.db, th.id, { role: 'owner', text: 'hi', state: 'done' }, t0);
+    recordCard(
+      w.db,
+      {
+        threadId: th.id,
+        messageId: m.id,
+        kind: 'setting',
+        link: '/config/confirm/abc',
+        state: 'pending',
+        summary: 'Loosen a guard.',
+      },
+      t0,
+    );
+    now = new Date(t0.getTime() + PENDING_MS - 1000);
+    const refused = await del(w, th.id);
+    expect(refused.statusCode).toBe(409);
+    expect(refused.json().error).toMatch(/Confirm/);
+    expect(listCards(w.db, th.id)).toHaveLength(1);
+    now = new Date(t0.getTime() + PENDING_MS + 1000);
+    expect((await del(w, th.id)).statusCode).toBe(200);
+    expect(listCards(w.db, th.id)).toEqual([]);
+    expect((await get(w, th.id)).statusCode).toBe(404);
+  });
+
+  test('a delete leaves applied changes in place: the config', async () => {
+    const w = world();
+    const revision = w.store.revision();
+    const doc = w.store.document();
+    const th = createThread(w.db, { title: 't' }, t0);
+    const m = appendMessage(w.db, th.id, { role: 'owner', text: 'hi', state: 'done' }, t0);
+    recordCard(
+      w.db,
+      {
+        threadId: th.id,
+        messageId: m.id,
+        kind: 'setting',
+        state: 'done',
+        summary: 'Set pollSeconds.',
+        undo: { revision, patch: { pollSeconds: 60 }, expect: {} },
+      },
+      t0,
+    );
+    expect((await del(w, th.id)).statusCode).toBe(200);
+    expect(w.store.revision()).toBe(revision);
+    expect(w.store.document()).toEqual(doc);
+    expect(w.db.prepare('SELECT COUNT(*) AS n FROM outbox').get()).toEqual({ n: 0 });
+  });
+
+  test("a delete leaves a card's label and issue as they are on the forge", async () => {
+    const u = undoWorld();
+    const issues = JSON.stringify([...u.f.state.issues.entries()]);
+    const calls = u.f.author.calls.length;
+    const gone = await app?.inject({
+      method: 'DELETE',
+      url: `/api/chat/threads/${u.th.id}`,
+      headers: u.session,
+      payload: {},
+    });
+    expect(gone?.statusCode).toBe(200);
+    expect(listCards(u.db, u.th.id)).toEqual([]);
+    expect(JSON.stringify([...u.f.state.issues.entries()])).toBe(issues);
+    expect(u.f.state.issues.get(1)?.labels).toEqual(['agent-ready']);
+    expect(u.f.author.calls.length).toBe(calls);
+    expect(u.db.prepare('SELECT COUNT(*) AS n FROM outbox').get()).toEqual({ n: 0 });
   });
 });

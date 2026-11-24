@@ -105,6 +105,7 @@ The crew lead can propose a goal change too (my call): its briefing carries the 
 ### The page
 
 - `/chat` lists threads, newest first, and opens one. A **Chat** link goes in the top bar on every page.
+- Each row on `/chat` has **Rename** and a trashcan **Delete** (#833); the thread page's heading has Rename too. Rename is `PATCH /api/chat/threads/:id` with `{ title }` (trimmed, 1 to 200 characters); a thread renamed to anything but `New chat` keeps its name when its first message arrives. Delete is `DELETE /api/chat/threads/:id`, after a confirmation naming the thread: it removes the thread, its messages and its cards in one transaction, and is refused (409) while a turn waits or runs or a change it staged still waits for Confirm. It never undoes what the thread already changed. Both routes see only the threads the session may see (another session's own thread is 404).
 - From a zone page, a briefing or a goals page, **Ask about this** opens the Ask side panel (#626) on a thread focused on that object: a recent one with that focus, or a new one. Its first turn is given the object's context (the briefing's item, drops, verdicts and diff, for #103).
 - Messages stream in. Tool calls show as one collapsed line each ("read apps/server/src/goals.ts", "listed jm's open issues"), and actions as cards.
 

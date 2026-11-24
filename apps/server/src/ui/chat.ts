@@ -68,6 +68,36 @@ export function focusChip(t: ChatThread, zones: readonly ZoneRef[]): string {
   return ` <span class="chip">${text}</span>`;
 }
 
+const ACTIONS_STYLE = `<style>.thread-actions{white-space:nowrap;text-align:right}.thread-actions button,.thread-head button{margin-left:.25rem}.thread-actions .delete-thread svg{width:1rem;height:1rem;vertical-align:middle}.thread-head{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem}.thread-head h2{margin-right:auto}</style>`;
+
+/** What Delete asks before it deletes a thread (#833), the thread named as the page shows it. */
+export const deleteAsk = (title: string): string =>
+  `Delete the thread “${title}”? Its messages and cards go; what it already changed stays.`;
+
+/** A trashcan, drawn; the button around it carries the label. */
+const TRASHCAN =
+  '<svg viewBox="0 0 24 24" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M6 6l1 14h10l1-14M10 11v6M14 11v6"/></svg>';
+
+/** The Rename button of a thread (#833): its id and title as data, escaped. */
+const renameButton = (t: ChatThread): string =>
+  `<button type="button" class="rename-thread" aria-label="Rename thread" data-thread="${t.id}" data-title="${escapeHtml(threadTitle(t))}">Rename</button>`;
+
+/** Where a refused rename or delete says why, set with `textContent` only. */
+const ACTIONS_OUT = '<p id="thread-actions-out" class="error" role="alert" hidden></p>';
+
+/**
+ * Rename and Delete on `/chat` and Rename on `/chat/:id` (#833). Rename asks for the new title
+ * (the current one filled in) and sends `PATCH /api/chat/threads/:id`, then reloads, so every
+ * place the title shows has the new one. Delete asks the button's `data-ask`, sends `DELETE`, and
+ * takes its row away. A refusal shows the server's error with `textContent`.
+ */
+export const THREAD_ACTIONS_SCRIPT = `<script>{const out=document.getElementById('thread-actions-out');const say=(t)=>{if(!out)return;out.textContent=t;out.hidden=false;};
+const url=(b)=>'/api/chat/threads/'+encodeURIComponent(b.dataset.thread);
+const refused=async(r)=>'Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??'');
+document.addEventListener('click',async(e)=>{const b=e.target&&e.target.closest?e.target.closest('button.rename-thread,button.delete-thread'):null;if(!b||b.disabled)return;e.preventDefault();
+if(b.classList.contains('rename-thread')){const t=prompt('Rename thread (1 to 200 characters)',b.dataset.title||'');if(t===null)return;b.disabled=true;try{const r=await jmFetch(url(b),{title:t},'PATCH');if(r.ok){location.reload();return;}say(await refused(r));}catch(x){say('Not sent: '+((x&&x.message)||x));}finally{b.disabled=false;}return;}
+if(!confirm(b.dataset.ask||''))return;b.disabled=true;try{const r=await jmFetch(url(b),{},'DELETE');if(r.ok){if(out)out.hidden=true;const row=b.closest('tr');if(row)row.remove();return;}say(await refused(r));}catch(x){say('Not sent: '+((x&&x.message)||x));}finally{b.disabled=false;}});}</script>`;
+
 /** The `/chat` page: the threads, newest first, and a New thread button. */
 export function renderChatList(
   threads: ChatThread[],
@@ -81,15 +111,15 @@ export function renderChatList(
   const list =
     threads.length === 0
       ? '<p>No threads yet.</p>'
-      : `<table><tr><th>Thread</th><th>Updated</th></tr>${threads
+      : `<table><tr><th>Thread</th><th>Updated</th><th><span class="sr-only">Actions</span></th></tr>${threads
           .map(
             (t) =>
-              `<tr><td><a href="/chat/${encodeURIComponent(t.id)}">${codeHtml(threadTitle(t))}</a>${focusChip(t, zones)}</td><td>${relativeTime(t.updatedAt, now)}</td></tr>`,
+              `<tr><td><a href="/chat/${encodeURIComponent(t.id)}">${codeHtml(threadTitle(t))}</a>${focusChip(t, zones)}</td><td>${relativeTime(t.updatedAt, now)}</td><td class="thread-actions">${renameButton(t)}<button type="button" class="delete-thread" aria-label="Delete thread" title="Delete thread" data-thread="${t.id}" data-ask="${escapeHtml(deleteAsk(threadTitle(t)))}">${TRASHCAN}</button></td></tr>`,
           )
           .join('')}</table>`;
   const script = `<script>document.getElementById('new-thread').addEventListener('submit',async(e)=>{e.preventDefault();const r=await jmFetch('/api/chat/threads',{});if(r.ok){const b=await r.json();location.href='/chat/'+encodeURIComponent(b.thread.id);}else alert('Refused: '+r.status+' '+((await r.json().catch(()=>({}))).error??''));});</script>`;
   return page(
-    `${CHIP_STYLE}<h2>Chat</h2>${missing}<form id="new-thread"><button class="primary">New thread</button></form>${list}${script}`,
+    `${CHIP_STYLE}${ACTIONS_STYLE}<h2>Chat</h2>${missing}<form id="new-thread"><button class="primary">New thread</button></form>${ACTIONS_OUT}${list}${script}${THREAD_ACTIONS_SCRIPT}`,
     { title: 'Chat' },
   );
 }
@@ -340,11 +370,12 @@ export function renderThread(
   const last = messages.reduce((n, m) => Math.max(n, m.seq), 0);
   const busy = messages.some((m) => m.state === 'queued' || m.state === 'running');
   return page(
-    `${CHAT_STYLE}${CHIP_STYLE}${o.panel ? '' : breadcrumb([{ label: 'Chat', href: '/chat' }, { label: codeHtml(threadTitle(t)) }])}<h2>${codeHtml(threadTitle(t))}${focusChip(t, o.zones ?? [])}</h2>` +
+    `${CHAT_STYLE}${CHIP_STYLE}${ACTIONS_STYLE}${o.panel ? '' : breadcrumb([{ label: 'Chat', href: '/chat' }, { label: codeHtml(threadTitle(t)) }])}<div class="thread-head"><h2>${codeHtml(threadTitle(t))}${focusChip(t, o.zones ?? [])}</h2>${renameButton(t)}</div>${ACTIONS_OUT}` +
       `<div id="chat" data-thread="${t.id}" data-last="${last}" data-busy="${busy ? '1' : '0'}">` +
       `<div id="messages" class="chat-log" aria-live="polite">${logHtml(messages, cards, cardHtml, busy)}</div>` +
       `<form id="send" class="chat-send"><textarea name="text" maxlength="20000" required placeholder="Ask Jumpmaster" aria-describedby="send-hint"></textarea><small id="send-hint" class="hint">Enter to send, Shift+Enter for a new line</small><button class="primary">Send</button></form>${CONFIRM_DIALOG}</div>` +
       THREAD_SCRIPT +
+      THREAD_ACTIONS_SCRIPT +
       (o.panel ? PANEL_ESCAPE_SCRIPT : ''),
     // A tab title can't hold code: a doctor check's thread (titled by its check id) says so.
     {

@@ -26,10 +26,12 @@ import { openDb } from '../db/open.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import {
   CHAT_MISSING_COMMAND,
+  deleteAsk,
   messageTextHtml,
   PANEL_ESCAPE_SCRIPT,
   renderChatList,
   renderThread,
+  THREAD_ACTIONS_SCRIPT,
   THREAD_SCRIPT,
 } from './chat.js';
 import { renderChatMarkdown } from './markdown.js';
@@ -1977,5 +1979,171 @@ describe('focus chips and relative times', () => {
     expect(list.body).toContain(`<time datetime="${t0.toISOString()}"`);
     const one = await w.app.inject({ method: 'GET', url: `/chat/${th.id}`, headers: w.session });
     expect(one.body).toContain('<span class="chip">gone-zone</span>');
+  });
+});
+
+describe('rename and delete a thread (#833)', () => {
+  const EVIL = `<img src=x onerror=alert(1)> "q" 'a' & co`;
+  const rows = (html: string) => html.split('<tr>').slice(2);
+
+  test('each row on /chat has a Rename button and a trashcan button labelled Delete thread', () => {
+    const db = openDb(tmpDbFile());
+    const a = createThread(db, { title: 'First' }, t0);
+    const b = createThread(db, { title: 'Second' }, t0);
+    const html = renderChatList(listThreads(db), { serviceMissing: false, now: t0 });
+    const all = rows(html);
+    expect(all).toHaveLength(2);
+    for (const [row, t] of [
+      [all.find((r) => r.includes(`href="/chat/${a.id}"`)), a],
+      [all.find((r) => r.includes(`href="/chat/${b.id}"`)), b],
+    ] as const) {
+      expect(row).toContain(
+        `<button type="button" class="rename-thread" aria-label="Rename thread" data-thread="${t.id}" data-title="${t.title}">Rename</button>`,
+      );
+      expect(row).toMatch(
+        new RegExp(
+          `<button type="button" class="delete-thread" aria-label="Delete thread"[^>]* data-thread="${t.id}"[^>]*><svg[^>]*aria-hidden="true"`,
+        ),
+      );
+      // The controls are the row's last cell, after the title and the time.
+      expect(row?.indexOf('rename-thread')).toBeGreaterThan(row?.indexOf('<time') ?? 0);
+    }
+    expect(html).toContain('id="thread-actions-out"');
+    expect(html).toContain(THREAD_ACTIONS_SCRIPT);
+  });
+
+  test('the thread page has a Rename button by its heading', () => {
+    const db = openDb(tmpDbFile());
+    const th = createThread(db, { title: 'Plain one' }, t0);
+    const html = renderThread(th, []);
+    expect(html).toContain(
+      `<div class="thread-head"><h2>Plain one</h2><button type="button" class="rename-thread" aria-label="Rename thread" data-thread="${th.id}" data-title="Plain one">Rename</button></div>`,
+    );
+    expect(html).toContain('id="thread-actions-out"');
+    expect(html).toContain(THREAD_ACTIONS_SCRIPT);
+    expect(renderThread(th, [], [], { panel: true })).toContain('class="rename-thread"');
+  });
+
+  test('titles stay escaped in the list, the heading and the confirmation text', () => {
+    const db = openDb(tmpDbFile());
+    const th = createThread(db, { title: EVIL }, t0);
+    const esc = '&lt;img src=x onerror=alert(1)&gt; &quot;q&quot; &#39;a&#39; &amp; co';
+    const list = renderChatList(listThreads(db), { serviceMissing: false, now: t0 });
+    const one = renderThread(th, []);
+    for (const html of [list, one]) {
+      expect(html).not.toContain('<img src=x');
+      expect(html).toContain(`data-title="${esc}"`);
+    }
+    expect(list).toContain(`data-ask="Delete the thread “${esc}”?`);
+    expect(deleteAsk(EVIL)).toContain(`“${EVIL}”`);
+    expect(one).toContain(`<h2>&lt;img src=x onerror=alert(1)&gt;`);
+  });
+
+  /** Runs the actions script against a fake page; returns its click handler and what it did. */
+  function actions(o: {
+    confirm: boolean;
+    prompt: string | null;
+    res: { status: number; body: unknown };
+  }) {
+    let onClick: ((e: unknown) => Promise<void>) | undefined;
+    const out = { textContent: '', hidden: true };
+    const fetched: unknown[][] = [];
+    const asked: string[] = [];
+    let removed = 0;
+    let reloaded = 0;
+    const ctx = vm.createContext({
+      document: {
+        getElementById: () => out,
+        addEventListener: (_: string, fn: typeof onClick) => {
+          onClick = fn;
+        },
+      },
+      location: {
+        reload: () => {
+          reloaded++;
+        },
+      },
+      confirm: (t: string) => {
+        asked.push(t);
+        return o.confirm;
+      },
+      prompt: (_: string, t: string) => {
+        asked.push(t);
+        return o.prompt;
+      },
+      jmFetch: async (...a: unknown[]) => {
+        fetched.push(a);
+        return {
+          ok: o.res.status < 300,
+          status: o.res.status,
+          json: async () => o.res.body,
+        };
+      },
+    });
+    vm.runInContext(THREAD_ACTIONS_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+    const button = (cls: string) => {
+      const b = {
+        disabled: false,
+        dataset: { thread: '7', title: 'Old <t>', ask: deleteAsk('Old <t>') },
+        classList: { contains: (c: string) => c === cls },
+        closest: (sel: string) =>
+          sel === 'tr'
+            ? {
+                remove: () => {
+                  removed++;
+                },
+              }
+            : b,
+      };
+      return b;
+    };
+    const click = async (cls: string) =>
+      onClick?.({ target: button(cls), preventDefault: () => {} });
+    return {
+      click,
+      out,
+      fetched,
+      asked,
+      removed: () => removed,
+      reloaded: () => reloaded,
+    };
+  }
+
+  test('Delete asks, sends DELETE through jmFetch, and takes the row away', async () => {
+    const a = actions({ confirm: true, prompt: null, res: { status: 200, body: { deleted: 7 } } });
+    await a.click('delete-thread');
+    expect(a.asked).toEqual([deleteAsk('Old <t>')]);
+    expect(a.fetched).toEqual([['/api/chat/threads/7', {}, 'DELETE']]);
+    expect(a.removed()).toBe(1);
+  });
+
+  test('a cancelled Delete sends nothing; a refused one shows the error as text', async () => {
+    const no = actions({ confirm: false, prompt: null, res: { status: 200, body: {} } });
+    await no.click('delete-thread');
+    expect(no.fetched).toEqual([]);
+    const err = '<b>this thread has a turn waiting or running</b>';
+    const a = actions({ confirm: true, prompt: null, res: { status: 409, body: { error: err } } });
+    await a.click('delete-thread');
+    expect(a.removed()).toBe(0);
+    expect(a.out).toEqual({ textContent: `Refused: 409 ${err}`, hidden: false });
+  });
+
+  test('Rename prompts with the title, sends PATCH through jmFetch, and reloads', async () => {
+    const a = actions({ confirm: true, prompt: 'New name', res: { status: 200, body: {} } });
+    await a.click('rename-thread');
+    expect(a.asked).toEqual(['Old <t>']);
+    expect(a.fetched).toEqual([['/api/chat/threads/7', { title: 'New name' }, 'PATCH']]);
+    expect(a.reloaded()).toBe(1);
+    const bad = actions({
+      confirm: true,
+      prompt: ' ',
+      res: { status: 400, body: { error: 'a title is 1 to 200 characters' } },
+    });
+    await bad.click('rename-thread');
+    expect(bad.reloaded()).toBe(0);
+    expect(bad.out.textContent).toBe('Refused: 400 a title is 1 to 200 characters');
+    const cancelled = actions({ confirm: true, prompt: null, res: { status: 200, body: {} } });
+    await cancelled.click('rename-thread');
+    expect(cancelled.fetched).toEqual([]);
   });
 });
