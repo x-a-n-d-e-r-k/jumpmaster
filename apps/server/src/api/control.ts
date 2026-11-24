@@ -89,6 +89,7 @@ import { type Forge, GitHubForge } from '../forge/github.js';
 import type { GitHubAppBroker } from '../forge/github-app.js';
 import type { HeldDropTokens } from '../forge/held-tokens.js';
 import type { InstallationVerifier } from '../forge/installation-verifier.js';
+import { forgeKind } from '../forge/kind.js';
 import type { ImageMirror } from '../images/mirror.js';
 import { fileIntakeIssue, GoalStubSchema, IntakeIssueSchema, renderGoalStub } from '../intake.js';
 import { engageKill, expireLeases, releaseKill } from '../leases.js';
@@ -966,9 +967,9 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
             );
             if (r.state !== 'done') {
               audit(req, 'labels.create', { result: `failed: ${r.state}` }, zone.id);
-              return reply
-                .code(502)
-                .send({ error: `GitHub did not create the labels (${r.state})` });
+              return reply.code(502).send({
+                error: `${forgeKind(zone) === 'gitlab' ? 'GitLab' : 'GitHub'} did not create the labels (${r.state})`,
+              });
             }
             created = ((r.result as { created?: string[] } | undefined)?.created ?? []).slice();
           } catch (e) {

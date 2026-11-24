@@ -44,11 +44,13 @@ import {
 } from '../db/repo.js';
 import type { DoctorCheck, DoctorDeps } from '../doctor/checks.js';
 import { createAppBrokers } from '../forge/app-brokers.js';
+import { GitLabForge } from '../forge/gitlab.js';
 import { serverScrubSet } from '../forge/scrub-set.js';
 import { createTokenCache } from '../forge/token-cache.js';
 import type { MirrorStatus } from '../images/mirror.js';
 import { intakeKey } from '../intake.js';
 import { AUTHOR_TOKEN, CLAUDE_TOKEN, NOW, world } from '../test/doctorWorld.js';
+import { ACCESS, fakeGitLab } from '../test/fake-gitlab.js';
 import { fakeForgePair } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
@@ -547,6 +549,74 @@ describe('doctor routes', () => {
       ['main', 'refused: killed'],
       ['main', 'created: drop-ready, agent-retry'],
     ]);
+  });
+
+  describe('the label action on a GitLab zone (issue #812)', () => {
+    const GL = 'https://gitlab.example.com';
+    const PATH = 'acme/demo';
+    // Made-up tokens, built at run time so no token-shaped literal sits in the tracked file.
+    const glpat = (c: string) => ['glpat', c.repeat(20)].join('-');
+    const A_TOKEN = glpat('A');
+    const R_TOKEN = glpat('R');
+    let gl: ReturnType<typeof fakeGitLab> | undefined;
+
+    beforeAll(() => nock.disableNetConnect());
+    afterEach(() => {
+      gl?.stop();
+      gl = undefined;
+      nock.cleanAll();
+    });
+    afterAll(() => nock.enableNetConnect());
+
+    function gitlabApp(authorAccess: number) {
+      const w = world({ zone: { repo: PATH, forge: 'gitlab', gitlab: { baseUrl: GL } } });
+      gl = fakeGitLab({ baseUrl: GL, project: { id: 7, path: PATH, visibility: 'private' } });
+      gl.addUser({ username: 'jm-author', token: A_TOKEN, accessLevel: authorAccess });
+      gl.addUser({ username: 'jm-reviewer', token: R_TOKEN, accessLevel: ACCESS.developer });
+      gl.seedLabel({ name: 'bug' });
+      app = controlApp({
+        db: w.db,
+        config: { ...w.config, secrets: { ...w.config.secrets, operatorToken: TOKEN } },
+        now: () => NOW,
+        forgesFor: () => ({
+          author: new GitLabForge(GL, PATH, A_TOKEN),
+          reviewer: new GitLabForge(GL, PATH, R_TOKEN),
+        }),
+        doctorEnv: w.deps.env,
+      });
+      return w;
+    }
+    const noToken = (body: string) => {
+      for (const t of [A_TOKEN, R_TOKEN]) expect(body).not.toContain(t);
+      expect(body).not.toMatch(/glpat-/);
+    };
+
+    test('creates the missing labels on the GitLab project as the author', async () => {
+      gitlabApp(ACCESS.developer);
+      const r = await post('/api/control/zones/main/labels', {});
+      expect(r?.statusCode).toBe(200);
+      expect(r?.json()).toMatchObject({
+        created: ['drop-ready', 'agent-retry'],
+        check: { id: 'forge.labels', status: 'pass' },
+      });
+      noToken(r?.body ?? '');
+      const creates = gl?.requests.filter((q) => q.method === 'POST' && q.path.endsWith('/labels'));
+      expect(creates?.map((q) => [q.user, (q.body as { name: string }).name])).toEqual([
+        ['jm-author', 'drop-ready'],
+        ['jm-author', 'agent-retry'],
+      ]);
+    });
+
+    test('a refused create answers in GitLab words, not GitHub', async () => {
+      const w = gitlabApp(ACCESS.guest);
+      const r = await post('/api/control/zones/main/labels', {});
+      expect(r?.statusCode).toBe(502);
+      expect(r?.json().error).toMatch(/^GitLab did not create the labels/);
+      expect(r?.body).not.toContain('GitHub');
+      noToken(r?.body ?? '');
+      const rows = listAudit(w.db).filter((a) => a.action === 'labels.create');
+      expect(rows.map((a) => a.detail.result)).toEqual(['failed: failed']);
+    });
   });
 
   test('the doctor routes need the operator token and an allowed Origin', async () => {

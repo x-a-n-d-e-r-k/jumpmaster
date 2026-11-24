@@ -405,12 +405,21 @@ function gitlabReadFailed(
       summary: `could not ${what}: GitLab's rate limit refused the ${who} token's read (HTTP ${r.status}); the check did not run`,
       fix: 'Run the doctor again in a few minutes.',
     };
-  if (r.status === 403 || r.status === 404)
+  if (r.status === 403)
     return {
       ...base,
       status: 'fail',
-      summary: `the ${who} token can't ${what} (HTTP ${r.status}): it needs the api scope and at least Developer access to the project`,
+      summary: `the ${who} token can't ${what} (HTTP 403): it lacks the api scope`,
       fix: `${newToken} Check that the ${who} bot user is a Developer on the project.`,
+      doc: doc('tokens'),
+    };
+  // GitLab answers a non-member of a private project 404.
+  if (r.status === 404)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `the ${who} token can't ${what} (HTTP 404): its user is not a member of the project, or the project path is wrong`,
+      fix: `Make the ${who} bot user (the owner of the token in ${entry}) a member of the project with the Developer role, and check the zone's project path is the project's full path on GitLab.`,
       doc: doc('tokens'),
     };
   return {
@@ -2668,8 +2677,19 @@ export function wantedLabels(
 /** `forge.labels` on the author's forge (the doctor run, and again after the label action). */
 export async function labelsCheckOn(zone: DropZoneConfig, author: Forge): Promise<DoctorCheck> {
   const base = { id: 'forge.labels', zoneId: zone.id, doc: doc('labels') };
+  const gitlab = forgeKind(zone) === 'gitlab';
   const got = await attempt(() => author.listLabels());
-  if (!got.ok) return readFailed(base, 'author', 'list the labels', 'Issues: read', got);
+  if (!got.ok)
+    return readFailed(
+      base,
+      'author',
+      'list the labels',
+      'Issues: read',
+      got,
+      gitlab
+        ? { zoneId: zone.id, baseUrl: zone.gitlab?.baseUrl ?? 'the GitLab instance' }
+        : undefined,
+    );
   const want = wantedLabels(zone);
   const have = new Set(got.value.map((l) => l.toLowerCase()));
   const missing = want.filter((l) => !have.has(l.name.toLowerCase()));
@@ -2679,12 +2699,23 @@ export async function labelsCheckOn(zone: DropZoneConfig, author: Forge): Promis
       status: 'pass',
       summary: `the labels exist: ${want.map((l) => l.name).join(', ')}`,
     };
+  const action = `Use the doctor page's Create the missing labels (or POST /api/control/zones/${zone.id}/labels)`;
+  // GitLab (issue #812): no gh command; each label as the project's Manage → Labels form asks.
+  if (gitlab)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `missing label(s) on the GitLab project ${zone.repo}: ${missing.map((l) => l.name).join(', ')}`,
+      fix: `${action}, or create them in the project's Manage → Labels, as a user with at least the Reporter role:\n${missing
+        .map((l) => `${l.name} (colour #${l.color})${l.description ? `: ${l.description}` : ''}`)
+        .join('\n')}`,
+    };
   const q = (s: string) => (/^[\w.:-]+$/.test(s) ? s : JSON.stringify(s));
   return {
     ...base,
     status: 'fail',
     summary: `missing label(s) on ${zone.repo}: ${missing.map((l) => l.name).join(', ')}`,
-    fix: `Use the doctor page's Create the missing labels (or POST /api/control/zones/${zone.id}/labels), or create them with the GitHub CLI, as an account with write access:\n${missing
+    fix: `${action}, or create them with the GitHub CLI, as an account with write access:\n${missing
       .map(
         (l) =>
           `gh label create ${q(l.name)} --repo ${zone.repo} --color ${l.color} --description ${JSON.stringify(l.description)}`,
