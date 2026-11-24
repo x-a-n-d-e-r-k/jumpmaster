@@ -1824,6 +1824,23 @@ app's page and accept the change on the installation). A grant it can't read is 
 Administration and Workflows are `forge.admin`'s. An app has no token expiry to report: its
 tokens are minted per use.
 
+On a GitLab zone (`forge: 'gitlab'`) the check reads the author's personal access token, stored
+in the vault entry `gitlab-pat/<zone>/author` (System, Credentials, or
+`jumpmaster ctl secrets set gitlab-pat/<zone>/author`), against the GitLab project. It fails when:
+
+- GitLab rejects the token (401): it is wrong, expired or revoked; store a new one in the entry;
+- the token can read its user but not the project (403), or its scopes are readable and lack
+  `api` (`read_api` and `write_repository` alone are not enough): create a token with the `api`
+  scope;
+- the token carries the `sudo` or `admin_mode` scope: revoke it and create one without;
+- the project can't be read (404): make the bot user a member of the project with Developer, and
+  check the zone's project path;
+- the bot user is below Developer, or is Owner (no GitLab token above Maintainer).
+
+It warns when the token can't read its own scopes (`GET /personal_access_tokens/self` answers 401
+or 404, so the scope check did not run), when the token expires soon, and when GitLab gives no
+usable answer (a rate limit, a 5xx or no connection).
+
 ### `forge.reviewer`
 
 **Action:** Open System, Credentials (`/system/credentials`).
@@ -1838,6 +1855,11 @@ are the same GitHub App, or the same account: GitHub never lets an app approve i
 request, so create a second GitHub App for the reviewer, install it on the repository and import
 it as the owner's reviewer app. A reviewer app with admin on the repository fails: remove the
 Administration permission on its page and accept the change on its installation.
+
+On a GitLab zone it runs the same checks with `gitlab-pat/<zone>/reviewer`, and fails when the
+reviewer is Maintainer or above (a Maintainer can edit the approval rules its own approval is
+checked against) or is the same GitLab user as the author (GitLab never counts an author's
+approval of its own merge request).
 
 ### `forge.author-reads`
 

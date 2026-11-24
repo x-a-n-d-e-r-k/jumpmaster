@@ -4135,6 +4135,17 @@ describe('forge.author and forge.reviewer on a GitLab zone (issue #778)', () => 
   });
   afterAll(() => nock.enableNetConnect());
 
+  function stubbed(routes: Record<string, () => Response>): typeof fetch {
+    return (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(String(url)).pathname;
+      for (const [suffix, answer] of Object.entries(routes))
+        if (path.endsWith(suffix)) return answer();
+      return fetch(url, init);
+    }) as typeof fetch;
+  }
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
   async function run(
     o: {
       author?: UserOpts;
@@ -4144,6 +4155,8 @@ describe('forge.author and forge.reviewer on a GitLab zone (issue #778)', () => 
       authorNonMember?: boolean;
       /** The author's token matches no GitLab user. */
       authorUnknown?: boolean;
+      /** Answers the author forge's requests whose path ends with a key; the rest go to the fake. */
+      authorStub?: Record<string, () => Response>;
     } = {},
   ) {
     const w = world({
@@ -4174,7 +4187,12 @@ describe('forge.author and forge.reviewer on a GitLab zone (issue #778)', () => 
       });
     const reviewerToken = o.reviewer === 'same' ? A_TOKEN : R_TOKEN;
     w.deps.forges = () => ({
-      author: new GitLabForge(GL, PATH, A_TOKEN),
+      author: new GitLabForge(
+        GL,
+        PATH,
+        A_TOKEN,
+        o.authorStub ? { fetch: stubbed(o.authorStub) } : {},
+      ),
       reviewer: o.starter ? null : new GitLabForge(GL, PATH, reviewerToken),
     });
     const checks = await zoneChecks(w.deps, w.zone, []);
@@ -4220,6 +4238,70 @@ describe('forge.author and forge.reviewer on a GitLab zone (issue #778)', () => 
     expect(author.fix).toContain('Developer');
     expect(author.fix).toContain('jm-author');
     expect(author.fix).toContain('project path');
+  });
+
+  test('fails a token that can read /user but not the project (no api or read_api) as a token problem', async () => {
+    for (const scopes of [
+      ['read_user', 'write_repository'],
+      ['read_user', 'sudo'],
+    ]) {
+      const { author, zone } = await run({ author: { scopes } });
+      expect(author.status).toBe('fail');
+      expect(author.summary).toContain('HTTP 403');
+      expect(author.summary).toContain('api scope');
+      expect(author.summary).not.toContain('member');
+      expect(author.fix).toContain(`gitlab-pat/${zone}/author`);
+      expect(author.fix).toContain('neither sudo nor admin_mode');
+      expect(author.fix).not.toContain('member');
+    }
+  });
+
+  test('fails a token that cannot read its own user (403 on GET /user) for lack of the api scope', async () => {
+    const { author, zone } = await run({ author: { scopes: ['write_repository'] } });
+    expect(author.status).toBe('fail');
+    expect(author.summary).toContain('(HTTP 403): it lacks the api scope');
+    expect(author.fix).toContain(`gitlab-pat/${zone}/author`);
+  });
+
+  test('fails a token GitLab rejects (401) on the project read, naming its vault entry', async () => {
+    const { author, zone } = await run({
+      authorStub: {
+        [`/projects/${encodeURIComponent(PATH)}`]: () => json(401, { message: '401 Unauthorized' }),
+      },
+    });
+    expect(author.status).toBe('fail');
+    expect(author.summary).toContain('GitLab rejected the author token (401)');
+    expect(author.summary).toContain(`project ${PATH}`);
+    expect(author.fix).toContain(`gitlab-pat/${zone}/author`);
+  });
+
+  test('warns, and does not judge the token, when GitLab gives no usable answer', async () => {
+    const http500 = await run({
+      authorStub: { '/user': () => json(500, { message: '500 Internal Server Error' }) },
+    });
+    expect(http500.author.status).toBe('warn');
+    expect(http500.author.summary).toContain('HTTP 500');
+    expect(http500.author.summary).toContain('the check did not run');
+    expect(http500.author.fix).toContain(GL);
+    const down = await run({
+      authorStub: {
+        '/user': () => {
+          throw new TypeError('fetch failed');
+        },
+      },
+    });
+    expect(down.author.status).toBe('warn');
+    expect(down.author.summary).toContain('no HTTP answer');
+  });
+
+  test('fails an empty scope list as lacking api, naming it none', async () => {
+    const { author } = await run({
+      authorStub: {
+        '/personal_access_tokens/self': () => json(200, { scopes: [], expires_at: null }),
+      },
+    });
+    expect(author.status).toBe('fail');
+    expect(author.summary).toContain('(it has: none)');
   });
 
   test('fails a Reporter author, below Developer', async () => {

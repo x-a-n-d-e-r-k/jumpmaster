@@ -1250,7 +1250,16 @@ async function gitlabIdentityCheck(
   if (!access.ok) {
     const what = `read the ${project}`;
     if (access.status === 401) return rejected(what);
-    if ((access.status === 403 || access.status === 404) && !access.rateLimited)
+    // GitLab answers a non-member of a private project 404; a 403 here is the token's scope
+    // (it can read /user through read_user, but the project read needs api or read_api).
+    if (access.status === 403 && !access.rateLimited)
+      return {
+        ...base,
+        status: 'fail',
+        summary: `the ${who} token (user ${user}) can't ${what} (HTTP 403): it lacks the api scope`,
+        fix: newToken,
+      };
+    if (access.status === 404)
       return {
         ...base,
         status: 'fail',
