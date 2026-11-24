@@ -73,6 +73,8 @@ export type GitLabIssue = {
   created_at: string;
   updated_at: string;
   closed_at: string | null;
+  /** The issue this one was moved to (GitLab closes the original on a move), or null. */
+  moved_to_id: number | null;
 };
 export type GitLabDiffRefs = { base_sha: string; start_sha: string; head_sha: string };
 export type GitLabMergeRequest = {
@@ -483,6 +485,8 @@ export function fakeGitLab(opts: {
     author?: string;
     createdAt?: string;
     updatedAt?: string;
+    /** Marks the issue as moved to another (GitLab's `moved_to_id`). */
+    movedToId?: number;
   }): GitLabIssue {
     const createdAt = i.createdAt ?? now();
     const state = i.state ?? 'opened';
@@ -498,6 +502,7 @@ export function fakeGitLab(opts: {
       created_at: createdAt,
       updated_at: i.updatedAt ?? createdAt,
       closed_at: state === 'closed' ? (i.updatedAt ?? createdAt) : null,
+      moved_to_id: i.movedToId ?? null,
     };
     for (const l of issue.labels) ensureLabel(l);
     issues.push(issue);

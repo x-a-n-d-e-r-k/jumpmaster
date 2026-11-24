@@ -15,6 +15,13 @@
 // - `addBlockedBy` is refused with GitLabUnsupportedError and sends no request.
 // - `updateIssue`'s `stateReason` has no GitLab counterpart and is dropped.
 // - `getIssue` never sets `pullRequest`: GitLab numbers issues and merge requests separately.
+// - `getIssue`'s `stateReason`: GitLab has no close reason, and the spec is silent, so this mapping
+//   is chosen. A plain GitLab close is the counterpart of GitHub's default close (completed), so a
+//   closed issue reads as `stateReason: 'completed'` and can be cited as evidence (`verifyCited`).
+//   The exception: an issue whose `moved_to_id` is set was closed by GitLab when it was moved, and
+//   the work was not done there, so it gets no `stateReason` and `verifyCited` refuses it. An open
+//   issue has none. Known limitation: GitLab's REST issue response has no reliable duplicate
+//   marker, so an issue closed as a duplicate also reads as completed.
 // - `branchSha` is `GET repository/branches/:name` (404 gives null). `createBranch` is
 //   `POST repository/branches`; GitLab's 400 for an existing branch is success only when the branch
 //   is already on `fromSha`.
@@ -279,6 +286,7 @@ type RawIssue = {
   labels?: string[];
   author?: RawUser;
   created_at: string;
+  moved_to_id?: number | null;
 };
 type RawMergeRequest = {
   iid: number;
@@ -500,9 +508,13 @@ export class GitLabForge implements Forge {
       if ((err as GitLabForgeError).status === 404) return null;
       throw err;
     }
+    const state = i.state === 'opened' ? 'open' : 'closed';
+    // A plain close reads as completed; a moved issue (closed by the move) does not.
+    const completed = state === 'closed' && (i.moved_to_id ?? null) === null;
     return {
       body: i.description ?? '',
-      state: i.state === 'opened' ? 'open' : 'closed',
+      state,
+      ...(completed ? { stateReason: 'completed' as const } : {}),
       labels: i.labels ?? [],
       ...(i.author?.username ? { author: i.author.username } : {}),
     };

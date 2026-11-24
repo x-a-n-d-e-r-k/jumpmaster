@@ -1,5 +1,6 @@
 import nock from 'nock';
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
+import { verifyCited } from '../crew/trail.js';
 import { branchProtectionProblems } from '../flow/guards.js';
 import { ACCESS, type FakeGitLab, fakeGitLab, type GitLabJobStatus } from '../test/fake-gitlab.js';
 import { makeZone } from '../test/fixtures.js';
@@ -114,9 +115,55 @@ describe('reads', () => {
       author: 'other',
     });
     const closed = await forge.getIssue(6);
-    expect(closed).toEqual({ body: '', state: 'closed', labels: [], author: 'agent' });
+    expect(closed).toEqual({
+      body: '',
+      state: 'closed',
+      stateReason: 'completed',
+      labels: [],
+      author: 'agent',
+    });
     expect(closed).not.toHaveProperty('pullRequest');
     expect(await forge.getIssue(99)).toBeNull();
+  });
+
+  test('getIssue: a closed issue reads as completed, an open or moved one has no stateReason', async () => {
+    const { gl, forge } = setup();
+    gl.seedIssue({ iid: 1, title: 'open' });
+    gl.seedIssue({ iid: 2, title: 'closed', state: 'closed' });
+    gl.seedIssue({ iid: 3, title: 'moved', state: 'closed', movedToId: 4242 });
+    expect(gl.issue(2)?.moved_to_id).toBeNull();
+    expect(gl.issue(3)?.moved_to_id).toBe(4242);
+    expect(await forge.getIssue(1)).not.toHaveProperty('stateReason');
+    expect(await forge.getIssue(2)).toMatchObject({ state: 'closed', stateReason: 'completed' });
+    const moved = await forge.getIssue(3);
+    expect(moved).toMatchObject({ state: 'closed' });
+    expect(moved).not.toHaveProperty('stateReason');
+  });
+
+  test('verifyCited with a GitLabForge pair: a cited closed issue is evidence, open and moved ones are not', async () => {
+    const { gl, forge } = setup();
+    gl.seedIssue({ iid: 1, title: 'this one' });
+    gl.seedIssue({ iid: 2, title: 'done', state: 'closed' });
+    gl.seedIssue({ iid: 3, title: 'open' });
+    gl.seedIssue({ iid: 4, title: 'moved', state: 'closed', movedToId: 9001 });
+    const pair = { author: forge, reviewer: null };
+    expect(await verifyCited(pair, 1, { pulls: [], issues: [2] })).toEqual({ ok: true });
+    expect(await verifyCited(pair, 1, { pulls: [], issues: [3] })).toEqual({
+      ok: false,
+      why: '#3 is not closed',
+    });
+    expect(await verifyCited(pair, 1, { pulls: [], issues: [4] })).toEqual({
+      ok: false,
+      why: '#4 was not closed as completed',
+    });
+    expect(await verifyCited(pair, 1, { pulls: [], issues: [99] })).toEqual({
+      ok: false,
+      why: '#99 not found',
+    });
+    expect(await verifyCited(pair, 1, { pulls: [], issues: [1] })).toEqual({
+      ok: false,
+      why: '#1 is this issue',
+    });
   });
 
   test('getIssueState and getIssueLabels, and the throw for a missing issue', async () => {
