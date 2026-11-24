@@ -35,6 +35,7 @@ import { FABLE_PLANS } from '../fable.js';
 import {
   appCodeownersFindings,
   branchProtectionProblems,
+  type CodeownersFindings,
   codeownersFindings,
   MERGE_RULESET,
 } from '../flow/guards.js';
@@ -2507,6 +2508,7 @@ async function codeownersCheck(
   app?: string,
   twoApp = false,
 ): Promise<DoctorCheck> {
+  if (forgeKind(zone) === 'gitlab') return gitlabCodeownersCheck(zone, r);
   const base = { id: 'forge.codeowners', zoneId: zone.id, doc: doc('branch-rules') };
   const rules = await r.rules();
   const required = [rules.author, rules.reviewer].some(
@@ -2608,6 +2610,178 @@ async function readCodeowners(
     if (got.value !== null) return { ok: true, text: got.value };
   }
   return { ok: true, text: null };
+}
+
+const GITLAB_CODEOWNERS_PATHS = ['CODEOWNERS', 'docs/CODEOWNERS', '.gitlab/CODEOWNERS'];
+const CODE_OWNER_SETTING =
+  "the protected branch's Code owner approval setting (Settings → Repository → Protected branches)";
+
+/**
+ * A GitLab CODEOWNERS file split into its sections, each as CODEOWNERS text GitHub's reader takes
+ * (`codeownersFindings`): every other line blank, so line numbers hold. Header lines (`[Name]`,
+ * `^[Name]`, `[Name][n]`, with default owners after) are not path lines; a path line with no
+ * owners takes its section's defaults. An optional (`^`) section requires no approval, so it is
+ * left out: its owners count as no owner. Sections of the same name are one section.
+ */
+function gitlabCodeownersSections(text: string): string[] {
+  const lines = text.split('\n');
+  const sections = new Map<string, { optional: boolean; lines: Map<number, string> }>();
+  const section = (key: string, optional: boolean) => {
+    let s = sections.get(key);
+    if (!s) sections.set(key, (s = { optional, lines: new Map() }));
+    return s;
+  };
+  let current = section('', false);
+  let defaults: string[] = [];
+  lines.forEach((raw, i) => {
+    const line = raw
+      .replace(/\r$/, '')
+      .replace(/(^|\s)#.*$/, '')
+      .trim();
+    if (line === '') return;
+    const header = /^(\^?)\[([^\]]+)\](?:\[\d+\])?(?:\s+(.*))?$/.exec(line);
+    if (header) {
+      current = section(`[${(header[2] ?? '').trim().toLowerCase()}]`, header[1] === '^');
+      defaults = (header[3] ?? '').split(/\s+/).filter((o) => o !== '');
+      return;
+    }
+    const [pattern = '', ...owners] = line.split(/(?<!\\)\s+/);
+    current.lines.set(i, [pattern, ...(owners.length > 0 ? owners : defaults)].join(' '));
+  });
+  return [...sections.values()]
+    .filter((s) => !s.optional)
+    .map((s) => lines.map((_, i) => s.lines.get(i) ?? '').join('\n'));
+}
+
+/**
+ * `codeownersFindings` for GitLab, section by section: GitLab applies every required section (the
+ * last match wins within one), so a line fails or warns in its own section, and a protected glob
+ * needs a person when any section's last covering line is people-only.
+ */
+function gitlabCodeownersFindings(
+  text: string,
+  zone: DropZoneConfig,
+  reviewer: string,
+): CodeownersFindings {
+  const per = gitlabCodeownersSections(text).map((t) => codeownersFindings(t, zone, reviewer));
+  const byLine = (a: { line: number }, b: { line: number }) => a.line - b.line;
+  const warn: CodeownersFindings['warn'] = [];
+  for (const glob of zone.protectedPaths) {
+    const seen = per.map((f) => f.warn.find((w) => w.glob === glob));
+    if (seen.some((w) => w === undefined)) continue;
+    const ws = seen.filter((w) => w !== undefined);
+    const pick =
+      ws.find((w) => w.why === 'bot-owns-protected') ??
+      ws.find((w) => w.line !== undefined) ??
+      ws[0];
+    if (pick) warn.push(pick);
+  }
+  return {
+    fail: per.flatMap((f) => f.fail).sort(byLine),
+    unknown: per.flatMap((f) => f.unknown).sort(byLine),
+    warn,
+  };
+}
+
+/**
+ * `forge.codeowners` for a GitLab zone (issue #815): GitLab reads the first of CODEOWNERS,
+ * docs/CODEOWNERS and .gitlab/CODEOWNERS, with sections, and requires the code owners' approval
+ * when the protected branch's `code_owner_approval_required` is on (a paid feature; off on Free).
+ * The rules by path are §7.4's, as on GitHub.
+ */
+async function gitlabCodeownersCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> {
+  const base = { id: 'forge.codeowners', zoneId: zone.id, doc: doc('branch-rules') };
+  const gitlab = { zoneId: zone.id, baseUrl: zone.gitlab?.baseUrl ?? 'the GitLab instance' };
+  const rules = await r.rules();
+  const required = [rules.author, rules.reviewer].some(
+    (x) => x?.kind === 'ok' && x.rules.requireCodeOwnerReview === true,
+  );
+  const parks =
+    'Jumpmaster parks every merge request that touches a protected path for you to review and merge by hand';
+  if (zone.identity === 'starter')
+    return required
+      ? {
+          ...base,
+          status: 'warn',
+          summary: `the protected branch requires code owner approval, which starter mode can never give: you are the author and the only code owner, and by default GitLab does not let an author approve their own merge request, so a merge request touching owned paths waits for good. ${parks}, which is the human review in starter mode`,
+          fix: `Turn off ${CODE_OWNER_SETTING}, or add a reviewer identity.`,
+        }
+      : {
+          ...base,
+          status: 'pass',
+          summary: `the protected branch does not require code owner approval, as starter mode needs: ${parks}`,
+        };
+  if (!required)
+    return {
+      ...base,
+      status: 'pass',
+      summary: 'the protected branch does not require code owner approval',
+    };
+  const branch = await r.branch();
+  const reviewer = await r.logins.reviewer();
+  if (!reviewer.ok)
+    return readFailed(base, 'reviewer', 'read its own account', 'the api scope', reviewer, gitlab);
+  let text: string | null = null;
+  for (const p of GITLAB_CODEOWNERS_PATHS) {
+    const got = await attempt(() => r.pair.author.getFileAt(branch, p));
+    if (!got.ok) return readFailed(base, 'author', `read ${p}`, 'the api scope', got, gitlab);
+    if (got.value !== null) {
+      text = got.value;
+      break;
+    }
+  }
+  const create = `Create .gitlab/CODEOWNERS naming people (you, and anyone else who may approve) for the protected paths (${zone.protectedPaths.join(', ')}), and @${reviewer.value} for everything else; or turn off ${CODE_OWNER_SETTING}.`;
+  if (text === null)
+    return {
+      ...base,
+      status: 'warn',
+      summary:
+        'the protected branch requires code owner approval, and there is no CODEOWNERS file: nobody owns the protected paths on GitLab, so GitLab asks no person to approve them',
+      fix: create,
+    };
+  const found = gitlabCodeownersFindings(text, zone, reviewer.value);
+  const at = (f: { line: number; pattern: string }) => `line ${f.line} (${f.pattern})`;
+  if (found.fail.length > 0)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `the protected branch requires code owner approval, and CODEOWNERS ${found.fail.map(at).join(', ')} names only people: every merge request touching those paths waits for a person, so nothing Jumpmaster approves can merge`,
+      fix: `In .gitlab/CODEOWNERS (or the CODEOWNERS file the project uses), name @${reviewer.value} on ${found.fail.length === 1 ? 'that line' : 'those lines'}, or in its section's default owners (the protected lines after it stay people-only; the last match in a section wins); or turn off ${CODE_OWNER_SETTING}.`,
+    };
+  const notes = [
+    ...found.unknown.map(
+      (u) =>
+        `${at(u)} names a group or an e-mail: if ${reviewer.value} is not among them, nothing merges; name @${reviewer.value} on the line to be sure`,
+    ),
+    ...found.warn
+      .filter((w) => w.why === 'bot-owns-protected')
+      .map(
+        (w) =>
+          `the reviewer account ${reviewer.value} owns ${w.glob} through line ${w.line} (${w.pattern}): its approval would satisfy the approval GitLab requires from a person there`,
+      ),
+    ...(found.warn.some((w) => w.why === 'unowned')
+      ? [
+          `no line owns ${found.warn
+            .filter((w) => w.why === 'unowned')
+            .map((w) => w.glob)
+            .join(
+              ', ',
+            )} (or the last line that matches names no owner, or only in an optional section): GitLab asks no person for those protected paths`,
+        ]
+      : []),
+  ];
+  if (notes.length > 0)
+    return {
+      ...base,
+      status: 'warn',
+      summary: notes.join('; '),
+      fix: `In .gitlab/CODEOWNERS (or the CODEOWNERS file the project uses), keep each protected path's last matching line people-only, after the line that names @${reviewer.value} (the last match in a section wins), outside any optional ^[...] section, and name @${reviewer.value} on lines owned by a group.`,
+    };
+  return {
+    ...base,
+    status: 'pass',
+    summary: `code owner approval is required: the protected paths are owned by people, and the reviewer ${reviewer.value} owns the rest, so GitLab holds a protected-path merge request for a person and merges the others`,
+  };
 }
 
 /**
