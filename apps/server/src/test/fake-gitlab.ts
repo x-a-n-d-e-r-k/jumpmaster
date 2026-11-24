@@ -589,7 +589,8 @@ export function fakeGitLab(opts: {
     const list = issues
       .filter((i) => state === 'all' || i.state === state)
       .filter((i) => wanted.every((l) => i.labels.includes(l)))
-      .filter((i) => afterMs === undefined || Date.parse(i.updated_at) > afterMs)
+      // GitLab: "Return issues updated on or after the given time", so the bound is inclusive.
+      .filter((i) => afterMs === undefined || Date.parse(i.updated_at) >= afterMs)
       .sort(byNewest);
     return paged(list, c.query);
   });
