@@ -922,7 +922,7 @@ describe('the wizard says what it checked (#161)', () => {
     const visible = forge.replace(/name="[^"]*"/g, '');
     expect(visible).not.toMatch(/\bauthorMayBeAdmin\b/);
     const text = forge
-      .replace(/<script>[\s\S]*?<\/script>/g, '')
+      .replace(/<script>[\s\S]*?<\/script>/gi, '')
       .replace(/<style>[\s\S]*?<\/style>/g, '')
       .replace(/<[^>]*>/g, ' ');
     expect(text.match(/\b[a-z]+[A-Z][A-Za-z]*\b/g) ?? []).toEqual([]);
@@ -1028,7 +1028,7 @@ describe('creating the GitHub Apps from the forge step (#374, spec §4.1)', () =
     const w = await world({ github: { ownerType: 'Organization' } });
     const forge = (await w.get('/setup/forge?repo=octo-org%2Fdemo')).body;
     const text = forge
-      .replace(/<script>[\s\S]*?<\/script>/g, '')
+      .replace(/<script>[\s\S]*?<\/script>/gi, '')
       .replace(/<style>[\s\S]*?<\/style>/g, '')
       .replace(/<[^>]*>/g, ' ');
     expect(text.match(/\b[a-z]+[A-Z][A-Za-z]*\b/g) ?? []).toEqual([]);
@@ -1587,7 +1587,7 @@ async function runProjectForm(
   detected: Record<string, unknown>,
   o: { identity?: string; preset?: string; gates?: { name: string; run: string }[] } = {},
 ) {
-  const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+  const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/gi)]
     .map((m) => m[1] as string)
     .find((s) => s.includes('const HOSTS')) as string;
   expect(script).toBeDefined();
@@ -1844,7 +1844,7 @@ describe('the project step takes a GitLab project URL (#796)', () => {
       expect(body, url).toContain('/reviewer</code> for two bots');
       expect(body, url).not.toContain('ctl secrets set gitlab-pat/');
       // The page decides nothing about the forge itself: no URL or path parsing in its script.
-      const script = [...body.matchAll(/<script>([\s\S]*?)<\/script>/g)]
+      const script = [...body.matchAll(/<script>([\s\S]*?)<\/script>/gi)]
         .map((m) => m[1] as string)
         .find((s) => s.includes('const HOSTS'));
       expect(script, url).toContain("jmFetch('/api/control/detect', { project })");
