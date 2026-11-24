@@ -519,6 +519,140 @@ function baseGate(
   return throttled(db, cfg, t) ? 'finishing_only' : 'open';
 }
 
+/** A live account-wide window at or above the threshold, holding the gate. */
+export type ThresholdReason = {
+  kind: 'threshold';
+  window: string;
+  utilization: number;
+  threshold: number;
+  resetsAt: string | null;
+};
+
+/** Claude's warning standing in for a figure it did not report (#748). */
+export type WarningReason = { kind: 'warning'; window: string | null; resetsAt: string | null };
+
+/**
+ * What holds dispatch, or that nothing does (#753): decided in dispatchGate's order, so its kind
+ * always agrees with the gate (`threshold` and `warning` are `finishing_only`). Per-model holds
+ * (#747) never hold the gate and are not a reason.
+ */
+export type GateReason =
+  | { kind: 'open' }
+  | { kind: 'stopped'; dropId: string | null; until: string | null }
+  | { kind: 'closed'; until: string | null }
+  | { kind: 'credits_resume'; workItemId: number | null; until: string | null }
+  | { kind: 'probe' }
+  | ThresholdReason
+  | WarningReason
+  | ({ kind: 'override'; held: ThresholdReason | WarningReason } & UsageOverride);
+
+/** The later of two ISO times, either possibly absent. */
+function laterOf(a: string | null, b: string | null): string | null {
+  const ta = ms(a);
+  const tb = ms(b);
+  if (ta === null) return tb === null ? null : b;
+  if (tb === null) return a;
+  return ta >= tb ? a : b;
+}
+
+/** What holds the throttle at `t`: the highest live account-wide window at the threshold, else the warning. */
+function throttleReason(
+  db: Db,
+  cfg: UsageConfig,
+  t: number,
+): ThresholdReason | WarningReason | null {
+  const top = liveAccountWindows(db, new Date(t))
+    .filter((w) => w.utilization >= cfg.throttleUtilization)
+    .sort((a, b) => b.utilization - a.utilization)[0];
+  if (top)
+    return {
+      kind: 'threshold',
+      window: top.key,
+      utilization: top.utilization,
+      threshold: cfg.throttleUtilization,
+      resetsAt: top.resetsAt,
+    };
+  if (!warningHolds(db, t)) return null;
+  const w = usageWarning(db, new Date(t));
+  return { kind: 'warning', window: w?.window ?? null, resetsAt: w?.resetsAt ?? null };
+}
+
+/** What holds dispatch now, in dispatchGate's terms (#753). */
+export function gateReason(db: Db, cfg: UsageConfig, now: Date): GateReason {
+  const u = getUsageState(db);
+  const gate = baseGate(db, u, cfg, now);
+  switch (gate) {
+    case 'open':
+    case 'probe':
+      return { kind: gate };
+    case 'stopped':
+      return { kind: 'stopped', dropId: u.overageDropId, until: u.overageUntil };
+    case 'closed':
+      return { kind: 'closed', until: laterOf(u.pausedUntil, u.probeNotBefore) };
+    case 'credits_resume':
+      return {
+        kind: 'credits_resume',
+        workItemId: u.overageResumeWorkItemId,
+        until: u.overageResumeUntil,
+      };
+    case 'finishing_only': {
+      const held = throttleReason(db, cfg, now.getTime());
+      // baseGate said the throttle holds, so one of the two does.
+      if (held === null) throw new Error('the throttle holds with no reason');
+      const o = overrideIn(db, u, now.getTime());
+      return o ? { kind: 'override', held, ...o } : held;
+    }
+    default:
+      return unreachable(gate);
+  }
+}
+
+/** A window key in words: `five_hour` reads `5-hour`, `seven_day_oauth_apps` `7-day oauth apps`. */
+function windowWords(key: string): string {
+  const periods: [string, string][] = [
+    ['five_hour', '5-hour'],
+    ['seven_day', '7-day'],
+  ];
+  for (const [p, words] of periods) {
+    if (key === p) return words;
+    if (key.startsWith(`${p}_`)) return `${words} ${key.slice(p.length + 1).replace(/_/g, ' ')}`;
+  }
+  return key.replace(/_/g, ' ');
+}
+
+const percent = (share: number): string => `${Math.round(share * 100)}%`;
+
+/**
+ * A gate reason in plain words: percentages rounded, no times and no HTML. Callers add reset and
+ * until times in their own format, and escape it.
+ */
+export function gateReasonText(reason: GateReason): string {
+  switch (reason.kind) {
+    case 'open':
+      return 'usage allows new work';
+    case 'stopped':
+      return `drop ${reason.dropId ?? '-'} ran on usage credits`;
+    case 'closed':
+      return 'Claude usage is at its limit';
+    case 'credits_resume':
+      return reason.workItemId === null
+        ? 'Command resumed work on credits'
+        : `Command resumed work item ${reason.workItemId} on credits`;
+    case 'probe':
+      return 'the usage limit was hit: one probe drop runs at a time until a report says it cleared';
+    case 'threshold':
+      return `${windowWords(reason.window)} usage at ${percent(reason.utilization)} is at or above the ${percent(reason.threshold)} throttle`;
+    case 'warning':
+      return reason.window === null
+        ? 'Claude warned that usage is high and reported no figure for any window'
+        : `Claude warned of ${windowWords(reason.window)} usage and reported no figure for it`;
+    case 'override':
+      return `${gateReasonText(reason.held)}; Command's override has ${reason.startsLeft} of ${reason.starts} starts left`;
+    default:
+      return unreachable(reason);
+  }
+}
+
 /** Called when a drop becomes terminal: frees the probe slot, backing off if nothing cleared it. */
 export function releaseProbe(
   db: Db,

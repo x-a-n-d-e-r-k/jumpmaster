@@ -32,7 +32,7 @@ import { currentObjective, type GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
 import { sliceWhole } from '../slice-whole.js';
 import type { Status } from '../status.js';
-import type { Gate, UsageWarning } from '../usage.js';
+import { type Gate, type GateReason, gateReasonText, type UsageWarning } from '../usage.js';
 import {
   type FailingCheck,
   floorCounts,
@@ -119,6 +119,8 @@ export interface HomeState {
     overageStatus?: string | null;
     /** Claude's current `allowed_warning` (#749), as `usageWarning` reads it; absent or null when none. */
     warning?: UsageWarning | null;
+    /** What holds dispatch (#753), as `gateReason` reads it; its words are `gateReasonText`'s. */
+    reason?: GateReason;
   };
   /** Outbox ops needing attention (`unknown` or `failed`): counted on the zone cards. */
   outbox?: OutboxRow[];
@@ -276,10 +278,19 @@ export function gateWords(u: NonNullable<HomeState['usage']>, now: Date): string
   switch (u.gate) {
     case 'open':
       return 'Dispatch open';
-    case 'finishing_only':
-      return 'Dispatch open to finishing work only: usage is near its limit';
-    case 'override':
+    case 'finishing_only': {
+      const r = u.reason;
+      if (r?.kind !== 'threshold' && r?.kind !== 'warning')
+        return 'Dispatch open to finishing work only: usage is near its limit';
+      const reset = r.resetsAt ? `; it resets ${at(r.resetsAt, now)}` : '';
+      return `Dispatch open to finishing work only: ${escapeHtml(gateReasonText(r))}${reset}`;
+    }
+    case 'override': {
+      const r = u.reason;
+      if (r?.kind === 'override')
+        return `Dispatch open on your usage override: ${escapeHtml(gateReasonText(r))}, ending ${at(r.until, now)}`;
       return `Dispatch open on your usage override: ${s.overrideStartsLeft ?? 0} of ${s.overrideStarts ?? 0} starts left, ending ${s.overrideUntil ? at(s.overrideUntil, now) : 'soon'}`;
+    }
     case 'probe':
       return 'Dispatch probing: one drop at a time until Claude allows more';
     case 'closed':

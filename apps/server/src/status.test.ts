@@ -569,6 +569,18 @@ describe('usage holds (round 2, I1 and I2)', () => {
     expect(statusOf(base({ usage: { gate: 'finishing_only' } }), NOW).headline).toMatch(/^Idle/);
   });
 
+  test("the throttle-held headline's detail carries the reason (#753)", () => {
+    const reason = '7-day usage at 93% is at or above the 90% throttle';
+    const s = statusOf(
+      base({ usage: { gate: 'finishing_only', reason }, zones: [zone({ items: ready() })] }),
+      NOW,
+    );
+    expect(s.headline).toMatch(/^Held by Claude's usage throttle/);
+    expect(s.detail).toBe(
+      '7-day usage at 93% is at or above the 90% throttle: reviews, heals and merges go on; new work starts once usage falls back.',
+    );
+  });
+
   test('a probe after a pause or a credits stop says one drop runs until the limit shows clear', () => {
     const s = statusOf(
       base({
@@ -1206,7 +1218,7 @@ describe('the usage throttle holding the crew, queued work or not (#727)', () =>
     const s = await w.status();
     expect(s.headline).toBe(CREW_HEADLINE);
     expect(s.detail).toBe(
-      'Claude reported its usage near the limit. Reviews, heals and merges go on; the crew lead, audits and new work start again once it clears.',
+      'Claude warned of 5-hour usage and reported no figure for it. Reviews, heals and merges go on; the crew lead, audits and new work start again once it clears.',
     );
     expect(s.waitingOn).toBe('claude');
     expect(s.since).toBe(w.observedAt);
