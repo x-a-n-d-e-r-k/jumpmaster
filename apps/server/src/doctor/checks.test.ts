@@ -4403,42 +4403,69 @@ describe('forge.branch-rules on a two-bot GitLab zone (issue #803, ruling 120)',
   afterAll(() => nock.enableNetConnect());
 
   async function branchRules(o: {
-    tier: 'free' | 'premium';
+    tier?: 'free' | 'premium';
+    starter?: boolean;
     approvalRule?: number;
     pushAccess?: number;
+    /** Each bot's member level (default Developer). */
+    level?: number;
+    resetOnPush?: boolean;
+    pipeline?: boolean;
+    protect?: boolean;
+    protectedBranchesStatus?: 403 | 500;
+    requireBranchProtection?: boolean;
   }) {
-    const w = world({ zone: { repo: PATH, forge: 'gitlab', gitlab: { baseUrl: GL } } });
+    const w = world({
+      zone: {
+        repo: PATH,
+        forge: 'gitlab',
+        gitlab: { baseUrl: GL },
+        ...(o.starter ? { identity: 'starter' as const } : {}),
+        ...(o.requireBranchProtection === false ? { requireBranchProtection: false } : {}),
+      },
+    });
     gl = fakeGitLab({
       baseUrl: GL,
-      project: { id: 7, path: PATH, visibility: 'private', onlyAllowMergeIfPipelineSucceeds: true },
-      approvals: { resetOnPush: true },
+      project: {
+        id: 7,
+        path: PATH,
+        visibility: 'private',
+        onlyAllowMergeIfPipelineSucceeds: o.pipeline ?? true,
+      },
+      approvals: { resetOnPush: o.resetOnPush ?? true },
     });
     for (const [username, token] of [
       ['jm-author', A_TOKEN],
       ['jm-reviewer', R_TOKEN],
     ] as const)
-      gl.addUser({ username, token, accessLevel: ACCESS.developer, scopes: ['api'] });
-    gl.protectBranch({
-      name: 'main',
-      pushAccessLevels: [o.pushAccess ?? ACCESS.maintainer],
-      mergeAccessLevels: [ACCESS.developer],
-    });
+      gl.addUser({ username, token, accessLevel: o.level ?? ACCESS.developer, scopes: ['api'] });
+    if (o.protect !== false)
+      gl.protectBranch({
+        name: 'main',
+        pushAccessLevels: [o.pushAccess ?? ACCESS.maintainer],
+        mergeAccessLevels: [ACCESS.developer],
+      });
     if (o.approvalRule !== undefined)
       gl.seedApprovalRule({
         name: 'review',
         approvalsRequired: o.approvalRule,
         protectedBranches: ['main'],
       });
-    gl.setTier(o.tier);
+    gl.setTier(o.tier ?? 'premium');
+    if (o.protectedBranchesStatus) gl.setProtectedBranchesStatus(o.protectedBranchesStatus);
     w.deps.forges = () => ({
       author: new GitLabForge(GL, PATH, A_TOKEN),
-      reviewer: new GitLabForge(GL, PATH, R_TOKEN),
+      reviewer: o.starter ? null : new GitLabForge(GL, PATH, R_TOKEN),
     });
     const c = one(await zoneChecks(w.deps, w.zone, []), 'forge.branch-rules');
     const text = `${c.summary}\n${c.fix ?? ''}\n${JSON.stringify(c)}`;
     for (const t of [A_TOKEN, R_TOKEN]) expect(text).not.toContain(t);
     expect(text).not.toMatch(/glpat-/);
-    return c;
+    // GitLab words only (issue #816): no GitHub setting, plan or variable in what the operator reads.
+    const said = `${c.summary}\n${c.fix ?? ''}`;
+    for (const word of ['ruleset', 'GitHub', 'pull request', 'fine-grained', 'JM_GITHUB_'])
+      expect(said).not.toContain(word);
+    return { ...c, zone: w.zone.id };
   }
 
   test('approval rules refused (Free): warns that the merge rests on the reviewer bot', async () => {
@@ -4461,9 +4488,139 @@ describe('forge.branch-rules on a two-bot GitLab zone (issue #803, ruling 120)',
   test('another problem fails, and the waived approval problems are not listed', async () => {
     const c = await branchRules({ tier: 'free', pushAccess: ACCESS.developer });
     expect(c.status).toBe('fail');
-    expect(c.summary).toContain('bot can bypass');
-    expect(c.summary).not.toContain('approvals < 1');
-    expect(c.summary).not.toContain('stale approvals not dismissed');
+    // The guard's labels, worded for GitLab by the doctor (issue #816).
+    expect(c.summary).toContain('a bot is allowed to push to the branch');
+    expect(c.summary).not.toContain('no approval rule requires an approval');
+    expect(c.summary).not.toContain('approvals are not removed when a commit is added');
+  });
+
+  describe('GitLab wording and fixes (issue #816)', () => {
+    const PROTECT = 'Settings → Repository → Protected branches';
+    const APPROVALS = 'Settings → Merge requests → Merge request approvals';
+    /** GitLab's "No one" access level on a protected branch. */
+    const NO_ONE = 0;
+
+    test('two-bot, no protected branch: fails, protect it and add an approval rule', async () => {
+      const c = await branchRules({ protect: false });
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('the branch is not protected');
+      expect(c.fix).toContain(PROTECT);
+      expect(c.fix).toContain('Allowed to merge');
+      expect(c.fix).toContain('Allowed to push and merge');
+      expect(c.fix).toContain('No one');
+      expect(c.fix).toContain('approval rule requiring 1 approval');
+      expect(c.fix).toContain(APPROVALS);
+    });
+
+    test('two-bot, approval rule of 1, reset on push, push No one, pipeline: passes', async () => {
+      const c = await branchRules({ approvalRule: 1, pushAccess: NO_ONE });
+      expect(c.status).toBe('pass');
+      expect(c.summary).toContain('merge request');
+      expect(c.summary).toContain('1 approval');
+      expect(c.summary).toContain('approval rules');
+      expect(c.summary).toContain('removes approvals when a commit is added');
+      expect(c.summary).toContain('pipeline');
+      expect(c.summary).toContain('neither bot can push to the branch');
+      expect(c.fix).toBeUndefined();
+    });
+
+    test('two-bot, approval rule of 0: fails, naming the approval rule', async () => {
+      const c = await branchRules({ approvalRule: 0, pushAccess: NO_ONE });
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('no approval rule requires an approval');
+      expect(c.fix).toContain('approval rule');
+      expect(c.fix).toContain(APPROVALS);
+    });
+
+    test('two-bot, reset on push off: fails, naming the removal of approvals', async () => {
+      const c = await branchRules({
+        approvalRule: 1,
+        pushAccess: NO_ONE,
+        resetOnPush: false,
+      });
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('approvals are not removed when a commit is added');
+      expect(c.fix).toContain('Remove all approvals when a commit is added');
+    });
+
+    test('a bot allowed to push: fails, set Allowed to push and merge to No one', async () => {
+      const c = await branchRules({ approvalRule: 1, pushAccess: ACCESS.developer });
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('the bot can push to the branch without a merge request');
+      expect(c.summary).toContain('a bot is allowed to push to the branch');
+      expect(c.fix).toContain('Allowed to push and merge to No one');
+      expect(c.fix).toContain(PROTECT);
+    });
+
+    test('a bot at Maintainer: fails, give the bots the Developer role', async () => {
+      const c = await branchRules({
+        approvalRule: 1,
+        pushAccess: NO_ONE,
+        level: ACCESS.maintainer,
+      });
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('a bot is a Maintainer or Owner');
+      expect(c.fix).toContain('Developer role');
+      expect(c.fix).toContain('Project → Manage → Members');
+    });
+
+    test('two-bot, pipeline not required with ciRequired: fails, offering ciRequired: false', async () => {
+      const c = await branchRules({ approvalRule: 1, pushAccess: NO_ONE, pipeline: false });
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('pipelines are not required to succeed');
+      expect(c.fix).toContain('Pipelines must succeed');
+      expect(c.fix).toContain('ciRequired: false');
+    });
+
+    test('starter, protected, push No one, pipeline, no approvals: passes', async () => {
+      const c = await branchRules({ starter: true, pushAccess: NO_ONE });
+      expect(c.status).toBe('pass');
+      expect(c.summary).toContain('requires a merge request');
+      expect(c.summary).toContain('no approval');
+      expect(c.summary).toContain('the pipeline must succeed');
+    });
+
+    test('starter with approvals required: fails, set the approvals to 0', async () => {
+      const c = await branchRules({ starter: true, pushAccess: NO_ONE, approvalRule: 1 });
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('an approval rule requires approvals in starter mode');
+      expect(c.fix).toContain('0 required approvals');
+      expect(c.fix).toContain(APPROVALS);
+    });
+
+    test('starter with the pipeline not required: fails, without offering ciRequired', async () => {
+      const c = await branchRules({ starter: true, pushAccess: NO_ONE, pipeline: false });
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('pipelines are not required to succeed');
+      expect(c.fix).toContain('Pipelines must succeed');
+      expect(c.fix).not.toContain('ciRequired');
+    });
+
+    test('protected-branch list refused (403): fails, naming the vault entry', async () => {
+      const c = await branchRules({ approvalRule: 1, protectedBranchesStatus: 403 });
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain('GitLab refused');
+      expect(c.fix).toContain(`gitlab-pat/${c.zone}/author`);
+      expect(c.fix).toContain('api scope');
+      expect(c.fix).toContain('Developer');
+      expect(c.fix).not.toMatch(/HTTP|403/);
+    });
+
+    test('protected-branch list answering 500: warns with GitLab wording, never a pass', async () => {
+      const c = await branchRules({ approvalRule: 1, protectedBranchesStatus: 500 });
+      expect(c.status).toBe('warn');
+      expect(c.summary).toContain('GitLab');
+      expect(c.summary).toContain('the check did not run');
+      expect(c.fix).toContain(GL);
+    });
+
+    test('requireBranchProtection: false warns with GitLab wording', async () => {
+      const c = await branchRules({ requireBranchProtection: false });
+      expect(c.status).toBe('warn');
+      expect(c.summary).toContain('nothing on GitLab stops a direct push');
+      expect(c.fix).toContain(PROTECT);
+      expect(c.fix).toContain('requireBranchProtection: true');
+    });
   });
 });
 

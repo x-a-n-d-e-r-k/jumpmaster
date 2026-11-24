@@ -1213,7 +1213,15 @@ export function fakeGitLab(opts: {
   let tier: GitLabTier = 'premium';
   const approvalRules: GitLabApprovalRule[] = [];
 
-  route('GET', /^\/protected_branches$/, (c) => paged(protectedBranches, c.query));
+  /** What `GET /protected_branches` answers instead of the list (default: the list). */
+  let protectedBranchesStatus: 403 | 500 | undefined;
+  route('GET', /^\/protected_branches$/, (c) =>
+    protectedBranchesStatus === 403
+      ? FORBIDDEN
+      : protectedBranchesStatus === 500
+        ? err(500, '500 Internal Server Error')
+        : paged(protectedBranches, c.query),
+  );
   /** The exact stored name only: a branch that merely matches a wildcard answers 404. */
   route('GET', /^\/protected_branches\/([^/]+)$/, (_c, m) => {
     const name = decodeSegment(m[1]);
@@ -1846,6 +1854,11 @@ export function fakeGitLab(opts: {
     /** Set the tier the fake models (default `premium`); on `free` approval rules answer 403. */
     setTier(t: GitLabTier) {
       tier = t;
+    },
+    /** Opt-in: `GET /protected_branches` answers this status instead of the list; undefined
+     *  restores the list. */
+    setProtectedBranchesStatus(status: 403 | 500 | undefined) {
+      protectedBranchesStatus = status;
     },
     /** The approvals merge request `iid` holds now, oldest first, with the head SHA each was
      *  given on. */
