@@ -131,3 +131,49 @@ describe('refiling a rejected issue (#784)', () => {
     expect(rule2).toContain('Rejected issues of the current objective');
   });
 });
+
+describe('a decision an issue leaves to Command (#800)', () => {
+  const rule = (name: string, n: number): string =>
+    prompt(name)
+      .split('\n')
+      .find((l) => l.startsWith(`${n}. `)) ?? '';
+
+  test('rule 6 raises a briefing for it and never calls that part covered before a ruling', () => {
+    const rule6 = rule('crew-lead.md', 6);
+    expect(rule6).toMatch(/^6\. Raise a briefing to record a decision Command should make/);
+    expect(rule6).toContain(
+      'When an issue of the current objective, open or merged, leaves a decision to Command and no ruling or open briefing covers it, raise a briefing for it.',
+    );
+    expect(rule6).toContain(
+      'That part of the objective is not covered until Command rules: never report it as covered in the `summary`, and never report the objective done under rule 7 while such a decision is unasked or unruled.',
+    );
+    expect(rule6).toContain('`Needs Command: `');
+    expect(rule6).toContain('the limits the merged code states');
+    expect(rule6).toMatch(
+      /raise the next after it is ruled, and say in your `summary` that a decision is waiting/,
+    );
+    // The limit of one open briefing per objective is unchanged.
+    expect(rule6).toMatch(/While a briefing is open for the current objective/);
+  });
+
+  test('rule 7 still forbids reporting an objective with work open', () => {
+    expect(rule('crew-lead.md', 7)).toMatch(/never one with work still open\./);
+  });
+
+  test('the refute prompt asks for the `Needs Command: ` line and forbids removing it', () => {
+    const text = prompt('refute.md');
+    expect(text).toContain(
+      'When a revised body leaves a decision to Command, it must carry a line starting `Needs Command: ` followed by that decision in one sentence, so the crew lead can find it.',
+    );
+    expect(text).toContain('Never remove a `Needs Command: ` line from a body you revise.');
+  });
+
+  test('the lead still has rules 1 to 12, in order', () => {
+    const numbers = prompt('crew-lead.md')
+      .split('\n')
+      .map((l) => /^(\d+)\. /.exec(l)?.[1])
+      .filter((n): n is string => n !== undefined)
+      .map(Number);
+    expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  });
+});

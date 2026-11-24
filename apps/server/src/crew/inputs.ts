@@ -291,6 +291,26 @@ function rejectedIssuesText(
     .join('\n\n');
 }
 
+/** The most `Needs Command: ` lines the lead sees under one crew issue (#800). */
+export const MAX_NEEDS_COMMAND_LINES = 3;
+/** The most characters of one `Needs Command: ` line the lead sees, counted after redaction. */
+export const MAX_NEEDS_COMMAND_CHARS = 300;
+const NEEDS_COMMAND = 'Needs Command: ';
+
+/**
+ * The decisions a crew issue's body leaves to Command (#800): its first `MAX_NEEDS_COMMAND_LINES`
+ * lines starting `Needs Command: `, each redacted with `scrub` and cut to
+ * `MAX_NEEDS_COMMAND_CHARS` characters here, neutralised and fenced by `assemble`.
+ */
+function needsCommandLines(body: string, scrub: string[]): string[] {
+  return body
+    .split(/\r\n?|\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith(NEEDS_COMMAND))
+    .slice(0, MAX_NEEDS_COMMAND_LINES)
+    .map((l) => [...redact(l, scrub)].slice(0, MAX_NEEDS_COMMAND_CHARS).join('').trimEnd());
+}
+
 /**
  * The lead's input: GOAL.md, the current objective and Command's rulings as instructions; the crew
  * issues, free slots and trusted open issues as data. Issues by untrusted authors (or whose trust
@@ -311,10 +331,16 @@ export async function crewLeadInput(
   const openBriefings = openCrewBriefings(db, zone.id);
 
   const crewIssues = listCrewIssues(db, zone.id);
+  const scrub = [...secrets, ...serverScrubSet.values()];
   const byObjective = new Map<string, string[]>();
   for (const c of crewIssues) {
     const line = `- [${c.state}] ${c.key}: ${c.title}${c.number !== null ? ` (#${c.number})` : ''}`;
-    byObjective.set(c.objective, [...(byObjective.get(c.objective) ?? []), line]);
+    // A decision the issue leaves to Command, under each issue of the current objective (#800).
+    const needs =
+      current !== null && c.objective === current.key
+        ? needsCommandLines(c.body, scrub).map((l) => `  ${l}`)
+        : [];
+    byObjective.set(c.objective, [...(byObjective.get(c.objective) ?? []), line, ...needs]);
   }
   const crewText = [
     `Free slots: ${crewIssueSlots(db, zone)} (file at most this many issues).`,
