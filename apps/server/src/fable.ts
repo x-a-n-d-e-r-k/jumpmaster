@@ -176,12 +176,22 @@ export function fableStatus(
   return { available: true, reason: 'available' };
 }
 
+/** Why a review drop's change is security-sensitive (#836): decided by the server, never by text. */
+export type SecurityReason = 'security paths' | 'file list unknown';
+
+/** Why a review ran on Fable, shown on the drop's page (#836). */
+export type FableReviewReason = 'every review' | SecurityReason;
+
+export type ModelChoice = { model: string; fableReason: FableReviewReason | null };
+
 /**
  * The model a drop runs on. A Fable role gets `fableModel` when Fable is available; otherwise the
  * role's configured model, unless that names Fable while Fable is unavailable, when the zone model
- * stands in. A review gets Fable too while `claude.fableReview` is on and review's own budget
- * allows (`reviewBudgetAllows`). Fable never runs undeclared. `opts.fable` makes this drop a Fable role too (a refute
- * of a security-touching crew issue); the doctor never runs on Fable.
+ * stands in. A review wants Fable while `claude.fableReview` is on, or when `opts.security` says its
+ * change is security-sensitive (#836); it gets it only when Fable is available and review's own
+ * budget allows (`reviewBudgetAllows`), never waiting. Fable never runs undeclared. `opts.fable`
+ * makes this drop a Fable role too (a refute of a security-touching crew issue); the doctor never
+ * runs on Fable.
  */
 export function resolveModel(
   db: Db,
@@ -189,27 +199,43 @@ export function resolveModel(
   zone: DropZoneConfig,
   role: Role,
   now: Date,
-  opts: { fable?: boolean } = {},
+  opts: { fable?: boolean; security?: SecurityReason | null } = {},
 ): string {
+  return chooseModel(db, cfg, zone, role, now, opts).model;
+}
+
+/** `resolveModel`, with why a review ran on Fable (null for any other drop or model). */
+export function chooseModel(
+  db: Db,
+  cfg: Pick<Config, 'claude'>,
+  zone: DropZoneConfig,
+  role: Role,
+  now: Date,
+  opts: { fable?: boolean; security?: SecurityReason | null } = {},
+): ModelChoice {
   const status = fableStatus(db, cfg, now);
   const fableRole =
     role !== 'doctor' && ((FABLE_ROLES as readonly string[]).includes(role) || opts.fable === true);
-  if (fableRole && status.available && cfg.claude.fableModel) return cfg.claude.fableModel;
+  if (fableRole && status.available && cfg.claude.fableModel)
+    return { model: cfg.claude.fableModel, fableReason: null };
   // A review runs on Fable while review's own share of the budget allows (#605), never waiting.
-  if (
-    role === 'review' &&
-    cfg.claude.fableReview !== false &&
-    status.available &&
-    cfg.claude.fableModel &&
-    reviewBudgetAllows(db, cfg, now)
-  )
-    return cfg.claude.fableModel;
+  if (role === 'review') {
+    const reason: FableReviewReason | null =
+      cfg.claude.fableReview !== false ? 'every review' : (opts.security ?? null);
+    if (
+      reason !== null &&
+      status.available &&
+      cfg.claude.fableModel &&
+      reviewBudgetAllows(db, cfg, now)
+    )
+      return { model: cfg.claude.fableModel, fableReason: reason };
+  }
   const configured = modelFor(zone, role);
   // The doctor's one-line probe never spends Fable: it runs on the zone's model whatever models says.
   if (role === 'doctor' && (FABLE.test(configured) || configured === cfg.claude.fableModel))
-    return zone.model;
+    return { model: zone.model, fableReason: null };
   const isFable = FABLE.test(configured) || configured === cfg.claude.fableModel;
-  return isFable && !status.available ? zone.model : configured;
+  return { model: isFable && !status.available ? zone.model : configured, fableReason: null };
 }
 
 const namesFable = (cfg: Pick<Config, 'claude'>, model: string): boolean =>

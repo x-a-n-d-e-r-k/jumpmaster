@@ -67,6 +67,7 @@ export type HeldCandidate = {
   id: string;
   role: string;
   dropZoneId: string;
+  workItemId: number | null;
   inputJson: string | null;
 };
 
@@ -233,7 +234,7 @@ export function leaseNextDrop(
           (
             db
               .prepare(
-                `SELECT id, role, drop_zone_id AS dropZoneId, input_json AS inputJson
+                `SELECT id, role, drop_zone_id AS dropZoneId, work_item_id AS workItemId, input_json AS inputJson
                FROM drops WHERE state = 'queued' ${ZONE_ACTIVE} ${NOT_EXCLUDED}${filter}
                ORDER BY ${ROLE_CLASS}, created_at, rowid`,
               )

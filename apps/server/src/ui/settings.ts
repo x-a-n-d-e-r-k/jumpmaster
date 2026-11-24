@@ -743,7 +743,7 @@ function installSettings(config: Config): Setting[] {
     },
     {
       path: 'claude.fableReview',
-      label: 'run pull request reviews on Fable while its weekly budget has room',
+      label: 'run every pull request review on Fable while its weekly budget has room',
       kind: 'bool',
       value: config.claude.fableReview !== false,
     },

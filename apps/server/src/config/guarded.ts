@@ -425,6 +425,10 @@ export const NOT_GUARDED: FreePath[] = [
   free('dropZones[].model', 'the model a drop runs; the same guards hold'),
   free('dropZones[].maxTurns', PACE),
   free('dropZones[].models', 'per-role models; the same guards hold'),
+  free(
+    'dropZones[].securityPaths',
+    'only which model reviews a change; every review and guard still applies',
+  ),
   free('dropZones[].budgets.maxHeal', BUDGET),
   free('dropZones[].budgets.maxResolve', BUDGET),
   free('dropZones[].budgets.maxResolveTotal', BUDGET),

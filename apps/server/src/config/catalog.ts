@@ -469,6 +469,12 @@ const WORDS: Words[] = [
     'list',
   ),
   z_(
+    'securityPaths',
+    'Review changes to these paths on Fable',
+    'Reviews of pull requests touching files matching these patterns, or whose file list is unknown, run on Fable while its review budget has room, even with every-review Fable off. Empty, reviews follow that setting.',
+    'list',
+  ),
+  z_(
     'overrideApprovers',
     'People who may override check changes',
     'Logins whose approval lets a change to a gate script or tool through. Protected paths are never overridden.',

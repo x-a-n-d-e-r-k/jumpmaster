@@ -42,6 +42,7 @@ import {
   setKilled,
   setStickDesiredSlots,
   setUsageState,
+  setWorkItemPrFiles,
   setWorkItemState,
   setZoneMode,
   updateDrop,
@@ -78,6 +79,7 @@ const config: Config = {
       models: {},
       protectedPaths: [],
       privateKeyPaths: [],
+      securityPaths: [],
       reviewReadToken: false,
       budgets: {
         maxHeal: 3,
@@ -795,6 +797,50 @@ describe('a per-model window holds new drops on its model (#747)', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toMatchObject({ dropId: 'd1', model: 'claude-opus-5-5' });
   });
+});
+
+describe('a review of a security path leases on Fable (#836)', () => {
+  const FABLE = 'claude-fable-5-2';
+  const secure: Config = {
+    ...config,
+    claude: { plan: 'max', fableModel: FABLE, fableWeeklyDropCap: 0, fableReview: false },
+    dropZones: [
+      {
+        ...config.dropZones[0]!,
+        models: { review: 'claude-sonnet-5-5' },
+        securityPaths: ['apps/server/src/vault/**'],
+      },
+    ],
+  };
+  const reviewOf = (db: Db, item: number, files: string[] | null) => {
+    setWorkItemPrFiles(db, item, files);
+    insertDrop(db, {
+      id: 'r1',
+      dropZoneId: 'main',
+      workItemId: item,
+      role: 'review',
+      state: 'queued',
+      prNumber: 1,
+      headSha: 'h1',
+      createdAt: t0.toISOString(),
+    });
+  };
+
+  for (const [files, model, reason] of [
+    [['apps/server/src/vault/problems.ts'], FABLE, 'security paths'],
+    [['apps/server/src/ui/pages.ts'], 'claude-sonnet-5-5', null],
+    [null, FABLE, 'file list unknown'],
+  ] as const) {
+    test(`files ${JSON.stringify(files)}: ${model}, recorded with the same model`, async () => {
+      const { db, wi } = setup({ queued: false, config: secure });
+      reviewOf(db, wi.id, files === null ? null : [...files]);
+      const { stickToken } = await enroll();
+      const res = await lease(stickToken);
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ dropId: 'r1', role: 'review', model });
+      expect(getDrop(db, 'r1')).toMatchObject({ requestedModel: model, fableReason: reason });
+    });
+  }
 });
 
 describe('stick capabilities, per zone', () => {

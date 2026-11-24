@@ -67,6 +67,7 @@ const baseZone: DropZoneConfig = {
   models: {},
   protectedPaths: [],
   privateKeyPaths: [],
+  securityPaths: [],
   reviewReadToken: false,
   budgets: {
     maxHeal: 3,

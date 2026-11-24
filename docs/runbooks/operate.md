@@ -356,7 +356,21 @@ stored.
 next pass and says the revision it saved. Reviews may request Fable: with `claude.fableReview` on
 (the default), a pull request review runs on Fable while Fable's weekly usage is under
 `claude.fableReviewMaxUtilization` (default 0.5), and on the zone's review model otherwise, so the
-audit, diagnose and arbitrate drops keep Fable up to `claude.fableMaxUtilization`. Turning `usage.stopOnOverage` off or `mcp.enabled` on asks
+audit, diagnose and arbitrate drops keep Fable up to `claude.fableMaxUtilization`.
+
+**Fable for security-sensitive reviews only.** A project's `securityPaths` (its advanced
+settings, "Review changes to these paths on Fable"; default `[]`) lists globs, matched like
+`protectedPaths`. With `claude.fableReview` off, a review runs on Fable only when the pull
+request's file list, as the forge reported it, has a file matching one of them (both sides of a
+rename count), or when that list is unknown; every other review runs on the zone's review model.
+With `claude.fableReview` on, every review asks for Fable whatever the paths; with no
+`securityPaths`, `claude.fableReview` alone decides, as before. Either way a review gets Fable only
+while Fable is available and its weekly usage is under `claude.fableReviewMaxUtilization`, and it
+never waits for Fable. The decision is the server's, never read from the issue, the PR body or an
+agent's text. The drop's page says why a review ran on Fable: `every review`, `security paths` or
+`file list unknown`.
+
+Turning `usage.stopOnOverage` off or `mcp.enabled` on asks
 for confirmation; turning `requireSignedImages` off is not offered (set it with `ctl` or in the
 file). `mcp.enabled` and `mcp.maxBodyBytes` take effect at the next restart: the tab shows
 **Restart pending** until you run `docker compose restart jumpmaster`. The boot settings
