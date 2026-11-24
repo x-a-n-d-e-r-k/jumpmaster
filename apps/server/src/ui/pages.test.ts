@@ -604,6 +604,90 @@ describe('renderHome loop state', () => {
     expect(html).toContain(words);
   });
 
+  describe("Claude's current warning (#749)", () => {
+    const now = new Date('2026-01-01T00:00:00.000Z');
+    const reset = '2026-01-04T00:00:00.000Z';
+    const capacity = (
+      gate: 'open' | 'finishing_only',
+      warning?: { window: string | null; at: string; resetsAt: string | null } | null,
+    ) => {
+      const html = renderHome({
+        zones: [z],
+        items: [],
+        drops: [],
+        now,
+        usage: {
+          gate,
+          state: usageState,
+          plan: 'pro',
+          windows: [],
+          ...(warning !== undefined ? { warning } : {}),
+        },
+      });
+      return html.slice(html.indexOf('id="capacity"'), html.indexOf('id="pipeline"'));
+    };
+    const line = (c: string) => /<p class="usage-warning">(.*?)<\/p>/.exec(c)?.[1] ?? null;
+    const w = (window: string | null, resetsAt: string | null = reset) => ({
+      window,
+      at: now.toISOString(),
+      resetsAt,
+    });
+
+    test.each([
+      ['open', 'Dispatch open.'],
+      ['finishing_only', 'Dispatch open to finishing work only: usage is near its limit.'],
+    ] as const)('shows under the %s gate, the gate words unchanged', (gate, words) => {
+      const c = capacity(gate, w('seven_day'));
+      expect(c).toContain(`<p class="gate-words">${words}</p>`);
+      const l = line(c);
+      expect(l).toContain('Claude warned that 7-day usage is high; it resets ');
+      expect(l).toContain(`datetime="${reset}"`);
+      expect(l).toContain('in 3 d<');
+      expect(c.indexOf('gate-words')).toBeLessThan(c.indexOf('usage-warning'));
+      for (const raw of [
+        'seven_day',
+        'allowed_warning',
+        'finishing_only',
+        'warningWindow',
+        'warningResetsAt',
+        'paused',
+        'held',
+      ])
+        expect(l, raw).not.toContain(raw);
+    });
+
+    test.each([
+      ['seven_day', '7-day usage'],
+      ['five_hour', '5-hour usage'],
+      ['seven_day_opus', 'Opus (7-day) usage'],
+      [null, 'Claude warned that usage is high'],
+    ] as const)('a warning on %s reads "%s"', (window, words) => {
+      const l = line(capacity('open', w(window))) ?? '';
+      expect(l).toContain(words);
+      expect(l).not.toMatch(/seven_day|five_hour|null|undefined/);
+    });
+
+    test('a null reset leaves the reset clause out', () => {
+      const l = line(capacity('open', w(null, null)));
+      expect(l).toBe('Claude warned that usage is high.');
+      expect(line(capacity('open', w('seven_day', null)))).toBe(
+        'Claude warned that 7-day usage is high.',
+      );
+    });
+
+    test('no warning, or an expired one, shows no line', () => {
+      expect(capacity('open')).not.toContain('usage-warning');
+      expect(capacity('open', null)).not.toContain('usage-warning');
+      expect(capacity('open')).not.toContain('Claude warned');
+    });
+
+    test('the window is escaped', () => {
+      const l = line(capacity('open', w('seven_day_<b>'))) ?? '';
+      expect(l).toContain('&lt;b&gt; (7-day) usage');
+      expect(l).not.toContain('<b>');
+    });
+  });
+
   test('shows verdict and attempts', () => {
     const html =
       workItemRows(
