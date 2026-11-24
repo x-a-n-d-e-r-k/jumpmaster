@@ -910,6 +910,112 @@ describe('ctl detect and ctl zones add', () => {
   });
 });
 
+describe('ctl zones add with a project URL and --gate (#777)', () => {
+  test('a URL argument is sent as project, with the preset and each gate split at the first =', () => {
+    expect(
+      ctlRequest([
+        'zones',
+        'add',
+        'https://gitlab.example.com/group/proj',
+        '--preset',
+        'node',
+        '--gate',
+        'test=npm test',
+      ]),
+    ).toEqual({
+      method: 'POST',
+      path: '/api/control/zones',
+      body: {
+        zone: {
+          project: 'https://gitlab.example.com/group/proj',
+          preset: 'node',
+          gates: [{ name: 'test', run: 'npm test' }],
+          egress: { mode: 'monitor' },
+        },
+      },
+    });
+  });
+
+  test('--gate repeats, in order, and splits at the first = only', () => {
+    expect(
+      ctlRequest([
+        'zones',
+        'add',
+        'octo/demo',
+        '--gate',
+        'test=npm test',
+        '--gate',
+        'env=FOO=1 make check',
+      ]),
+    ).toEqual({
+      method: 'POST',
+      path: '/api/control/zones',
+      body: {
+        zone: {
+          repo: 'octo/demo',
+          gates: [
+            { name: 'test', run: 'npm test' },
+            { name: 'env', run: 'FOO=1 make check' },
+          ],
+          egress: { mode: 'monitor' },
+        },
+      },
+    });
+  });
+
+  test('a malformed --gate is a usage error', () => {
+    for (const gate of ['test', '=npm test', 'test=', '='])
+      expect(ctlRequest(['zones', 'add', 'octo/demo', '--gate', gate]), gate).toBeNull();
+    expect(ctlRequest(['zones', 'add', 'octo/demo', '--gate'])).toBeNull();
+    expect(ctlRequest(['zones', 'add', 'http://gitlab.example.com/group/proj'])).toBeNull();
+  });
+
+  test('an owner/name argument sends the body it always has, with no gates key', () => {
+    const r = ctlRequest(['zones', 'add', 'octo/demo', '--preset', 'node']);
+    expect(r).toEqual({
+      method: 'POST',
+      path: '/api/control/zones',
+      body: { zone: { repo: 'octo/demo', preset: 'node', egress: { mode: 'monitor' } } },
+    });
+  });
+
+  test('the usage text names the URL form, --gate and what a GitLab URL needs', async () => {
+    const r = await run(['zones', '--help'], '', fakeFetch(200, {}));
+    const add = r.out.find((l) => l.startsWith('ctl zones add')) ?? '';
+    expect(add).toContain('<project URL>');
+    expect(add).toContain('--gate <name>=<command>');
+    expect(add).toMatch(/GitLab URL needs --preset and at least one --gate/);
+  });
+
+  test('the add line names the forge when the server gives it', async () => {
+    const r = await run(
+      [
+        'zones',
+        'add',
+        'https://gitlab.example.com/group/proj',
+        '--preset',
+        'node',
+        '--gate',
+        't=x',
+      ],
+      '',
+      fakeFetch(200, {
+        revision: 2,
+        zone: 'proj',
+        forge: 'gitlab',
+        preset: 'node',
+        egress: 'monitor',
+        gates: [{ name: 't', run: 'x' }],
+      }),
+    );
+    expect(r.code).toBe(0);
+    expect(r.out).toEqual([
+      'added zone proj (revision 2), forge gitlab, preset node, egress monitor',
+      '  gate t: x',
+    ]);
+  });
+});
+
 describe('ctl zones keeps its API paths when the pages move to /projects (#631)', () => {
   test('zones list, show, add and remove still call /api/control/zones', () => {
     expect(ctlRequest(['zones', 'list'])).toMatchObject({

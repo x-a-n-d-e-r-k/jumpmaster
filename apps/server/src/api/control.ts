@@ -134,6 +134,7 @@ import {
 } from '../vault/credentials.js';
 import type { AppRole, GitHubAppEntry } from '../vault/github-app-entries.js';
 import type { ResolvedApps } from '../vault/resolution.js';
+import { GITLAB_PRESET_GATES, gitlabZoneIdOf, readZoneAdd, sameProject } from '../zones/add-ref.js';
 import {
   type DetectForge,
   type Detection,
@@ -1505,15 +1506,39 @@ function registerConfigRoutes(
     const body = ZoneAddBody.safeParse(req.body ?? {});
     if (!body.success)
       return invalid(reply, '{"zone": {"repo": "owner/name", …}, "resume"?: true}');
-    const { zone, resume, returnTo, cancelTo } = body.data;
-    const repo = zone.repo;
-    if (typeof repo !== 'string' || !REPO.test(repo))
+    const { resume, returnTo, cancelTo } = body.data;
+    // A GitLab project (`project` or an explicit `forge: 'gitlab'`) is read before the GitHub
+    // REPO check; a GitHub `project` becomes `repo` and takes the GitHub path unchanged.
+    const ref = readZoneAdd(body.data.zone);
+    if ('error' in ref) return reply.code(400).send({ issues: [ref.error] });
+    const zone = ref.zone;
+    // GitLab detection needs the zone's own tokens, which a new zone has not got yet (#777).
+    if (ref.forge === 'gitlab' && (zone.preset === undefined || zone.gates === undefined))
+      return reply.code(400).send({
+        issues: [
+          {
+            path: zone.preset === undefined ? 'zone.preset' : 'zone.gates',
+            message: GITLAB_PRESET_GATES,
+          },
+        ],
+      });
+    const repo = ref.forge === 'gitlab' ? ref.repo : zone.repo;
+    if (typeof repo !== 'string' || (ref.forge === 'github' && !REPO.test(repo)))
       return reply
         .code(400)
         .send({ issues: [{ path: 'zone.repo', message: 'the repository must be owner/name' }] });
-    const id = typeof zone.id === 'string' && zone.id !== '' ? zone.id : zoneIdOf(repo);
+    const id =
+      typeof zone.id === 'string' && zone.id !== ''
+        ? zone.id
+        : ref.forge === 'gitlab'
+          ? gitlabZoneIdOf(repo)
+          : zoneIdOf(repo);
     const config = req.jmConfig ?? store.current();
-    const sameRepo = config.dropZones.find((z) => z.repo.toLowerCase() === repo.toLowerCase());
+    const where =
+      ref.forge === 'gitlab'
+        ? { forge: 'gitlab' as const, gitlab: { baseUrl: ref.baseUrl }, repo }
+        : { repo };
+    const sameRepo = config.dropZones.find((z) => sameProject(z, where));
     if (sameRepo)
       return reply.code(409).send({
         error: `${repo} is already zone ${sameRepo.id}: a repository has one zone`,
@@ -1590,6 +1615,7 @@ function registerConfigRoutes(
     return {
       ...(out as object),
       zone: id,
+      forge: ref.forge,
       ...(written?.preset ? { preset: written.preset } : {}),
       egress: written?.egress?.mode ?? 'off',
       gates: written?.gates ?? [],

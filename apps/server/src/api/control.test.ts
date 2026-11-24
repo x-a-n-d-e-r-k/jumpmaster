@@ -12,7 +12,13 @@ import { grantSudo, SUDO_MS, sha256Hex } from '../auth/sessions.js';
 import { listRulings, raiseBriefing } from '../briefings.js';
 import { loadBoot } from '../config/boot.js';
 import { ConfigStore, startVault } from '../config/store.js';
-import { type Config, type DropZoneConfig, STARTER_WARNING, secretList } from '../config.js';
+import {
+  type Config,
+  type DropZoneConfig,
+  STARTER_WARNING,
+  secretList,
+  ZONE_ID,
+} from '../config.js';
 import { nextCrewWork } from '../crew/schedule.js';
 import { insertCrewIssue, listCrewIssues } from '../crew/store.js';
 import { ctlRequest } from '../ctl.js';
@@ -1976,12 +1982,19 @@ describe('detect and zone add routes', () => {
       now: () => t0,
       imageLockPath: join(dir, 'no-lock.json'),
     });
-    const seen: { repo?: string; token?: string; calls: string[] } = { calls: [] };
+    /** `forges`: each detection forge built, so a refused add can show none was. */
+    const seen: { repo?: string; token?: string; calls: string[]; forges: number } = {
+      calls: [],
+      forges: 0,
+    };
+    const logs: string[] = [];
     app = controlApp({
       db,
       config: store,
       now: () => t0,
+      log: (l) => logs.push(l),
       detectForge: (repo, token) => {
+        seen.forges += 1;
         seen.repo = repo;
         seen.token = token;
         return {
@@ -2019,6 +2032,7 @@ describe('detect and zone add routes', () => {
       db,
       store,
       seen,
+      logs,
       sessionId: session.id,
       asSession: { ...session.headers, host: HOST },
     };
@@ -2213,6 +2227,230 @@ describe('detect and zone add routes', () => {
         })
       ).statusCode,
     ).toBe(400);
+  });
+
+  describe('a GitLab zone (#777)', () => {
+    const GATES = [{ name: 'test', run: 'npm test' }];
+    const URL_ = 'https://gitlab.example.com/group/sub/proj';
+
+    test('through project: forge, base URL and path from the URL, id from the last segment, egress monitor, no project key', async () => {
+      const { store, seen } = zoneApp();
+      const r = await post('/api/control/zones', {
+        zone: { project: URL_, preset: 'node', gates: GATES },
+      });
+      expect(r.statusCode, r.body).toBe(200);
+      expect(r.json()).toMatchObject({
+        zone: 'proj',
+        forge: 'gitlab',
+        preset: 'node',
+        egress: 'monitor',
+        gates: GATES,
+      });
+      expect(store.current().dropZones[0]).toMatchObject({
+        id: 'proj',
+        forge: 'gitlab',
+        gitlab: { baseUrl: 'https://gitlab.example.com' },
+        repo: 'group/sub/proj',
+        egress: { mode: 'monitor' },
+      });
+      const stored = (store.document().dropZones as Record<string, unknown>[])[0];
+      expect(stored).not.toHaveProperty('project');
+      expect(ZONE_ID.test('proj')).toBe(true);
+      expect(seen.forges).toBe(0);
+      expect(seen.calls).toEqual([]);
+    });
+
+    test('a subgroup path gives its last segment, normalized, as an id that matches ZONE_ID', async () => {
+      const { store } = zoneApp();
+      const r = await post('/api/control/zones', {
+        zone: {
+          project: 'https://gitlab.example.com/Group/Sub/My_Proj.Web',
+          preset: 'node',
+          gates: GATES,
+        },
+      });
+      expect(r.statusCode, r.body).toBe(200);
+      expect(r.json().zone).toBe('my-proj-web');
+      expect(ZONE_ID.test(r.json().zone)).toBe(true);
+      expect(store.current().dropZones[0]?.repo).toBe('Group/Sub/My_Proj.Web');
+    });
+
+    test('given explicitly as forge, gitlab.baseUrl and repo; a bad path or base URL is refused', async () => {
+      const { store } = zoneApp();
+      const r = await post('/api/control/zones', {
+        zone: {
+          forge: 'gitlab',
+          gitlab: { baseUrl: 'https://gitlab.example.com' },
+          repo: 'group/sub/proj',
+          preset: 'node',
+          gates: GATES,
+        },
+      });
+      expect(r.statusCode, r.body).toBe(200);
+      expect(r.json()).toMatchObject({ zone: 'proj', forge: 'gitlab' });
+      expect(store.current().dropZones[0]).toMatchObject({
+        forge: 'gitlab',
+        gitlab: { baseUrl: 'https://gitlab.example.com' },
+        repo: 'group/sub/proj',
+      });
+      for (const zone of [
+        { repo: 'group/../proj' },
+        { repo: 'proj' },
+        { repo: 'group/proj', gitlab: { baseUrl: 'http://gitlab.example.com' } },
+        { repo: 'group/proj', gitlab: undefined },
+      ]) {
+        const bad = await post('/api/control/zones', {
+          zone: {
+            forge: 'gitlab',
+            gitlab: { baseUrl: 'https://gitlab.example.com' },
+            preset: 'node',
+            gates: GATES,
+            id: 'other',
+            ...zone,
+          },
+        });
+        expect(bad.statusCode, JSON.stringify(zone)).toBe(400);
+      }
+      expect(store.current().dropZones).toHaveLength(1);
+    });
+
+    test('project together with repo, forge or gitlab is refused', async () => {
+      const { store, seen } = zoneApp();
+      for (const extra of [
+        { repo: 'group/proj' },
+        { forge: 'gitlab' },
+        { gitlab: { baseUrl: 'https://gitlab.example.com' } },
+      ]) {
+        const r = await post('/api/control/zones', {
+          zone: { project: URL_, preset: 'node', gates: GATES, ...extra },
+        });
+        expect(r.statusCode, JSON.stringify(extra)).toBe(400);
+        expect(r.json().issues[0].path).toBe('zone.project');
+      }
+      expect(store.current().dropZones).toEqual([]);
+      expect(seen.forges).toBe(0);
+    });
+
+    test('an add without preset or without gates is refused before any forge or detection request', async () => {
+      const { store, seen } = zoneApp();
+      for (const zone of [
+        { project: URL_, gates: GATES },
+        { project: URL_, preset: 'node' },
+        { project: URL_ },
+        {
+          forge: 'gitlab',
+          gitlab: { baseUrl: 'https://gitlab.example.com' },
+          repo: 'group/proj',
+          preset: 'node',
+        },
+      ]) {
+        const r = await post('/api/control/zones', { zone });
+        expect(r.statusCode, JSON.stringify(zone)).toBe(400);
+        expect(r.json().issues[0].message).toMatch(/give the preset and the gates/);
+      }
+      expect(seen.forges).toBe(0);
+      expect(seen.calls).toEqual([]);
+      expect(store.current().dropZones).toEqual([]);
+    });
+
+    test("a token-shaped or unreadable project is refused with parseProjectRef's text, never echoed", async () => {
+      const { seen, logs } = zoneApp();
+      const token = 'glpat-' + 'ABCDEFGHIJKLMNOPQRST';
+      for (const [project, text] of [
+        [token, 'the project looks like it contains a token: enter owner/name or a project URL'],
+        [
+          `https://gitlab.example.com/group/${token}`,
+          'the project looks like it contains a token: enter owner/name or a project URL',
+        ],
+        [
+          'https://gitlab.example.com/gr oup\\x',
+          'enter owner/name, a github.com URL or a GitLab project URL',
+        ],
+      ] as const) {
+        const r = await post('/api/control/zones', {
+          zone: { project, preset: 'node', gates: GATES },
+        });
+        expect(r.statusCode, project).toBe(400);
+        expect(r.json()).toEqual({ issues: [{ path: 'zone.project', message: text }] });
+        expect(r.body).not.toContain(project);
+        expect(logs.join('\n')).not.toContain(project);
+      }
+      expect(logs.join('\n')).not.toContain(token);
+      expect(seen.forges).toBe(0);
+    });
+
+    test('the same path on the same instance, in any case, is a 409 in the repository-duplicate form', async () => {
+      zoneApp();
+      expect(
+        (
+          await post('/api/control/zones', {
+            zone: { project: URL_, preset: 'node', gates: GATES },
+          })
+        ).statusCode,
+      ).toBe(200);
+      for (const zone of [
+        { project: 'https://GitLab.Example.COM/Group/SUB/proj', id: 'two' },
+        {
+          forge: 'gitlab',
+          gitlab: { baseUrl: 'https://GITLAB.example.com/' },
+          repo: 'GROUP/sub/Proj',
+          id: 'two',
+        },
+      ]) {
+        const r = await post('/api/control/zones', {
+          zone: { ...zone, preset: 'node', gates: GATES },
+        });
+        expect(r.statusCode, JSON.stringify(zone)).toBe(409);
+        expect(r.json().error).toMatch(
+          /^group\/sub\/proj is already zone proj: a repository has one zone$/i,
+        );
+      }
+    });
+
+    test('another instance, or GitLab next to GitHub, is not a duplicate: accepted with its own id, the id 409 without', async () => {
+      const { store } = zoneApp();
+      const add = (zone: Record<string, unknown>) =>
+        post('/api/control/zones', { zone: { preset: 'node', gates: GATES, ...zone } });
+      expect((await add({ repo: 'octo/demo' })).statusCode).toBe(200);
+      expect((await add({ project: 'https://gitlab.example.com/octo/demo' })).json().error).toBe(
+        'zone demo exists: pick another id',
+      );
+      const gl = await add({ project: 'https://gitlab.example.com/octo/demo', id: 'gl-demo' });
+      expect(gl.statusCode, gl.body).toBe(200);
+      expect(gl.json()).toMatchObject({ zone: 'gl-demo', forge: 'gitlab' });
+      const other = await add({ project: 'https://gitlab.other.org/octo/demo' });
+      expect(other.statusCode).toBe(409);
+      expect(other.json().error).toBe('zone demo exists: pick another id');
+      const ok = await add({ project: 'https://gitlab.other.org/octo/demo', id: 'other-demo' });
+      expect(ok.statusCode, ok.body).toBe(200);
+      expect(store.current().dropZones.map((z) => z.id)).toEqual(['demo', 'gl-demo', 'other-demo']);
+    });
+
+    test('a project given as owner/name or a github.com URL gives what the repo add gives, detection included', async () => {
+      const results = [];
+      for (const zone of [
+        { repo: 'Octo/My.Demo' },
+        { project: 'Octo/My.Demo' },
+        { project: 'https://github.com/Octo/My.Demo' },
+      ]) {
+        const { store, seen } = zoneApp();
+        const r = await post('/api/control/zones', { zone });
+        expect(r.statusCode, r.body).toBe(200);
+        results.push({
+          reply: r.json(),
+          doc: store.document().dropZones,
+          seen: { ...seen },
+        });
+      }
+      expect(results[0]?.reply).toMatchObject({ zone: 'my-demo', forge: 'github' });
+      expect(results[0]?.seen.calls.length).toBeGreaterThan(0);
+      expect(results[1]).toEqual(results[0]);
+      expect(results[2]).toEqual(results[0]);
+      const bad = await post('/api/control/zones', {
+        zone: { project: 'https://github.com/octo' },
+      });
+      expect(bad.statusCode).toBe(400);
+    });
   });
 });
 
