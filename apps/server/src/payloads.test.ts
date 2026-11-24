@@ -1493,3 +1493,96 @@ describe('GitHub Actions failure annotations in a heal (#720)', () => {
     outsideEveryFence(fb, fb.indexOf(CI_FAILURES_INSTRUCTION));
   });
 });
+
+describe('GitLab zone payloads (#765)', () => {
+  const origin = 'https://gitlab.example.com';
+  const gitlabZone = (repo = 'grp/sub/proj'): DropZoneConfig =>
+    ({
+      ...zone,
+      repo,
+      forge: 'gitlab',
+      gitlab: { baseUrl: origin },
+      reviewReadToken: true,
+    }) as DropZoneConfig;
+  const githubValues = [
+    secrets.githubAuthorToken,
+    secrets.githubReviewerToken,
+    secrets.githubReadToken,
+  ] as string[];
+  const doctorDrop: Drop = { ...base, id: 'doc', workItemId: null, role: 'doctor' };
+
+  const check = (p: ReturnType<typeof buildPayload>, repo = 'grp/sub/proj') => {
+    expect(DropPayloadSchema.parse(p)).toEqual(p);
+    expect(p.repo.forge).toEqual({ kind: 'gitlab', origin, projectPath: repo });
+    expect(p.credentials).toEqual({ claudeToken: 'claude-secret' });
+    const text = JSON.stringify(p);
+    for (const t of githubValues) expect(text).not.toContain(t);
+  };
+
+  for (const [role, drop] of [
+    ['implement', impl],
+    ['heal', heal],
+    ['resolve', resolve],
+    ['review', review],
+    ['doctor', doctorDrop],
+  ] as const) {
+    test(`a ${role} drop names the GitLab remote and carries no GitHub token`, () => {
+      const p = buildPayload(db, gitlabZone(), drop, secrets);
+      check(p);
+      expect(p.role).toBe(role);
+      expect(p.repo).toMatchObject({ owner: 'grp', name: 'proj' });
+    });
+  }
+
+  test('a crew drop names the GitLab remote and carries no GitHub token', async () => {
+    const w = await crewWorld({ reviewReadToken: true });
+    const pass = await zonePass(w.forges, w.zone, 'main');
+    const id = await enqueueCrew(w.db, w.forges, w.zone, pass, promptVersions(), usageCfg, t0);
+    const drop = getDrop(w.db, id ?? '') as Drop;
+    const z = {
+      ...w.zone,
+      repo: 'grp/sub/proj',
+      forge: 'gitlab',
+      gitlab: { baseUrl: origin },
+    } as DropZoneConfig;
+    const p = buildPayload(w.db, z, drop, secrets);
+    check(p);
+    expect(p.role).toBe('crew-lead');
+  });
+
+  test('owner and name fall back to placeholders a GitHub name check would refuse', () => {
+    for (const d of [impl, review, doctorDrop]) {
+      const p = buildPayload(db, gitlabZone('my_group/sub/proj.name'), d, secrets);
+      check(p, 'my_group/sub/proj.name');
+      expect(p.repo).toMatchObject({ owner: 'gitlab', name: 'proj.name' });
+    }
+    // A GitLab project name may be longer than a GitHub repository name.
+    const long = `grp/${'p'.repeat(120)}`;
+    const p = buildPayload(db, gitlabZone(long), impl, secrets);
+    check(p, long);
+    expect(p.repo).toMatchObject({ owner: 'grp', name: 'project' });
+  });
+
+  test('a passed read token reaches no GitLab drop', () => {
+    for (const d of [impl, heal, resolve, review, doctorDrop]) {
+      const p = buildPayload(db, gitlabZone(), d, secrets, { readToken: 'minted-secret' });
+      check(p);
+      expect(JSON.stringify(p)).not.toContain('minted-secret');
+    }
+  });
+
+  test('a GitHub zone payload has no forge key and keeps its shape', () => {
+    for (const d of [impl, review, heal, resolve, doctorDrop]) {
+      const p = buildPayload(db, { ...zone, reviewReadToken: true }, d, secrets);
+      expect(JSON.stringify(p.repo)).toBe('{"owner":"octo","name":"demo","defaultBranch":"main"}');
+      expect(JSON.stringify(p)).not.toContain('"forge"');
+    }
+    expect(buildPayload(db, zone, impl, secrets).credentials).toEqual({
+      claudeToken: 'claude-secret',
+      forgeToken: 'read-secret',
+    });
+    expect(
+      buildPayload(db, { ...zone, reviewReadToken: true }, doctorDrop, secrets).credentials,
+    ).toEqual({ claudeToken: 'claude-secret', readToken: 'read-secret' });
+  });
+});

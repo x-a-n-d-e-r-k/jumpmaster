@@ -7,6 +7,8 @@ import {
   type DropPayload,
   type EgressPayload,
   isCrewRole,
+  isOwnerName,
+  isRepoName,
   normalizeHost,
   type Role,
   redact,
@@ -26,6 +28,7 @@ import { type Drop, getPullRequest, listWorkItems, updateDrop, type WorkItem } f
 import { resolveModel } from './fable.js';
 import type { CodeScanning, Feedback } from './flow/decide.js';
 import { malformedDrops } from './flow/malformed.js';
+import { forgeKind } from './forge/kind.js';
 import { type CrewRetryNote, lastFailure, renderLastFailure } from './gate-output.js';
 import { unsanitizeForgeText } from './outbox.js';
 import { PRESET_EGRESS } from './presets.js';
@@ -518,6 +521,34 @@ export function fableWanted(drop: Pick<Drop, 'inputJson'>): boolean {
 }
 
 /**
+ * The payload's `repo`. A GitHub zone's is `<owner>/<name>` as before, with no `forge` key. A
+ * GitLab zone's names its remote in `forge` (issue #765); `owner` and `name` then name nothing on
+ * the wire but must still pass the GitHub name checks, so they are placeholders: the first path
+ * segment when it is a valid owner, else `gitlab`, and the last when it is a valid repo name, else
+ * `project`.
+ */
+export function payloadRepo(zone: DropZoneConfig, defaultBranch: string): DropPayload['repo'] {
+  const segments = zone.repo.split('/');
+  if (forgeKind(zone) !== 'gitlab') {
+    const [owner = '', name = ''] = segments;
+    return { owner, name, defaultBranch };
+  }
+  const first = segments[0] ?? '';
+  const last = segments[segments.length - 1] ?? '';
+  return {
+    owner: isOwnerName(first) ? first : 'gitlab',
+    name: isRepoName(last) ? last : 'project',
+    defaultBranch,
+    forge: {
+      kind: 'gitlab',
+      // The config allows a trailing slash; the wire wants the bare origin.
+      origin: new URL(zone.gitlab?.baseUrl ?? '').origin,
+      projectPath: zone.repo,
+    },
+  };
+}
+
+/**
  * A crew drop: the template plus the input rendered at enqueue. It never carries the author or
  * reviewer token: at most the read token, on the same terms as review.
  */
@@ -537,12 +568,11 @@ function buildCrewPayload(
   const row = db
     .prepare('SELECT default_branch AS defaultBranch FROM drop_zones WHERE id = ?')
     .get(zone.id) as { defaultBranch: string };
-  const [owner = '', name = ''] = zone.repo.split('/');
   const common = {
     protocol: 1 as const,
     dropId: drop.id,
     epoch: drop.epoch,
-    repo: { owner, name, defaultBranch: row.defaultBranch },
+    repo: payloadRepo(zone, row.defaultBranch),
     model,
     maxTurns: zone.maxTurns,
     promptVersion: promptVersions()[role],
@@ -613,14 +643,13 @@ function buildDoctorPayload(
   const row = db
     .prepare('SELECT default_branch AS defaultBranch FROM drop_zones WHERE id = ?')
     .get(zone.id) as { defaultBranch: string };
-  const [owner = '', name = ''] = zone.repo.split('/');
   return {
     // The trooper finds the payload on stdin by its leading protocol field.
     protocol: 1 as const,
     dropId: drop.id,
     epoch: drop.epoch,
     role: 'doctor',
-    repo: { owner, name, defaultBranch: row.defaultBranch },
+    repo: payloadRepo(zone, row.defaultBranch),
     model,
     image: zone.image,
     gates: zone.gates,
@@ -670,6 +699,9 @@ export function leaseModel(
  *   only when the zone sets `reviewReadToken`;
  * - the author app's (issue #249) for an implement, heal or resolve drop, which fetches with it in
  *   place of any PAT; absent, those drops get `githubReadToken ?? githubAuthorToken` (Ruling 1).
+ *
+ * A GitLab zone's drops (issue #765) name its remote in `repo.forge` (`payloadRepo`) and carry no
+ * forge token in any role: no GitHub token, the passed `readToken` included, and no GitLab one.
  */
 export function buildPayload(
   db: Db,
@@ -681,10 +713,14 @@ export function buildPayload(
   const model = leaseModel(db, zone, drop, o.claude, o.now ?? new Date());
   // Records requested_model on the drop as a side effect (the Fable weekly cap counts it).
   updateDrop(db, drop.id, { requestedModel: model });
+  // A GitLab zone's drops carry no forge token at all (issue #765): no GitHub token names its
+  // remote, and whether its agent containers may hold a GitLab credential is for Command.
+  const gitlab = forgeKind(zone) === 'gitlab';
   // The clone token of review, crew and doctor drops (never an author's).
-  const readToken =
-    o.readToken ??
-    (zone.reviewReadToken && secrets.githubReadToken ? secrets.githubReadToken : undefined);
+  const readToken = gitlab
+    ? undefined
+    : (o.readToken ??
+      (zone.reviewReadToken && secrets.githubReadToken ? secrets.githubReadToken : undefined));
   if (isCrewRole(drop.role))
     return buildCrewPayload(db, zone, drop, drop.role, secrets, model, readToken);
   if (drop.role === 'doctor') return buildDoctorPayload(db, zone, drop, secrets, model, readToken);
@@ -693,7 +729,6 @@ export function buildPayload(
   const row = db
     .prepare('SELECT default_branch AS defaultBranch FROM drop_zones WHERE id = ?')
     .get(zone.id) as { defaultBranch: string };
-  const [owner = '', name = ''] = zone.repo.split('/');
   const role = drop.role as Role;
   // Forge text loses the outbox's mention-breaking joiners, so quoted values arrive as written.
   const title = unsanitizeForgeText(item.title);
@@ -704,7 +739,7 @@ export function buildPayload(
     protocol: 1 as const,
     dropId: drop.id,
     epoch: drop.epoch,
-    repo: { owner, name, defaultBranch: row.defaultBranch },
+    repo: payloadRepo(zone, row.defaultBranch),
     issue: { number: item.issueNumber, title, body },
     branch,
     gates: zone.gates,
@@ -728,10 +763,12 @@ export function buildPayload(
   // gets the read token when one is configured. In PAT mode without one it still holds the author
   // token for its fetch; it never pushes with it. In an app-author zone the lease passes the author
   // app's per-drop read token (issue #249), and no PAT is used.
-  const fetchCredentials = {
-    claudeToken: secrets.claudeToken,
-    forgeToken: o.readToken ?? secrets.githubReadToken ?? secrets.githubAuthorToken,
-  };
+  const fetchCredentials = gitlab
+    ? { claudeToken: secrets.claudeToken }
+    : {
+        claudeToken: secrets.claudeToken,
+        forgeToken: o.readToken ?? secrets.githubReadToken ?? secrets.githubAuthorToken,
+      };
   const pr = () => {
     if (drop.prNumber === null || drop.headSha === null) {
       throw new Error(`${role} drop ${drop.id} has no pull request`);
