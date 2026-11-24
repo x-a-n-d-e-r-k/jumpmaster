@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { raiseBriefing } from './briefings.js';
 import { openDb } from './db/open.js';
-import { type Drop, type OutboxRow, setZoneMode, type WorkItem } from './db/repo.js';
+import { type Drop, type OutboxRow, setUsageState, setZoneMode, type WorkItem } from './db/repo.js';
 import type { DoctorCheck } from './doctor/checks.js';
 import {
   cannotRunText,
@@ -14,6 +14,8 @@ import {
   statusOf,
   type UsageFacts,
 } from './status.js';
+import { crewOn } from './test/crew.js';
+import type { FakeIssue } from './test/fakes.js';
 import { harness } from './test/flowHarness.js';
 import { plus, t0, tmpDbFile } from './test/helpers.js';
 import type { CredentialProblem } from './vault/problems.js';
@@ -1143,5 +1145,104 @@ describe('projectFails: the failing checks that block a project, for Home (#625)
   test('no checks, or no zones, is no rows', () => {
     expect(projectFails([], [{ id: 'main' }])).toEqual([]);
     expect(projectFails([check({})], [])).toEqual([]);
+  });
+});
+
+describe('the usage throttle holding the crew, queued work or not (#727)', () => {
+  const OPERATOR = { authorization: `Bearer ${'o'.repeat(32)}`, host: 'localhost:80' };
+  const CREW_HEADLINE = "Held by Claude's usage throttle: the crew waits until usage falls back";
+  const CREW_ALSO = "The crew waits on Claude's usage throttle";
+
+  /** A harness with a live stick and nothing queued; the crew on unless `crew` is false. */
+  async function world(o: { crew?: boolean; issues?: FakeIssue[] } = {}) {
+    const h = await harness({
+      issues: o.issues ?? [],
+      zone: o.crew === false ? {} : { crew: crewOn, triage: { gate: false } },
+    });
+    await h.app.inject({
+      method: 'POST',
+      url: '/api/sticks/lease',
+      headers: h.stickHeaders(),
+      payload: { freeSlots: 1, capabilities: ['push-v1'] },
+    });
+    const observedAt = h.now().toISOString();
+    const throttle = () =>
+      setUsageState(h.db, { pausedUntil: null, status: 'allowed_warning', observedAt }, h.now());
+    const brief = () =>
+      raiseBriefing(
+        h.db,
+        {
+          zoneId: 'main',
+          why: 'w',
+          source: 'server',
+          kind: 'parked',
+          subject: 'item:2',
+          decision: 'Parked. Retry?',
+          options: [{ id: 'retry', label: 'Retry', effect: 'none' }],
+        },
+        h.now(),
+      );
+    const status = async () =>
+      (
+        await h.app.inject({ method: 'GET', url: '/api/control/status', headers: OPERATOR })
+      ).json() as Status;
+    return { h, observedAt, throttle, brief, status };
+  }
+  const texts = (s: Status) => [s.headline, s.detail, ...(s.also ?? []).map((a) => a.text)];
+
+  test('the throttle with nothing waiting and no briefing: the headline says the crew waits', async () => {
+    const w = await world();
+    w.throttle();
+    const s = await w.status();
+    expect(s.headline).toBe(CREW_HEADLINE);
+    expect(s.detail).toBe(
+      'Claude reported its usage near the limit. Reviews, heals and merges go on; the crew lead, audits and new work start again once it clears.',
+    );
+    expect(s.waitingOn).toBe('claude');
+    expect(s.since).toBe(w.observedAt);
+  });
+
+  test('with an open briefing: waiting on you leads, and the crew hold is an also item', async () => {
+    const w = await world();
+    w.throttle();
+    w.brief();
+    const s = await w.status();
+    expect(s.headline).toBe('Waiting on you: 1 briefing');
+    expect(s.also?.map((a) => a.text)).toContain(CREW_ALSO);
+  });
+
+  test('the gate open: no throttle text', async () => {
+    const w = await world();
+    w.brief();
+    const s = await w.status();
+    expect(texts(s).join(' ')).not.toContain('throttle');
+    const idle = await (await world()).status();
+    expect(texts(idle).join(' ')).not.toContain('throttle');
+  });
+
+  test('the crew disabled in every zone: no crew-throttle text', async () => {
+    const w = await world({ crew: false });
+    w.throttle();
+    const s = await w.status();
+    expect(s.headline).not.toBe(CREW_HEADLINE);
+    expect(texts(s)).not.toContain(CREW_ALSO);
+    expect(s.headline).toMatch(/^Idle/);
+  });
+
+  test('two ready issues under the throttle: the existing line, without the crew item', async () => {
+    const issue = (number: number): FakeIssue => ({
+      number,
+      title: `Issue ${number}`,
+      body: 'b',
+      author: 'human',
+      labels: ['agent-ready'],
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    const w = await world({ issues: [issue(1), issue(2)] });
+    w.throttle();
+    await w.h.sync();
+    const s = await w.status();
+    expect(s.headline).toMatch(/^Held by Claude's usage throttle: 2 issues wait; /);
+    expect(texts(s)).not.toContain(CREW_ALSO);
   });
 });

@@ -84,6 +84,8 @@ export type UsageFacts = {
   overageProbeSince?: string;
   /** Command's override of the throttle, while in force (#728). */
   override?: UsageOverride;
+  /** When Claude's usage was last observed (the usage row's `observedAt`). */
+  observedAt?: string;
 };
 
 /** One zone as the status reads it. The optional facts serve the headlines that name them. */
@@ -120,6 +122,11 @@ export type StatusInput = {
   usagePausedUntil?: string;
   /** The usage gate and the row's facts (default: open). */
   usage?: UsageFacts;
+  /**
+   * The throttle holds the crew (#727): the gate is `finishing_only` and a configured, active zone
+   * has the crew enabled, so its lead, audits and triage wait (`gateQueuesCrew`). Default: false.
+   */
+  crewHeld?: boolean;
   /** Live sticks, their slots, and the slots leased or running now. */
   sticks: { live: number; slots?: number; busy?: number };
   doctor: { fails: DoctorCheck[]; finishedAt?: string };
@@ -257,6 +264,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
   const queuedIssues = heldQueued.filter((q) => q.d.workItemId !== null).length;
   // Under the throttle only finishing roles and the doctor lease (leases.ts): the rest waits.
   const throttled = heldQueued.filter((q) => !FINISHING.has(q.d.role) && q.d.role !== 'doctor');
+  const crewHeld = input.crewHeld === true && usage.gate === 'finishing_only';
   const goalChanges = input.goalChangesToConfirm ?? [];
   const goalText = `${plural(goalChanges.length, 'goal change')} to confirm`;
   // The oldest change (the lowest id) is the one a link opens.
@@ -273,9 +281,13 @@ export function statusOf(input: StatusInput, now: Date): Status {
       doctor?: boolean;
       cap?: boolean;
       goalChanges?: boolean;
+      /** The headline already says the throttle holds the crew's work. */
+      crewHeld?: boolean;
     } = {},
   ) => {
     const also: NonNullable<Status['also']> = [];
+    if (uses.crewHeld !== true && crewHeld)
+      also.push({ text: "The crew waits on Claude's usage throttle", href: '/' });
     // Said only where it lifts something: not under the kill switch, nor with every project held.
     const o = usage.override;
     if (o && !input.killed && activeZones.length > 0)
@@ -439,13 +451,16 @@ export function statusOf(input: StatusInput, now: Date): Status {
   const waiting = readyCount + queuedIssues;
   const underThrottle = readyCount + throttled.length;
   if (underThrottle > 0 && usage.gate === 'finishing_only')
-    return said({
-      headline: `Held by Claude's usage throttle: ${wait(underThrottle, throttled.every((q) => q.d.workItemId !== null) ? 'issue' : 'drop')}; only finishing work starts`,
-      detail:
-        "Claude's usage is above the throttle: reviews, heals and merges go on; new work starts once usage falls back.",
-      waitingOn: 'claude',
-      action: { label: 'See usage on home', href: '/' },
-    });
+    return said(
+      {
+        headline: `Held by Claude's usage throttle: ${wait(underThrottle, throttled.every((q) => q.d.workItemId !== null) ? 'issue' : 'drop')}; only finishing work starts`,
+        detail:
+          "Claude's usage is above the throttle: reviews, heals and merges go on; new work starts once usage falls back.",
+        waitingOn: 'claude',
+        action: { label: 'See usage on home', href: '/' },
+      },
+      { crewHeld: true },
+    );
   if (waiting > 0 && usage.gate === 'probe')
     return said({
       headline: `Probing the usage limit: one drop runs until it shows the limit cleared; ${wait(waiting, 'issue')}`,
@@ -639,6 +654,20 @@ export function statusOf(input: StatusInput, now: Date): Status {
       action: { label: `Open ${name(firstHeld.id)}`, href: zoneHref(firstHeld.id) },
     });
 
+  // Nothing waits, but the throttle holds the crew's own drops (#727): say so, not idle.
+  if (crewHeld)
+    return said(
+      {
+        headline: "Held by Claude's usage throttle: the crew waits until usage falls back",
+        detail:
+          'Claude reported its usage near the limit. Reviews, heals and merges go on; the crew lead, audits and new work start again once it clears.',
+        waitingOn: 'claude',
+        ...(usage.observedAt ? { since: usage.observedAt } : {}),
+        action: { label: 'See usage on home', href: '/' },
+      },
+      { crewHeld: true },
+    );
+
   const zoneOne = activeZones[0] ?? zones[0];
   return said({
     headline: `Idle: no ready issues. Label one ${zoneOne?.readyLabel ?? DEFAULT_READY_LABEL} or file a new issue`,
@@ -733,6 +762,7 @@ export function statusInputOf(o: {
       ...opt('overageResumeUntil', u.overageResumeUntil),
       ...opt('overageResumeWorkItemId', u.overageResumeWorkItemId),
       ...opt('overageProbeSince', u.overageProbeSince),
+      ...opt('observedAt', u.observedAt),
       // Shown only where it acts: the throttle holds, and the override lifts it.
       ...opt('override', gate === 'override' ? usageOverride(db, now) : null),
     },
@@ -745,6 +775,12 @@ export function statusInputOf(o: {
     // A paused or observing zone's briefings are held off the floor, so they don't count here.
     openBriefings: floorBriefings(db, config.dropZones).listed.length,
     goalChangesToConfirm: goalChangesToConfirm(db, config),
+    // The throttle holds the crew where a configured, active zone runs one (gateQueuesCrew).
+    crewHeld:
+      gate === 'finishing_only' &&
+      config.dropZones.some(
+        (z) => z.crew?.enabled === true && getZoneMode(db, z.id, z.mode) === 'active',
+      ),
     zones: config.dropZones.map((zone): StatusZone => {
       const items = listWorkItems(db, zone.id);
       const drops = listActiveDrops(db, zone.id);
