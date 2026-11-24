@@ -48,6 +48,7 @@ import {
   InstallationCheckError,
   type InstallationVerifier,
 } from '../forge/installation-verifier.js';
+import { forgeKind } from '../forge/kind.js';
 import { APP_MANIFEST_PERMISSIONS } from '../github/app-manifest.js';
 import { FORBIDDEN, type ZoneGuidance } from '../github/guidance.js';
 import { getGoals } from '../goals.js';
@@ -1125,6 +1126,7 @@ async function identityCheck(
   const base = { id: `forge.${who}`, zoneId: zone.id, doc: doc('tokens') };
   if (who === 'reviewer' && zone.identity === 'starter')
     return { ...base, status: 'skip', summary: NO_REVIEWER, doc: doc('starter-mode') };
+  if (forgeKind(zone) === 'gitlab') return gitlabIdentityCheck(d, zone, r, who, base);
   const unverified = await appIdsProblem(d, zone, who, base);
   if (unverified) return unverified;
   const app = appEntryFor(d, zone, who);
@@ -1182,6 +1184,144 @@ async function identityCheck(
       status: 'warn',
       summary,
       fix: `Create a replacement token before then, write it to the file ${v}_FILE names, and restart the server.`,
+    };
+  return { ...base, status: 'pass', summary };
+}
+
+/** GitLab's word for the access level `repoAccess` reports. */
+function gitlabLevelOf(a: Awaited<ReturnType<Forge['repoAccess']>>): string {
+  const p = a.permissions;
+  return p.admin
+    ? 'Owner'
+    : p.maintain
+      ? 'Maintainer'
+      : p.push
+        ? 'Developer'
+        : p.pull
+          ? 'Reporter'
+          : 'Guest (or no membership)';
+}
+
+/**
+ * `forge.author` / `forge.reviewer` for a GitLab zone (issue #778): the token against `GET /user`,
+ * the project and the user's member level (Developer or above; the reviewer below Maintainer, the
+ * author below Owner), distinct users, then the token's own scopes (`api`, never `sudo` or
+ * `admin_mode`) and expiry. No line holds a token; the base URL and project path are not secret.
+ */
+async function gitlabIdentityCheck(
+  d: DoctorDeps,
+  zone: DropZoneConfig,
+  r: ZoneReads,
+  who: 'author' | 'reviewer',
+  base: { id: string; zoneId: string; doc: string },
+): Promise<DoctorCheck> {
+  const entry = `gitlab-pat/${zone.id}/${who}`;
+  const project = `GitLab project ${zone.repo}`;
+  const store = `store it in the vault entry ${entry} (under System, Credentials, or with jumpmaster ctl secrets set ${entry})`;
+  const newToken = `Create a GitLab personal access token for the ${who} bot user with the api scope (and neither sudo nor admin_mode), then ${store}.`;
+  const unreachable = (what: string, f: Failed): DoctorCheck => ({
+    ...base,
+    status: 'warn',
+    summary: `could not ${what} with the ${who} token: ${f.rateLimited ? "GitLab's rate limit refused the read" : f.status === null || f.status === 0 ? 'no HTTP answer' : `HTTP ${f.status}`}; the check did not run`,
+    fix: `Check the server can reach ${zone.gitlab?.baseUrl ?? 'the GitLab instance'}, then run the doctor again.`,
+  });
+  const rejected = (what: string): DoctorCheck => ({
+    ...base,
+    status: 'fail',
+    summary: `GitLab rejected the ${who} token (401) while trying to ${what}: it is wrong, expired or revoked`,
+    fix: newToken,
+  });
+
+  const login = await r.logins[who]();
+  if (!login.ok) {
+    const what = 'read its own user (GET /user)';
+    if (login.status === 401) return rejected(what);
+    if (login.status === 403 && !login.rateLimited)
+      return {
+        ...base,
+        status: 'fail',
+        summary: `the ${who} token can't ${what} on GitLab (HTTP 403): it lacks the api scope`,
+        fix: newToken,
+      };
+    return unreachable(what, login);
+  }
+  const user = login.value;
+  const access = await r.access[who]();
+  if (!access.ok) {
+    const what = `read the ${project}`;
+    if (access.status === 401) return rejected(what);
+    if ((access.status === 403 || access.status === 404) && !access.rateLimited)
+      return {
+        ...base,
+        status: 'fail',
+        summary: `the ${who} token (user ${user}) can't read the ${project} (HTTP ${access.status}): GitLab answers so when the user is not a member of a private project, or the project path is wrong`,
+        fix: `Make ${user} a member of the ${project} with the Developer role, and check the zone's project path (${zone.repo}) is the project's full path on GitLab.`,
+      };
+    return unreachable(what, access);
+  }
+  const a = access.value;
+  const level = gitlabLevelOf(a);
+  const forbidden = (a.scopes ?? []).filter((s) => s === 'sudo' || s === 'admin_mode');
+  if (forbidden.length > 0)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `the ${who} token (user ${user}) has the ${forbidden.join(' and ')} scope${forbidden.length > 1 ? 's' : ''}: no GitLab token Jumpmaster uses may carry sudo or admin_mode`,
+      fix: `Revoke that token. ${newToken}`,
+    };
+  if (who === 'reviewer') {
+    const author = await r.logins.author();
+    if (author.ok && author.value === user)
+      return {
+        ...base,
+        status: 'fail',
+        summary: `the reviewer token is the same GitLab user as the author (${user}): GitLab never counts an author's approval of its own merge request`,
+        fix: `Create a second GitLab user (the reviewer bot), make it a Developer on the ${project}, and store its token in ${entry}.`,
+      };
+  }
+  if (!a.permissions.push)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `the ${who} user ${user} has ${level} access to the ${project}, below Developer`,
+      fix: `Give ${user} the Developer role on the ${project} (Manage → Members).`,
+    };
+  if (who === 'reviewer' && a.permissions.maintain)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `the reviewer user ${user} is ${level} on the ${project}: a Maintainer can edit the approval rules its own approval is checked against`,
+      fix: `Give ${user} the Developer role instead of ${level} on the ${project}.`,
+    };
+  if (who === 'author' && a.permissions.admin)
+    return {
+      ...base,
+      status: 'fail',
+      summary: `the author user ${user} is Owner of the ${project}: no GitLab token Jumpmaster uses may be above Maintainer`,
+      fix: `Give ${user} the Developer or Maintainer role instead of Owner on the ${project}.`,
+    };
+  if (a.scopes !== null && !a.scopes.includes('api'))
+    return {
+      ...base,
+      status: 'fail',
+      summary: `the ${who} token (user ${user}) lacks the api scope (it has: ${a.scopes.join(', ') || 'none'}): opening, commenting on, labelling and approving merge requests need api`,
+      fix: newToken,
+    };
+  if (a.scopes === null)
+    return {
+      ...base,
+      status: 'warn',
+      summary: `${who} user ${user} has ${level} on the ${project}, but the token can't read its own scopes (GET /personal_access_tokens/self), so the scope check did not run`,
+      fix: `Check by hand that the token in ${entry} has the api scope and neither sudo nor admin_mode; a personal access token can read itself.`,
+    };
+  const exp = expiryNote(a.tokenExpiresAt, d.now());
+  const summary = `${who} user ${user} has ${level} on the ${project} (token scopes: ${a.scopes.join(', ')})${exp.note}`;
+  if (exp.soon)
+    return {
+      ...base,
+      status: 'warn',
+      summary,
+      fix: `Before then, create a replacement GitLab personal access token with the api scope (and neither sudo nor admin_mode), and ${store}.`,
     };
   return { ...base, status: 'pass', summary };
 }

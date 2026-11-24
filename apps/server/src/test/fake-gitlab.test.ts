@@ -325,6 +325,29 @@ describe('access', () => {
     expect(gl.unknown).toEqual([]);
   });
 
+  test('tokenSelfStatus makes GET /personal_access_tokens/self answer 401 or 404, opt-in', async () => {
+    const { gl, call } = setup();
+    const t404 = glpat('N');
+    const t401 = glpat('M');
+    gl.addUser({ username: 'n', token: t404, accessLevel: ACCESS.developer, tokenSelfStatus: 404 });
+    gl.addUser({ username: 'm', token: t401, accessLevel: ACCESS.developer, tokenSelfStatus: 401 });
+    expect(await call('GET', '/personal_access_tokens/self', { token: t404 })).toMatchObject({
+      status: 404,
+      body: { message: '404 Not Found' },
+    });
+    expect(await call('GET', '/personal_access_tokens/self', { token: t401 })).toMatchObject({
+      status: 401,
+      body: { message: '401 Unauthorized' },
+    });
+    // GET /user still answers for those users, and the default stays 200.
+    expect((await call('GET', '/user', { token: t404 })).status).toBe(200);
+    expect((await call('GET', '/personal_access_tokens/self', { token: REPORTER })).status).toBe(
+      200,
+    );
+    expect(gl.unknown).toEqual([]);
+    expect(JSON.stringify(gl.requests)).not.toContain(t404);
+  });
+
   test('GET /personal_access_tokens/self answers 401 with no token or an unknown token', async () => {
     const { call } = setup();
     const none = await call('GET', '/personal_access_tokens/self', { token: null });

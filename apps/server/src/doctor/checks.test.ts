@@ -24,10 +24,12 @@ import {
   setZoneMode,
   stampStick,
 } from '../db/repo.js';
+import { GitLabForge } from '../forge/gitlab.js';
 import { InstallationCheckError } from '../forge/installation-verifier.js';
 import { ScrubSet } from '../forge/scrub-set.js';
 import { APP_MANIFEST_PERMISSIONS } from '../github/app-manifest.js';
 import { AUTHOR_TOKEN, ago, NOW, one, PG, world } from '../test/doctorWorld.js';
+import { ACCESS, type FakeGitLab, fakeGitLab } from '../test/fake-gitlab.js';
 import { okProbes } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
 import { tmpDbFile } from '../test/helpers.js';
@@ -51,6 +53,7 @@ import {
   type DoctorCheck,
   type DoctorDeps,
   installDocUrl,
+  zoneChecks,
 } from './checks.js';
 import { processEnv } from './run.js';
 
@@ -4096,5 +4099,204 @@ describe('forge.author-reads and forge.reviewer-reads for GitHub App roles (issu
     expect(c.status).toBe('pass');
     expect(c.summary).toContain('CI is read through Actions jobs');
     expect(c.summary).toContain('the author token');
+  });
+});
+
+describe('forge.author and forge.reviewer on a GitLab zone (issue #778)', () => {
+  const GL = 'https://gitlab.example.com';
+  const PATH = 'acme/demo';
+  // Made-up tokens, built at run time so no token-shaped literal sits in the tracked file.
+  const glpat = (c: string) => ['glpat', c.repeat(20)].join('-');
+  const A_TOKEN = glpat('A');
+  const R_TOKEN = glpat('R');
+  type UserOpts = Omit<Parameters<FakeGitLab['addUser']>[0], 'username' | 'token'>;
+  let fakes: FakeGitLab[] = [];
+  const seen: DoctorCheck[] = [];
+
+  beforeAll(() => nock.disableNetConnect());
+  afterEach(() => {
+    try {
+      // No token in any summary or fix, of any GitLab identity check this block produced.
+      for (const c of seen) {
+        const text = `${c.summary}\n${c.fix ?? ''}\n${JSON.stringify(c)}`;
+        for (const t of [A_TOKEN, R_TOKEN]) expect(text).not.toContain(t);
+        if (c.status === 'skip') continue;
+        expect(text).not.toMatch(/collaborator/i);
+        expect(text).not.toContain('Metadata: read');
+        expect(text).not.toMatch(/JM_\w*TOKEN/);
+        expect(text).not.toContain('GitHub');
+      }
+    } finally {
+      seen.length = 0;
+      for (const gl of fakes) gl.stop();
+      fakes = [];
+      nock.cleanAll();
+    }
+  });
+  afterAll(() => nock.enableNetConnect());
+
+  async function run(
+    o: {
+      author?: UserOpts;
+      reviewer?: UserOpts | 'same';
+      starter?: boolean;
+      /** The author is not a member of the private project. */
+      authorNonMember?: boolean;
+      /** The author's token matches no GitLab user. */
+      authorUnknown?: boolean;
+    } = {},
+  ) {
+    const w = world({
+      zone: {
+        repo: PATH,
+        forge: 'gitlab',
+        gitlab: { baseUrl: GL },
+        ...(o.starter ? { identity: 'starter' as const } : {}),
+      },
+    });
+    const gl = fakeGitLab({ baseUrl: GL, project: { id: 7, path: PATH, visibility: 'private' } });
+    fakes.push(gl);
+    if (!o.authorUnknown)
+      gl.addUser({
+        username: 'jm-author',
+        token: A_TOKEN,
+        scopes: ['api'],
+        ...(o.authorNonMember ? {} : { accessLevel: ACCESS.developer }),
+        ...o.author,
+      });
+    if (o.reviewer !== 'same')
+      gl.addUser({
+        username: 'jm-reviewer',
+        token: R_TOKEN,
+        accessLevel: ACCESS.developer,
+        scopes: ['api'],
+        ...o.reviewer,
+      });
+    const reviewerToken = o.reviewer === 'same' ? A_TOKEN : R_TOKEN;
+    w.deps.forges = () => ({
+      author: new GitLabForge(GL, PATH, A_TOKEN),
+      reviewer: o.starter ? null : new GitLabForge(GL, PATH, reviewerToken),
+    });
+    const checks = await zoneChecks(w.deps, w.zone, []);
+    const author = one(checks, 'forge.author');
+    const reviewer = one(checks, 'forge.reviewer');
+    seen.push(author, reviewer);
+    return { author, reviewer, zone: w.zone.id };
+  }
+
+  test('passes a Developer author and reviewer whose tokens have the api scope', async () => {
+    const { author, reviewer } = await run();
+    expect(author).toMatchObject({ status: 'pass', zoneId: 'main' });
+    expect(author.summary).toContain('jm-author');
+    expect(author.summary).toContain('Developer');
+    expect(author.summary).toContain('api');
+    expect(author.summary).toContain(PATH);
+    expect(reviewer).toMatchObject({ status: 'pass' });
+    expect(reviewer.summary).toContain('jm-reviewer');
+  });
+
+  test('passes a Maintainer author with the api scope', async () => {
+    const { author } = await run({
+      author: { accessLevel: ACCESS.maintainer, scopes: ['api', 'read_user'] },
+    });
+    expect(author.status).toBe('pass');
+    expect(author.summary).toContain('Maintainer');
+    expect(author.summary).toContain('api, read_user');
+  });
+
+  test('fails a token GitLab rejects (401 on GET /user), naming its vault entry', async () => {
+    const { author, zone } = await run({ authorUnknown: true });
+    expect(author.status).toBe('fail');
+    expect(author.summary).toContain('GitLab rejected the author token (401)');
+    expect(author.fix).toContain(`gitlab-pat/${zone}/author`);
+    expect(author.fix).toContain('ctl secrets set');
+  });
+
+  test('fails when the project cannot be read (a non-member of a private project)', async () => {
+    const { author } = await run({ authorNonMember: true });
+    expect(author.status).toBe('fail');
+    expect(author.summary).toContain(`project ${PATH}`);
+    expect(author.summary).toContain('GitLab');
+    expect(author.fix).toContain('Developer');
+    expect(author.fix).toContain('jm-author');
+    expect(author.fix).toContain('project path');
+  });
+
+  test('fails a Reporter author, below Developer', async () => {
+    const { author } = await run({ author: { accessLevel: ACCESS.reporter } });
+    expect(author.status).toBe('fail');
+    expect(author.summary).toContain('Reporter');
+    expect(author.fix).toContain('Developer');
+  });
+
+  test('fails an Owner author: no GitLab token above Maintainer', async () => {
+    const { author } = await run({ author: { accessLevel: ACCESS.owner } });
+    expect(author.status).toBe('fail');
+    expect(author.summary).toContain('Owner');
+    expect(author.fix).toContain('Developer or Maintainer');
+  });
+
+  for (const scope of ['sudo', 'admin_mode'])
+    test(`fails a token with the ${scope} scope`, async () => {
+      const { author, zone } = await run({ author: { scopes: ['api', scope] } });
+      expect(author.status).toBe('fail');
+      expect(author.summary).toContain(scope);
+      expect(author.fix).toContain(`gitlab-pat/${zone}/author`);
+    });
+
+  test('fails read_api plus write_repository without api', async () => {
+    const { author, zone } = await run({ author: { scopes: ['read_api', 'write_repository'] } });
+    expect(author.status).toBe('fail');
+    expect(author.summary).toContain('api scope');
+    expect(author.summary).toContain('read_api, write_repository');
+    expect(author.fix).toContain('api scope');
+    expect(author.fix).toContain('neither sudo nor admin_mode');
+    expect(author.fix).toContain(`gitlab-pat/${zone}/author`);
+  });
+
+  for (const status of [401, 404] as const)
+    test(`warns when the scopes can't be read (${status} on the token's own read)`, async () => {
+      const { author, reviewer } = await run({
+        author: { tokenSelfStatus: status },
+        reviewer: { tokenSelfStatus: status },
+      });
+      for (const c of [author, reviewer]) {
+        expect(c.status).toBe('warn');
+        expect(c.summary).toContain('the scope check did not run');
+      }
+    });
+
+  test('warns when the token expires within the window, and passes when it does not', async () => {
+    const soon = new Date(NOW.getTime() + 3 * 86_400_000).toISOString().slice(0, 10);
+    const { author, reviewer, zone } = await run({
+      author: { expiresAt: soon },
+      reviewer: { expiresAt: '2027-09-01' },
+    });
+    expect(author.status).toBe('warn');
+    expect(author.summary).toContain(`the token expires ${soon}`);
+    expect(author.fix).toContain(`gitlab-pat/${zone}/author`);
+    expect(reviewer.status).toBe('pass');
+    expect(reviewer.summary).toContain('the token expires 2027-09-01');
+  });
+
+  test('fails a Maintainer or Owner reviewer', async () => {
+    for (const level of [ACCESS.maintainer, ACCESS.owner]) {
+      const { reviewer } = await run({ reviewer: { accessLevel: level } });
+      expect(reviewer.status).toBe('fail');
+      expect(reviewer.summary).toContain('approval rules');
+      expect(reviewer.fix).toContain('Developer');
+    }
+  });
+
+  test('fails a reviewer who is the same user as the author', async () => {
+    const { reviewer } = await run({ reviewer: 'same' });
+    expect(reviewer.status).toBe('fail');
+    expect(reviewer.summary).toContain('same GitLab user as the author (jm-author)');
+  });
+
+  test('starter mode skips the reviewer check', async () => {
+    const { author, reviewer } = await run({ starter: true });
+    expect(author.status).toBe('pass');
+    expect(reviewer.status).toBe('skip');
   });
 });
