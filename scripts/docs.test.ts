@@ -809,3 +809,21 @@ describe('rotating a GitHub App private key (issue 504)', () => {
       );
   });
 });
+
+describe('the clone container spec (issue 822)', () => {
+  test('exists with its title and the decided headings', () => {
+    const path = 'docs/superpowers/specs/2026-11-24-clone-container.md';
+    expect(existsSync(join(ROOT, path))).toBe(true);
+    const text = read(path);
+    expect(text.startsWith('# Clone container for GitLab drops\n')).toBe(true);
+    for (const h of [
+      'Decided',
+      'How a drop runs',
+      'Server rules for the token',
+      'Volumes',
+      'Work, in order',
+      'How it is proved',
+    ])
+      expect(text, h).toMatch(new RegExp(`^## ${h}$`, 'm'));
+  });
+});
