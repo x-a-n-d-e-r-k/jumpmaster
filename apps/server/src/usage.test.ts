@@ -536,7 +536,7 @@ describe('every reported usage window (#144)', () => {
     unifiedWindows: windows,
   });
 
-  test('two reports keep the latest value of every window, with observed_at set', () => {
+  test('two reports keep the latest value of each reported window, with observed_at set', () => {
     ingestRateLimit(
       db,
       allowed({
@@ -550,7 +550,10 @@ describe('every reported usage window (#144)', () => {
     const later = plus(t0, MIN);
     ingestRateLimit(
       db,
-      allowed({ seven_day_fable: { utilization: 0.42, resetsAt: '2026-10-26T00:00:00.000Z' } }),
+      allowed({
+        seven_day: { utilization: 0.3, resetsAt: '2026-10-25T00:00:00.000Z' },
+        seven_day_fable: { utilization: 0.42, resetsAt: '2026-10-26T00:00:00.000Z' },
+      }),
       src('d2', null),
       cfg,
       later,
@@ -560,7 +563,7 @@ describe('every reported usage window (#144)', () => {
         key: 'seven_day',
         utilization: 0.3,
         resetsAt: '2026-10-25T00:00:00.000Z',
-        observedAt: t0.toISOString(),
+        observedAt: later.toISOString(),
         model: null,
       },
       {
@@ -573,6 +576,54 @@ describe('every reported usage window (#144)', () => {
     ]);
     // The existing columns still follow five_hour and seven_day only.
     expect(getUsageState(db)).toMatchObject({ sevenDayUtil: 0.3, fiveHourUtil: null });
+  });
+
+  describe('a report carrying unifiedWindows replaces the stored set (#737)', () => {
+    const seed = () =>
+      ingestRateLimit(
+        db,
+        allowed({ five_hour: { utilization: 0.4 }, seven_day: { utilization: 0.2 } }),
+        src('d1', null),
+        cfg,
+        t0,
+      );
+    const keyed = () => listUsageWindows(db).map((w) => [w.key, w.utilization]);
+
+    test('an ultra-shaped report (seven_day only) forgets five_hour', () => {
+      seed();
+      ingestRateLimit(
+        db,
+        allowed({ seven_day: { utilization: 0.25 } }),
+        src('d2', null),
+        cfg,
+        plus(t0, MIN),
+      );
+      expect(keyed()).toEqual([['seven_day', 0.25]]);
+    });
+
+    test('a report with no unifiedWindows leaves the rows unchanged', () => {
+      seed();
+      const before = listUsageWindows(db);
+      ingestRateLimit(db, { status: 'allowed' }, src('d2', null), cfg, plus(t0, MIN));
+      expect(listUsageWindows(db)).toEqual(before);
+    });
+
+    test('a report whose only window is invalid (utilization 2) leaves the rows unchanged', () => {
+      seed();
+      const before = listUsageWindows(db);
+      ingestRateLimit(
+        db,
+        allowed({ seven_day: { utilization: 2 } }),
+        src('d2', null),
+        cfg,
+        plus(t0, MIN),
+      );
+      expect(listUsageWindows(db)).toEqual(before);
+      expect(keyed()).toEqual([
+        ['five_hour', 0.4],
+        ['seven_day', 0.2],
+      ]);
+    });
   });
 
   test('a Fable-only limit still records its window', () => {

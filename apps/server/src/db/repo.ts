@@ -1355,22 +1355,34 @@ export interface UsageWindowRow {
   model: string | null;
 }
 
-/** Stores the latest value of each reported window, stamped `now` and the reporting `model`. */
+/**
+ * Replaces the stored windows with the reported set, each stamped `now` and the reporting `model`;
+ * a stored window the report no longer names is forgotten (#737: `ultra` has no 5-hour window).
+ * An empty set forgets nothing. Upserts and deletes run in one transaction.
+ */
 export function recordUsageWindows(
   db: Db,
   windows: Record<string, { utilization: number; resetsAt?: string | undefined }>,
   now: Date,
   model: string | null,
 ): void {
+  const keys = Object.keys(windows);
+  if (keys.length === 0) return;
   const up = db.prepare(
     `INSERT INTO usage_windows (key, utilization, resets_at, observed_at, model)
      VALUES (?, ?, ?, ?, ?)
      ON CONFLICT (key) DO UPDATE SET utilization = excluded.utilization,
        resets_at = excluded.resets_at, observed_at = excluded.observed_at, model = excluded.model`,
   );
-  for (const [key, w] of Object.entries(windows)) {
-    up.run(key, w.utilization, w.resetsAt ?? null, now.toISOString(), model);
-  }
+  const forget = db.prepare(
+    `DELETE FROM usage_windows WHERE key NOT IN (${keys.map(() => '?').join(', ')})`,
+  );
+  db.transaction(() => {
+    forget.run(...keys);
+    for (const [key, w] of Object.entries(windows)) {
+      up.run(key, w.utilization, w.resetsAt ?? null, now.toISOString(), model);
+    }
+  })();
 }
 
 /** Every stored usage window, by key. */
