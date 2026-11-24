@@ -4464,3 +4464,101 @@ describe('forge.branch-rules on a two-bot GitLab zone (issue #803, ruling 120)',
     expect(c.summary).not.toContain('stale approvals not dismissed');
   });
 });
+
+describe('forge.author-reads, forge.reviewer-reads and forge.admin on a GitLab zone (issue #804)', () => {
+  const GL = 'https://gitlab.example.com';
+  const PATH = 'acme/demo';
+  // Made-up tokens, built at run time so no token-shaped literal sits in the tracked file.
+  const glpat = (c: string) => ['glpat', c.repeat(20)].join('-');
+  const A_TOKEN = glpat('A');
+  const R_TOKEN = glpat('R');
+  const IDS = ['forge.author-reads', 'forge.reviewer-reads', 'forge.admin'] as const;
+  let gl: FakeGitLab | undefined;
+
+  beforeAll(() => nock.disableNetConnect());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    gl?.stop();
+    gl = undefined;
+    nock.cleanAll();
+  });
+  afterAll(() => nock.enableNetConnect());
+
+  async function run(o: { starter?: boolean } = {}) {
+    const w = world({
+      zone: {
+        repo: PATH,
+        forge: 'gitlab',
+        gitlab: { baseUrl: GL },
+        ...(o.starter ? { identity: 'starter' as const } : {}),
+      },
+    });
+    gl = fakeGitLab({ baseUrl: GL, project: { id: 7, path: PATH, visibility: 'private' } });
+    gl.addUser({
+      username: 'jm-author',
+      token: A_TOKEN,
+      accessLevel: ACCESS.developer,
+      scopes: ['api'],
+    });
+    gl.addUser({
+      username: 'jm-reviewer',
+      token: R_TOKEN,
+      accessLevel: ACCESS.developer,
+      scopes: ['api'],
+    });
+    const reads = vi.spyOn(GitLabForge.prototype, 'probeReads');
+    const admin = vi.spyOn(GitLabForge.prototype, 'probeAdministration');
+    w.deps.forges = () => ({
+      author: new GitLabForge(GL, PATH, A_TOKEN),
+      reviewer: o.starter ? null : new GitLabForge(GL, PATH, R_TOKEN),
+    });
+    const checks = await zoneChecks(w.deps, w.zone, []);
+    expect(reads).not.toHaveBeenCalled();
+    expect(admin).not.toHaveBeenCalled();
+    for (const id of IDS) {
+      const c = one(checks, id);
+      const text = `${c.summary}\n${c.fix ?? ''}\n${JSON.stringify(c)}`;
+      for (const t of [A_TOKEN, R_TOKEN]) expect(text).not.toContain(t);
+      expect(text).not.toMatch(/glpat-/);
+      // No GitHub permission or settings path in what the operator reads.
+      const said = `${c.summary}\n${c.fix ?? ''}`;
+      expect(said).not.toMatch(/: read\b|: write\b|Administration|Settings →|github\.com/);
+      expect(said).not.toContain('GitHub');
+    }
+    // The fake saw no request that a reads or administration probe would make.
+    expect(gl.unknown).toEqual([]);
+    for (const r of gl.requests)
+      expect(r.path).not.toMatch(/\/(issues|merge_requests|statuses|pipelines|hooks)\b/);
+    return { checks, zone: w.zone.id };
+  }
+
+  test('a two-bot zone skips all three, naming the identity checks', async () => {
+    const { checks } = await run();
+    const author = one(checks, 'forge.author-reads');
+    expect(author.status).toBe('skip');
+    expect(author.summary).toContain('on GitLab the api scope covers the reads');
+    expect(author.summary).toContain('forge.author checks it');
+    const reviewer = one(checks, 'forge.reviewer-reads');
+    expect(reviewer.status).toBe('skip');
+    expect(reviewer.summary).toContain('on GitLab the api scope covers the reads');
+    expect(reviewer.summary).toContain('forge.reviewer checks it');
+    const admin = one(checks, 'forge.admin');
+    expect(admin.status).toBe('skip');
+    expect(admin.summary).toContain('nothing above Maintainer');
+    expect(admin.summary).toContain('sudo');
+    expect(admin.summary).toContain('admin_mode');
+    expect(admin.summary).toContain('forge.author and forge.reviewer');
+    expect(admin.summary).toContain('forge.branch-rules (bot is admin)');
+    for (const id of IDS) expect(one(checks, id).fix).toBeUndefined();
+  });
+
+  test('a starter zone keeps the starter skip on forge.reviewer-reads', async () => {
+    const { checks } = await run({ starter: true });
+    expect(one(checks, 'forge.reviewer-reads')).toMatchObject({
+      status: 'skip',
+      summary: 'starter mode has no reviewer identity, so there is no reviewer token to check',
+    });
+    expect(one(checks, 'forge.author-reads').summary).toContain('forge.author checks it');
+    expect(one(checks, 'forge.admin').status).toBe('skip');
+  });
+});
