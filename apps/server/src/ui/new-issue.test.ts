@@ -78,7 +78,7 @@ function newIssue(answer: { status: number; body: unknown }) {
       return { status: answer.status, json: async () => answer.body };
     },
   });
-  vm.runInContext(ISSUE_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+  vm.runInContext(ISSUE_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
   const submit = async () => {
     const button = { disabled: false };
     for (const fn of els['issue-form']!.listeners.submit ?? [])

@@ -1,16 +1,20 @@
 import { describe, expect, test } from 'vitest';
+import { PENDING_MS } from '../config/confirm.js';
 import type { Db } from '../db/open.js';
 import { openDb } from '../db/open.js';
 import { t0, tmpDbFile } from '../test/helpers.js';
+import { listCards, recordCard } from './cards.js';
 import {
   appendMessage,
   CHAT_TOOL_RESULT_DAYS,
   createThread,
+  deleteThread,
   getThread,
   listMessages,
   listThreads,
   nextQueued,
   pruneChatToolResults,
+  renameThread,
   setMessage,
   setThreadSession,
   setToolResult,
@@ -211,5 +215,82 @@ describe('chat store', () => {
       expect(byId(db, th.id, past.id)?.result).toBeUndefined();
       expect(byId(db, th.id, past.id)?.resultPrunedAt).toBe(now.toISOString());
     });
+  });
+});
+
+describe('deleteThread (#833)', () => {
+  const seed = (db: Db, title: string, cardState: 'done' | 'pending' = 'done', at = t0) => {
+    const th = createThread(db, { title }, at);
+    const m = appendMessage(db, th.id, { role: 'owner', text: `hi ${title}`, state: 'done' }, at);
+    appendMessage(db, th.id, { role: 'assistant', text: 'ok', state: 'done' }, at);
+    recordCard(
+      db,
+      {
+        threadId: th.id,
+        messageId: m.id,
+        kind: 'queue',
+        state: cardState,
+        summary: `card of ${title}`,
+        ...(cardState === 'pending' ? { link: '/config/confirm/abc' } : {}),
+      },
+      at,
+    );
+    return th;
+  };
+  const count = (db: Db, table: string, id: number) =>
+    (
+      db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM ${table} WHERE ${table === 'chat_threads' ? 'id' : 'thread_id'} = ?`,
+        )
+        .get(id) as { n: number }
+    ).n;
+
+  test('removes the thread, its messages and its cards; other threads are untouched', () => {
+    const db = openDb(tmpDbFile());
+    const gone = seed(db, 'gone');
+    const kept = seed(db, 'kept');
+    const keptMessages = listMessages(db, kept.id);
+    const keptCards = listCards(db, kept.id);
+    expect(deleteThread(db, gone.id, t0)).toBe('deleted');
+    for (const table of ['chat_threads', 'chat_messages', 'chat_cards'])
+      expect(count(db, table, gone.id), table).toBe(0);
+    expect(getThread(db, gone.id)).toBeUndefined();
+    expect(getThread(db, kept.id)).toEqual(kept);
+    expect(listMessages(db, kept.id)).toEqual(keptMessages);
+    expect(listCards(db, kept.id)).toEqual(keptCards);
+    expect(deleteThread(db, gone.id, t0)).toBe('unknown');
+  });
+
+  test("is refused while busy or a pending card's change has not lapsed; a lapsed one does not block", () => {
+    const db = openDb(tmpDbFile());
+    const busy = createThread(db, { title: 'busy' }, t0);
+    appendMessage(db, busy.id, { role: 'owner', text: 'go', state: 'running' }, t0);
+    expect(deleteThread(db, busy.id, t0)).toBe('busy');
+    expect(getThread(db, busy.id)).toBeDefined();
+    const pending = seed(db, 'pending', 'pending');
+    expect(deleteThread(db, pending.id, new Date(t0.getTime() + PENDING_MS - 1))).toBe('pending');
+    expect(listCards(db, pending.id)).toHaveLength(1);
+    expect(deleteThread(db, pending.id, new Date(t0.getTime() + PENDING_MS))).toBe('deleted');
+    expect(getThread(db, pending.id)).toBeUndefined();
+  });
+
+  test("another session's thread is unknown to a viewer and kept", () => {
+    const db = openDb(tmpDbFile());
+    const th = createThread(db, { title: 'mine', owner: 'a' }, t0);
+    expect(deleteThread(db, th.id, t0, 'b')).toBe('unknown');
+    expect(getThread(db, th.id)).toBeDefined();
+    expect(deleteThread(db, th.id, t0, 'a')).toBe('deleted');
+  });
+});
+
+describe('renameThread (#833)', () => {
+  test("sets the title of a visible thread only; another session's is left as it is", () => {
+    const db = openDb(tmpDbFile());
+    const th = createThread(db, { title: 'old', owner: 'a' }, t0);
+    expect(renameThread(db, th.id, 'new', 'b')).toBeUndefined();
+    expect(getThread(db, th.id)?.title).toBe('old');
+    expect(renameThread(db, th.id, 'new', 'a')?.title).toBe('new');
+    expect(renameThread(db, th.id + 1, 'x')).toBeUndefined();
   });
 });

@@ -143,7 +143,7 @@ function pageScript(
       return { ok: a.ok, status: a.status, json: async () => a.json };
     },
   });
-  vm.runInContext(FLAGS_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+  vm.runInContext(FLAGS_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
   const fn = <T>(name: string) => ctx[name] as (...a: unknown[]) => T;
   return { ctx, calls, fn };
 }

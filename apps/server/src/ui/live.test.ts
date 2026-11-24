@@ -102,7 +102,7 @@ function live() {
       interval = undefined;
     },
   });
-  vm.runInContext(LIVE_SCRIPT.replace(/^<script>|<\/script>$/g, ''), ctx);
+  vm.runInContext(LIVE_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
   const flush = () => new Promise((r) => setImmediate(r));
   return {
     state,

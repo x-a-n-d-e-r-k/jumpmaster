@@ -22,10 +22,12 @@ import {
   appendMessage,
   type ChatMessage,
   createThread,
+  deleteThread,
   getThread,
   hasOwnerMessage,
   listMessages,
   listThreads,
+  renameThread,
   resultStepsUpTo,
   SESSION_BOUND_FOCUS,
   setThreadTitle,
@@ -115,6 +117,8 @@ const NewThreadBody = z.object({
   /** What the thread is about ("Ask about this"): its first turn is given the object's context. */
   focus: FocusBody.optional(),
 });
+/** A rename (#833): the same 1 to 200 characters, trimmed, as a new thread's title. */
+const RenameBody = z.object({ title: z.string().trim().min(1).max(200) });
 const MessageBody = z.object({ text: z.string().min(1).max(MAX_MESSAGE_CHARS) });
 
 /**
@@ -195,6 +199,45 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     return { thread, messages: listMessages(db, thread.id) };
   });
 
+  /** Renames a thread the session may see (#833); another session's own thread is unknown. */
+  app.patch<{ Params: { id: string } }>('/api/chat/threads/:id', async (req, reply) => {
+    const viewer = sessionOf(req, reply);
+    if (!viewer) return reply;
+    const id = threadIdOf(req.params.id);
+    if (id === undefined || !getThread(db, id, viewer))
+      return reply.code(404).send({ error: 'unknown thread' });
+    const body = RenameBody.safeParse(req.body ?? {});
+    if (!body.success) return reply.code(400).send({ error: 'a title is 1 to 200 characters' });
+    const thread = renameThread(db, id, body.data.title, viewer);
+    if (!thread) return reply.code(404).send({ error: 'unknown thread' });
+    return { thread };
+  });
+
+  /**
+   * Deletes a thread the session may see, with its messages and cards (#833). Refused (409) while
+   * a turn of it waits or runs, or while a change it staged still waits for Confirm. What its turns
+   * already changed stays: only the chat's record goes.
+   */
+  app.delete<{ Params: { id: string } }>('/api/chat/threads/:id', async (req, reply) => {
+    const viewer = sessionOf(req, reply);
+    if (!viewer) return reply;
+    const id = threadIdOf(req.params.id);
+    const r = id === undefined ? 'unknown' : deleteThread(db, id, deps.now(), viewer);
+    if (r === 'unknown') return reply.code(404).send({ error: 'unknown thread' });
+    if (r === 'busy') {
+      return reply.code(409).send({
+        error: 'this thread has a turn waiting or running: delete it once the turn has finished',
+      });
+    }
+    if (r === 'pending') {
+      return reply.code(409).send({
+        error:
+          'this thread has a change waiting for Confirm: confirm it, or delete the thread once it has lapsed (10 minutes after it was staged)',
+      });
+    }
+    return { deleted: id };
+  });
+
   app.post<{ Params: { id: string } }>('/api/chat/threads/:id/messages', async (req, reply) => {
     const sessionHash = sessionOf(req, reply);
     if (!sessionHash) return reply;
@@ -209,6 +252,9 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     }
     const now = deps.now();
     const message = db.transaction(() => {
+      // Only a thread still titled DEFAULT_TITLE is titled from its first owner message: a thread
+      // the owner renamed (#833) to anything else keeps that name, and a rename to exactly
+      // DEFAULT_TITLE leaves it eligible, as a new thread is. No column records a rename.
       if (thread.title === DEFAULT_TITLE && !hasOwnerMessage(db, thread.id)) {
         const title = titleFromMessage(body.data.text);
         if (title) setThreadTitle(db, thread.id, title, now);
