@@ -1278,7 +1278,7 @@ describe('pairFor by credential kind (spec §4.4)', () => {
         expect(calls.length).toBeGreaterThanOrEqual(2);
         for (const call of calls) expect(call).toMatch(/pairOptionsOf\(zone\)/);
         expect(main).toMatch(
-          /pairOptionsFor\(\s*zone,\s*\{ resolved: live\.resolved\(\), apps: live\.resolvedApps\(\) \},\s*appTokens,\s*\)/,
+          /pairOptionsFor\(\s*zone,\s*\{ resolved: live\.resolved\(\), apps: live\.resolvedApps\(\) \},\s*appTokens,\s*live\.resolvedGitlabPats\(\),\s*\)/,
         );
         expect(main).not.toMatch(/pushOptionsFor|pairFor\(/);
       });

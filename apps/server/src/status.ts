@@ -43,6 +43,7 @@ import {
   type UsageOverride,
   usageOverride,
 } from './usage.js';
+import { parseGitlabPatEntryName } from './vault/gitlab-pat-entries.js';
 import { type CredentialProblem, credentialProblems } from './vault/problems.js';
 
 /**
@@ -201,8 +202,11 @@ const CREDENTIAL_WORDS: Record<string, string> = {
   githubReadToken: 'read token',
   registryReadToken: 'registry read token',
 };
-const credentialWords = (name: string) =>
-  CREDENTIAL_WORDS[name] ?? `gate secret ${name.split(':').at(-1)}`;
+const credentialWords = (name: string) => {
+  const gitlab = parseGitlabPatEntryName(name);
+  if (gitlab) return `GitLab ${gitlab.role} token`;
+  return CREDENTIAL_WORDS[name] ?? `gate secret ${name.split(':').at(-1)}`;
+};
 
 /** "demo: no Claude token": the short form of a credential problem. */
 function shortProblem(p: CredentialProblem, name: (id: string) => string): string {
@@ -826,7 +830,7 @@ export function statusInputOf(o: {
         drops,
         parked: items.filter((i) => i.state === 'parked').length,
         credentialProblems: resolved
-          ? credentialProblems(zone, resolved, store?.resolvedApps())
+          ? credentialProblems(zone, resolved, store?.resolvedApps(), store?.resolvedGitlabPats())
           : [],
         repo: zone.repo,
         readyLabel: zone.readyLabel,

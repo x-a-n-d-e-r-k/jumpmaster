@@ -1287,3 +1287,52 @@ describe('the usage throttle holding the crew, queued work or not (#727)', () =>
     expect(texts(s)).not.toContain(CREW_ALSO);
   });
 });
+
+describe("a GitLab zone's gitlab-pat problems on Home (issue #764)", () => {
+  test('the short line names a GitLab author or reviewer token, never a gate secret', () => {
+    const s = statusOf(
+      base({
+        zones: [
+          zone({ items: [item({ state: 'in_flight' })], drops: [drop()], gateEvents: {} }),
+          zone({
+            id: 'web',
+            credentialProblems: [
+              problem({ zoneId: 'web', credential: 'gitlab-pat/web/author' }),
+              problem({ zoneId: 'web', credential: 'gitlab-pat/web/reviewer' }),
+              problem({ zoneId: 'web', kind: 'same', credential: 'gitlab-pat/web/reviewer' }),
+            ],
+          }),
+        ],
+      }),
+      NOW,
+    );
+    expect(s.also?.map((a) => a.text)).toEqual([
+      'web: no GitLab author token',
+      'web: no GitLab reviewer token',
+      'web: the GitLab reviewer token is the same as another',
+    ]);
+    expect(JSON.stringify(s)).not.toContain('gate secret');
+  });
+
+  test('the wording for every other credential is unchanged', () => {
+    const s = statusOf(
+      base({
+        zones: [
+          zone({ items: [item({ state: 'in_flight' })], drops: [drop()], gateEvents: {} }),
+          zone({
+            id: 'web',
+            credentialProblems: [
+              problem({ zoneId: 'web', credential: 'githubAuthorToken' }),
+              problem({ zoneId: 'web', credential: 'zone:web:NPM_TOKEN' }),
+            ],
+          }),
+        ],
+      }),
+      NOW,
+    );
+    expect(s.also?.map((a) => a.text)).toEqual([
+      'web: no author token',
+      'web: no gate secret NPM_TOKEN',
+    ]);
+  });
+});

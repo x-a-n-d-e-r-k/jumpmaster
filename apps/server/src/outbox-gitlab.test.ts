@@ -5,8 +5,11 @@ import nock from 'nock';
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { GitHubForge } from './forge/github.js';
 import { GitLabForge } from './forge/gitlab.js';
-import { ForgePairs, type PairOptions, pairFor, pairKey } from './outbox.js';
+import { GITLAB_UNSUPPORTED } from './forge/kind.js';
+import { ForgePairs, type PairOptions, pairFor, pairKey, pairOptionsFor } from './outbox.js';
 import { ACCESS, type FakeGitLab, fakeGitLab } from './test/fake-gitlab.js';
+import type { Resolved } from './vault/credentials.js';
+import type { ResolvedGitlabPats } from './vault/resolution.js';
 
 const GITLAB = 'https://gitlab.example.com';
 const OTHER_GITLAB = 'https://gitlab.other.example.com';
@@ -235,5 +238,71 @@ describe('ForgePairs for a GitLab zone', () => {
     expect(second).not.toBe(first);
     expect(await second.author.viewerLogin()).toBe('author-bot');
     expect(other.requests.map((r) => r.user)).toEqual(['author-bot']);
+  });
+});
+
+describe('pairOptionsFor for a GitLab zone (issue #764)', () => {
+  const resolved = {} as Resolved;
+  const creds = { resolved, apps: new Map() };
+  // No app source is ever consulted for a GitLab zone.
+  const never = () => {
+    throw new Error('the app token source was called');
+  };
+  const src = { fresh: vi.fn(never), provider: vi.fn(never), grant: vi.fn(never) };
+  const patsOf = (roles: { author?: string; reviewer?: string }): ResolvedGitlabPats =>
+    new Map([[twoBot.id, roles]]);
+  const of = (zone: Parameters<typeof pairOptionsFor>[0], pats?: ResolvedGitlabPats) =>
+    pairOptionsFor(zone, creds, src, pats);
+
+  test('resolved gitlab-pats give gitlabTokens, the reviewer only when it resolved', () => {
+    expect(of(twoBot, patsOf(tokens))).toEqual({ gitlabTokens: tokens });
+    expect(of(starter, patsOf({ author: AUTHOR }))).toEqual({ gitlabTokens: { author: AUTHOR } });
+    expect(of(twoBot, patsOf({ author: AUTHOR }))).toEqual({ gitlabTokens: { author: AUTHOR } });
+    expect(pairFor(starter, github, of(starter, patsOf({ author: AUTHOR }))).author).toBeInstanceOf(
+      GitLabForge,
+    );
+    expect(pairFor(twoBot, github, of(twoBot, patsOf(tokens))).reviewer).toBeInstanceOf(
+      GitLabForge,
+    );
+    expect(src.fresh).not.toHaveBeenCalled();
+  });
+
+  test('no author pat gives no gitlabTokens, and pairFor refuses with GITLAB_UNSUPPORTED', () => {
+    for (const pats of [undefined, new Map(), patsOf({}), patsOf({ reviewer: REVIEWER })]) {
+      const opts = of(twoBot, pats);
+      expect(opts.gitlabTokens).toBeUndefined();
+      expect(thrown(() => pairFor(twoBot, github, opts)).message).toBe(GITLAB_UNSUPPORTED);
+      expect(thrown(() => new ForgePairs().for(twoBot, github, opts)).message).toBe(
+        GITLAB_UNSUPPORTED,
+      );
+    }
+    // Another zone's pats are not this zone's.
+    expect(of(twoBot, new Map([['other', tokens]])).gitlabTokens).toBeUndefined();
+  });
+
+  test("a GitHub zone's options and pinned key are as before, whatever the gitlab-pats", () => {
+    const hub = { id: 'hub', repo: 'o/r', authorMayBeAdmin: false, identity: 'two-bot' as const };
+    const hubPats: ResolvedGitlabPats = new Map([['hub', tokens]]);
+    const before = pairOptionsFor(hub, creds, src);
+    expect(before).toEqual({});
+    expect(pairOptionsFor(hub, creds, src, hubPats)).toEqual(before);
+    const PINNED = '["o/r","two-bot",false,"af14c68180fea0c1"]';
+    // The same tokens as outbox.test.ts's pinned PAT-mode key.
+    expect(pairKey(hub, github)).toBe(PINNED);
+    expect(pairKey(hub, github, pairOptionsFor(hub, creds, src, hubPats))).toBe(PINNED);
+  });
+
+  test('a rotated gitlab-pat changes pairKey, and ForgePairs builds a new pair', () => {
+    const key = (pats: ResolvedGitlabPats) => pairKey(twoBot, github, of(twoBot, pats));
+    const base = key(patsOf(tokens));
+    expect(key(patsOf({ ...tokens }))).toBe(base);
+    expect(key(patsOf({ author: ROTATED, reviewer: REVIEWER }))).not.toBe(base);
+    expect(key(patsOf({ author: AUTHOR, reviewer: ROTATED }))).not.toBe(base);
+    const pairs = new ForgePairs();
+    const first = pairs.for(twoBot, github, of(twoBot, patsOf(tokens)));
+    expect(pairs.for(twoBot, github, of(twoBot, patsOf({ ...tokens })))).toBe(first);
+    expect(pairs.for(twoBot, github, of(twoBot, patsOf({ ...tokens, author: ROTATED })))).not.toBe(
+      first,
+    );
   });
 });

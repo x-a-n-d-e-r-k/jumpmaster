@@ -25,6 +25,7 @@ import {
 } from '../db/repo.js';
 import { ScrubSet } from '../forge/scrub-set.js';
 import { scrub } from '../scrub.js';
+import { statusInputOf, statusOf } from '../status.js';
 import { plus, t0, tmpDbFile } from '../test/helpers.js';
 import { appEntryName, serializeAppEntry } from '../vault/github-app-entries.js';
 import { gitlabPatEntryName } from '../vault/gitlab-pat-entries.js';
@@ -1493,6 +1494,48 @@ describe('GitHub App entries in the store (§4.4)', () => {
     vault.delete(gitlabPatEntryName('web', 'author'));
     expect(store.refreshSecrets().ok).toBe(true);
     expect(store.resolvedGitlabPats().get('web')).toEqual({});
+  });
+
+  test("a GitLab zone is judged by its gitlab-pat vault entries in problems() and Home's status (issue #764)", () => {
+    const glZone = zone('web', {
+      repo: 'group/sub/web',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    });
+    const { w, vault, open } = withVault({ dropZones: [glZone] });
+    // A Claude token, and no GitHub token at all: a GitLab zone needs none.
+    vault.put('claudeToken', ['sk-ant-oat01', 'store-claude-value'].join('-'), { now: t0 });
+    const store = open();
+    const inputOf = () =>
+      statusInputOf({
+        db: w.db,
+        config: store.current(),
+        store,
+        now: t0,
+        pages: { zones: true, settings: true, credentials: true },
+      });
+    const AUTHOR = 'plain-gitlab-author-value-000001';
+    const REVIEWER = 'plain-gitlab-reviewer-value-0001';
+    expect(store.problems().map((p) => [p.kind, p.credential])).toEqual([
+      ['missing', 'gitlab-pat/web/author'],
+      ['missing', 'gitlab-pat/web/reviewer'],
+    ]);
+    expect(inputOf().zones[0]?.credentialProblems.map((p) => p.credential)).toEqual([
+      'gitlab-pat/web/author',
+      'gitlab-pat/web/reviewer',
+    ]);
+    const blocked = JSON.stringify(statusOf(inputOf(), t0));
+    expect(blocked).toContain('GitLab author token');
+    expect(blocked).not.toContain('gate secret');
+
+    vault.put(gitlabPatEntryName('web', 'author'), AUTHOR, { now: t0 });
+    vault.put(gitlabPatEntryName('web', 'reviewer'), REVIEWER, { now: t0 });
+    expect(store.refreshSecrets().ok).toBe(true);
+    expect(store.problems()).toEqual([]);
+    expect(inputOf().zones[0]?.credentialProblems).toEqual([]);
+    const text = JSON.stringify(statusOf(inputOf(), t0));
+    expect(text).not.toContain(AUTHOR);
+    expect(text).not.toContain(REVIEWER);
   });
 
   test("a vault app entry for a two-bot zone's owner is in resolvedApps(), on load and on each revision", () => {

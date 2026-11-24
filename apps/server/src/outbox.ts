@@ -30,6 +30,7 @@ import {
   appInstallationFor,
   credentialFor,
   type ResolvedApps,
+  type ResolvedGitlabPats,
   type ZoneForAppInstallation,
 } from './vault/resolution.js';
 
@@ -342,12 +343,16 @@ const SERVER_USE = { author: 'server-author', reviewer: 'server-reviewer' } as c
  * besides the push options. Any other zone (PAT roles, or starter) gets the push options alone,
  * so its pair key is the one before apps. An app role whose entry is missing or undecryptable
  * keeps the app (§4.4): its identity throws, so the pair is refused rather than built on the PAT.
+ * A GitLab zone gets its `gitlab-pat` tokens from `gitlabPats` (`ConfigStore.resolvedGitlabPats()`)
+ * and nothing else (issue #764).
  */
 export function pairOptionsFor(
-  zone: Parameters<typeof credentialFor>[0] & { id: string },
+  zone: Parameters<typeof credentialFor>[0] & { id: string; forge?: ForgeKind | undefined },
   credentials: { resolved: Resolved; apps: ResolvedApps },
   source: Pick<AppTokenSource, 'fresh' | 'provider' | 'grant'>,
+  gitlabPats: ResolvedGitlabPats = new Map(),
 ): PairOptions {
+  if (forgeKind(zone) === 'gitlab') return gitlabOptionsFor(zone, gitlabPats);
   const { apps } = credentials;
   const push = pushOptionsFor(zone, apps, source);
   const refs: PairRefs = {
@@ -369,6 +374,19 @@ export function pairOptionsFor(
       return { slug: read.entry.slug, appId: read.entry.appId };
     },
     appGrant: (_owner, role) => source.grant(zone.id, role),
+  };
+}
+
+/**
+ * A GitLab zone's options (issue #764): its `gitlab-pat` tokens, the reviewer's only when it
+ * resolved. With no author token there are none, so `pairFor` refuses the zone with
+ * GITLAB_UNSUPPORTED rather than building it on a GitHub token. App options never apply.
+ */
+function gitlabOptionsFor(zone: { id: string }, gitlabPats: ResolvedGitlabPats): PairOptions {
+  const pats = gitlabPats.get(zone.id);
+  if (!pats?.author) return {};
+  return {
+    gitlabTokens: { author: pats.author, ...(pats.reviewer ? { reviewer: pats.reviewer } : {}) },
   };
 }
 
