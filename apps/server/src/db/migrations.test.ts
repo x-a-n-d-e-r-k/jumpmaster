@@ -1853,3 +1853,24 @@ test('v58 adds diagnose_stale_reruns to briefings, default 0, keeping every row'
   );
   db.close();
 });
+
+test('v60 adds the usage warning columns to usage_state, null, keeping the row', () => {
+  const f = dbAt(59, (raw) => {
+    raw.exec(
+      `UPDATE usage_state SET status = 'allowed_warning', observed_at = '2026-01-01T00:00:00.000Z',
+         override_by = 'session' WHERE id = 1`,
+    );
+  });
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(count(db, 'usage_state')).toBe(1);
+  expect(getUsageState(db)).toMatchObject({
+    status: 'allowed_warning',
+    observedAt: '2026-01-01T00:00:00.000Z',
+    overrideBy: 'session',
+    warningWindow: null,
+    warningAt: null,
+    warningResetsAt: null,
+  });
+  db.close();
+});

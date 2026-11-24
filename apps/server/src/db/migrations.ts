@@ -1632,6 +1632,16 @@ ALTER TABLE usage_state ADD COLUMN override_starts_left INTEGER;
 ALTER TABLE usage_state ADD COLUMN override_by TEXT;
 `;
 
+/**
+ * v60 (#739): the last `allowed_warning` Claude reported: the warned window (null when unnamed),
+ * when it came and when that window resets. All null: no warning stored.
+ */
+const V60_SQL = `
+ALTER TABLE usage_state ADD COLUMN warning_window TEXT;
+ALTER TABLE usage_state ADD COLUMN warning_at TEXT;
+ALTER TABLE usage_state ADD COLUMN warning_resets_at TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1692,6 +1702,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 57, sql: V57_SQL, foreignKeysOff: true },
   { version: 58, sql: V58_SQL },
   { version: 59, sql: V59_SQL },
+  { version: 60, sql: V60_SQL },
 ];
 
 /**

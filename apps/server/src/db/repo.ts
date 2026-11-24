@@ -1280,6 +1280,12 @@ export interface UsageStateRow {
   overrideStartsLeft: number | null;
   /** `session` or `token`: who set it. */
   overrideBy: string | null;
+  /** The last `allowed_warning` (#739): the warned window, null when unnamed or invalid. */
+  warningWindow: string | null;
+  /** When it came; null when no warning is stored. */
+  warningAt: string | null;
+  /** When the warned window resets, if reported. */
+  warningResetsAt: string | null;
   updatedAt: string | null;
 }
 
@@ -1318,6 +1324,9 @@ const USAGE_COLUMN: Record<keyof UsageStateRow, string> = {
   overrideStarts: 'override_starts',
   overrideStartsLeft: 'override_starts_left',
   overrideBy: 'override_by',
+  warningWindow: 'warning_window',
+  warningAt: 'warning_at',
+  warningResetsAt: 'warning_resets_at',
   updatedAt: 'updated_at',
 };
 
