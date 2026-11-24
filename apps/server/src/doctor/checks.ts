@@ -1647,6 +1647,10 @@ function adminRoleOf(
   return { kind: 'pat' };
 }
 
+/** What `forge.admin` says on a GitLab zone, where the identity checks judge what it stands for. */
+const GITLAB_ADMIN =
+  'on GitLab the access-level ceiling (nothing above Maintainer) and the sudo and admin_mode scopes are checked by forge.author and forge.reviewer, and what Maintainer can reach is judged by forge.branch-rules (bot is admin)';
+
 /**
  * `forge.admin` (spec §6, §4.3): a PAT author's admin role as before, and for each app role its
  * installation grant (no `administration` or `workflows`, at any level) and its bypass on each
@@ -1656,6 +1660,7 @@ function adminRoleOf(
  */
 async function adminCheck(d: DoctorDeps, zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> {
   const base = { id: 'forge.admin', zoneId: zone.id, doc: doc('tokens') };
+  if (forgeKind(zone) === 'gitlab') return { ...base, status: 'skip', summary: GITLAB_ADMIN };
   const author = adminRoleOf(d, zone, 'author');
   const reviewer =
     zone.identity === 'starter' ? { kind: 'pat' as const } : adminRoleOf(d, zone, 'reviewer');
@@ -1867,6 +1872,12 @@ async function readsCheck(
   const base = { id: `forge.${who}-reads`, zoneId: zone.id, doc: doc('tokens') };
   if (who === 'reviewer' && zone.identity === 'starter')
     return { ...base, status: 'skip', summary: NO_REVIEWER, doc: doc('starter-mode') };
+  if (forgeKind(zone) === 'gitlab')
+    return {
+      ...base,
+      status: 'skip',
+      summary: `on GitLab the api scope covers the reads, and forge.${who} checks it`,
+    };
   if (app) return appReadsCheck(zone, r, who, app, base);
   const branch = await r.branch();
   const probed = await attempt(() =>
