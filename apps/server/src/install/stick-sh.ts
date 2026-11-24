@@ -128,7 +128,9 @@ export function stickScript(p: StickScriptParams): string {
 # one-time enrollment code is its argument. As root on Linux (x86_64 or aarch64):
 #   curl -fsSL ${p.serverUrl}/install/stick.sh | sudo sh -s -- <code>       install and enroll
 #   curl -fsSL ${p.serverUrl}/install/stick.sh | sudo sh -s -- --uninstall  remove it
-# Add --yes to install Docker with get.docker.com without asking.
+# Add --yes to install Docker with get.docker.com without asking. To cap what the stick's drops
+# and pushes may reach, give it host names between sudo and sh (issue #781):
+#   curl -fsSL ... | sudo JM_EGRESS_CEILING=registry.npmjs.org,gitlab.example.com sh -s -- <code>
 # The code appears on the pasted line (and so in ps, shell history and sudo's log) only until
 # the exchange, which is the first network call: it swaps the code for an install token, and the
 # code works nowhere after. The token goes only through a header file and stdin, never argv, and
@@ -157,6 +159,8 @@ LOCAL_IMAGE=${STICK_IMAGE_NAME}:installed
 CODE_PATH=${ENROLL_CODE_PATH}
 WAIT_SECONDS=\${JM_INSTALL_WAIT:-60}
 TTY=\${JM_INSTALL_TTY:-/dev/tty}
+# The stick's egress ceiling, from the operator's shell only: this text never holds one.
+EGRESS_CEILING=\${JM_EGRESS_CEILING:-}
 sha256() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d ' ' -f 1
 }
@@ -278,6 +282,14 @@ fi
 
 [ -n "$CODE" ] || die "no enrollment code: copy the whole line from Add a stick on the sticks page"
 [ -z "$NOT_READY" ] || die "$NOT_READY"
+# Only host-name characters, so no shell or docker word can hide in it; the stick checks the rest.
+if [ -n "$EGRESS_CEILING" ]; then
+  case $EGRESS_CEILING in
+    *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.*,-]* | ,* | *, | *,,*)
+      die "JM_EGRESS_CEILING must be host names separated by commas" ;;
+  esac
+  [ \${#EGRESS_CEILING} -le 4000 ] || die "JM_EGRESS_CEILING must be host names separated by commas"
+fi
 
 TMP=$(mktemp -d "\${TMPDIR:-/tmp}/tmp.XXXXXXXXXX")
 trap 'rm -rf "$TMP"' EXIT
@@ -290,6 +302,8 @@ fi
 if command -v docker >/dev/null 2>&1 && docker container inspect "$CONTAINER" >/dev/null 2>&1; then
   die "a stick is already installed here (container $CONTAINER): run this with --uninstall first"
 fi
+
+say "Egress ceiling: \${EGRESS_CEILING:-none}"
 
 # The exchange: the code, from a header file, for an install token. From here on only the token
 # is used, also from a header file, never on a command line another user could read.
@@ -505,10 +519,13 @@ forget_code() {
   fi
 }
 
+# The ceiling, when given, is one more variable, always one quoted word.
+set --
+[ -z "$EGRESS_CEILING" ] || set -- -e "JM_EGRESS_CEILING=$EGRESS_CEILING"
 docker run -d --name "$CONTAINER" --restart unless-stopped --read-only --tmpfs /tmp \\
   -v /var/run/docker.sock:/var/run/docker.sock -v "$VOLUME:/state" \\
   -e "JM_SERVER_URL=$JM_SERVER_URL" -e "JM_ENROLL_CODE_FILE=$CODE_PATH" \\
-  -e JM_IMAGE_SOURCE=server -e JM_IMAGE_POLICY=signed \\
+  -e JM_IMAGE_SOURCE=server -e JM_IMAGE_POLICY=signed "$@" \\
   "$LOCAL_IMAGE" >/dev/null || { forget_code; die "docker run failed"; }
 
 say "Waiting for the stick to enroll"
@@ -520,6 +537,13 @@ while [ "$i" -lt "$WAIT_SECONDS" ]; do
     forget_code
     say "Enrolled as $name. Back to your browser."
     exit 0
+  fi
+  # A stick that refuses its JM_EGRESS_CEILING stops at start and never enrolls: say why now.
+  refused=$(printf '%s\\n' "$logs" | grep -E '^(Error: )?JM_EGRESS_CEILING' | head -n 1 || true)
+  if [ -n "$refused" ]; then
+    docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+    forget_code
+    die "the stick refused its egress ceiling ($refused): install it again with a valid JM_EGRESS_CEILING and a new code from the sticks page"
   fi
   failed=$(printf '%s\\n' "$logs" | grep 'enroll failed' | head -n 1 || true)
   if [ -n "$failed" ]; then
