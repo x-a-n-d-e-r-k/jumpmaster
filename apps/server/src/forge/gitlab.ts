@@ -1159,12 +1159,13 @@ export class GitLabForge implements Forge {
   /**
    * Retries (`POST pipelines/:id/retry`) each pipeline on `headSha` that owns an effective job
    * named in `names` that failed (not allowed to) or was canceled; once each, newest first.
+   * `running` is always false.
    */
   async rerunFailedChecks(
     _prNumber: number,
     headSha: string,
     names: string[],
-  ): Promise<{ runIds: number[] }> {
+  ): Promise<{ runIds: number[]; running: boolean }> {
     const wanted = new Set(names);
     const runIds = (await this.pipelineJobs(headSha))
       .filter(({ jobs }) =>
@@ -1177,7 +1178,8 @@ export class GitLabForge implements Forge {
       .map(({ pipeline }) => pipeline.id);
     for (const id of runIds)
       await this.request(`retrying pipeline ${id}`, 'POST', `/pipelines/${positiveId(id)}/retry`);
-    return { runIds };
+    // It retries single jobs, never a pipeline still running as GitHub refuses: never waits.
+    return { runIds, running: false };
   }
 
   // --- Blocked-by: a no-op and a refusal -----------------------------------------------------

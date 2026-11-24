@@ -619,7 +619,7 @@ function forgeFor(
       ),
     rerunFailedChecks: async (n, headSha, names) => {
       state.reruns.push({ number: n, headSha, names: [...names], identity });
-      return { runIds: names.map((_, i) => i + 1) };
+      return { runIds: names.map((_, i) => i + 1), running: false };
     },
     getBranchRules: async () => structuredClone(state.rules[identity]),
     getFileAt: async (ref, path) => state.files.get(`${ref}:${path}`) ?? null,

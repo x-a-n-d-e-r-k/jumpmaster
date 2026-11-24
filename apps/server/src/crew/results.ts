@@ -669,17 +669,24 @@ function applyDiagnose(
 /** The forge's refusal of a re-run, in plain words for the briefing (never its raw answer). */
 function rerunRefusal(e: unknown): string {
   const status = (e as { status?: unknown } | null)?.status;
-  if (status === 403) return 'the token lacks the Actions write permission';
+  if (status === 403) {
+    return 'GitHub refused the re-run (HTTP 403): the token may lack the Actions write permission';
+  }
   if (status === 404) return 'GitHub found no workflow run to re-run (HTTP 404)';
   if (typeof status === 'number') return `GitHub refused the re-run (HTTP ${status})`;
   return 'the forge could not be reached';
 }
 
+/** How long a rerun waits for its workflow run to complete, from the row's `created_at` (#772). */
+export const RERUN_WAIT_MS = 60 * 60_000;
+
 /**
  * Re-runs a rerun row's failed checks on the PR's current head (#420). Only names the forge reads
  * as failed on the head the server records are re-run; anything else, a refusal or an error
  * settles the row `skipped` with why. Returns `retry` once re-run (or re-run by an earlier pass),
- * `wait` when a read failed (the claim is released for the next pass), or `skipped`.
+ * `wait` when a read failed or the workflow run is still in progress (the claim is released for
+ * the next pass, #772), or `skipped`. A row that would still wait RERUN_WAIT_MS after it was
+ * recorded is `skipped` instead.
  */
 async function rerunChecks(
   db: Db,
@@ -714,11 +721,18 @@ async function rerunChecks(
     );
   }
   try {
-    const { runIds } = await forges.author.rerunFailedChecks(
+    const { runIds, running } = await forges.author.rerunFailedChecks(
       stored.number,
       stored.headSha,
       row.checks,
     );
+    if (running) {
+      if (now.getTime() - Date.parse(row.createdAt) > RERUN_WAIT_MS) {
+        return skip('the workflow run is still in progress');
+      }
+      releaseCrewRetryApply(db, row.id, now);
+      return 'wait';
+    }
     if (runIds.length === 0) return skip('GitHub has no failed workflow run of it to re-run');
   } catch (e) {
     return skip(rerunRefusal(e));
