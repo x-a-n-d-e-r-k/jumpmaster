@@ -164,8 +164,14 @@ export const withBasicAuth = (token: string | undefined): string[] =>
  * The base64 of git's basic-auth form of a GitLab token (`oauth2:<token>`), as the trooper sends
  * it. No token shape matches it, so wherever a GitLab token is redacted this must be too.
  */
-export const gitlabBasicAuth = (token: string): string =>
-  Buffer.from(`oauth2:${token}`).toString('base64');
+export const gitlabBasicAuth = (token: string): string => gitlabBasicAuthAs('oauth2', token);
+
+/**
+ * The base64 of git's basic-auth form `<username>:<token>`: a GitLab deploy token is accepted only
+ * with its own username, never `oauth2`. Redact it wherever the token is redacted.
+ */
+export const gitlabBasicAuthAs = (username: string, token: string): string =>
+  Buffer.from(`${username}:${token}`).toString('base64');
 
 /** A token, its GitHub basic-auth form, and with `gitlab` its GitLab basic-auth form too. */
 const tokenForms = (token: string | undefined, gitlab: boolean): string[] =>

@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'vitest';
 import {
   agentBranch,
+  CloneGrantSchema,
+  ClonePayloadSchema,
+  ClonePlanSchema,
+  CloneResultSchema,
   CREW_ROLES,
   crewOutputJsonSchema,
   DoctorResultSchema,
@@ -1044,5 +1048,96 @@ describe('StickInfoSchema egressCeiling (#780)', () => {
     expect(StickInfoSchema.safeParse({ egressCeiling: ['a'.repeat(256)] }).success).toBe(false);
     expect(StickInfoSchema.safeParse({ egressCeiling: ['a'.repeat(255)] }).success).toBe(true);
     expect(StickInfoSchema.safeParse({ egressCeiling: [''] }).success).toBe(false);
+  });
+});
+
+describe('clone container protocol (#830)', () => {
+  const forge = { kind: 'gitlab', origin: 'https://gitlab.example.com', projectPath: 'grp/proj' };
+
+  test('STICK_CAPABILITIES names clone-v1', () => {
+    expect(STICK_CAPABILITIES).toContain('clone-v1');
+  });
+
+  const payload = { protocol: 1, role: 'clone', dropId: 'd1', epoch: 2 };
+  test('the clone payload parses, with and without egress, and is strict', () => {
+    expect(ClonePayloadSchema.parse(payload)).toEqual(payload);
+    expect(ClonePayloadSchema.parse({ ...payload, egress: true })).toEqual({
+      ...payload,
+      egress: true,
+    });
+    expect(ClonePayloadSchema.safeParse({ ...payload, token: 't' }).success).toBe(false);
+    expect(ClonePayloadSchema.safeParse({ ...payload, egress: false }).success).toBe(false);
+    expect(ClonePayloadSchema.safeParse({ ...payload, role: 'push' }).success).toBe(false);
+    expect(ClonePayloadSchema.safeParse({ ...payload, protocol: 2 }).success).toBe(false);
+  });
+
+  const plan = { forge, maxBytes: 1024 };
+  test('the clone plan parses, needs a forge and a positive integer maxBytes, and is strict', () => {
+    expect(ClonePlanSchema.parse(plan)).toEqual(plan);
+    const full = {
+      ...plan,
+      limits: { pids: 100, memoryMb: 512 },
+      egress: { mode: 'enforce', allow: ['gitlab.example.com'] },
+    };
+    expect(ClonePlanSchema.parse(full)).toEqual(full);
+    expect(ClonePlanSchema.safeParse({ ...plan, token: 't' }).success).toBe(false);
+    expect(ClonePlanSchema.safeParse({ maxBytes: 1 }).success).toBe(false);
+    for (const maxBytes of [0, -1, 1.5, '1'])
+      expect(ClonePlanSchema.safeParse({ ...plan, maxBytes }).success).toBe(false);
+    const pathOrigin = { ...forge, origin: 'https://gitlab.example.com/grp' };
+    expect(ClonePlanSchema.safeParse({ ...plan, forge: pathOrigin }).success).toBe(false);
+  });
+
+  const grant = { token: 'tok', forge, secrets: ['tok'] };
+  test('the clone grant parses with and without a username, and refuses bad ones', () => {
+    expect(CloneGrantSchema.parse(grant)).toEqual(grant);
+    const named = { ...grant, username: 'gitlab+deploy-token-7' };
+    expect(CloneGrantSchema.parse(named)).toEqual(named);
+    expect(CloneGrantSchema.safeParse({ ...grant, token: '' }).success).toBe(false);
+    expect(CloneGrantSchema.safeParse({ ...grant, username: 'a:b' }).success).toBe(false);
+    expect(CloneGrantSchema.safeParse({ ...grant, username: '' }).success).toBe(false);
+    expect(CloneGrantSchema.safeParse({ ...grant, extra: 1 }).success).toBe(false);
+    const { forge: _f, ...noForge } = grant;
+    expect(CloneGrantSchema.safeParse(noForge).success).toBe(false);
+  });
+
+  test('the clone result is cloned or failed', () => {
+    const cloned = { status: 'cloned', bytes: 4096 };
+    expect(CloneResultSchema.parse(cloned)).toEqual(cloned);
+    const failed = { status: 'failed', reason: 'auth', retryable: false };
+    expect(CloneResultSchema.parse(failed)).toEqual(failed);
+    expect(CloneResultSchema.safeParse({ ...failed, reason: 'x'.repeat(2001) }).success).toBe(
+      false,
+    );
+    expect(CloneResultSchema.safeParse({ status: 'pushed' }).success).toBe(false);
+    expect(CloneResultSchema.safeParse({ status: 'cloned' }).success).toBe(false);
+  });
+
+  test('payloads without repo.mirror parse unchanged; mirror must be provided', () => {
+    const github = { ...validPayload, resume: false };
+    expect(DropPayloadSchema.parse(github)).toEqual(github);
+    const gitlab = { ...github, repo: { ...github.repo, forge } };
+    expect(DropPayloadSchema.parse(gitlab)).toEqual(gitlab);
+    const mirrored = { ...gitlab, repo: { ...gitlab.repo, mirror: 'provided' } };
+    expect(DropPayloadSchema.parse(mirrored)).toEqual(mirrored);
+    const other = { ...gitlab, repo: { ...gitlab.repo, mirror: 'fetched' } };
+    expect(DropPayloadSchema.safeParse(other).success).toBe(false);
+    const crew = {
+      protocol: 1,
+      dropId: 'c1',
+      epoch: 1,
+      role: 'refute',
+      repo: { owner: 'octo', name: 'widgets', defaultBranch: 'main', forge },
+      model: 'claude-opus-5-5',
+      maxTurns: 50,
+      promptVersion: 'v1',
+      prompt: 'Refute.',
+      image: 'jumpmaster-trooper:test',
+      protectedPaths: [] as string[],
+      credentials: { claudeToken: 'c' },
+    };
+    expect(DropPayloadSchema.parse(crew)).toEqual(crew);
+    const crewMirrored = { ...crew, repo: { ...crew.repo, mirror: 'provided' } };
+    expect(DropPayloadSchema.parse(crewMirrored)).toEqual(crewMirrored);
   });
 });

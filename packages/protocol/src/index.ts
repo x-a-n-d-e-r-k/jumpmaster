@@ -67,6 +67,7 @@ export const PresetSchema = z.enum(PRESETS);
  * and the server never leases it a drop from a zone that needs one it lacks.
  */
 export const STICK_CAPABILITIES = [
+  'clone-v1',
   'egress-v1',
   'image-verify-v1',
   'push-v1',
@@ -313,6 +314,11 @@ const dropPayloadBase = {
     defaultBranch: z.string(),
     /** A GitLab remote: the clone goes there, not to github.com/<owner>/<name>. */
     forge: ForgeRemoteSchema.optional(),
+    /**
+     * `provided`: a clone container has already cloned the repo into the drop's workspace, so the
+     * trooper uses that mirror and fetches nothing with a token. Absent: the trooper clones.
+     */
+    mirror: z.literal('provided').optional(),
   }),
   issue: z.object({ number: z.number(), title: z.string(), body: z.string() }),
   branch: z.string(),
@@ -856,6 +862,7 @@ export {
   findJwtShape,
   findPrivateKeys,
   gitlabBasicAuth,
+  gitlabBasicAuthAs,
   type PrivateKeyBlock,
   payloadSecrets,
   REAL_KEY_BODY_CHARS,
@@ -998,3 +1005,56 @@ export const PushResultSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('nothing'), reason: z.string().max(2000) }),
 ]);
 export type PushResult = z.infer<typeof PushResultSchema>;
+
+/**
+ * The clone container's payload: it clones a GitLab zone's private project for a drop, and no
+ * agent runs in it. Strict, and carries no token: the grant arrives after ready.
+ */
+export const ClonePayloadSchema = z
+  .object({
+    protocol: z.literal(1),
+    role: z.literal('clone'),
+    dropId: dropPayloadBase.dropId,
+    epoch: dropPayloadBase.epoch,
+    /** As on the push payload: set when the container's only route out is the egress proxy. */
+    egress: z.literal(true).optional(),
+  })
+  .strict();
+export type ClonePayload = z.infer<typeof ClonePayloadSchema>;
+
+/** What the stick learns from the server before it starts a clone container. Holds no secret. */
+export const ClonePlanSchema = z
+  .object({
+    forge: ForgeRemoteSchema,
+    limits: ContainerLimitsSchema.optional(),
+    egress: EgressPayloadSchema.optional(),
+    /** The most bytes the clone may take on disk. */
+    maxBytes: z.number().int().positive(),
+  })
+  .strict();
+export type ClonePlan = z.infer<typeof ClonePlanSchema>;
+
+/** The read credential for one clone, handed over only after the container reports ready. */
+export const CloneGrantSchema = z
+  .object({
+    token: z.string().min(1),
+    /**
+     * The git basic-auth username: a GitLab deploy token's own username, which GitLab requires for
+     * one. Absent: `oauth2`.
+     */
+    username: z
+      .string()
+      .min(1)
+      .refine((u) => !u.includes(':'), { message: 'username must not contain ":"' })
+      .optional(),
+    forge: ForgeRemoteSchema,
+    secrets: z.array(z.string()),
+  })
+  .strict();
+export type CloneGrant = z.infer<typeof CloneGrantSchema>;
+
+export const CloneResultSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('cloned'), bytes: z.number().int().nonnegative() }),
+  z.object({ status: z.literal('failed'), reason: z.string().max(2000), retryable: z.boolean() }),
+]);
+export type CloneResult = z.infer<typeof CloneResultSchema>;
