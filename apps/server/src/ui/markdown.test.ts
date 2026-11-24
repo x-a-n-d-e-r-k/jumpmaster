@@ -129,6 +129,8 @@ describe('renderChatMarkdown', () => {
       '**a/** '.repeat(n / 7),
       '**a b/** '.repeat(n / 9),
       '*a b/* '.repeat(n / 7),
+      '*a/*.b '.repeat(n / 7),
+      '**a/**.b '.repeat(n / 9),
       '*a '.repeat(n / 3),
       ' _a'.repeat(n / 3),
       '`a '.repeat(n / 3),
@@ -164,6 +166,17 @@ describe('renderChatMarkdown', () => {
     );
     expect(md('*.ts or src/**')).toBe('<p>*.ts or src/**</p>');
     expect(md('*a b** c')).toBe('<p>*a b** c</p>');
+  });
+
+  test('a glob that continues after a directory name stays text', () => {
+    expect(md('match *test/*.ts files')).toBe('<p>match *test/*.ts files</p>');
+    expect(md('ignore **build/**.map')).toBe('<p>ignore **build/**.map</p>');
+    expect(md('globs: *-plugin/*.js')).toBe('<p>globs: *-plugin/*.js</p>');
+    // still emphasis: a closer followed by sentence punctuation
+    expect(md('See **docs/**.')).toBe('<p>See <strong>docs/</strong>.</p>');
+    expect(md('**docs/**: the documentation')).toBe(
+      '<p><strong>docs/</strong>: the documentation</p>',
+    );
   });
 
   test('bold and italic directory names ending in / still render', () => {
