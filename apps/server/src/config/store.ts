@@ -45,6 +45,7 @@ import {
   readAppEntry,
   serializeAppEntry,
 } from '../vault/github-app-entries.js';
+import { type GitLabPatRole, gitlabPatEntryName } from '../vault/gitlab-pat-entries.js';
 import { type CredentialProblem, credentialProblems } from '../vault/problems.js';
 import {
   type ResolvedApps,
@@ -927,6 +928,53 @@ export class ConfigStore implements ConfigSource {
           },
         ],
       };
+    }
+    return { ok: true, deleted };
+  }
+
+  /**
+   * Stores a GitLab zone's `gitlab-pat/<zoneId>/<role>` token in the vault with its test result
+   * and swaps it in, as `putCredential` does: when the new set does not load, the previous entry
+   * is put back exactly as it was.
+   */
+  putGitlabPat(
+    zoneId: string,
+    role: GitLabPatRole,
+    value: string,
+    test: { result: string; login?: string },
+  ): { ok: true; meta: VaultMeta } | { ok: false; issues: ConfigIssue[] } {
+    const vault = this.vault();
+    if (vault === 'disabled') return { ok: false, issues: [{ path: '', message: VAULT_DISABLED }] };
+    const name = gitlabPatEntryName(zoneId, role);
+    const before = vault.snapshot(name);
+    const now = this.o.now();
+    const meta = vault.put(name, value, { now });
+    vault.recordTest(name, { at: now, ...test });
+    const r = this.refreshSecrets();
+    if (!r.ok) {
+      vault.restore(name, before);
+      return { ok: false, issues: 'issues' in r ? r.issues : [] };
+    }
+    return { ok: true, meta: vault.meta(name) ?? meta };
+  }
+
+  /**
+   * Removes a GitLab zone's `gitlab-pat/<zoneId>/<role>` vault entry and swaps the credentials:
+   * when the new set does not load, the entry is put back.
+   */
+  deleteGitlabPat(
+    zoneId: string,
+    role: GitLabPatRole,
+  ): { ok: true; deleted: boolean } | { ok: false; issues: ConfigIssue[] } {
+    const vault = this.vault();
+    if (vault === 'disabled') return { ok: false, issues: [{ path: '', message: VAULT_DISABLED }] };
+    const name = gitlabPatEntryName(zoneId, role);
+    const before = vault.snapshot(name);
+    const deleted = vault.delete(name);
+    const r = this.refreshSecrets();
+    if (!r.ok) {
+      vault.restore(name, before);
+      return { ok: false, issues: 'issues' in r ? r.issues : [] };
     }
     return { ok: true, deleted };
   }
