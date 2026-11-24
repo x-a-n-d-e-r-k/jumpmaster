@@ -277,7 +277,7 @@ export const CTL_VERBS: { verb: string; page: Page; forms: string[] }[] = [
     verb: 'zones',
     page: 'Zones',
     forms: [
-      'ctl zones add <owner/name> [--id <id>] [--preset <p>] [--identity starter] [--egress off|monitor|enforce] [--resume]',
+      'ctl zones add <owner/name | <project URL>> [--id <id>] [--preset <p>] [--gate <name>=<command>]… [--identity starter] [--egress off|monitor|enforce] [--resume] (a GitLab URL needs --preset and at least one --gate)',
       'ctl zones list [--json]',
       'ctl zones show <zone> [--json]',
       'ctl zones set <zone> <path>=<json>… [--note <text>]',
