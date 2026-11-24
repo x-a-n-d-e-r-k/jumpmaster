@@ -278,8 +278,9 @@ export function nextDiagnose(
  * (`nextDiagnose`); then refute a staged crew issue whose current body is unrefuted (within `maxRefute`), arbitrate one whose
  * refutes ran out (with `crew.arbiter` on, Fable available, at least one stored verdict, and no
  * arbitration of this text yet), triage the oldest open triage request (within `maxTriage`, with a
- * slot free), then the lead cycle when it is due (by time, a ruling, a request, or the queue
- * emptying: `queueEmptied`), then an audit of a merged commit (`auditDue`). An
+ * slot free), then the lead cycle when it is due (by time, a ruling on a crew, promote,
+ * promote_held or refute_exhausted briefing, an objective marked done since the last cycle, a
+ * request, or the queue emptying: `queueEmptied`), then an audit of a merged commit (`auditDue`). An
  * exhausted issue that may not be arbitrated, or whose arbitration of this text is settled, is put
  * to Command instead.
  */
@@ -354,8 +355,16 @@ export function nextCrewWork(
          AND b.kind IN ('crew', 'promote', 'promote_held', 'refute_exhausted') LIMIT 1`,
     )
     .get(zone.id, last.at);
+  // An objective marked done since the last cycle (#763): keyed on when the ruling was applied,
+  // not ruled, so a cycle started in between (still reading the old objective) doesn't swallow it.
+  // Strict: the early cycle's own creation makes this false again, once per objective.
+  const advanced = db
+    .prepare('SELECT 1 FROM objectives_done WHERE zone_id = ? AND done_at > ? LIMIT 1')
+    .get(zone.id, last.at);
   const requested = cycleRequests.get(zone.id);
-  if (ruled || (requested !== undefined && requested > last.at)) return { role: 'crew-lead' };
+  if (ruled || advanced || (requested !== undefined && requested > last.at)) {
+    return { role: 'crew-lead' };
+  }
   if (queueEmptied(db, zone.id, last.at, now)) return { role: 'crew-lead' };
   return auditDue(db, zone, last) ? { role: 'audit' } : null;
 }
