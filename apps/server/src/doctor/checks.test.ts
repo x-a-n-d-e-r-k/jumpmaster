@@ -53,6 +53,8 @@ import {
   type DoctorCheck,
   type DoctorDeps,
   installDocUrl,
+  labelsCheckOn,
+  wantedLabels,
   zoneChecks,
 } from './checks.js';
 import { processEnv } from './run.js';
@@ -4704,5 +4706,124 @@ describe('forge.ci on a GitLab zone (issue #809)', () => {
     expect(c.fix).toContain('api scope');
     expect(c.fix).toContain(`gitlab-pat/main/author`);
     expect(c.fix).not.toContain('Fine-grained');
+  });
+});
+
+describe('forge.labels on a GitLab zone (issue #812)', () => {
+  const GL = 'https://gitlab.example.com';
+  const PATH = 'acme/demo';
+  // Made-up tokens, built at run time so no token-shaped literal sits in the tracked file.
+  const glpat = (c: string) => ['glpat', c.repeat(20)].join('-');
+  const A_TOKEN = glpat('A');
+  const R_TOKEN = glpat('R');
+  const X_TOKEN = glpat('X');
+  let gl: FakeGitLab | undefined;
+
+  beforeAll(() => nock.disableNetConnect());
+  afterEach(() => {
+    gl?.stop();
+    gl = undefined;
+    nock.cleanAll();
+  });
+  afterAll(() => nock.enableNetConnect());
+
+  async function labels(
+    o: {
+      seed?: 'all' | string[];
+      /** The author user's project role; `null` for no membership. */
+      authorAccess?: number | null;
+      authorScopes?: string[];
+      /** The token the author forge sends (default the registered author token). */
+      authorToken?: string;
+    } = {},
+  ) {
+    const w = world({ zone: { repo: PATH, forge: 'gitlab', gitlab: { baseUrl: GL } } });
+    gl = fakeGitLab({ baseUrl: GL, project: { id: 7, path: PATH, visibility: 'private' } });
+    gl.addUser({
+      username: 'jm-author',
+      token: A_TOKEN,
+      ...(o.authorAccess === null ? {} : { accessLevel: o.authorAccess ?? ACCESS.developer }),
+      scopes: o.authorScopes ?? ['api'],
+    });
+    gl.addUser({
+      username: 'jm-reviewer',
+      token: R_TOKEN,
+      accessLevel: ACCESS.developer,
+      scopes: ['api'],
+    });
+    const seed = o.seed === 'all' ? wantedLabels(w.zone).map((l) => l.name) : (o.seed ?? []);
+    for (const name of seed) gl.seedLabel({ name });
+    w.deps.forges = () => ({
+      author: new GitLabForge(GL, PATH, o.authorToken ?? A_TOKEN),
+      reviewer: new GitLabForge(GL, PATH, R_TOKEN),
+    });
+    const c = one(await zoneChecks(w.deps, w.zone, []), 'forge.labels');
+    const text = `${c.summary}\n${c.fix ?? ''}\n${JSON.stringify(c)}`;
+    for (const t of [A_TOKEN, R_TOKEN, X_TOKEN]) expect(text).not.toContain(t);
+    expect(text).not.toMatch(/glpat-/);
+    expect(text).not.toContain('gh label create');
+    expect(text).not.toContain('JM_GITHUB_');
+    expect(text).not.toMatch(/Issues: read|Fine-grained|GitHub/);
+    return { c, zone: w.zone };
+  }
+
+  test('all labels present: pass', async () => {
+    const { c } = await labels({ seed: 'all' });
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('drop-ready');
+    expect(c.fix).toBeUndefined();
+  });
+
+  test('labels missing: fail, with the GitLab fix and no gh command', async () => {
+    const { c, zone } = await labels({ seed: ['bug', 'drop-ready'] });
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain(`GitLab project ${PATH}`);
+    expect(c.summary).toContain('agent-retry');
+    expect(c.summary).not.toContain('drop-ready');
+    expect(c.fix).toContain('Create the missing labels');
+    expect(c.fix).toContain(`POST /api/control/zones/${zone.id}/labels`);
+    expect(c.fix).toContain('Manage → Labels');
+    expect(c.fix).toContain('agent-retry');
+    expect(c.fix).toContain('#FBCA04');
+    expect(c.fix).toContain('Ask Jumpmaster to retry a parked issue');
+    expect(c.fix).not.toContain('drop-ready');
+  });
+
+  test('a 401 on the listing names the gitlab-pat entry: wrong, expired or revoked', async () => {
+    const { c, zone } = await labels({ authorToken: X_TOKEN });
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('401');
+    expect(c.summary).toContain('wrong, expired or revoked');
+    expect(c.fix).toContain(`gitlab-pat/${zone.id}/author`);
+  });
+
+  test('a 403 on the listing says the token lacks the api scope', async () => {
+    const { c, zone } = await labels({ authorScopes: ['read_user'] });
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('HTTP 403');
+    expect(c.summary).toContain('lacks the api scope');
+    expect(c.fix).toContain(`gitlab-pat/${zone.id}/author`);
+  });
+
+  test('a 404 on the listing says the user is not a member of the project', async () => {
+    const { c, zone } = await labels({ authorAccess: null });
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('HTTP 404');
+    expect(c.summary).toContain('not a member of the project');
+    expect(c.fix).toContain('member');
+    expect(c.fix).toContain(`gitlab-pat/${zone.id}/author`);
+  });
+
+  test('a rate-limited listing warns, in GitLab words', async () => {
+    const zone = makeZone({ repo: PATH, forge: 'gitlab', gitlab: { baseUrl: GL } });
+    const limited = {
+      listLabels: async () => {
+        throw Object.assign(new Error('429 Too Many Requests'), { status: 429 });
+      },
+    } as unknown as Parameters<typeof labelsCheckOn>[1];
+    const c = await labelsCheckOn(zone, limited);
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain("GitLab's rate limit");
+    expect(`${c.summary}\n${c.fix ?? ''}`).not.toMatch(/GitHub|JM_GITHUB_/);
   });
 });
