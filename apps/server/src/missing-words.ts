@@ -12,7 +12,11 @@ export const CEILING_MODE = `${CEILING_MISSING}mode`;
  */
 export function ceilingHosts(item: string): string | null {
   if (!item.startsWith(CEILING_MISSING) || item === CEILING_MODE) return null;
-  const parts = item.slice(CEILING_MISSING.length).split('+');
+  // Empty parts are dropped: a lone host named `mode` is sent as `mode+` (see `missingFor`).
+  const parts = item
+    .slice(CEILING_MISSING.length)
+    .split('+')
+    .filter((p) => p !== '');
   // At most 3 hosts, then the count of the rest (see `missingFor`).
   const more = parts.length > 3 ? parts.pop() : undefined;
   return `${parts.join(', ')}${more === undefined ? '' : ` and ${more} more`}`;

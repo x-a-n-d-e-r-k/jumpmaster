@@ -103,10 +103,22 @@ export function healthLine(st: StickRow): string {
   ].join(', ');
 }
 
-/** Its egress ceiling (issue #780), as it reported it: the entries, or none. */
+/** Ceiling entries the page shows, and the characters kept of each (the rest is counted). */
+const CEILING_SHOWN = 20;
+const CEILING_ENTRY_CHARS = 100;
+
+/**
+ * Its egress ceiling (issue #780), as it reported it: the entries (the first 20, each cut to 100
+ * characters, then how many more), or none. A stick may report 256 entries of 255 characters.
+ */
 export function ceilingLine(ceiling: readonly string[] | null | undefined): string {
   if (ceiling === null || ceiling === undefined) return 'egress ceiling: none';
-  return `egress ceiling: ${ceiling.join(', ') || 'covers nothing'}`;
+  if (ceiling.length === 0) return 'egress ceiling: covers nothing';
+  const shown = ceiling
+    .slice(0, CEILING_SHOWN)
+    .map((e) => (e.length > CEILING_ENTRY_CHARS ? `${e.slice(0, CEILING_ENTRY_CHARS)}…` : e));
+  const more = ceiling.length - shown.length;
+  return `egress ceiling: ${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}`;
 }
 
 /**

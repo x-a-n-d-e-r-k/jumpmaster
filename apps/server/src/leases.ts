@@ -104,8 +104,8 @@ const CEILING_HOST_CHARS = 100;
 /**
  * The `egress-ceiling:` item for a stick whose ceiling refuses this egress, or null when it may
  * run it: `egress-ceiling:mode` when the mode is the cause, else the hosts outside the ceiling,
- * at most 3 joined with `+`, each cut to 100 printable characters, then `+N` more. Short, as it
- * travels in the lease's skip header.
+ * at most 3 joined with `+`, each cut to 100 printable characters, then `+N` more (a lone host
+ * named `mode` gets a trailing `+`). Short, as it travels in the lease's skip header.
  */
 function ceilingMissing(
   egress: EgressPayload | undefined,
@@ -118,7 +118,10 @@ function ceilingMissing(
     .slice(0, CEILING_HOSTS_SHOWN)
     .map((h) => h.replace(/[^\x21-\x2a\x2c-\x7e]/g, '?').slice(0, CEILING_HOST_CHARS));
   const more = outside.length - named.length;
-  return `${CEILING_MISSING}${[...named, ...(more > 0 ? [String(more)] : [])].join('+')}`;
+  const hosts = [...named, ...(more > 0 ? [String(more)] : [])].join('+');
+  // A lone host literally named `mode` would read as CEILING_MODE: a trailing `+` (an empty part,
+  // which `ceilingHosts` drops) keeps the two apart.
+  return `${CEILING_MISSING}${hosts}${`${CEILING_MISSING}${hosts}` === CEILING_MODE ? '+' : ''}`;
 }
 
 /**

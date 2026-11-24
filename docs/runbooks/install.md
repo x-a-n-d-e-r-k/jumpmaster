@@ -1118,16 +1118,23 @@ Each stick can cap what any drop or push on it may reach, whatever the server se
 `JM_EGRESS_CEILING` on the stick (in `.env` for the compose install) to a comma-separated list
 of host names, or `*.` plus a name for its subdomains (never its apex; no IPs, ports or URLs; at
 most 200). A drop on that stick reaches an extra host, a GitLab instance for example, only when
-both the zone's `egress.allow` and the stick's ceiling list it. The stick checks every drop and
-push container before it verifies, pulls or starts anything; one outside the ceiling fails with
-the reason, and an invalid setting stops the stick at start (its log names the ceiling, or says
-none is set).
+both the zone's `egress.allow` and the stick's ceiling list it. The stick reports its ceiling to
+the server with every lease, and the server never leases it a drop outside it: such a drop waits
+queued, its attempts untouched, for a stick that can run it. Status, the doctor
+([`stick.capabilities`](#stickcapabilities)) and the cannot-run lines on home and the sticks page
+name what is missing: the hosts to add to `JM_EGRESS_CEILING`, or the zone's egress mode. Add the
+hosts and restart the stick, and its next lease takes the drop. The sticks page shows each
+stick's ceiling, or none. The stick still checks every drop and push container before it
+verifies, pulls or starts anything, as the backstop: one outside the ceiling fails with the
+reason. An invalid setting stops the stick at start (its log names the ceiling, or says none is
+set).
 
 - The base hosts, `api.anthropic.com` and `github.com`, are always within the ceiling.
 - Once a ceiling is set, every other host a zone's drops allow must be in it: the preset's hosts
   (`registry.npmjs.org` for `node`, for example) as well as the zone's own `egress.allow`.
 - A stick with a ceiling runs only zones in `enforce`. A zone in `monitor` (which lets any public
-  host through) or `off` fails on it.
+  host through) or `off` is not leased to it: its drops wait for another stick, and status and
+  the doctor say the zone's egress must be set to enforce.
 - Pushes pending on the stick when a ceiling is first set wait, with their work kept, until their
   zone is in `enforce` or the ceiling is removed; until then they also hold up an in-place
   upgrade of the stick. A pushed result is never thrown away over a setting.
@@ -1736,7 +1743,9 @@ did not come back, Docker is not starting at boot, or the services were last sto
 **Action:** See the sticks on home (`/`).
 
 No live stick can run this project: the fix names what it lacks (`egress-v1`, `image-verify-v1`, the
-signed policy). See [Stick](#stick).
+signed policy, hosts missing from the stick's `JM_EGRESS_CEILING`, or `enforce` as the zone's egress
+mode when the stick has a ceiling). See [Stick](#stick) and
+[The stick's egress ceiling](#the-sticks-egress-ceiling).
 
 ### `stick.image-policy`
 

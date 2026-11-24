@@ -5,6 +5,7 @@ import { t0 } from '../test/helpers.js';
 import { escapeHtml } from './pages.js';
 import {
   COPY_DIGEST_JS,
+  ceilingLine,
   renderInviteResult,
   renderStickImages,
   renderSticks,
@@ -500,5 +501,22 @@ describe("a stick's egress ceiling on /sticks (#780)", () => {
       now: t0,
     });
     expect(html).toContain('lacks gitlab.example.com in the stick&#39;s JM_EGRESS_CEILING');
+  });
+
+  test('an empty ceiling covers nothing', () => {
+    expect(ceilingLine([])).toBe('egress ceiling: covers nothing');
+  });
+
+  test('shows at most 20 entries, each cut to 100 characters, then how many more', () => {
+    const entries = Array.from({ length: 256 }, (_, i) => `${'h'.repeat(240)}${i}.example`);
+    const line = ceilingLine(entries);
+    expect(line).toBe(
+      `egress ceiling: ${Array.from({ length: 20 }, () => `${'h'.repeat(100)}…`).join(', ')} and 236 more`,
+    );
+    const html = renderSticks({ sticks: [{ ...row, egressCeiling: entries }], zones: [], now: t0 });
+    const bare = renderSticks({ sticks: [{ ...row, egressCeiling: null }], zones: [], now: t0 });
+    // 256 entries of 250 characters would be about 65 KB; shown, they add under 3 KB.
+    expect(html.length - bare.length).toBeLessThan(3_000);
+    expect(html).toContain('and 236 more');
   });
 });

@@ -28,6 +28,7 @@ import {
   releaseKill,
   zoneRequirements,
 } from './leases.js';
+import { missingWords } from './missing-words.js';
 import { makeZone } from './test/fixtures.js';
 import { plus, seedQueuedDrop, t0, workItem } from './test/helpers.js';
 import { setUsageOverride } from './usage.js';
@@ -562,6 +563,13 @@ describe('stick capabilities, per zone', () => {
       expect(missingFor(stick(ceiling), need)).toEqual([
         `egress-ceiling:a.example.com+${'a'.repeat(100)}+c.example.com+2`,
       ]);
+    });
+
+    test('a lone host named mode is not read as the mode case', () => {
+      const item = missingFor(stick(ceiling), zoneRequirements(zone('enforce', ['mode']), {}));
+      expect(item).toEqual(['egress-ceiling:mode+']);
+      expect(item).not.toEqual(['egress-ceiling:mode']);
+      expect(missingWords(item[0]!)).toBe("mode in the stick's JM_EGRESS_CEILING");
     });
 
     test('invalid ceiling entries (a bare *, an IP) cover nothing', () => {
