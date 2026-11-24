@@ -25,6 +25,7 @@ import type { Db } from './db/open.js';
 import { type Drop, getPullRequest, listWorkItems, updateDrop, type WorkItem } from './db/repo.js';
 import { resolveModel } from './fable.js';
 import type { CodeScanning, Feedback } from './flow/decide.js';
+import { malformedDrops } from './flow/malformed.js';
 import { type CrewRetryNote, lastFailure, renderLastFailure } from './gate-output.js';
 import { unsanitizeForgeText } from './outbox.js';
 import { PRESET_EGRESS } from './presets.js';
@@ -86,6 +87,11 @@ export function neutralise(text: string): string {
  * `retried`, the drop was created at or after it was applied, and no implement drop of the item
  * since then failed. So it rides every attempt of the crew's retry (an interrupted one's
  * continuation too) and stops once that retry fails.
+ *
+ * One failure does not end it: the malformed run that got its one retry (#659), by results.ts's
+ * rule. That is a null-head drop that ended malformed and is the item's only such implement drop
+ * across its whole history, so its retry is another attempt of the same crew retry. Any other
+ * malformed failure parked the item.
  */
 function crewRetryNote(
   db: Db,
@@ -101,17 +107,19 @@ function crewRetryNote(
   ) {
     return undefined;
   }
+  const malformed = malformedDrops(db, itemId, 'implement', null);
+  const retried = malformed.length === 1 ? malformed[0] : null;
   const failedSince = db
     .prepare(
       // One created at applied_at's very instant counts only if inserted after the diagnose drop
       // that asked for the retry: the failure it diagnosed was inserted before it.
       `SELECT 1 FROM drops WHERE work_item_id = ? AND role = 'implement' AND state = 'failed'
-         AND id <> ? AND created_at <= @until
+         AND id <> ? AND id IS NOT ? AND created_at <= @until
          AND (created_at > @from
            OR (created_at = @from AND rowid > COALESCE((SELECT rowid FROM drops WHERE id = ?), 0)))
        LIMIT 1`,
     )
-    .get(itemId, drop.id, r.dropId, { from: r.appliedAt, until: drop.createdAt });
+    .get(itemId, drop.id, retried, r.dropId, { from: r.appliedAt, until: drop.createdAt });
   return failedSince ? undefined : { diagnosis: r.diagnosis, instruction: r.instruction };
 }
 

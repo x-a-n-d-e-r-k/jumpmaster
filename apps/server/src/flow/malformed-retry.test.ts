@@ -5,7 +5,9 @@
  */
 import type { DropResult, GateResult, Verdict } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
+import { getCrewRetry } from '../crew/store.js';
 import { getAttempts } from '../db/repo.js';
+import { crewOn } from '../test/crew.js';
 import { type Harness, harness, toPrOpen } from '../test/flowHarness.js';
 import { workItem } from '../test/helpers.js';
 
@@ -211,6 +213,47 @@ describe('a malformed implement run is retried once', () => {
     await h.reconcile();
     expect(h.queuedRoles()).toEqual(['implement']);
     await h.finishDrop('implement', failed('session mismatch'));
+    expect(item(h)).toMatchObject({ state: 'parked', reason: 'session mismatch' });
+  });
+
+  test("after a crew retry: the first malformed run is retried with the crew's note, the second parks", async () => {
+    const DIAGNOSIS = 'The implement drop wrote whole fake tokens into test files.';
+    const INSTRUCTION = 'Build fake tokens from parts at runtime.';
+    const h = await harness({ zone: { crew: crewOn, triage: { gate: false } } });
+    await h.reconcile();
+    await h.finishDrop('implement', {
+      status: 'failed',
+      reason: 'gate test failed',
+      gates: [{ ...gateOk, exitCode: 1, outputTail: 'FAIL x' }],
+    });
+    expect(item(h).state).toBe('parked');
+    await h.reconcile(); // raises the parked briefing and queues its diagnose drop
+    const diag = await h.lease();
+    expect(diag.payload.role).toBe('diagnose');
+    await h.postResult(diag.dropId, diag.epoch, {
+      status: 'completed',
+      crew: {
+        diagnosis: DIAGNOSIS,
+        recommendation: 'retry',
+        detail: 'd',
+        instruction: INSTRUCTION,
+      },
+      gates: [],
+    });
+    await h.reconcile();
+    expect(getCrewRetry(h.db, 1)).toMatchObject({ outcome: 'retried' });
+    expect(h.queuedRoles()).toEqual(['implement']);
+
+    await h.finishDrop('implement', failed('multiple results'));
+    expect(item(h).state).toBe('ready');
+    await h.reconcile();
+    expect(h.queuedRoles()).toEqual(['implement']);
+    const retry = await h.lease();
+    const prompt = retry.payload.role === 'implement' ? (retry.payload.prompt ?? '') : '';
+    expect(prompt).toContain(
+      `The crew diagnosed this failure and retried the item once. Its diagnosis: ${DIAGNOSIS}. What the next attempt must do differently: ${INSTRUCTION}`,
+    );
+    await h.postResult(retry.dropId, retry.epoch, failed('session mismatch'));
     expect(item(h)).toMatchObject({ state: 'parked', reason: 'session mismatch' });
   });
 
