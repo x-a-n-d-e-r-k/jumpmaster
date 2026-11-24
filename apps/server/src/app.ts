@@ -628,6 +628,7 @@ export function createApp(
           dockerVersion: s.dockerVersion,
           freeBytes: s.freeBytes,
           upgrade: stickUpgradeView(db, s, target),
+          egressCeiling: s.egressCeiling,
         };
       }),
       pending: listPendingInvites(db, deps.now()),

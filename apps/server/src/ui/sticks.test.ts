@@ -452,3 +452,53 @@ describe('Add a stick: how it will be installed (issue #269)', () => {
     expect(html).not.toContain('role="tab"');
   });
 });
+
+describe("a stick's egress ceiling on /sticks (#780)", () => {
+  const row = {
+    id: 's1',
+    name: 'vps-1',
+    version: '1.0.0',
+    lastSeenAt: t0.toISOString(),
+    capabilities: ['egress-v1'],
+    imagePolicy: 'signed',
+    cannotRun: [],
+    slots: 1,
+    maxSlots: 4,
+    reported: true,
+    running: 0,
+  };
+
+  test('shows the ceiling, or none', () => {
+    const html = renderSticks({
+      sticks: [{ ...row, egressCeiling: ['github.com', 'registry.npmjs.org'] }],
+      zones: [],
+      now: t0,
+    });
+    expect(html).toContain('egress ceiling: github.com, registry.npmjs.org');
+    for (const egressCeiling of [null, undefined])
+      expect(renderSticks({ sticks: [{ ...row, egressCeiling }], zones: [], now: t0 })).toContain(
+        'egress ceiling: none',
+      );
+  });
+
+  test('escapes an entry', () => {
+    const html = renderSticks({
+      sticks: [{ ...row, egressCeiling: ['<script>alert(1)</script>'] }],
+      zones: [],
+      now: t0,
+    });
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).not.toContain('<script>alert(1)');
+  });
+
+  test('what a zone needs of the ceiling, in words', () => {
+    const html = renderSticks({
+      sticks: [
+        { ...row, cannotRun: [{ zoneId: 'gl', missing: ['egress-ceiling:gitlab.example.com'] }] },
+      ],
+      zones: [],
+      now: t0,
+    });
+    expect(html).toContain('lacks gitlab.example.com in the stick&#39;s JM_EGRESS_CEILING');
+  });
+});

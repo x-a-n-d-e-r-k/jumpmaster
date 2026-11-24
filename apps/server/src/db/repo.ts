@@ -601,10 +601,9 @@ export function listEvents(db: Db, dropId: string): StoredEvent[] {
   return rows.map((r) => ({ seq: r.seq, ts: r.ts, kind: r.kind, data: JSON.parse(r.dataJson) }));
 }
 
-type StickAdvert = Pick<
-  Stick,
-  'capabilities' | 'imagePolicy' | 'version' | 'pinnedImages' | 'egressCeiling'
->;
+/** What a stick advertises; an advert without `egressCeiling` reports none (null). */
+type StickAdvert = Pick<Stick, 'capabilities' | 'imagePolicy' | 'version' | 'pinnedImages'> &
+  Partial<Pick<Stick, 'egressCeiling'>>;
 const NO_ADVERT: StickAdvert = {
   capabilities: [],
   imagePolicy: 'allowlist',
@@ -617,7 +616,7 @@ const advertParams = (a: StickAdvert) => ({
   policy: a.imagePolicy,
   version: a.version,
   pinned: JSON.stringify(a.pinnedImages),
-  ceiling: a.egressCeiling === null ? null : JSON.stringify(a.egressCeiling),
+  ceiling: a.egressCeiling == null ? null : JSON.stringify(a.egressCeiling),
 });
 
 export function insertStick(

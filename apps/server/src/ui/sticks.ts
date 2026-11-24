@@ -6,6 +6,7 @@ import { STICK_LIVE_MS } from '../doctor/checks.js';
 import type { MirrorStatus } from '../images/mirror.js';
 import { MAX_INVITE_SLOTS } from '../install/invite.js';
 import { TS_AUTHKEY_PLACEHOLDER } from '../install/stick-sh.js';
+import { missingWords } from '../missing-words.js';
 import { PUBLIC_URL_NEEDED, PUBLIC_URL_PAGE } from '../reach.js';
 import { type StickUpgradeView, upgradeWords } from '../stick-upgrade-words.js';
 import {
@@ -40,6 +41,8 @@ export interface StickRow extends StickLine {
   freeBytes?: number | null;
   /** Its upgrade against the server's release (issue #428); null or absent: no target. */
   upgrade?: StickUpgradeView;
+  /** The egress ceiling it last reported (issue #780); null or absent: none. */
+  egressCeiling?: string[] | null;
 }
 
 /** An invite whose stick has not checked in yet (issue #138). */
@@ -98,6 +101,12 @@ export function healthLine(st: StickRow): string {
     has('image-verify-v1'),
     st.freeBytes === null || st.freeBytes === undefined ? 'free disk unmeasured' : gb(st.freeBytes),
   ].join(', ');
+}
+
+/** Its egress ceiling (issue #780), as it reported it: the entries, or none. */
+export function ceilingLine(ceiling: readonly string[] | null | undefined): string {
+  if (ceiling === null || ceiling === undefined) return 'egress ceiling: none';
+  return `egress ceiling: ${ceiling.join(', ') || 'covers nothing'}`;
 }
 
 /**
@@ -162,7 +171,10 @@ export function renderSticks(s: {
         st.cannotRun.length === 0
           ? 'all projects'
           : st.cannotRun
-              .map((c) => `cannot run ${name(c.zoneId)}: lacks ${escapeHtml(c.missing.join(', '))}`)
+              .map(
+                (c) =>
+                  `cannot run ${name(c.zoneId)}: lacks ${escapeHtml(c.missing.map(missingWords).join(', '))}`,
+              )
               .join('<br>');
       const url = `/api/control/sticks/${encodeURIComponent(st.id)}/slots`;
       // Capped by its version (it reports no ceiling), or below the default ceiling of 4, which
@@ -194,7 +206,7 @@ export function renderSticks(s: {
         `<div class="confirm" role="alertdialog" hidden><p>${escapeHtml(ask)}</p><button type="button" class="danger" data-confirm="${escapeHtml(removeUrl)}">Remove ${escapeHtml(st.name)}</button> <button type="button" data-keep>Keep it</button></div> <output aria-live="polite"></output>`;
       // An upgrading stick is watched until it settles.
       const poll = !stage.live || st.upgrade?.status === 'upgrading';
-      return `<tr${poll ? ' data-poll' : ''} data-stick="${escapeHtml(st.id)}"><td>${escapeHtml(st.name)}</td><td>${status}</td><td>${escapeHtml(st.version ?? '-')}${upgradeLine(st)}</td><td>${escapeHtml(st.capabilities.join(', ') || '-')}</td><td>${runs}</td><td>${troopers}</td><td>${remove}</td></tr>`;
+      return `<tr${poll ? ' data-poll' : ''} data-stick="${escapeHtml(st.id)}"><td>${escapeHtml(st.name)}</td><td>${status}</td><td>${escapeHtml(st.version ?? '-')}${upgradeLine(st)}</td><td>${escapeHtml(st.capabilities.join(', ') || '-')}<br><span class="muted ceiling">${escapeHtml(ceilingLine(st.egressCeiling))}</span></td><td>${runs}</td><td>${troopers}</td><td>${remove}</td></tr>`;
     })
     .join('');
   const table =

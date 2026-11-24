@@ -516,7 +516,7 @@ describe('stick capabilities, per zone', () => {
     });
     const ceiling = ['api.anthropic.com', 'github.com', 'registry.npmjs.org'];
 
-    test('zoneRequirements carries what egressFor gives the zone\'s drops', () => {
+    test("zoneRequirements carries what egressFor gives the zone's drops", () => {
       expect(zoneRequirements(zone('off'), {}).egress).toBeUndefined();
       expect(zoneRequirements(zone('enforce', ['Registry.npmjs.org']), {}).egress).toEqual({
         mode: 'enforce',
@@ -524,8 +524,7 @@ describe('stick capabilities, per zone', () => {
       });
       // The preset's hosts are in it too.
       expect(
-        zoneRequirements(makeZone({ preset: 'go', egress: { mode: 'enforce' } }), {}).egress
-          ?.allow,
+        zoneRequirements(makeZone({ preset: 'go', egress: { mode: 'enforce' } }), {}).egress?.allow,
       ).toContain('proxy.golang.org');
     });
 

@@ -220,7 +220,7 @@ describe('sticks', () => {
   });
 });
 
-describe('a stick\'s egress ceiling (#780)', () => {
+describe("a stick's egress ceiling (#780)", () => {
   const at = new Date('2026-03-01T00:00:00.000Z');
   const advert = (egressCeiling: string[] | null) => ({
     capabilities: [],
@@ -236,13 +236,22 @@ describe('a stick\'s egress ceiling (#780)', () => {
     stampStick(db, 's1', advert(['github.com']), at);
     expect(getStickByTokenHash(db, 'h')?.egressCeiling).toEqual(['github.com']);
     stampStick(db, 's1', advert(['github.com', 'gitlab.example.com']), at);
-    expect(getStickByTokenHash(db, 'h')?.egressCeiling).toEqual(['github.com', 'gitlab.example.com']);
+    expect(getStickByTokenHash(db, 'h')?.egressCeiling).toEqual([
+      'github.com',
+      'gitlab.example.com',
+    ]);
     stampStick(db, 's1', advert(null), at);
     expect(getStickByTokenHash(db, 'h')?.egressCeiling).toBeNull();
   });
 
   test('enroll stores it', () => {
-    insertStick(db, { id: 's1', name: 'box', tokenHash: 'h', slots: 1, egressCeiling: ['a.example.com'] });
+    insertStick(db, {
+      id: 's1',
+      name: 'box',
+      tokenHash: 'h',
+      slots: 1,
+      egressCeiling: ['a.example.com'],
+    });
     expect(getStickByTokenHash(db, 'h')?.egressCeiling).toEqual(['a.example.com']);
   });
 

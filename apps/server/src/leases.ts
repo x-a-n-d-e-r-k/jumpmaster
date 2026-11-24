@@ -26,6 +26,7 @@ import {
 } from './db/repo.js';
 import { egressFor } from './egress-for.js';
 import { refundCharge } from './flow/budgets.js';
+import { CEILING_MISSING, CEILING_MODE } from './missing-words.js';
 import {
   DEFAULT_USAGE_CONFIG,
   type Gate,
@@ -96,8 +97,6 @@ export function zoneRequirements(
   return { caps, signed, egress: egressFor(zone) };
 }
 
-/** The prefix of the `missing` item a stick's egress ceiling adds (#780). */
-export const CEILING_MISSING = 'egress-ceiling:';
 /** Hosts an `egress-ceiling:` item names before `+N`, and the characters kept of each. */
 const CEILING_HOSTS_SHOWN = 3;
 const CEILING_HOST_CHARS = 100;
@@ -113,11 +112,11 @@ function ceilingMissing(
   ceiling: readonly string[] | null,
 ): string | null {
   if (ceilingRefusal(egress, ceiling === null ? null : [...ceiling]) === null) return null;
-  if (!egress || egress.mode !== 'enforce') return `${CEILING_MISSING}mode`;
+  if (!egress || egress.mode !== 'enforce') return CEILING_MODE;
   const outside = egress.allow.filter((e) => !entryCovered(e, [...(ceiling ?? [])]));
   const named = outside
     .slice(0, CEILING_HOSTS_SHOWN)
-    .map((h) => h.replace(/[^\x21-\x7e]/g, '?').slice(0, CEILING_HOST_CHARS));
+    .map((h) => h.replace(/[^\x21-\x2a\x2c-\x7e]/g, '?').slice(0, CEILING_HOST_CHARS));
   const more = outside.length - named.length;
   return `${CEILING_MISSING}${[...named, ...(more > 0 ? [String(more)] : [])].join('+')}`;
 }

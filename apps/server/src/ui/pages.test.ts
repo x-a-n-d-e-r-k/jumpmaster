@@ -167,6 +167,33 @@ describe('renderHome', () => {
     );
   });
 
+  test("Capacity says what a stick's egress ceiling is missing, in words (#780)", () => {
+    const stick = {
+      id: 's1',
+      name: 'box',
+      version: null,
+      lastSeenAt: null,
+      capabilities: ['egress-v1'],
+      imagePolicy: 'allowlist',
+      slots: 1,
+    };
+    const html = renderHome({
+      zones: [z],
+      items: [],
+      drops: [],
+      sticks: [
+        { ...stick, cannotRun: [{ zoneId: 'gl', missing: ['egress-ceiling:gitlab.example.com'] }] },
+        { ...stick, id: 's2', cannotRun: [{ zoneId: 'mon', missing: ['egress-ceiling:mode'] }] },
+      ],
+    });
+    expect(html).toContain(
+      'cannot run gl: lacks gitlab.example.com in the stick&#39;s JM_EGRESS_CEILING',
+    );
+    expect(html).toContain(
+      'cannot run mon: lacks egress set to enforce (the stick&#39;s JM_EGRESS_CEILING requires it)',
+    );
+  });
+
   test("a project row links the project's New issue page and its page, the id encoded (#625)", () => {
     const id = 'a"<>&/b';
     const html = renderHome({ zones: [{ ...z, id }], items: [], drops: [] });

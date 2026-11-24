@@ -1195,7 +1195,12 @@ describe('stick capabilities, per zone', () => {
       }));
       const { db } = setup({ queued: false, config: { ...config, dropZones: zones } });
       for (const [z, zone] of zones.entries()) {
-        upsertDropZone(db, { id: zone.id, repo: zone.repo, defaultBranch: 'main', configJson: '{}' });
+        upsertDropZone(db, {
+          id: zone.id,
+          repo: zone.repo,
+          defaultBranch: 'main',
+          configJson: '{}',
+        });
         const w = upsertWorkItem(db, {
           dropZoneId: zone.id,
           issueNumber: 100 + z,

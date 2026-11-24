@@ -16,7 +16,6 @@ import {
   type TriageImageSkipped,
 } from '@jumpmaster/protocol';
 import { COMMAND_VIAS } from './briefings.js';
-import { egressFor } from './egress-for.js';
 import {
   type ClaudeConfig,
   type Config,
@@ -26,6 +25,7 @@ import {
 import { appliedItemArbitration, getCrewRetry } from './crew/store.js';
 import type { Db } from './db/open.js';
 import { type Drop, getPullRequest, listWorkItems, updateDrop, type WorkItem } from './db/repo.js';
+import { egressFor } from './egress-for.js';
 import { resolveModel } from './fable.js';
 import type { CodeScanning, Feedback } from './flow/decide.js';
 import { malformedDrops } from './flow/malformed.js';
@@ -425,10 +425,8 @@ function arbiterRuling(db: Db, drop: Drop): string {
 }
 
 // The base hosts live in the protocol package (the stick's ceiling needs them); re-exported here.
-export { BASE_EGRESS };
-
 // Moved to its own module so leases.ts can use it without importing this one; re-exported here.
-export { egressFor };
+export { BASE_EGRESS, egressFor };
 
 const egressField = (zone: DropZoneConfig): { egress?: EgressPayload } => {
   const egress = egressFor(zone);

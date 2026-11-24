@@ -203,6 +203,61 @@ describe('global checks', () => {
     expect(c.fix).toContain('egress');
   });
 
+  describe("a stick's egress ceiling (#780)", () => {
+    // The world's zone runs the node preset under enforce; this ceiling covers its hosts.
+    const NODE = [
+      'api.anthropic.com',
+      'codeload.github.com',
+      'github.com',
+      'nodejs.org',
+      'objects.githubusercontent.com',
+      'registry.npmjs.org',
+    ];
+    const stampCeiling = (w: ReturnType<typeof world>, egressCeiling: string[] | null) =>
+      stampStick(
+        w.db,
+        's1',
+        {
+          capabilities: ['egress-v1', 'image-verify-v1', 'push-v1'],
+          imagePolicy: 'signed',
+          version: '0.4.0',
+          pinnedImages: [],
+          egressCeiling,
+        },
+        ago(10_000),
+      );
+
+    test('stick.capabilities names a host outside the ceiling and how to add it', async () => {
+      const w = world({ zone: { egress: { mode: 'enforce', allow: ['gitlab.example.com'] } } });
+      stampCeiling(w, NODE);
+      const c = one(await w.run(), 'stick.capabilities');
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain(
+        "stick-1 lacks gitlab.example.com in the stick's JM_EGRESS_CEILING",
+      );
+      expect(c.fix).toBe('add gitlab.example.com to JM_EGRESS_CEILING on the stick and restart it');
+      expect(c.fix).not.toContain('upgrade the stick');
+      // Added, and the stick restarted: it can run the project.
+      stampCeiling(w, [...NODE, 'gitlab.example.com']);
+      expect(one(await w.run(), 'stick.capabilities').status).toBe('pass');
+      // No ceiling at all: as before.
+      stampCeiling(w, null);
+      expect(one(await w.run(), 'stick.capabilities').status).toBe('pass');
+    });
+
+    test('a zone in monitor: set its egress to enforce', async () => {
+      const w = world({ zone: { egress: { mode: 'monitor', allow: [] } } });
+      stampCeiling(w, NODE);
+      const c = one(await w.run(), 'stick.capabilities');
+      expect(c.status).toBe('fail');
+      expect(c.summary).toContain(
+        "stick-1 lacks egress set to enforce (the stick's JM_EGRESS_CEILING requires it)",
+      );
+      expect(c.fix).toBe("set the zone's egress to enforce");
+      expect(c.fix).not.toContain('upgrade the stick');
+    });
+  });
+
   test('stick.image-policy warns on allowlist, and fails it when signed images are required', async () => {
     const w = world({ zone: { egress: { mode: 'off', allow: [] } } });
     stampStick(

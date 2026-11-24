@@ -30,6 +30,7 @@ import { fableWindow, isFableWindow, modelFamily, PER_MODEL_WINDOWS } from '../f
 import type { GoalChange, GoalChangeWithStanding } from '../goal-change.js';
 import { currentObjective, type GoalRow } from '../goals.js';
 import { forgetSubmitKey, submitKey } from '../intake.js';
+import { missingWords } from '../missing-words.js';
 import { sliceWhole } from '../slice-whole.js';
 import type { Status } from '../status.js';
 import { type Gate, type GateReason, gateReasonText, type UsageWarning } from '../usage.js';
@@ -352,7 +353,10 @@ function capacitySection(state: HomeState, now: Date): string {
     s.cannotRun.length === 0
       ? ''
       : ` <small class="cannot-run">${s.cannotRun
-          .map((c) => `cannot run ${name(c.zoneId)}: lacks ${escapeHtml(c.missing.join(', '))}`)
+          .map(
+            (c) =>
+              `cannot run ${name(c.zoneId)}: lacks ${escapeHtml(c.missing.map(missingWords).join(', '))}`,
+          )
           .join('; ')}</small>`;
   const lines =
     sticks.length === 0
