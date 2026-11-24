@@ -28,6 +28,12 @@ in drops with your Claude credentials, so it goes through the
 [confirmation page](#guarded-changes-and-the-confirmation-page). `ctl zones add
 your-org/your-repo` does the same from a terminal (`--preset`, `--identity starter`, `--egress`).
 
+**A GitLab project.** The **Project** field also takes a GitLab project URL
+(`https://gitlab.example.com/group/project`). GitLab has no detection yet: Detect only reads the
+URL, and you choose the stack and add the checks yourself. The page takes no GitLab token; the
+project runs only once its bot tokens are in the vault as `gitlab-pat/<zone id>/author`, plus
+`gitlab-pat/<zone id>/reviewer` for two bots.
+
 **Resume.** A zone id that was removed keeps its history (issues, drops, GitHub writes, crew issues,
 goals). Adding the same id again is refused until you choose to resume it: the page says what
 **Resume** brings back, and the zone comes back paused. `ctl zones add your-org/your-repo --id

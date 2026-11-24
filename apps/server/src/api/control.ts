@@ -149,6 +149,7 @@ import {
   type DetectAppBroker,
   defaultDetectAppBroker,
 } from '../zones/detect-app.js';
+import { parseProjectRef } from '../zones/project-ref.js';
 import { removalNote, stopZone } from '../zones/stop.js';
 import {
   NO_TARGET_REASON,
@@ -1317,6 +1318,10 @@ const githubDetectForge = (repo: string, token: string): DetectForge => {
 };
 
 const DetectBody = z.strictObject({ repo: z.string().max(200) });
+/** The project step's form (#796): owner/name, a github.com URL or a GitLab project URL. */
+const DetectProjectBody = z.strictObject({ project: z.string().max(2048) });
+/** A detect body that is neither `{repo}` nor `{project}` (both, neither, or a wrong type). */
+const DETECT_BODY = 'give exactly one of repo (owner/name) or project';
 const ZoneAddBody = z.strictObject({
   zone: z.record(z.string(), z.unknown()),
   resume: z.boolean().optional(),
@@ -1489,7 +1494,21 @@ function registerConfigRoutes(
   // Detection for the project step and `ctl detect`: GET-only reads, after the REPO pattern. A read
   // changes nothing, so it is not audited.
   scope.post('/api/control/detect', async (req, reply) => {
-    const body = DetectBody.safeParse(req.body ?? {});
+    const raw = req.body ?? {};
+    // The project step sends what the operator typed; the forge is decided here, by
+    // `parseProjectRef`, and a refusal is its fixed text, never the input (#796).
+    if (isRecord(raw) && 'project' in raw) {
+      const body = DetectProjectBody.safeParse(raw);
+      if (!body.success) return reply.code(400).send({ error: DETECT_BODY });
+      const ref = parseProjectRef(body.data.project);
+      if ('error' in ref) return reply.code(400).send({ error: ref.error });
+      // GitLab detection is not there yet: the operator chooses the preset and the gates, so
+      // nothing is read and no token or app is needed.
+      if (ref.forge === 'gitlab') return { forge: 'gitlab', baseUrl: ref.baseUrl, repo: ref.repo };
+      const d = await detect(req, reply, ref.repo);
+      return d ? { ...d, forge: 'github', repo: ref.repo } : reply;
+    }
+    const body = DetectBody.safeParse(raw);
     if (!body.success || !REPO.test(body.data.repo))
       return reply.code(400).send({ error: 'the repository must be owner/name' });
     const d = await detect(req, reply, body.data.repo);

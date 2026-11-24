@@ -518,16 +518,17 @@ export function projectBody(
 ): string {
   const presets = PRESETS.map((p) => `<option value="${p}">${p}</option>`).join('');
   return `<h3>Add a project</h3>
-<p>Name the GitHub repository. Jumpmaster reads its default branch's root (nothing else, and writes nothing) to propose a stack and the checks to run, for you to review.</p>
-<form id="detect"><p><label>Repository <input name="repo" placeholder="owner/name" pattern="[A-Za-z0-9\\-]+/[A-Za-z0-9._\\-]+" required></label> <button>Detect</button> <span id="detect-out" role="status"></span></p></form>
+<p>Name the project: a GitHub repository or a GitLab project. On GitHub, Jumpmaster reads its default branch's root (nothing else, and writes nothing) to propose a stack and the checks to run, for you to review. On GitLab there is no detection yet: you choose the stack and the checks.</p>
+<form id="detect"><p><label>Project <input name="project" placeholder="owner/name or a project URL" required></label> <button>Detect</button> <span id="detect-out" role="status"></span><br><small>owner/name, a GitHub URL (https://github.com/owner/name) or a GitLab project URL (https://gitlab.example.com/group/project)</small></p></form>
 <form id="project" hidden>
 <p id="found"></p>
-<p><label>Project id <input name="id" placeholder="from the repository name" pattern="[a-z0-9](?:[a-z0-9\\-]{0,61}[a-z0-9])?"></label> <small>lower case letters, digits and dashes; blank takes the repository's name</small></p>
+<p><label>Project id <input name="id" placeholder="from the project name" pattern="[a-z0-9](?:[a-z0-9\\-]{0,61}[a-z0-9])?"></label> <small>lower case letters, digits and dashes; blank takes the project's name</small></p>
 <p><label>Stack <select name="preset">${presets}</select></label></p>
 <p><small>For information: drops in this project are expected to reach <span id="hosts"></span>. Egress starts in <strong>monitor</strong>: nothing is blocked, and the doctor shows what drops reached before you enforce a list.</small></p>
 <h4>Checks (gates) every change must pass</h4><div id="gates"></div><p><button type="button" id="add-gate">Add a check</button></p>
 <p>Accounts: <label><input type="radio" name="identity" value="two-bot"${identity === 'two-bot' ? ' checked' : ''}> two bots (author and reviewer)</label> <label><input type="radio" name="identity" value="starter"${identity === 'starter' ? ' checked' : ''}> starter (one account)</label></p>
-<p><label><input type="checkbox" name="authorMayBeAdmin" value="1"> The author token belongs to the repository's owner (a personal repository)</label></p>
+<p id="author-admin"><label><input type="checkbox" name="authorMayBeAdmin" value="1"> The author token belongs to the repository's owner (a personal repository)</label></p>
+<p id="gitlab-next" hidden>This page takes no GitLab token. The project runs only once its bot tokens are in the vault, as <code>gitlab-pat/&lt;zone id&gt;/author</code>, plus <code>gitlab-pat/&lt;zone id&gt;/reviewer</code> for two bots, where the id is the project id above.</p>
 <p><button>Create the project</button> <span id="project-out" role="status"></span></p></form>
 <div id="guidance-box" hidden><h4>On GitHub: the ruleset and the code owners</h4>
 <p>Jumpmaster merges only under a branch ruleset, and the protected paths need a person's review. Both files are made from what was detected; nothing is written to GitHub.</p>
@@ -554,9 +555,10 @@ document.querySelector('select[name=preset]').addEventListener('change', showHos
 document.getElementById('add-gate').addEventListener('click', () => gateRow({}));
 document.getElementById('detect').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const out = document.getElementById('detect-out'); out.textContent = 'Reading the repository…';
-  const repo = e.target.repo.value.trim();
-  const r = await jmFetch('/api/control/detect', { repo });
+  const out = document.getElementById('detect-out'); out.textContent = 'Reading the project…';
+  // Sent as typed: the server reads it and says which forge it is on (#796).
+  const project = e.target.project.value;
+  const r = await jmFetch('/api/control/detect', { project });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) {
     out.textContent = (j.error || ('Not read (' + r.status + ')')) + ' ';
@@ -566,7 +568,23 @@ document.getElementById('detect').addEventListener('submit', async (e) => {
     return;
   }
   out.textContent = '';
-  found = { repo, ...j };
+  const gitlab = j.forge === 'gitlab';
+  document.getElementById('gitlab-next').hidden = !gitlab;
+  document.getElementById('author-admin').hidden = gitlab;
+  if (gitlab) {
+    // No detection on GitLab yet: the operator chooses the stack and the checks.
+    found = { forge: 'gitlab', project, repo: j.repo, baseUrl: j.baseUrl };
+    document.getElementById('found').textContent = j.repo + ' on ' + j.baseUrl + ': detection is not available on GitLab yet. Choose the stack and the checks.';
+    document.querySelector('input[name=authorMayBeAdmin]').checked = false;
+    gates.textContent = ''; gateRow({});
+    showHosts();
+    document.getElementById('guidance-box').hidden = true;
+    document.getElementById('guidance').textContent = '';
+    document.getElementById('project').hidden = false;
+    return;
+  }
+  const repo = j.repo;
+  found = { ...j, repo };
   document.getElementById('found').textContent = repo + ': ' + j.visibility + ', default branch ' + j.defaultBranch + (j.evidence && j.evidence.length ? '; found ' + j.evidence.join(', ') : '') + (j.problems && j.problems.length ? '. Note: ' + j.problems.join('; ') : '');
   if (j.preset) document.querySelector('select[name=preset]').value = j.preset;
   document.querySelector('input[name=authorMayBeAdmin]').checked = !!j.admin;
@@ -578,7 +596,7 @@ document.getElementById('detect').addEventListener('submit', async (e) => {
 // The ruleset file and CODEOWNERS for the detected repository and the chosen accounts, rendered
 // (and escaped) by the server.
 async function loadGuidance() {
-  if (!found) return;
+  if (!found || found.forge === 'gitlab') return;
   const identity = document.querySelector('input[name=identity]:checked').value;
   const reviewer = document.getElementById('codeowners-reviewer').value.trim();
   const q = new URLSearchParams({ repo: found.repo, identity, reviewer });
@@ -595,15 +613,17 @@ document.getElementById('project').addEventListener('submit', async (e) => {
   const names = rows.map((p) => p.querySelector('input[name=gate-name]').value.trim());
   const runs = rows.map((p) => p.querySelector('input[name=gate-run]').value.trim());
   const extras = rows.map((p) => JSON.parse(p.dataset.extra || '{}'));
+  const gitlab = found.forge === 'gitlab';
+  // A GitLab project goes as typed, for the server to read; a GitHub one as the repo it detected.
   const zone = {
-    repo: found.repo,
+    ...(gitlab ? { project: found.project } : { repo: found.repo }),
     preset: form.preset.value,
     gates: names.map((name, i) => ({ ...extras[i], name, run: runs[i] })).filter((g) => g.name && g.run),
     identity: form.querySelector('input[name=identity]:checked').value,
     egress: { mode: 'monitor' },
   };
-  if (form.authorMayBeAdmin.checked) zone.authorMayBeAdmin = true;
-  if (found.visibility === 'private') zone.reviewReadToken = true;
+  if (!gitlab && form.authorMayBeAdmin.checked) zone.authorMayBeAdmin = true;
+  if (!gitlab && found.visibility === 'private') zone.reviewReadToken = true;
   if (form.id.value.trim()) zone.id = form.id.value.trim();
   if (zone.gates.length === 0) { out.textContent = 'Add at least one check.'; return; }
   await createZone(zone, false, out);
