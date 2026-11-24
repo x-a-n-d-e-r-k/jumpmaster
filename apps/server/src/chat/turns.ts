@@ -13,6 +13,7 @@ import { type Config, chatConfigOf } from '../config.js';
 import type { Db } from '../db/open.js';
 import { getDropZoneDefaultBranch } from '../db/repo.js';
 import type { AppTokenSource } from '../forge/app-tokens.js';
+import { forgeKind } from '../forge/kind.js';
 import { mintChatToken, revokeMcpToken } from '../mcp/tokens.js';
 import { fence, neutralise } from '../payloads.js';
 import { redactionList } from '../scrub.js';
@@ -116,6 +117,8 @@ const NOT_STARTED = 'The chat could not start this turn.';
 const NO_SESSION = 'This message has no browser session to act for.';
 const NO_CLAUDE = 'Claude is not set up yet: add the Claude token in System, Credentials.';
 const NO_READ_CREDENTIAL = 'no read credential for this zone';
+/** Why a GitLab zone chats without its code: chat fetches GitHub zones only (issue #805). */
+const GITLAB_NO_CODE = "chat cannot fetch a GitLab zone's code yet";
 
 /** The most model turns one chat turn may take. */
 export const CHAT_MAX_TURNS = 50;
@@ -405,14 +408,19 @@ export function historySummary(
   return fence(fenceId, 'history', kept.join('\n\n'));
 }
 
-/** The zone list as trusted lines: what the install is, and whether each zone's code is there. */
-function systemPromptOf(zones: ChatZoneFetch[]): string {
-  const lines = zones.map(
-    (z) =>
-      `(trusted) zone ${z.id}: repository ${z.owner}/${z.name}, default branch ${z.defaultBranch}, ` +
-      (z.token === null
-        ? `code unavailable (${NO_READ_CREDENTIAL}); say so when asked about its code`
-        : 'code fetched for this turn'),
+/**
+ * The zone list as trusted lines: what the install is, and whether each zone's code is there.
+ * `gitlab` holds the ids of GitLab zones, named by their full project path.
+ */
+function systemPromptOf(zones: ChatZoneFetch[], gitlab: ReadonlySet<string>): string {
+  const lines = zones.map((z) =>
+    gitlab.has(z.id)
+      ? `(trusted) zone ${z.id}: GitLab project ${z.owner}/${z.name}, default branch ${z.defaultBranch}, ` +
+        `code unavailable (${GITLAB_NO_CODE}); say so when asked about its code`
+      : `(trusted) zone ${z.id}: repository ${z.owner}/${z.name}, default branch ${z.defaultBranch}, ` +
+        (z.token === null
+          ? `code unavailable (${NO_READ_CREDENTIAL}); say so when asked about its code`
+          : 'code fetched for this turn'),
   );
   return [
     "The install's zones, from the server's configuration (trusted). Call the MCP tools with one of these zone ids.",
@@ -616,6 +624,7 @@ export class ChatTurns {
           : '';
 
       const zones: ChatZoneFetch[] = [];
+      const gitlab = new Set<string>();
       for (const zone of config.dropZones) {
         const cred = await chatReadCredential(
           zone,
@@ -627,7 +636,17 @@ export class ChatTurns {
           creds.push(cred);
           turnSecrets.push(...withBasicAuth(cred.token));
         }
-        const [owner = '', name = ''] = zone.repo.split('/');
+        let owner: string;
+        let name: string;
+        if (forgeKind(zone) === 'gitlab') {
+          // A GitLab project path may nest groups: keep all of it, so `owner/name` is the path.
+          gitlab.add(zone.id);
+          const cut = zone.repo.lastIndexOf('/');
+          owner = zone.repo.slice(0, Math.max(cut, 0));
+          name = zone.repo.slice(cut + 1);
+        } else {
+          [owner = '', name = ''] = zone.repo.split('/');
+        }
         zones.push({
           id: zone.id,
           owner,
@@ -641,14 +660,19 @@ export class ChatTurns {
         if (z.token !== null) continue;
         this.emit(threadId, {
           seq: msg.seq,
-          event: { type: 'zone', zoneId: z.id, state: 'unavailable', reason: NO_READ_CREDENTIAL },
+          event: {
+            type: 'zone',
+            zoneId: z.id,
+            state: 'unavailable',
+            reason: gitlab.has(z.id) ? GITLAB_NO_CODE : NO_READ_CREDENTIAL,
+          },
         });
       }
 
       const base: Omit<ChatTurnRequest, 'resumeSession' | 'prompt'> = {
         protocol: CHAT_PROTOCOL,
         turnId,
-        systemPrompt: systemPromptOf(zones),
+        systemPrompt: systemPromptOf(zones, gitlab),
         model: chat.model,
         maxTurns: CHAT_MAX_TURNS,
         deadlineMs: chat.turnMinutes * 60_000,
