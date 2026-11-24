@@ -264,3 +264,89 @@ describe('PAT requirements for GitHub App roles (issue #458)', () => {
     }
   });
 });
+
+describe('a GitLab zone is judged by its gitlab-pat entries (issue #764)', () => {
+  // Made-up tokens, built at run time so no token-shaped literal sits in the tracked file.
+  const AUTHOR = ['glpat', 'author-value-0123456789'].join('-');
+  const REVIEWER = ['glpat', 'reviewer-value-0123456789'].join('-');
+  const gl = (over: Partial<DropZoneConfig> = {}) =>
+    zone({ forge: 'gitlab', gitlab: { baseUrl: 'https://gitlab.test' }, ...over });
+  const pats = (roles: { author?: string; reviewer?: string }) => new Map([['web', roles]]);
+  // No GitHub token at all: a GitLab zone needs none.
+  const noGithub = full({
+    githubAuthorToken: missing,
+    githubReviewerToken: missing,
+    githubReadToken: missing,
+  });
+  const of = (z: DropZoneConfig, p: Map<string, { author?: string; reviewer?: string }>) =>
+    credentialProblems(z, noGithub, new Map(), p);
+  const noValues = (ps: { message: string }[]) => {
+    for (const p of ps) {
+      expect(p.message).not.toContain(AUTHOR);
+      expect(p.message).not.toContain(REVIEWER);
+      expect(p.message).not.toContain('glpat-');
+    }
+  };
+
+  test('with both pats and no GitHub token, there is no problem; only the Claude token is still judged', () => {
+    expect(of(gl(), pats({ author: AUTHOR, reviewer: REVIEWER }))).toEqual([]);
+    const noClaude = credentialProblems(
+      gl({ reviewReadToken: true }),
+      { ...noGithub, claudeToken: missing },
+      new Map(),
+      pats({ author: AUTHOR, reviewer: REVIEWER }),
+    );
+    expect(noClaude.map((p) => [p.kind, p.credential])).toEqual([['missing', 'claudeToken']]);
+  });
+
+  test('no author pat is missing gitlab-pat/<zone>/author', () => {
+    const ps = of(gl(), pats({ reviewer: REVIEWER }));
+    expect(ps).toEqual([
+      {
+        zoneId: 'web',
+        kind: 'missing',
+        credential: 'gitlab-pat/web/author',
+        message: expect.stringContaining('no GitLab author token is set'),
+      },
+    ]);
+    // With no pats map at all (the default), the author and reviewer are both missing.
+    expect(credentialProblems(gl(), noGithub).map((p) => p.credential)).toEqual([
+      'gitlab-pat/web/author',
+      'gitlab-pat/web/reviewer',
+    ]);
+    noValues(ps);
+  });
+
+  test('a two-bot zone with no reviewer pat is missing gitlab-pat/<zone>/reviewer', () => {
+    const ps = of(gl(), pats({ author: AUTHOR }));
+    expect(ps.map((p) => [p.kind, p.credential])).toEqual([['missing', 'gitlab-pat/web/reviewer']]);
+    noValues(ps);
+  });
+
+  test('a starter zone needs no reviewer pat', () => {
+    expect(of(gl({ identity: 'starter' }), pats({ author: AUTHOR }))).toEqual([]);
+  });
+
+  test('equal author and reviewer values are the same account', () => {
+    const ps = of(gl(), pats({ author: AUTHOR, reviewer: AUTHOR }));
+    expect(ps.map((p) => [p.kind, p.credential])).toEqual([['same', 'gitlab-pat/web/reviewer']]);
+    noValues(ps);
+    expect(of(gl({ identity: 'starter' }), pats({ author: AUTHOR, reviewer: AUTHOR }))).toEqual([]);
+  });
+
+  test('no GitHub token rule applies: no kind check on a non-github_pat_ value', () => {
+    const z = gl({ authorMayBeAdmin: true, reviewReadToken: true });
+    const classic = full({ githubAuthorToken: has('ghp_classic'), githubReadToken: missing });
+    expect(
+      credentialProblems(z, classic, new Map(), pats({ author: AUTHOR, reviewer: REVIEWER })),
+    ).toEqual([]);
+    expect(of(gl({ identity: 'starter' }), pats({ author: AUTHOR }))).toEqual([]);
+  });
+
+  test('gate secrets are judged as before', () => {
+    const z = gl({ gateSecrets: ['NPM_TOKEN'] });
+    const ps = of(z, pats({ author: AUTHOR, reviewer: REVIEWER }));
+    expect(ps.map((p) => p.kind)).toEqual(['missing']);
+    expect(ps[0]?.message).toContain('gate secret NPM_TOKEN');
+  });
+});

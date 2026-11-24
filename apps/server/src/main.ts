@@ -201,6 +201,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
       zone,
       { resolved: live.resolved(), apps: live.resolvedApps() },
       appTokens,
+      live.resolvedGitlabPats(),
     );
   }
   // A revision that replaces, swaps, adds or drops an app entry empties the token cache (issue #266).
@@ -335,7 +336,7 @@ export async function start(configPath?: string, env: NodeJS.ProcessEnv = proces
         // and so is one whose recorded app ids GitHub refuses (issue #267).
         await zonePass(
           zone,
-          credentialProblems(zone, resolved, live.resolvedApps()),
+          credentialProblems(zone, resolved, live.resolvedApps(), live.resolvedGitlabPats()),
           async () => {
             const forgePair = pairs.for(zone, config.secrets, pairOptionsOf(zone));
             const synced = await syncDropZone(db, forgePair, zone, new Date());

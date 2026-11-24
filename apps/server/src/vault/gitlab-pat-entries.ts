@@ -22,8 +22,11 @@ const isRole = (r: unknown): r is GitLabPatRole =>
   typeof r === 'string' && (GITLAB_PAT_ROLES as readonly string[]).includes(r);
 const isZoneId = (id: unknown): id is string => typeof id === 'string' && ZONE_ID.test(id);
 
+/** A `gitlab-pat` vault entry's name: `gitlab-pat/<zoneId>/<role>`. */
+export type GitlabPatEntryName = `gitlab-pat/${string}/${GitLabPatRole}`;
+
 /** `gitlab-pat/<zoneId>/<role>`; throws (never echoing the input) on a bad zone id or role. */
-export function gitlabPatEntryName(zoneId: string, role: GitLabPatRole): string {
+export function gitlabPatEntryName(zoneId: string, role: GitLabPatRole): GitlabPatEntryName {
   if (!isZoneId(zoneId)) throw new Error('gitlab-pat: the zone id is not a valid zone id');
   if (!isRole(role)) throw new Error('gitlab-pat: the role is not author or reviewer');
   return `gitlab-pat/${zoneId}/${role}`;

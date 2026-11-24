@@ -1750,6 +1750,75 @@ describe('credential checks (Task 4)', () => {
     });
   });
 
+  describe('a GitLab zone is judged by its gitlab-pat entries (issue #764)', () => {
+    const AUTHOR = ['glpat', 'D'.repeat(20)].join('-');
+    const REVIEWER = ['glpat', 'E'.repeat(20)].join('-');
+    // A Claude token and no GitHub token: a GitLab zone needs none.
+    const claudeOnly = (): Resolved =>
+      ({
+        claudeToken: { value: 'sk-ant-oat01-x', source: 'vault', fingerprint: 'fp' },
+        githubAuthorToken: { source: 'missing' },
+        githubReviewerToken: { source: 'missing' },
+        githubReadToken: { source: 'missing' },
+      }) as Resolved;
+    const gitlabOf = (zone: DropZoneConfig): DropZoneConfig => ({
+      ...zone,
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    });
+
+    test('with its pats in the vault, no credential check fails', async () => {
+      const w = world();
+      const pats = new Map([[w.zone.id, { author: AUTHOR, reviewer: REVIEWER }]]);
+      w.deps.credentials = creds({
+        problems: credentialProblems(gitlabOf(w.zone), claudeOnly(), new Map(), pats),
+      });
+      const checks = await w.run();
+      for (const id of ['credential.missing', 'credential.kind', 'credential.same'])
+        expect(one(checks, id)).toMatchObject({ zoneId: w.zone.id, status: 'pass' });
+    });
+
+    test('without them, credential.missing names gitlab-pat/<zone>/author, and no value', async () => {
+      const w = world();
+      w.deps.credentials = creds({
+        problems: credentialProblems(
+          gitlabOf(w.zone),
+          claudeOnly(),
+          new Map(),
+          new Map([[w.zone.id, { reviewer: REVIEWER }]]),
+        ),
+      });
+      const checks = await w.run();
+      expect(one(checks, 'credential.missing')).toMatchObject({
+        status: 'fail',
+        credentials: [`gitlab-pat/${w.zone.id}/author`],
+      });
+      expect(one(checks, 'credential.missing').summary).toContain(
+        `gitlab-pat/${w.zone.id}/author: no GitLab author token is set`,
+      );
+      expect(one(checks, 'credential.kind').status).toBe('pass');
+      expect(JSON.stringify(checks)).not.toContain(REVIEWER);
+    });
+
+    test('equal author and reviewer values fail credential.same on the reviewer entry', async () => {
+      const w = world();
+      w.deps.credentials = creds({
+        problems: credentialProblems(
+          gitlabOf(w.zone),
+          claudeOnly(),
+          new Map(),
+          new Map([[w.zone.id, { author: AUTHOR, reviewer: AUTHOR }]]),
+        ),
+      });
+      const checks = await w.run();
+      expect(one(checks, 'credential.same')).toMatchObject({
+        status: 'fail',
+        credentials: [`gitlab-pat/${w.zone.id}/reviewer`],
+      });
+      expect(JSON.stringify(checks)).not.toContain(AUTHOR);
+    });
+  });
+
   test('credential.shadowed warns naming the file and both fingerprints, never a value', async () => {
     const w = world();
     w.deps.credentials = creds({
