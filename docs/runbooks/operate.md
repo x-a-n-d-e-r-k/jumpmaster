@@ -358,9 +358,13 @@ config file show here too. From a terminal: `ctl settings set <path>=<json>…`,
 
 ### Overriding the usage throttle
 
-When Claude warns that usage is near its limit, or usage passes `usage.throttleUtilization`, only
-finishing work (reviews, heals, resolves) starts. A warning holds new work for five hours from the
-latest report that carries it, and every drop and chat turn reports. To start some work anyway:
+When usage passes `usage.throttleUtilization` on an account-wide window, only finishing work
+(reviews, heals, resolves) starts. Claude's warning that usage is near its limit is information:
+it holds new work only while the window it names (or, when it names none, every account-wide
+window) reports no utilization, and only until that window's reset, or five hours (seven days for
+a weekly window) from the warning when Claude gave no reset. A warning on a per-model window never
+holds all work, and later reports, chat turns included, do not extend a hold. To start some work
+anyway:
 
 ```sh
 docker compose exec jumpmaster jumpmaster ctl usage override            # 5 starts, for 3 hours

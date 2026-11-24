@@ -235,7 +235,17 @@ describe('the status says an override is on (#728)', () => {
     setKilled(db, false, t0);
     setUsageState(db, { status: 'allowed', warningWindow: null, warningAt: null }, t0);
     expect(said()).not.toContain('Usage override');
-    setUsageState(db, { status: 'allowed_warning', overrideStartsLeft: 0 }, t0);
+    setUsageState(
+      db,
+      {
+        status: 'allowed_warning',
+        warningWindow: 'five_hour',
+        warningAt: iso(0),
+        overrideStartsLeft: 0,
+      },
+      t0,
+    );
+    expect(dispatchGate(db, config.usage, t0)).toBe('finishing_only');
     expect(said()).not.toContain('Usage override');
   });
 });

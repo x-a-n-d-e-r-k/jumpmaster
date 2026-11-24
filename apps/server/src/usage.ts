@@ -394,6 +394,18 @@ function throttled(db: Db, cfg: UsageConfig, t: number): boolean {
 }
 
 /**
+ * When the throttle's hold began, for the status: the latest usage report while a window at or
+ * above the threshold holds, else the warning's time while the warning holds (#748); null when
+ * nothing holds.
+ */
+export function throttleSince(db: Db, cfg: UsageConfig, now: Date): string | null {
+  const t = now.getTime();
+  if (accountAt(db, cfg.throttleUtilization, t)) return getUsageState(db).observedAt;
+  if (warningHolds(db, t)) return usageWarning(db, now)?.at ?? null;
+  return null;
+}
+
+/**
  * The usage share at which an override ends by itself. A constant, and never the throttle's own
  * setting: chat can change that one without a confirmation, so nothing but a release raises this.
  */

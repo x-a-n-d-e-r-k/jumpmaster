@@ -34,7 +34,13 @@ import {
   SYSTEM_HREF,
 } from './ui/links.js';
 import { wizardActive } from './ui/setup.js';
-import { dispatchGate, type Gate, type UsageOverride, usageOverride } from './usage.js';
+import {
+  dispatchGate,
+  type Gate,
+  throttleSince,
+  type UsageOverride,
+  usageOverride,
+} from './usage.js';
 import { type CredentialProblem, credentialProblems } from './vault/problems.js';
 
 /**
@@ -84,8 +90,8 @@ export type UsageFacts = {
   overageProbeSince?: string;
   /** Command's override of the throttle, while in force (#728). */
   override?: UsageOverride;
-  /** When Claude's usage was last observed (the usage row's `observedAt`). */
-  observedAt?: string;
+  /** When the throttle's hold began: the usage report, or the warning that holds (#748). */
+  throttledSince?: string;
 };
 
 /** One zone as the status reads it. The optional facts serve the headlines that name them. */
@@ -662,7 +668,7 @@ export function statusOf(input: StatusInput, now: Date): Status {
         detail:
           'Claude reported its usage near the limit. Reviews, heals and merges go on; the crew lead, audits and new work start again once it clears.',
         waitingOn: 'claude',
-        ...(usage.observedAt ? { since: usage.observedAt } : {}),
+        ...(usage.throttledSince ? { since: usage.throttledSince } : {}),
         action: { label: 'See usage on home', href: '/' },
       },
       { crewHeld: true },
@@ -762,7 +768,7 @@ export function statusInputOf(o: {
       ...opt('overageResumeUntil', u.overageResumeUntil),
       ...opt('overageResumeWorkItemId', u.overageResumeWorkItemId),
       ...opt('overageProbeSince', u.overageProbeSince),
-      ...opt('observedAt', u.observedAt),
+      ...opt('throttledSince', throttleSince(db, config.usage, now)),
       // Shown only where it acts: the throttle holds, and the override lifts it.
       ...opt('override', gate === 'override' ? usageOverride(db, now) : null),
     },
