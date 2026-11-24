@@ -82,3 +82,39 @@ describe('a goal change in flight (#645)', () => {
     expect(rule8).toMatch(/^8\. Propose a goal change only through `goalChange`/);
   });
 });
+
+describe("a ruling's note (#767)", () => {
+  const rule = (n: number): string =>
+    prompt('crew-lead.md')
+      .split('\n')
+      .find((l) => l.startsWith(`${n}. `)) ?? '';
+
+  test('rule 1 says a note is part of the ruling, wins over the option, and how to act on it', () => {
+    const rule1 = rule(1);
+    expect(rule1).toMatch(/^1\. Steer toward the current objective\./);
+    expect(rule1).toContain('part of the ruling');
+    expect(rule1).toContain('the note wins');
+    expect(rule1).toContain('raise a briefing that quotes the note');
+    expect(rule1).toMatch(/without carrying its note/);
+  });
+
+  test('rule 1 names rule 5 as the limit on filing a note’s work', () => {
+    expect(rule(1)).toMatch(/When rule 5 forbids it as an issue/);
+    expect(rule(1)).toMatch(
+      /A note never lifts rule 5 or rule 10: protected work still goes to a briefing\./,
+    );
+  });
+
+  test('rule 9 names rulings with their note', () => {
+    expect(rule(9)).toMatch(/and with their note, if they have one/);
+  });
+
+  test('the prompt still has rules 1 to 12, in order', () => {
+    const numbers = prompt('crew-lead.md')
+      .split('\n')
+      .map((l) => /^(\d+)\. /.exec(l)?.[1])
+      .filter((n): n is string => n !== undefined)
+      .map(Number);
+    expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  });
+});

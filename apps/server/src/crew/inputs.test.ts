@@ -109,6 +109,48 @@ describe('crew-lead input', () => {
     expect(input).toContain(`<<<jm-data:${DROP}:begin open-issues>>>`);
   });
 
+  test("a ruling's note is in the trusted rulings section; a ruling without one has no note (#767)", async () => {
+    const raise = (subject: string) =>
+      raiseBriefing(
+        w.db,
+        {
+          zoneId: 'main',
+          kind: 'crew',
+          subject,
+          decision: 'How do GitLab drops reach their host?',
+          why: 'w',
+          options: [
+            { id: 'o1', label: 'Change code', effect: 'none' },
+            { id: 'o3', label: 'Change no code', effect: 'none' },
+          ],
+          source: 'crew',
+        },
+        t0,
+      );
+    const noted = ruleBriefing(
+      w.db,
+      raise('crew:egress'),
+      'o3',
+      'This should be a setting on the stick to define the allow-list per stick.',
+      t0,
+    );
+    const bare = ruleBriefing(w.db, raise('crew:other'), 'o1', '', t0);
+    if (!noted.ok || !bare.ok) throw new Error('not ruled');
+    const input = await leadInput();
+    const rulings = input.slice(
+      input.indexOf("## Command's rulings"),
+      input.indexOf('## Open briefings'),
+    );
+    expect(rulings).toContain('(trusted instructions)');
+    expect(rulings).toContain(`Ruling ${noted.rulingId} on briefing`);
+    expect(rulings).toContain(
+      'option o3; note: This should be a setting on the stick to define the allow-list per stick.',
+    );
+    const bareLine = rulings.split('\n').find((l) => l.startsWith(`Ruling ${bare.rulingId} `));
+    expect(bareLine).toMatch(/option o1 \(/);
+    expect(bareLine).not.toContain('note:');
+  });
+
   test('lists each open crew briefing by id, subject, decision and options (#246)', async () => {
     const lead = applyCrewActions(
       w.db,
