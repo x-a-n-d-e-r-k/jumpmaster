@@ -3,13 +3,17 @@ import { redactTokenShapes } from '@jumpmaster/protocol';
 import type { Db } from './db/open.js';
 import {
   claimOutboxResend,
+  countOutboxCleanRead,
   getOutbox,
   insertOutbox,
   isKilled,
   listOutbox,
+  listResentIssueFilings,
   type OutboxRow,
   type OutboxState,
   resetDoneOutbox,
+  resetOutboxCleanReads,
+  setOutboxResult,
   updateOutbox,
 } from './db/repo.js';
 import type { AppTokenSource } from './forge/app-tokens.js';
@@ -25,6 +29,7 @@ import {
 } from './forge/github.js';
 import { GitLabForge } from './forge/gitlab.js';
 import { type ForgeKind, forgeKind, GITLAB_UNSUPPORTED } from './forge/kind.js';
+import { log } from './log.js';
 import { credentialFingerprint, type Resolved } from './vault/credentials.js';
 import type { AppRole, CredentialRef } from './vault/github-app-entries.js';
 import {
@@ -696,16 +701,27 @@ async function lookup(forges: ForgePair, kind: OpKind, opKey: string, payload: u
   }
 }
 
-/** The last look before a `create_issue` row is failed: a day wider than the normal search. */
-async function wideIssueSearch(
+/**
+ * The last look before a `create_issue` row is failed, and before one is sent again: a day wider
+ * than the normal search. A failed search throws here.
+ */
+async function searchWide(
   forges: ForgePair,
   row: Pick<OutboxRow, 'kind' | 'opKey' | 'payloadJson'>,
 ): Promise<{ number: number } | null> {
   if (row.kind !== 'create_issue') return null;
   const p = JSON.parse(row.payloadJson) as CreateIssuePayload;
   const since = new Date(Date.parse(p.since) - WIDE_SEARCH_MS).toISOString();
+  return forges.author.findIssueByMarker(opMarker(row.opKey), since);
+}
+
+/** `searchWide`, with a failed search read as nothing found. */
+async function wideIssueSearch(
+  forges: ForgePair,
+  row: Pick<OutboxRow, 'kind' | 'opKey' | 'payloadJson'>,
+): Promise<{ number: number } | null> {
   try {
-    return await forges.author.findIssueByMarker(opMarker(row.opKey), since);
+    return await searchWide(forges, row);
   } catch {
     return null;
   }
@@ -991,9 +1007,9 @@ export async function runOpIf(
 
 /**
  * Kinds whose effect reads back exactly and that the forge refuses or ignores a second time, so a
- * write lost to a dropped connection may be sent again (#787). Not here: `create_issue`,
- * `comment_issue` and `post_review`, where a late first write could leave two, and
- * `update_branch`, which its caller sends again.
+ * write lost to a dropped connection may be sent again (#787). Not here: `create_issue` and
+ * `post_review`, where a late first write could leave two (they are `STRICT_RESEND_KINDS`),
+ * `comment_issue`, never sent again, and `update_branch`, which its caller sends again.
  */
 export const RESENDABLE_KINDS: ReadonlySet<OpKind> = new Set<OpKind>([
   'create_pr',
@@ -1009,15 +1025,45 @@ export const RESEND_AFTER_MS = 2 * 60_000;
 export const MAX_RESENDS = 3;
 
 /**
+ * Kinds sent again under stricter rules (#900), since a late first write could leave two: only
+ * after `CLEAN_READS` clean read-backs in a row (for a filing, the last also the wide search), at
+ * most `MAX_STRICT_RESENDS` times, and a review only on its open PR at its commit.
+ */
+export const STRICT_RESEND_KINDS: ReadonlySet<OpKind> = new Set<OpKind>([
+  'create_issue',
+  'post_review',
+]);
+/** The most times an issue filing or a review is sent again. */
+export const MAX_STRICT_RESENDS = 2;
+/** Clean read-backs in a row before an issue filing or a review is sent again. */
+export const CLEAN_READS = 3;
+/** The least time between two clean reads that both count. */
+export const CLEAN_READ_GAP_MS = 60_000;
+/** How long after a resent filing is done the passes look for a second issue with its marker. */
+export const DUPLICATE_WINDOW_MS = 30 * 60_000;
+
+/**
  * Whether an `unknown` row whose read-back came back clean and empty may be sent again now: a
  * resendable kind, under the cap, 2 minutes after its last send, kill switch off, zone active, and
  * for a PR, its branch still at the head SHA the op is keyed by (a failed read of it proves
  * nothing, so it holds the resend too).
  */
 async function mayResend(db: Db, forges: ForgePair, row: OutboxRow, now: Date): Promise<boolean> {
-  if (!RESENDABLE_KINDS.has(row.kind) || row.resends >= MAX_RESENDS) return false;
+  const strict = STRICT_RESEND_KINDS.has(row.kind);
+  if (!strict && !RESENDABLE_KINDS.has(row.kind)) return false;
+  if (row.resends >= (strict ? MAX_STRICT_RESENDS : MAX_RESENDS)) return false;
   if (now.getTime() - Date.parse(row.updatedAt) < RESEND_AFTER_MS) return false;
   if (isKilled(db) || zoneMode(db, row.zoneId) !== 'active') return false;
+  if (row.kind === 'post_review') {
+    // Only while the PR is open at the review's commit: otherwise it goes on to its deadline.
+    const p = JSON.parse(row.payloadJson) as PostReviewPayload;
+    try {
+      const pr = await forges.author.getPull(p.pr);
+      return pr !== null && pr.state === 'open' && !pr.merged && pr.headSha === p.commitId;
+    } catch {
+      return false;
+    }
+  }
   if (row.kind !== 'create_pr') return true;
   const keySha = row.opKey.split(':').at(-1);
   const p = JSON.parse(row.payloadJson) as CreatePrPayload;
@@ -1050,9 +1096,126 @@ async function resend(
 }
 
 /**
+ * An issue filing's or a review's turn after its read-back (#900): a failed read starts the clean
+ * reads again; a clean one counts when it is 2 minutes after the last send and a minute after the
+ * last that counted. At `CLEAN_READS`, a filing is looked for once more by the wide search (which
+ * must be clean too), then the write may be sent again (`mayResend`). Returns whether it is done.
+ */
+async function strictResend(
+  db: Db,
+  forges: ForgePair,
+  row: OutboxRow,
+  read: OpResult,
+  now: Date,
+): Promise<boolean> {
+  if (read.error !== undefined) {
+    resetOutboxCleanReads(db, row.opKey);
+    return false;
+  }
+  if (now.getTime() - Date.parse(row.updatedAt) < RESEND_AFTER_MS) return false;
+  const count = countOutboxCleanRead(db, row.opKey, now, CLEAN_READ_GAP_MS);
+  if (count === null || count < CLEAN_READS) return false;
+  if (row.kind === 'create_issue') {
+    let found: { number: number } | null;
+    try {
+      found = await searchWide(forges, row);
+    } catch {
+      resetOutboxCleanReads(db, row.opKey);
+      return false;
+    }
+    if (found) {
+      markDone(db, row.opKey, found, now);
+      return true;
+    }
+  }
+  if (!(await mayResend(db, forges, row, now))) return false;
+  return (await resend(db, forges, row, now))?.state === 'done';
+}
+
+/** The outbox key of closing issue `n`, a duplicate of the filing `opKey` (#900). */
+const duplicateCloseKey = (opKey: string, n: number): string => `dup:${opKey}:${n}`;
+
+/**
+ * For `DUPLICATE_WINDOW_MS` after a resent issue filing is done, looks for issues with its marker
+ * (#900). Of two or more, the lowest number is kept, and the record (the row's result and the crew
+ * issue) names it; each other one is closed through the outbox, once, with one log line. Only
+ * issues this identity filed with this row's own marker are ever closed, and nothing is under the
+ * kill switch or in a zone that is not active.
+ */
+async function closeDuplicateIssues(
+  db: Db,
+  forges: ForgePair,
+  zoneId: string,
+  now: Date,
+): Promise<void> {
+  if (isKilled(db) || zoneMode(db, zoneId) !== 'active') return;
+  const since = new Date(now.getTime() - DUPLICATE_WINDOW_MS);
+  for (const row of listResentIssueFilings(db, zoneId, since)) {
+    const p = JSON.parse(row.payloadJson) as CreateIssuePayload;
+    let found: { number: number }[];
+    try {
+      found = await forges.author.findIssuesByMarker(opMarker(row.opKey), p.since);
+    } catch {
+      continue; // looked for again on the next pass
+    }
+    const [keep, ...rest] = [...new Set(found.map((i) => i.number))].sort((a, b) => a - b);
+    if (keep === undefined || rest.length === 0) continue;
+    const result = (row.resultJson == null ? {} : JSON.parse(row.resultJson)) as {
+      number?: number;
+    };
+    if (result.number !== keep) {
+      db.transaction(() => {
+        setOutboxResult(db, row.opKey, JSON.stringify({ ...result, number: keep }));
+        repointFiledNumber(db, row.opKey, result.number, keep, now);
+      })();
+    }
+    // At most one issue per send of the row: the first and each resend.
+    for (const n of rest.slice(0, MAX_STRICT_RESENDS)) {
+      const opKey = duplicateCloseKey(row.opKey, n);
+      const first = getOutbox(db, opKey) === undefined;
+      try {
+        const r = await runOp(
+          db,
+          forges,
+          {
+            kind: 'update_issue',
+            opKey,
+            zoneId,
+            itemId: null,
+            payload: { number: n, state: 'closed' },
+          },
+          now,
+        );
+        if (first && r.state === 'done')
+          log(`outbox: closed issue #${n}, a duplicate of #${keep} (${row.opKey})`);
+      } catch {
+        // Refused (kill switch or observe since the check): tried again on the next pass.
+      }
+    }
+  }
+}
+
+/** The crew issue filed by `opKey` now names `to`, the kept one of two (#900), not `from`. */
+function repointFiledNumber(
+  db: Db,
+  opKey: string,
+  from: number | undefined,
+  to: number,
+  now: Date,
+): void {
+  if (!opKey.startsWith('issue:') || from === undefined) return;
+  db.prepare(
+    `UPDATE crew_issues SET number = ?, updated_at = ?
+       WHERE number = ? AND 'issue:' || zone_id || ':' || objective || ':' || key = ?`,
+  ).run(to, now.toISOString(), from, opKey);
+}
+
+/**
  * Read-back for every `unknown` row of one zone; returns how many became `done`. A row still
  * unresolved `maxAgeMinutes` after it was created becomes `failed`. Before that, a resendable
- * write the read-back cleanly did not find is sent again (`mayResend`, #787).
+ * write the read-back cleanly did not find is sent again (`mayResend`, #787); an issue filing or a
+ * review only after three clean reads (`strictResend`, #900). Then a resent filing's duplicates
+ * are closed (`closeDuplicateIssues`).
  */
 export async function resolveUnknown(
   db: Db,
@@ -1083,10 +1246,15 @@ export async function resolveUnknown(
       );
       continue;
     }
+    if (STRICT_RESEND_KINDS.has(row.kind)) {
+      if (await strictResend(db, forges, row, r, now)) resolved++;
+      continue;
+    }
     // A read that failed proves nothing: only a clean, empty read-back may lead to a resend.
     if (r.error !== undefined || !(await mayResend(db, forges, row, now))) continue;
     if ((await resend(db, forges, row, now))?.state === 'done') resolved++;
   }
+  await closeDuplicateIssues(db, forges, zoneId, now);
   return resolved;
 }
 

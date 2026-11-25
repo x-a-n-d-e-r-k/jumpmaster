@@ -1439,6 +1439,25 @@ describe('GitHubForge issue writes', () => {
     expect(await f.findIssueByMarker(MARK, '2026-01-01T00:00:00Z')).toEqual({ number: 152 });
   });
 
+  test('findIssuesByMarker lists every issue of this viewer ending with the marker, lowest first (#900)', async () => {
+    const f = new GitHubForge('o', 'r', 'tok');
+    nock(api).get('/user').reply(200, { login: 'jm-bot' });
+    nock(api)
+      .get('/repos/o/r/issues')
+      .query({ creator: 'jm-bot', state: 'all', since: '2026-01-01T00:00:00Z', per_page: '100' })
+      .reply(200, [
+        issue(9, { user: { login: 'jm-bot' }, body: `b\n${MARK}` }),
+        issue(8, { user: { login: 'other' }, body: `b\n${MARK}` }),
+        issue(7, { user: { login: 'jm-bot' }, pull_request: { url: 'x' }, body: `b\n${MARK}` }),
+        issue(6, { user: { login: 'jm-bot' }, body: 'no marker' }),
+        issue(4, { user: { login: 'jm-bot' }, body: `a\n\n${MARK}\n` }),
+      ]);
+    expect(await f.findIssuesByMarker(MARK, '2026-01-01T00:00:00Z')).toEqual([
+      { number: 4 },
+      { number: 9 },
+    ]);
+  });
+
   test('createIssue, updateIssue and getIssue map the API', async () => {
     const f = new GitHubForge('o', 'r', 'tok');
     nock(api)

@@ -470,6 +470,17 @@ function forgeFor(
       }
       return null;
     },
+    findIssuesByMarker: async (marker, since) =>
+      [...state.issues]
+        .filter(
+          ([, e]) =>
+            e.issue?.author === me() &&
+            (e.updatedAt ?? '') >= since &&
+            lastLine(e.issue.body) === marker,
+        )
+        .map(([number]) => number)
+        .sort((a, b) => a - b)
+        .map((number) => ({ number })),
     updateIssue: async (n, patch) => {
       const e = mustIssue(state, n);
       if (e.issue) {

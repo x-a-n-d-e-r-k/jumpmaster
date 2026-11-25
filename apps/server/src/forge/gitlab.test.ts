@@ -331,6 +331,18 @@ describe('markers', () => {
     expect(await forge.findIssueByMarker(MARK, since)).toEqual({ number: 2 });
   });
 
+  test('findIssuesByMarker lists every issue of this viewer with the marker, lowest first (#900)', async () => {
+    const { gl, forge } = setup();
+    gl.seedIssue({ iid: 1, title: 'mine', description: `a\n${MARK}`, author: 'agent' });
+    gl.seedIssue({ iid: 2, title: 'theirs', description: `x\n${MARK}`, author: 'other' });
+    gl.seedIssue({ iid: 3, title: 'no marker', description: 'x', author: 'agent' });
+    gl.seedIssue({ iid: 5, title: 'mine too', description: `b\n${MARK}\n`, author: 'agent' });
+    expect(await forge.findIssuesByMarker(MARK, '2000-01-01T00:00:00Z')).toEqual([
+      { number: 1 },
+      { number: 5 },
+    ]);
+  });
+
   test('findIssueByMarker pages', async () => {
     const { gl, forge } = setup();
     gl.seedIssue({ iid: 1, title: 'mine', description: MARK, author: 'agent' });

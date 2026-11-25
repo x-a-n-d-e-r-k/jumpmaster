@@ -560,6 +560,18 @@ export class GitLabForge implements Forge {
     return { number: i.iid };
   }
 
+  async findIssuesByMarker(marker: string, since: string): Promise<{ number: number }[]> {
+    const me = await this.viewerLogin();
+    const items = await this.list<RawIssue>('searching issues', '/issues', {
+      updated_after: since,
+    });
+    return items
+      .filter((i) => i.author?.username === me && (i.description ?? '').trimEnd().endsWith(marker))
+      .map((i) => i.iid)
+      .sort((a, b) => a - b)
+      .map((number) => ({ number }));
+  }
+
   async findIssueByMarker(marker: string, since: string): Promise<{ number: number } | null> {
     const me = await this.viewerLogin();
     const items = await this.list<RawIssue>('searching issues', '/issues', {
