@@ -152,6 +152,7 @@ const volumeMounts = (m: RepoMount): { Mounts: Docker.MountSettings[] } => ({
 const trooperMounts = (
   repo: RepoMount | undefined,
   mirror: MirrorMount | undefined,
+  mirrorWritable = false,
 ): { Mounts: Docker.MountSettings[] } => ({
   Mounts: [
     ...(repo ? volumeMounts(repo).Mounts : []),
@@ -161,7 +162,7 @@ const trooperMounts = (
             Type: 'volume',
             Source: mirror.volume,
             Target: mirror.target,
-            ReadOnly: true,
+            ReadOnly: !mirrorWritable,
             VolumeOptions: { NoCopy: true },
           } as Docker.MountSettings,
         ]
@@ -893,6 +894,9 @@ export class DockerDriver implements ContainerDriver, ImageLoader, ImageGcDriver
   }
 
   async start(o: Parameters<ContainerDriver['start']>[0]): Promise<ContainerHandle> {
+    // A clone container sees only its mirror, which it fills.
+    if (o.clone && o.mount) throw new Error('a clone container takes no repo mount');
+    if (o.clone && !o.mirror) throw new Error('a clone container needs its mirror volume');
     const container = await this.docker.createContainer({
       Image: o.image,
       name: o.name,
@@ -910,8 +914,9 @@ export class DockerDriver implements ContainerDriver, ImageLoader, ImageGcDriver
         Privileged: false,
         // The trooper (root, PID 1) only needs to drop to the agent/gate uids and kill their
         // processes. No CHOWN or DAC_OVERRIDE: root cannot read the agent's private files.
+        // The clone role drops to no uid and kills nothing, so it gets no capability back.
         CapDrop: ['ALL'],
-        CapAdd: ['SETUID', 'SETGID', 'KILL'],
+        ...(o.clone ? {} : { CapAdd: ['SETUID', 'SETGID', 'KILL'] }),
         SecurityOpt: ['no-new-privileges'],
         PidsLimit: o.limits?.pids ?? DEFAULT_PIDS,
         // MemorySwap equal to Memory: no swap, so a heavy drop can't thrash a shared host.
@@ -922,7 +927,7 @@ export class DockerDriver implements ContainerDriver, ImageLoader, ImageGcDriver
         Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }],
         // Egress: created on the drop network only, so it never touches a network with a route.
         ...(o.egress ? egressHostConfig(o.egress) : {}),
-        ...(o.mount || o.mirror ? trooperMounts(o.mount, o.mirror) : {}),
+        ...(o.mount || o.mirror ? trooperMounts(o.mount, o.mirror, o.clone === true) : {}),
       },
       ...(o.egress
         ? {

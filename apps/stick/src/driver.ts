@@ -75,8 +75,19 @@ export interface ContainerDriver {
     limits?: ContainerLimits;
     /** The drop's repo volume, read-write (no binds). */
     mount?: RepoMount;
-    /** The drop's mirror volume, a second mount, read-only (no binds). */
+    /**
+     * The drop's mirror volume, a second mount, read-only (no binds). With `clone`, the only
+     * mount, and read-write.
+     */
     mirror?: MirrorMount;
+    /**
+     * The clone role: the trooper fills the mirror, so `mirror` is required and mounted
+     * read-write, `mount` is refused (a clone container sees only its mirror), and no
+     * capability is added back (it runs as root and drops no privileges). Everything else in
+     * the hardening stays. The start throws before creating any container when `mirror` is
+     * missing or `mount` is given.
+     */
+    clone?: boolean;
     /**
      * Keep stdin open after the payload line, for `writeLine`/`endStdin`. Otherwise stdin ends
      * right after the payload.

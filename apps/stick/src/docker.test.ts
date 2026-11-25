@@ -766,6 +766,79 @@ test('start without mirror creates exactly the pinned container spec', async () 
   });
 });
 
+test('a clone start mounts the mirror read-write at /jm/mirror and adds no capabilities', async () => {
+  const { docker, created } = stdinDocker();
+  await new DockerDriver(docker as never).start({
+    image: 'i',
+    name: 'n',
+    labels: { a: 'b' },
+    payload: '{}',
+    mirror: { volume: 'jm-mirror-d1-3-0123abcd', target: '/jm/mirror' },
+    clone: true,
+  });
+  const hc = created[0]?.HostConfig as Record<string, unknown>;
+  expect(hc.Mounts).toEqual([
+    {
+      Type: 'volume',
+      Source: 'jm-mirror-d1-3-0123abcd',
+      Target: '/jm/mirror',
+      ReadOnly: false,
+      VolumeOptions: { NoCopy: true },
+    },
+  ]);
+  expect(hc.Binds).toBeUndefined();
+  expect(hc.CapAdd ?? []).toEqual([]);
+  expect(hc.CapDrop).toEqual(['ALL']);
+  expect(hc.SecurityOpt).toEqual(['no-new-privileges']);
+  expect(hc.Privileged).toBe(false);
+  expect(hc.PidsLimit).toBe(512);
+  expect(hc.Ulimits).toEqual([{ Name: 'core', Soft: 0, Hard: 0 }]);
+});
+
+test('a clone start keeps the memory settings', async () => {
+  const { docker, created } = stdinDocker();
+  await new DockerDriver(docker as never).start({
+    image: 'i',
+    name: 'n',
+    labels: {},
+    payload: '{}',
+    limits: { memoryMb: 256, pids: 64 },
+    mirror: { volume: 'jm-mirror-d1-3-0123abcd', target: '/jm/mirror' },
+    clone: true,
+  });
+  const hc = created[0]?.HostConfig as Record<string, unknown>;
+  expect(hc.Memory).toBe(256 * 1024 * 1024);
+  expect(hc.MemorySwap).toBe(256 * 1024 * 1024);
+  expect(hc.PidsLimit).toBe(64);
+});
+
+test('a clone start with a repo mount, or with no mirror, is refused and creates no container', async () => {
+  const withMount = stdinDocker();
+  await expect(
+    new DockerDriver(withMount.docker as never).start({
+      image: 'i',
+      name: 'n',
+      labels: {},
+      payload: '{}',
+      mount: { volume: 'jm-drop-d1-3-0123abcd', target: '/home/agent/repo' },
+      mirror: { volume: 'jm-mirror-d1-3-0123abcd', target: '/jm/mirror' },
+      clone: true,
+    }),
+  ).rejects.toThrow(/clone/);
+  expect(withMount.created).toEqual([]);
+  const noMirror = stdinDocker();
+  await expect(
+    new DockerDriver(noMirror.docker as never).start({
+      image: 'i',
+      name: 'n',
+      labels: {},
+      payload: '{}',
+      clone: true,
+    }),
+  ).rejects.toThrow(/clone/);
+  expect(noMirror.created).toEqual([]);
+});
+
 test('the payload is written newline-terminated and stdin ends after it by default', async () => {
   const { docker, stdin } = stdinDocker();
   await new DockerDriver(docker as never).start({
