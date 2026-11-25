@@ -298,8 +298,8 @@ function mcpTokensRequest(args: string[]): Raw | null {
 }
 
 /**
- * The test route of a credential: `github-app/<owner>/<role>` and `gitlab-pat/<zone>/<role>` name
- * an entry, each segment encoded on its own; any other name is one segment.
+ * The test route of a credential: `github-app/<owner>/<role>` and `gitlab-pat/<zone>/<role|read>`
+ * name an entry, each segment encoded on its own; any other name is one segment.
  */
 function secretTestPath(name: string): string {
   return `${secretPath(name)}/test`;
@@ -307,7 +307,8 @@ function secretTestPath(name: string): string {
 
 /**
  * The route of a credential, of an app entry (`github-app/<owner>/<role>`, issue #599) or of a
- * GitLab zone's token (`gitlab-pat/<zone>/<role>`, issue #776).
+ * GitLab zone's token (`gitlab-pat/<zone>/<role>`, issue #776, or its read deploy token
+ * `gitlab-pat/<zone>/read`, issue #866).
  */
 function secretPath(name: string): string {
   const entry = /^(github-app|gitlab-pat)\/([^/]+)\/([^/]+)$/.exec(name);
@@ -331,8 +332,8 @@ function secretSetPath(name: string): string {
 /**
  * `ctl secrets list | set <name> | test <name> | remove <name> | reload | vault on|off |
  * vault prefer on|off | copy-to-vault <name>`; `test` and `remove` also take
- * `github-app/<owner>/<role>`, and all three take `gitlab-pat/<zone>/<role>`. `set` takes its value
- * from stdin or a file, never argv: `runSecrets` sends it.
+ * `github-app/<owner>/<role>`, and all three take `gitlab-pat/<zone>/<role|read>`. `set` takes its
+ * value from stdin or a file, never argv: `runSecrets` sends it.
  */
 function secretsRequest(args: string[]): Raw | null {
   const [, verb, name, ...rest] = args;

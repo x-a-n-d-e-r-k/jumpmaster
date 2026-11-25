@@ -635,27 +635,36 @@ describe('the read deploy token gitlab-pat/:zone/read (issue #866)', () => {
 
   test('a GitHub zone or an unknown zone: 404 on all three; a session needs sudo', async () => {
     const w = world();
+    const bodies: string[] = [];
     for (const zone of ['web', 'nowhere']) {
-      expect((await put(zone, 'read', D_VALUE)).statusCode).toBe(404);
-      expect((await testRoute(zone, 'read')).statusCode).toBe(404);
-      expect((await remove(zone, 'read')).statusCode).toBe(404);
+      for (const r of [
+        await put(zone, 'read', D_VALUE),
+        await testRoute(zone, 'read'),
+        await remove(zone, 'read'),
+      ]) {
+        bodies.push(r.body);
+        expect(r.statusCode).toBe(404);
+      }
     }
     for (const r of [
       await put('gl', 'read', D_VALUE, w.asSession),
       await testRoute('gl', 'read', w.asSession),
       await remove('gl', 'read', w.asSession),
     ]) {
+      bodies.push(r.body);
       expect(r.statusCode).toBe(403);
       expect(r.json()).toMatchObject({ sudo: 'required' });
     }
     expect(w.vault.count()).toBe(0);
+    expectNoTokens(w, bodies);
   });
 
   test('the bad name refusal names read beside author and reviewer', async () => {
-    world();
-    const r = await put('gl', 'maintainer', AUTHOR);
+    const w = world();
+    const r = await put('gl', 'maintainer', D_VALUE);
     expect(r.statusCode).toBe(400);
     expect(r.json().error).toMatch(/author.*reviewer.*read|read.*author.*reviewer/);
+    expectNoTokens(w, [r.body]);
   });
 });
 
