@@ -15,7 +15,7 @@ import {
   type DropPayload,
   type ForgeRemote,
   findPrivateKeys,
-  gitlabBasicAuth,
+  gitlabBasicAuthAs,
   type MergeOutcome,
   type PushGrant,
   type PushResult,
@@ -65,15 +65,26 @@ const remoteUrl = (t: RemoteTarget): string =>
 /** The only URL prefix the target's auth header is sent to. */
 export const authScope = (t: RemoteTarget): string => (t.forge ? `${t.forge.origin}/` : AUTH_SCOPE);
 
-/** The auth header git sends to the target's scope. */
-export const targetAuthHeader = (t: RemoteTarget, token: string): string =>
-  t.forge ? `AUTHORIZATION: basic ${gitlabBasicAuth(token)}` : authHeader(token);
+/** The basic-auth username for a GitLab target: a deploy token's own, else `oauth2`. */
+const forgeUser = (username: string | undefined): string => username ?? 'oauth2';
+
+/**
+ * The auth header git sends to the target's scope. A GitLab target authenticates as `username`
+ * (a deploy token's own) or, absent, `oauth2`; a GitHub target ignores it.
+ */
+export const targetAuthHeader = (t: RemoteTarget, token: string, username?: string): string =>
+  t.forge
+    ? `AUTHORIZATION: basic ${gitlabBasicAuthAs(forgeUser(username), token)}`
+    : authHeader(token);
 
 /** The forms of `token` to redact from what git says about the target. */
-export const targetTokenSecrets = (t: RemoteTarget, token: string): string[] => [
+export const targetTokenSecrets = (t: RemoteTarget, token: string, username?: string): string[] => [
   token,
   authHeader(token),
-  ...(t.forge ? [gitlabBasicAuth(token)] : []),
+  ...(t.forge ? [gitlabBasicAuthAs(forgeUser(username), token)] : []),
+  ...(t.forge && username !== undefined
+    ? [`${username}:${token}`, gitlabBasicAuthAs('oauth2', token)]
+    : []),
 ];
 
 // ---- process seam --------------------------------------------------------------------------------
@@ -249,6 +260,10 @@ export type RunGitOpts = {
   as?: AgentIdentity | null;
   /** With a token: the remote whose scope and header the token is sent with. Required then. */
   remote?: RemoteTarget;
+  /** A GitLab remote's basic-auth username (a deploy token's own). Absent: `oauth2`. */
+  username?: string;
+  /** Sets `http.followRedirects=false`: a redirect, even to the same host, fails the call. */
+  refuseRedirects?: boolean;
   /** Root call: a root-owned bare repo; sets GIT_DIR / GIT_COMMON_DIR / GIT_CEILING_DIRECTORIES. */
   gitDir?: string;
   extraConfig?: [string, string][];
@@ -310,11 +325,11 @@ export function runGit(
   if (token && !remote) return Promise.reject(new Error('runGit: a token without a remote'));
   const config: [string, string][] = [
     ...(token && remote
-      ? ([[`http.${authScope(remote)}.extraheader`, targetAuthHeader(remote, token)]] as [
-          string,
-          string,
-        ][])
+      ? ([
+          [`http.${authScope(remote)}.extraheader`, targetAuthHeader(remote, token, opts.username)],
+        ] as [string, string][])
       : []),
+    ...(opts.refuseRedirects ? ([['http.followRedirects', 'false']] as [string, string][]) : []),
     ...(opts.extraConfig ?? []),
   ];
   const env: NodeJS.ProcessEnv = {
@@ -378,16 +393,24 @@ export async function initBare(gitDir: string): Promise<void> {
 /**
  * Root, in the mirror only: refresh `refs/heads/<ref>` (`*` for all heads) from the remote, and
  * each of `extraRefs` (`pull/7/head`) as `refs/<ref>`. `depth` makes the fetch shallow.
+ * `username` is a GitLab target's basic-auth username (absent: `oauth2`); `refuseRedirects` sets
+ * `http.followRedirects=false`. With either, a failure's message is redacted of the token's forms.
  */
 export async function mirrorFetch(
   mirrorDir: string,
   token: string,
   target: RemoteTarget,
   refs: string[],
-  o: { extraRefs?: string[]; depth?: number; timeoutMs?: number } = {},
+  o: {
+    extraRefs?: string[];
+    depth?: number;
+    timeoutMs?: number;
+    username?: string;
+    refuseRedirects?: boolean;
+  } = {},
 ): Promise<void> {
   const url = remoteUrl(target);
-  await runGit(
+  const fetched = runGit(
     undefined,
     [
       ...PRISTINE,
@@ -408,8 +431,20 @@ export async function mirrorFetch(
       gitDir: mirrorDir,
       remote: target,
       ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}),
+      ...(o.username !== undefined ? { username: o.username } : {}),
+      ...(o.refuseRedirects ? { refuseRedirects: true } : {}),
     },
   );
+  try {
+    await fetched;
+  } catch (e) {
+    // Only the clone fetch (the new options) redacts here: every other caller redacts itself.
+    const clone = o.username !== undefined || o.refuseRedirects === true;
+    if (!clone || !token || !(e instanceof Error)) throw e;
+    throw Object.assign(e, {
+      message: redact(e.message, targetTokenSecrets(target, token, o.username)),
+    });
+  }
 }
 
 /**

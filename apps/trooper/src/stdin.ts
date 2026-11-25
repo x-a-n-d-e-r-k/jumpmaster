@@ -1,5 +1,10 @@
 import type { Readable } from 'node:stream';
-import { type PushGrant, PushGrantSchema } from '@jumpmaster/protocol';
+import {
+  type CloneGrant,
+  CloneGrantSchema,
+  type PushGrant,
+  PushGrantSchema,
+} from '@jumpmaster/protocol';
 
 /** A grant is a small JSON object; a megabyte is far beyond any real one. */
 export const GRANT_MAX_BYTES = 1024 * 1024;
@@ -70,8 +75,11 @@ export function readLine(stream: Readable, maxBytes: number, eofEnds = false): P
   });
 }
 
-/** Read the grant line the stick sends once this container has printed its ready line. */
-export async function readGrant(stdin: Readable): Promise<PushGrant> {
+/** Reads one JSON line and parses it; a refusal names no value from the line. */
+async function readJsonLine<T>(
+  stdin: Readable,
+  parse: (raw: unknown) => { success: true; data: T } | { success: false },
+): Promise<T> {
   const line = await readLine(stdin, GRANT_MAX_BYTES);
   let raw: unknown;
   try {
@@ -79,8 +87,18 @@ export async function readGrant(stdin: Readable): Promise<PushGrant> {
   } catch {
     throw new Error('grant is not valid JSON');
   }
-  const parsed = PushGrantSchema.safeParse(raw);
+  const parsed = parse(raw);
   // Zod issues can name values; say only that the grant was refused.
   if (!parsed.success) throw new Error('grant rejected: does not match the grant schema');
   return parsed.data;
+}
+
+/** Read the grant line the stick sends once this container has printed its ready line. */
+export function readGrant(stdin: Readable): Promise<PushGrant> {
+  return readJsonLine(stdin, (raw) => PushGrantSchema.safeParse(raw));
+}
+
+/** The clone container's grant line, read once it has printed its ready line. */
+export function readCloneGrant(stdin: Readable): Promise<CloneGrant> {
+  return readJsonLine(stdin, (raw) => CloneGrantSchema.safeParse(raw));
 }
