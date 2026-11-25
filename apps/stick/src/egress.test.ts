@@ -229,6 +229,56 @@ describe('the egress capability', () => {
     });
   });
 
+  test('startEgress passes a private host list as JM_EGRESS_PRIVATE, and nothing without one', async () => {
+    const run = async (egress: Parameters<typeof startEgress>[1]['egress']) => {
+      const d = probeDriver();
+      let env: Record<string, string> = {};
+      (d.driver as unknown as { startEgressProxy: unknown }).startEgressProxy = async (p: {
+        env: Record<string, string>;
+      }) => {
+        env = { ...p.env };
+        return {
+          async *logs() {
+            yield '{"ready":true}';
+          },
+          async stop() {},
+        };
+      };
+      const s = await startEgress(
+        d.driver,
+        {
+          dropId: 'd',
+          epoch: 1,
+          egress,
+          net: { proxy: '172.30.0.2' } as never,
+          image: 'i',
+          labels: {},
+          readyMs: 50,
+          env: {},
+        },
+        null,
+      );
+      await s.stop();
+      return env;
+    };
+    const allow = ['github.com', 'gitlab.internal.example'];
+    const today = {
+      JM_EGRESS_MODE: 'enforce',
+      JM_EGRESS_ALLOW: 'github.com,gitlab.internal.example',
+      JM_EGRESS_BIND: '172.30.0.2',
+    };
+    expect(await run({ mode: 'enforce', allow, private: ['gitlab.internal.example'] })).toEqual({
+      ...today,
+      JM_EGRESS_PRIVATE: 'gitlab.internal.example',
+    });
+    expect(
+      await run({ mode: 'enforce', allow, private: ['gitlab.internal.example', 'github.com'] }),
+    ).toMatchObject({ JM_EGRESS_PRIVATE: 'gitlab.internal.example,github.com' });
+    // Without it, or empty, exactly today's keys.
+    expect(await run({ mode: 'enforce', allow })).toEqual(today);
+    expect(await run({ mode: 'enforce', allow, private: [] })).toEqual(today);
+  });
+
   test('startEgress outside the ceiling throws before any proxy starts', async () => {
     const d = probeDriver();
     const o = {
