@@ -1,5 +1,6 @@
 import { basename, matchesGlob } from 'node:path';
 import { z } from 'zod';
+import { normalizeHost } from './egress.js';
 import {
   MAX_TRIAGE_IMAGES,
   MAX_TRIAGE_IMAGES_SKIPPED,
@@ -249,14 +250,43 @@ export const ContainerLimitsSchema = z.object({
 });
 export type ContainerLimits = z.infer<typeof ContainerLimitsSchema>;
 
+/** Most hosts `EgressPayload.private` may list. */
+export const MAX_EGRESS_PRIVATE = 16;
+
 /**
  * Egress control for a drop. Absent when the zone's mode is `off`. The trooper derives its proxy
  * (the fixed `EGRESS_PROXY_URL`) from its presence; the stick runs the proxy with `allow`.
+ * `private` lists plain host names (never `*.`, never an IP), each also on `allow`, that the proxy
+ * lets resolve to private-network addresses (`JM_EGRESS_PRIVATE`). Errors name the field, never a
+ * value.
  */
-export const EgressPayloadSchema = z.object({
-  mode: z.enum(['monitor', 'enforce']),
-  allow: z.array(z.string()),
-});
+export const EgressPayloadSchema = z
+  .object({
+    mode: z.enum(['monitor', 'enforce']),
+    allow: z.array(z.string()),
+    private: z
+      .array(
+        z.string().refine((h) => normalizeHost(h) !== null && !h.startsWith('*.'), {
+          message: 'private entry is not a plain host name',
+        }),
+      )
+      .max(MAX_EGRESS_PRIVATE, {
+        message: `private lists more than ${MAX_EGRESS_PRIVATE} hosts`,
+      })
+      .optional(),
+  })
+  .superRefine((e, ctx) => {
+    if (!e.private) return;
+    const allowed = new Set(e.allow.map(normalizeHost).filter((h) => h !== null));
+    e.private.forEach((h, i) => {
+      if (!allowed.has(normalizeHost(h) as string))
+        ctx.addIssue({
+          code: 'custom',
+          path: ['private', i],
+          message: 'private entry is not on allow',
+        });
+    });
+  });
 export type EgressPayload = z.infer<typeof EgressPayloadSchema>;
 
 /** A GitHub owner login; the error names the field, never the value. */

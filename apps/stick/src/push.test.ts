@@ -132,7 +132,9 @@ function fakeDriver(scripts: Script[], opts: { proxyStopError?: boolean } = {}) 
         return { ...NET, name };
       },
       async startEgressProxy(o) {
-        order.push(`proxy ${o.env.JM_EGRESS_ALLOW}`);
+        order.push(
+          `proxy ${o.env.JM_EGRESS_ALLOW}${o.env.JM_EGRESS_PRIVATE === undefined ? '' : ` private=${o.env.JM_EGRESS_PRIVATE}`}`,
+        );
         let done: () => void = () => {};
         const end = new Promise<void>((r) => {
           done = r;
@@ -228,6 +230,21 @@ describe('pushOnce', () => {
     expect(started?.payload).not.toContain(GRANT.token);
     expect(s.pending.networks()).toEqual(new Set());
     expect(s.d.order).toContain('teardown jm-push-d1-3');
+  });
+
+  test('a plan whose egress lists a private host starts a proxy with JM_EGRESS_PRIVATE', async () => {
+    const egress = {
+      mode: 'enforce' as const,
+      allow: ['github.com', 'gitlab.internal.example'],
+      private: ['gitlab.internal.example'],
+    };
+    const s = setup([{ before: [READY_LINE], after: [PUSHED] }], { plan: { ...PLAN, egress } });
+    expect(await pushOnce(s.entry, { ...s.deps, egressImage: 'egress:1', ceiling: null })).toBe(
+      'done',
+    );
+    expect(s.d.order).toContain(
+      'proxy github.com,gitlab.internal.example private=gitlab.internal.example',
+    );
   });
 
   test('without egress it runs on the plain network the agent would have had', async () => {
