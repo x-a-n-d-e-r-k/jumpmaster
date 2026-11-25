@@ -6,7 +6,12 @@
 import { spawn } from 'node:child_process';
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { type DropPayload, EGRESS_PROXY_URL, type PushPayload } from '@jumpmaster/protocol';
+import {
+  type ClonePayload,
+  type DropPayload,
+  EGRESS_PROXY_URL,
+  type PushPayload,
+} from '@jumpmaster/protocol';
 import { type AgentIdentity, asAgentArgv, type TrooperIdentities } from './privilege.js';
 
 /** Every variable `proxyEnv` sets. */
@@ -152,11 +157,14 @@ export async function applyEgress(
 }
 
 /**
- * The push container's half of `applyEgress`: when it runs behind the egress proxy (`egress` in
- * its payload), git's fetch and push must go through the proxy, since the drop network has no
- * other route out. It runs no tools, so there is no tool config to write.
+ * The push and clone containers' half of `applyEgress`: when one runs behind the egress proxy
+ * (`egress` in its payload), git's fetch and push must go through the proxy, since its network has
+ * no other route out. Neither runs tools, so there is no tool config to write.
  */
-export function applyPushEgress(payload: PushPayload, env: NodeJS.ProcessEnv = process.env): void {
+export function applyPushEgress(
+  payload: PushPayload | ClonePayload,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
   if (!payload.egress) return;
   Object.assign(env, proxyEnv(EGRESS_PROXY_URL, [], env));
 }

@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  ClonePayloadSchema,
   type DropPayload,
   DropPayloadSchema,
   EGRESS_PROXY_URL,
@@ -237,6 +238,17 @@ describe('the push container under egress', () => {
     const env: NodeJS.ProcessEnv = { PATH: '/bin' };
     applyPushEgress(PushPayloadSchema.parse(push), env);
     expect(env).toEqual({ PATH: '/bin' });
+  });
+
+  test('a clone payload with egress gets the same proxy variables; without it, none', () => {
+    const clone = { protocol: 1, role: 'clone', dropId: 'd1', epoch: 3 };
+    const env: NodeJS.ProcessEnv = {};
+    applyPushEgress(ClonePayloadSchema.parse({ ...clone, egress: true }), env);
+    expect(env.https_proxy).toBe(EGRESS_PROXY_URL);
+    expect(env.HTTPS_PROXY).toBe(EGRESS_PROXY_URL);
+    const plain: NodeJS.ProcessEnv = { PATH: '/bin' };
+    applyPushEgress(ClonePayloadSchema.parse(clone), plain);
+    expect(plain).toEqual({ PATH: '/bin' });
   });
 });
 

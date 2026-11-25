@@ -3,7 +3,7 @@ import type { DropPayload, GateResult } from '@jumpmaster/protocol';
 import { expect, test } from 'vitest';
 import type { TrooperDeps } from './main.js';
 import { claudeSpawnArgs, describeFatal, readPayload, runTrooper } from './main.js';
-import { readGrant } from './stdin.js';
+import { readCloneGrant, readGrant } from './stdin.js';
 
 const payload: DropPayload = {
   protocol: 1,
@@ -357,6 +357,29 @@ test('readPayload then readGrant works when the grant is written later', async (
   const g = readGrant(s);
   setTimeout(() => s.write(`${grantLine}\n`), 10);
   expect((await g).branch).toBe('jm/x');
+});
+
+const clonePayload = { protocol: 1, role: 'clone', dropId: 'd7', epoch: 1 };
+const cloneGrantLine = JSON.stringify({
+  token: 'dtok-0123456789',
+  username: 'gitlab+deploy-token-7',
+  forge: { kind: 'gitlab', origin: 'https://gitlab.com', projectPath: 'g/p' },
+  secrets: [],
+});
+
+test('readPayload parses a clone payload and leaves its grant line unread', async () => {
+  const s = new PassThrough();
+  s.write(`${JSON.stringify({ ...clonePayload, egress: true })}\n${cloneGrantLine}\n`);
+  expect(await readPayload(undefined, s)).toEqual({ ...clonePayload, egress: true });
+  expect((await readCloneGrant(s)).username).toBe('gitlab+deploy-token-7');
+  expect(s.destroyed).toBe(false);
+});
+
+test('readPayload refuses a clone payload with an unknown field or a token', async () => {
+  for (const extra of [{ extra: 1 }, { token: 'dtok-0123456789' }]) {
+    const s = Readable.from([`${JSON.stringify({ ...clonePayload, ...extra })}\n`]);
+    await expect(readPayload(undefined, s)).rejects.toThrow();
+  }
 });
 
 test('readPayload finds the payload after a leaked prefix that ends in a newline', async () => {

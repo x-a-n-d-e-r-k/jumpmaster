@@ -313,6 +313,24 @@ describe('stack presets', () => {
     }
   });
 
+  test('the trooper carries the clone label beside the push and egress labels', () => {
+    const final = finalStage(instructions(read('images/trooper/Dockerfile')));
+    const labels = final
+      .filter((i) => i.op === 'LABEL')
+      .map((i) => i.args)
+      .join(' ');
+    expect(labels).toMatch(/(^|\s)org\.jumpmaster\.trooper\.clone="1"(\s|$)/);
+    expect(labels).toMatch(/(^|\s)org\.jumpmaster\.trooper\.push="1"(\s|$)/);
+    expect(labels).toMatch(/(^|\s)org\.jumpmaster\.trooper\.egress="1"(\s|$)/);
+    const stick = read('apps/stick/src/clone.ts');
+    expect(stick).toContain("TROOPER_CLONE_LABEL = 'org.jumpmaster.trooper.clone'");
+    expect(stick).toContain("TROOPER_CLONE_VERSION = '1'");
+    // The presets build FROM the trooper and must not reset the label.
+    for (const file of Object.values(PRESET_FILES)) {
+      expect(read(file), file).not.toMatch(/org\.jumpmaster\.trooper\.clone/);
+    }
+  });
+
   test('the lazy-fetch e2e drives the real stageFromAgent offline as the agent', () => {
     const e2e = read('images/trooper/e2e/lazy-fetch.sh');
     expect(read('apps/trooper/src/git.ts')).toContain(

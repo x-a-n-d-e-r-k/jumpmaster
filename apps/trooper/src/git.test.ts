@@ -365,6 +365,75 @@ describe('the remote target decides the URL, auth scope and header (#716)', () =
     expect(c.env.GIT_DIR).toBe(dir);
     noTokenInArgv(calls);
   });
+
+  test("a GitLab target's env and argv are unchanged without the clone options", async () => {
+    const dir = await mirror('gl-fetch-same');
+    const calls = record();
+    await mirrorFetch(dir, TOKEN, { owner: 'o', name: 'r', forge: GITLAB }, ['main']);
+    const c = calls[0] as Call;
+    expect(c.argv).toEqual([
+      'git',
+      '-c',
+      'core.hooksPath=/dev/null',
+      '-c',
+      'protocol.allow=never',
+      '-c',
+      'protocol.https.allow=always',
+      'fetch',
+      '-q',
+      '--no-tags',
+      '--no-write-fetch-head',
+      '--prune',
+      '--end-of-options',
+      'https://git.example.internal:8443/group/sub/project.git',
+      '+refs/heads/main:refs/heads/main',
+    ]);
+    expect(authEnv(c.env)).toEqual({
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'http.https://git.example.internal:8443/.extraheader',
+      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${b64(`oauth2:${TOKEN}`)}`,
+    });
+  });
+
+  test('a deploy-token username builds the header, and redirects are refused', async () => {
+    const dir = await mirror('gl-fetch-user');
+    const calls = record();
+    await mirrorFetch(dir, TOKEN, { owner: 'o', name: 'r', forge: GITLAB }, ['*'], {
+      username: 'gitlab+deploy-token-7',
+      refuseRedirects: true,
+    });
+    const c = calls[0] as Call;
+    expect(authEnv(c.env)).toEqual({
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_CONFIG_COUNT: '2',
+      GIT_CONFIG_KEY_0: 'http.https://git.example.internal:8443/.extraheader',
+      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${b64(`gitlab+deploy-token-7:${TOKEN}`)}`,
+      GIT_CONFIG_KEY_1: 'http.followRedirects',
+      GIT_CONFIG_VALUE_1: 'false',
+    });
+    expect(c.argv).toContain('+refs/heads/*:refs/heads/*');
+    noTokenInArgv(calls);
+    for (const a of c.argv) expect(a).not.toContain(b64(`gitlab+deploy-token-7:${TOKEN}`));
+  });
+
+  test('a git failure with a username is redacted in its username forms', async () => {
+    const dir = await mirror('gl-fetch-redact');
+    const user = 'gitlab+deploy-token-7';
+    const forms = [TOKEN, `${user}:${TOKEN}`, b64(`${user}:${TOKEN}`)];
+    setSpawn((_cmd, _args, opts) =>
+      spawn('sh', ['-c', `echo "401 ${forms.join(' ')}" >&2; exit 128`], { ...opts, cwd: '/' }),
+    );
+    const err = await mirrorFetch(dir, TOKEN, { owner: 'o', name: 'r', forge: GITLAB }, ['*'], {
+      username: user,
+    }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    const msg = (err as Error).message;
+    expect(msg).toContain('401');
+    for (const f of forms) expect(msg).not.toContain(f);
+  });
 });
 
 test('remoteBranchExists reports whether the branch is on the remote', async () => {

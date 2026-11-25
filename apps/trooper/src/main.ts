@@ -6,6 +6,8 @@ import { createInterface } from 'node:readline';
 import type { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import {
+  type ClonePayload,
+  ClonePayloadSchema,
   type DropPayload,
   DropPayloadSchema,
   type DropResult,
@@ -28,6 +30,7 @@ import {
   trooperIdentities,
 } from './privilege.js';
 import { redact } from './redact.js';
+import { CLONE_MIRROR_DIR, runClone } from './roles/clone.js';
 import { runCrew } from './roles/crew.js';
 import { runDoctorRole } from './roles/doctor.js';
 import { runHeal } from './roles/heal.js';
@@ -188,14 +191,14 @@ const PAYLOAD_MAX_BYTES = 16 * 1024 * 1024;
 
 /**
  * Read the payload: from a file, or as the first line of stdin. Stdin is left open and unread
- * past that line; the caller closes it (agent roles) or keeps it for the grant (push role).
+ * past that line; the caller closes it (agent roles) or keeps it for the grant (push and clone).
  * A sender that closes stdin without a trailing newline is accepted: the stick does so today.
  * The grant sender must end its line with a newline (readGrant waits for one).
  */
 export async function readPayload(
   file: string | undefined,
   stdin: Readable,
-): Promise<DropPayload | PushPayload> {
+): Promise<DropPayload | PushPayload | ClonePayload> {
   let text: string;
   if (file) text = readFileSync(file, 'utf8');
   else {
@@ -226,9 +229,9 @@ export async function readPayload(
     // V8's parse errors quote the text around the fault, which may be a credential.
     throw new Error('payload is not valid JSON');
   }
-  if (typeof raw === 'object' && raw !== null && (raw as { role?: unknown }).role === 'push') {
-    return PushPayloadSchema.parse(raw);
-  }
+  const role = typeof raw === 'object' && raw !== null ? (raw as { role?: unknown }).role : null;
+  if (role === 'push') return PushPayloadSchema.parse(raw);
+  if (role === 'clone') return ClonePayloadSchema.parse(raw);
   return DropPayloadSchema.parse(raw);
 }
 
@@ -253,8 +256,20 @@ export function describeFatal(err: unknown): string {
 async function main(): Promise<void> {
   const payload = await readPayload(process.argv[2], process.stdin);
   if (process.env.JM_WORK_ROOT) gitOps.setWorkRoot(process.env.JM_WORK_ROOT);
-  // The push role keeps stdin open for its grant line; every other role is done with stdin once
-  // it has the payload.
+  // The push and clone roles keep stdin open for their grant line; every other role is done with
+  // stdin once it has the payload.
+  if (payload.role === 'clone') {
+    applyPushEgress(payload);
+    const result = await runClone(payload, {
+      stdin: process.stdin,
+      emit: (l) => process.stdout.write(`${l}\n`),
+      mirrorDir: CLONE_MIRROR_DIR,
+      git: gitOps,
+    });
+    process.stdin.destroy();
+    process.exitCode = result.status === 'cloned' ? 0 : 1;
+    return;
+  }
   if (payload.role === 'push') {
     applyPushEgress(payload);
     const ids = trooperIdentities(process.env);
