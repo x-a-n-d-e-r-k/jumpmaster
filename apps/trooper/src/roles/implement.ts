@@ -1,4 +1,3 @@
-import { join } from 'node:path';
 import { type DropPayload, type DropResult, IMPLEMENT_OUTPUT_SCHEMA } from '@jumpmaster/protocol';
 import { repoTarget } from '../git.js';
 import type { TrooperDeps } from '../main.js';
@@ -9,6 +8,8 @@ import {
   completedWith,
   earlyStop,
   emitEvent,
+  mirrorDirOf,
+  mirrorProvided,
   type RoleCtx,
   reportOf,
   resultMeta,
@@ -45,21 +46,33 @@ async function implementSteps(
   ctx: RoleCtx,
   gates: DropResult['gates'],
 ): Promise<DropResult> {
-  const forgeToken = payload.credentials.forgeToken as string;
   const base = payload.repo.defaultBranch;
   const target = repoTarget(payload.repo);
   const as = ctx.ids?.agent ?? null;
   const resumeSha = payload.resume ? payload.resumeSha : undefined;
   if (payload.resume && resumeSha === undefined) throw new Error('resume requires resumeSha');
 
+  // A provided mirror already holds every head: nothing is fetched and the remote is never asked.
+  const provided = mirrorProvided(payload);
+  const mirrorDir = mirrorDirOf(ctx, payload);
   const repoDir = await cloneAndPrepare(payload, deps, ctx);
   if (resumeSha !== undefined) {
     emitEvent(deps, ctx, 'phase', { phase: 'resume', branch: payload.branch });
-    await deps.git.mirrorFetch(join(ctx.workdir, 'mirror'), forgeToken, target, [payload.branch]);
+    if (!provided) {
+      const forgeToken = payload.credentials.forgeToken as string;
+      await deps.git.mirrorFetch(mirrorDir, forgeToken, target, [payload.branch]);
+    }
     await deps.git.checkoutBranch(repoDir, payload.branch, resumeSha, as);
   } else {
     // Fail fast: the server resumes items whose branch exists, so a fresh drop must not find one.
-    if ((await deps.git.remoteBranchSha(target, payload.branch, forgeToken)) !== null) {
+    const existing = provided
+      ? await deps.git.mirrorBranchSha(mirrorDir, payload.branch)
+      : await deps.git.remoteBranchSha(
+          target,
+          payload.branch,
+          payload.credentials.forgeToken as string,
+        );
+    if (existing !== null) {
       return {
         status: 'failed',
         reason: `branch ${payload.branch} already exists on remote`,

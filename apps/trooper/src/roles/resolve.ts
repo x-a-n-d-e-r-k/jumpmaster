@@ -1,4 +1,3 @@
-import { join } from 'node:path';
 import type { DropPayload, DropResult, MergeOutcome } from '@jumpmaster/protocol';
 import { IMPLEMENT_OUTPUT_SCHEMA } from '@jumpmaster/protocol';
 import { repoTarget } from '../git.js';
@@ -10,6 +9,8 @@ import {
   completedWith,
   emitEvent,
   guarded,
+  mirrorDirOf,
+  mirrorProvided,
   type RoleCtx,
   resultMeta,
   runAgent,
@@ -44,14 +45,17 @@ async function resolveSteps(
   gates: DropResult['gates'],
   state: { mergeOutcome?: MergeOutcome },
 ): Promise<DropResult> {
-  const forgeToken = payload.credentials.forgeToken as string;
   const base = payload.repo.defaultBranch;
   const target = repoTarget(payload.repo);
   const as = ctx.ids?.agent ?? null;
   const { branch, headSha: prHead } = payload.pr;
 
   const dir = await cloneAndPrepare(payload, deps, ctx);
-  await deps.git.mirrorFetch(join(ctx.workdir, 'mirror'), forgeToken, target, [branch, base]);
+  // A provided mirror already holds every head: nothing is fetched.
+  if (!mirrorProvided(payload)) {
+    const forgeToken = payload.credentials.forgeToken as string;
+    await deps.git.mirrorFetch(mirrorDirOf(ctx), forgeToken, target, [branch, base]);
+  }
   emitEvent(deps, ctx, 'phase', { phase: 'checkout', branch });
   await deps.git.checkoutBranch(dir, branch, prHead, as);
 

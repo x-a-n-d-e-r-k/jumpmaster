@@ -33,6 +33,11 @@ export const NO_RESULT_RETRIES = 3;
 /** Every trooper image from the push-container release carries it; older ones can't push. */
 export const TROOPER_PUSH_LABEL = 'org.jumpmaster.trooper.push';
 export const TROOPER_PUSH_VERSION = '1';
+/**
+ * Every trooper image from the provided-mirror release carries it: its agent roles read a drop's
+ * read-only mirror at `/jm/mirror` and make no remote call. Nothing reads it yet.
+ */
+export const TROOPER_MIRROR_LABEL = 'org.jumpmaster.trooper.mirror';
 const STOP_GRACE_MS = 30_000;
 const NO_RESULT_REASON = 'push container exited without a result';
 

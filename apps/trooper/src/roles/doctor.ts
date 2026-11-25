@@ -15,9 +15,11 @@ import type { TrooperDeps } from '../main.js';
 import { sweepUid } from '../privilege.js';
 import { redact } from '../redact.js';
 import {
+  cloneFromProvidedMirror,
   emitEvent,
   gateExtraEnv,
   mirrorDirOf,
+  mirrorProvided,
   type RoleCtx,
   repoDirOf,
   waitForServices,
@@ -60,13 +62,16 @@ export async function runDoctorRole(
   let clone: DoctorResult['clone'];
   emitEvent(deps, ctx, 'phase', { phase: 'clone' });
   try {
-    await deps.git.cloneRepo({
-      ...repoTarget(payload.repo),
-      token: payload.credentials.readToken ?? '',
-      dir,
-      mirrorDir: mirrorDirOf(ctx),
-      as,
-    });
+    // A provided mirror that is missing or fails its check is a failed clone; the rest still runs.
+    if (mirrorProvided(payload)) await cloneFromProvidedMirror(payload, deps, ctx, dir);
+    else
+      await deps.git.cloneRepo({
+        ...repoTarget(payload.repo),
+        token: payload.credentials.readToken ?? '',
+        dir,
+        mirrorDir: mirrorDirOf(ctx),
+        as,
+      });
     // A local branch at origin/<default>, so the clone has a HEAD; never pushed.
     await deps.git.prepareBranch(dir, 'jm-doctor', payload.repo.defaultBranch, as);
     clone = { ok: true, sha: await deps.git.headSha(dir, as) };

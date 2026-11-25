@@ -12,6 +12,10 @@ export function roleWorld(
     cloneError?: string;
     /** remoteBranchSha's answer (implement's fresh-branch check). */
     remoteSha?: string | null;
+    /** checkMirror throws this message (a provided mirror that is missing or fails the check). */
+    mirrorError?: string;
+    /** mirrorBranchSha's answer (implement's fresh-branch check with a provided mirror). */
+    mirrorSha?: string | null;
     rateLimited?: boolean;
     merge?: MergeOutcome;
     markers?: string[];
@@ -40,6 +44,11 @@ export function roleWorld(
         if (o.cloneError) throw new Error(o.cloneError);
       }),
       remoteBranchSha: rec('remoteBranchSha', () => o.remoteSha ?? null),
+      checkMirror: rec('checkMirror', () => {
+        if (o.mirrorError) throw new Error(o.mirrorError);
+      }),
+      cloneFromMirror: rec('cloneFromMirror', () => undefined),
+      mirrorBranchSha: rec('mirrorBranchSha', () => o.mirrorSha ?? null),
       prepareBranch: rec('prepareBranch', () => undefined),
       mirrorFetch: rec('mirrorFetch', () => undefined),
       checkoutBranch: rec('checkoutBranch', () => {
@@ -65,7 +74,9 @@ export function roleWorld(
       claude.runs++;
       claude.args.push(args);
       claude.env.push(env);
-      const file = args[args.indexOf('--append-system-prompt-file') + 1];
+      // Doctor's probe has no system-prompt file.
+      const at = args.indexOf('--append-system-prompt-file');
+      const file = at === -1 ? undefined : args[at + 1];
       claude.systemPrompts.push(file ? readFileSync(file, 'utf8') : '');
       if (o.agentCommits) head = o.agentCommits;
       yield JSON.stringify({ type: 'system', subtype: 'init', session_id: 's' });

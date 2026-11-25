@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -110,6 +111,21 @@ export function setGitOutputMaxBytes(n: number | null): void {
 let workRoot = realpathSync(tmpdir());
 export function setWorkRoot(dir: string): void {
   workRoot = dir;
+}
+
+/**
+ * Where a drop's provided mirror is mounted, read-only, in the agent's container: the clone
+ * container fetched the project into a root-owned bare repo there (`repo.mirror: "provided"`).
+ */
+export const PROVIDED_MIRROR_DIR = '/jm/mirror';
+let providedMirror = PROVIDED_MIRROR_DIR;
+/** The provided mirror's path: `PROVIDED_MIRROR_DIR` outside tests. */
+export function providedMirrorDir(): string {
+  return providedMirror;
+}
+/** Test-only: points the provided mirror at another path (null restores the default). */
+export function setProvidedMirrorDir(dir: string | null): void {
+  providedMirror = dir ?? PROVIDED_MIRROR_DIR;
 }
 
 /** `exec`'s rejection once a child's stdout passes the cap. */
@@ -293,11 +309,16 @@ export function agentGitConfigFile(): string | null {
  * tree root created for the agent (the chat's `work`, group-writable by the agent's gid but owned
  * by root, since root here cannot chown). Returns the global config file the agent's git reads.
  */
-export function trustMirror(mirrorDir: string, alsoTrust: string[] = []): string {
+export function trustMirror(
+  mirrorDir: string,
+  alsoTrust: string[] = [],
+  /** Where the config file goes: the mirror's parent, unless that can't be written. */
+  configDir: string = dirname(mirrorDir),
+): string {
   assertRootOwnedDir(mirrorDir);
   trustedMirrors.add(mirrorDir);
   for (const d of alsoTrust) trustedMirrors.add(d);
-  const file = join(dirname(mirrorDir), 'agent.gitconfig');
+  const file = join(configDir, 'agent.gitconfig');
   const lines = [...trustedMirrors].map((m) => `\tdirectory = ${m}`).join('\n');
   // In the root-owned workdir (0755): the agent can read it but not change it.
   writeFileSync(file, `[safe]\n${lines}\n`, { mode: 0o644 });
@@ -379,7 +400,7 @@ function ensureRootDir(path: string): void {
 }
 
 /** The fixed config of every root-owned bare repo: nothing an earlier process wrote survives. */
-const BARE_CONFIG = '[core]\n\trepositoryformatversion = 0\n\tbare = true\n';
+export const BARE_CONFIG = '[core]\n\trepositoryformatversion = 0\n\tbare = true\n';
 
 /** Creates (or resets) a root-owned bare repo: fixed config, no hooks. */
 export async function initBare(gitDir: string): Promise<void> {
@@ -478,6 +499,110 @@ export async function cloneRepo(o: {
   );
   await runGit(o.dir, ['config', 'user.name', AGENT_NAME], '', { as });
   await runGit(o.dir, ['config', 'user.email', AGENT_EMAIL], '', { as });
+}
+
+/**
+ * The mirror check: `mirrorDir` (a provided mirror) is a bare repository on a path that passes
+ * `assertRootOwnedDir`, with exactly `BARE_CONFIG` as its config and no `hooks`. Throws naming
+ * what is wrong. Reads only: nothing is written into the mirror.
+ */
+export async function checkMirror(
+  mirrorDir: string,
+  getuid: () => number = () => process.getuid?.() ?? -1,
+): Promise<void> {
+  let st: ReturnType<typeof lstatSync>;
+  try {
+    st = lstatSync(mirrorDir);
+  } catch {
+    throw new Error(`no mirror at ${mirrorDir}`);
+  }
+  if (st.isSymbolicLink()) throw new Error(`the mirror ${mirrorDir} is a symlink`);
+  if (!st.isDirectory()) throw new Error(`the mirror ${mirrorDir} is not a directory`);
+  try {
+    assertRootOwnedDir(mirrorDir, getuid);
+  } catch (e) {
+    throw new Error(`the mirror is not root-owned and closed: ${(e as Error).message}`);
+  }
+  const isFile = (p: string) => {
+    try {
+      return lstatSync(p).isFile();
+    } catch {
+      return false;
+    }
+  };
+  const isSymlink = (p: string) => {
+    try {
+      return lstatSync(p).isSymbolicLink();
+    } catch {
+      return false;
+    }
+  };
+  const isDir = (p: string) => {
+    try {
+      return lstatSync(p).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+  const bare =
+    isFile(join(mirrorDir, 'HEAD')) &&
+    isDir(join(mirrorDir, 'objects')) &&
+    isDir(join(mirrorDir, 'refs'));
+  if (!bare) throw new Error(`the mirror ${mirrorDir} is not a bare repository`);
+  const config = join(mirrorDir, 'config');
+  if (!isFile(config) || readFileSync(config, 'utf8') !== BARE_CONFIG) {
+    throw new Error('the mirror config is not the fixed bare config');
+  }
+  if (existsSync(join(mirrorDir, 'hooks')) || isSymlink(join(mirrorDir, 'hooks'))) {
+    throw new Error('the mirror has a hooks directory');
+  }
+}
+
+/**
+ * A provided mirror (checked with `checkMirror` first): the agent clones the working copy from it
+ * at `branch` (the default branch) and sets the Jumpmaster Agent identity. No remote, no token.
+ * The agent's git config (the mirror's safe-directory trust) goes in `configDir`, never in the
+ * read-only mirror's parent.
+ */
+export async function cloneFromMirror(o: {
+  mirrorDir: string;
+  dir: string;
+  branch: string;
+  configDir: string;
+  as?: AgentIdentity | null;
+}): Promise<void> {
+  const as = o.as ?? null;
+  trustMirror(o.mirrorDir, [], o.configDir);
+  await runGit(
+    dirname(o.dir),
+    [
+      'clone',
+      '-q',
+      '--no-hardlinks',
+      '--branch',
+      o.branch,
+      '--end-of-options',
+      `file://${o.mirrorDir}`,
+      o.dir,
+    ],
+    '',
+    { as, extraConfig: [['protocol.file.allow', 'always']] },
+  );
+  await runGit(o.dir, ['config', 'user.name', AGENT_NAME], '', { as });
+  await runGit(o.dir, ['config', 'user.email', AGENT_EMAIL], '', { as });
+}
+
+/** The tip of `refs/heads/<branch>` in a provided mirror, or null. Root, read-only, no remote. */
+export async function mirrorBranchSha(mirrorDir: string, branch: string): Promise<string | null> {
+  const ref = `refs/heads/${branch}`;
+  const out = await runGit(
+    undefined,
+    [...PRISTINE, 'for-each-ref', '--format=%(objectname) %(refname)', '--', ref],
+    '',
+    { gitDir: mirrorDir },
+  );
+  const line = out.split('\n').find((l) => l.endsWith(` ${ref}`));
+  return line ? (line.split(' ')[0] as string) : null;
 }
 
 export async function prepareBranch(
