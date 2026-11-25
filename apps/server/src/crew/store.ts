@@ -194,6 +194,78 @@ export function listCrewIssues(db: Db, zoneId: string, states?: CrewIssueState[]
   ).map(crewFromRow);
 }
 
+/** Crew issues that hold a slot: not yet promoted, and not rejected or failed. */
+export const OPEN_STATES: readonly CrewIssueState[] = [
+  'filing',
+  'staged',
+  'promote_held',
+  'promoting',
+  'revising',
+];
+
+/** The work item's state once a verified claim closed its issue. */
+export const CLAIM_DONE_REASON = 'already done (crew, verified)';
+/** The work item's state once Command's Close as done ruling closed its issue. */
+export const COMMAND_DONE_REASON = 'closed by Command as done';
+
+/**
+ * The `done` reasons that finish a promoted crew issue's work: merged, or closed as already done
+ * (by Command, or on a crew claim the server verified). Any other `done` does not.
+ */
+export const FINISHED_REASONS: readonly string[] = [
+  'merged',
+  COMMAND_DONE_REASON,
+  CLAIM_DONE_REASON,
+];
+
+/**
+ * A crew issue of an objective whose work is unfinished (#882): its key, its forge number when it
+ * has one, and what holds it (its crew state, or its work item's state once promoted). Never its
+ * title.
+ */
+export type UnfinishedIssue = { key: string; number: number | null; state: string };
+
+/**
+ * The crew issues of `objective` in the zone that are unfinished, oldest first: in an open crew
+ * state (`OPEN_STATES`), or `promoted` without a work item done as finished (`FINISHED_REASONS`).
+ * A promoted issue with no number or no work item counts as unfinished (D2). Rejected, rejecting
+ * and failed issues never count.
+ */
+export function unfinishedObjectiveIssues(
+  db: Db,
+  zoneId: string,
+  objective: string,
+): UnfinishedIssue[] {
+  const open = OPEN_STATES.map(() => '?').join(', ');
+  const finished = FINISHED_REASONS.map(() => '?').join(', ');
+  return db
+    .prepare(
+      `SELECT c.key, c.number, CASE WHEN c.state = 'promoted'
+           THEN COALESCE((SELECT w.state FROM work_items w
+             WHERE w.drop_zone_id = c.zone_id AND w.issue_number = c.number), 'promoted')
+           ELSE c.state END AS state
+         FROM crew_issues c WHERE c.zone_id = ? AND c.objective = ?
+           AND (c.state IN (${open}) OR (c.state = 'promoted' AND NOT EXISTS (
+             SELECT 1 FROM work_items w WHERE w.drop_zone_id = c.zone_id
+               AND w.issue_number = c.number AND w.state = 'done'
+               AND w.reason IN (${finished}))))
+         ORDER BY c.id`,
+    )
+    .all(zoneId, objective, ...OPEN_STATES, ...FINISHED_REASONS) as UnfinishedIssue[];
+}
+
+/** The most unfinished issues a refusal or a briefing line names; the rest are counted. */
+export const MAX_UNFINISHED_NAMED = 5;
+
+/** `#879 (in_flight), add-docs (staged), and 2 more`: by number, or by key before it has one. */
+export function unfinishedList(list: readonly UnfinishedIssue[]): string {
+  const named = list
+    .slice(0, MAX_UNFINISHED_NAMED)
+    .map((u) => `${u.number === null ? u.key : `#${u.number}`} (${u.state})`);
+  const more = list.length - MAX_UNFINISHED_NAMED;
+  return more > 0 ? `${named.join(', ')}, and ${more} more` : named.join(', ');
+}
+
 export function setCrewIssue(db: Db, id: number, patch: CrewIssuePatch, now: Date): void {
   const keys = (Object.keys(patch) as (keyof CrewIssuePatch)[]).filter(
     (k) => patch[k] !== undefined,

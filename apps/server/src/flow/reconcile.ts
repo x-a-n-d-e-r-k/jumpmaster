@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { agentBranch, type GateResult, type Role, type Verdict } from '@jumpmaster/protocol';
-import { applyPendingRulings, syncParkBriefings } from '../briefings.js';
+import {
+  applyPendingRulings,
+  syncObjectiveDoneBriefings,
+  syncParkBriefings,
+} from '../briefings.js';
 import type { ClaudeConfig, DropZoneConfig, UsageConfig } from '../config.js';
 import { flushCrewOps } from '../crew/flush.js';
 import type { ImageFetchOpts } from '../crew/images.js';
@@ -543,6 +547,8 @@ export async function reconcileZone(
   // After the rulings: a parked item is briefed on its state as they left it (a Retry has already
   // taken it out of parked), never on the state they were made about.
   syncParkBriefings(db, zone, now);
+  // An open objective_done briefing names any issue of its objective unfinished again (#882).
+  syncObjectiveDoneBriefings(db, zone.id, now);
   const pulls = await forges.author.listOpenAgentPulls('agent/issue-');
   actions += await adopt(db, forges, zone, pass, pulls, now);
   if (mode === 'paused') return { actions, merges };

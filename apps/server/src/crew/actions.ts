@@ -10,11 +10,13 @@ import { placementPaths } from '../scheduler.js';
 import { crewBodySha } from './flush.js';
 import {
   type CrewIssue,
-  type CrewIssueState,
   commandRejection,
   getCrewIssueByKey,
   insertCrewIssue,
   normTitle,
+  OPEN_STATES,
+  unfinishedList,
+  unfinishedObjectiveIssues,
 } from './store.js';
 
 /** Lower case, punctuation and repeated whitespace collapsed: how two titles are compared. */
@@ -41,14 +43,7 @@ export type ApplyOptions = { objective?: string; allOrNothing?: boolean; ownBrie
 /** Thrown inside the transaction to roll back an all-or-nothing batch with a refusal. */
 class Refused extends Error {}
 
-/** Crew issues that hold a slot: not yet promoted, and not rejected or failed. */
-export const OPEN_STATES: readonly CrewIssueState[] = [
-  'filing',
-  'staged',
-  'promote_held',
-  'promoting',
-  'revising',
-];
+export { OPEN_STATES };
 
 const HEADING = /^#{1,6}\s+(.+?)\s*#*\s*$/;
 const UNCHECKED = /^\s*[-*+]\s+\[ \]\s+\S/;
@@ -252,6 +247,8 @@ const sourceRefOf = (s: CrewSource): string => (s.kind === 'drop' ? s.dropId : S
  * The crew's report that the current objective is finished, raised as a server briefing whose
  * "Mark it done" ruling records it done (`advance_objective`). Only a crew drop may report it, and
  * only for the zone's current objective; a second report while it is open updates the briefing.
+ * The server checks the claim (#882): it is refused while any crew issue of the objective is
+ * unfinished (`unfinishedObjectiveIssues`), read in the transaction that records the briefing.
  */
 function objectiveDoneBriefing(
   db: Db,
@@ -263,6 +260,8 @@ function objectiveDoneBriefing(
   if (source.kind !== 'drop') return { refused: 'an MCP source cannot report it' };
   const current = zoneObjective(db, zone.id);
   if (!current || current.key !== done.key) return { refused: 'not the current objective' };
+  const unfinished = unfinishedObjectiveIssues(db, zone.id, current.key);
+  if (unfinished.length > 0) return { refused: `not done: ${unfinishedList(unfinished)}` };
   return raiseBriefing(
     db,
     {

@@ -105,6 +105,13 @@ describe("a ruling's note (#767)", () => {
     );
   });
 
+  test('rule 7 says an issue still being built or promoted is open work, never merged (#882)', () => {
+    expect(rule(7)).toMatch(/^7\. When every part of the current objective has merged/);
+    expect(rule(7)).toContain(
+      "An issue that is still being built or promoted is work still open: don't list it as merged.",
+    );
+  });
+
   test('rule 9 names rulings with their note', () => {
     expect(rule(9)).toMatch(/and with their note, if they have one/);
   });

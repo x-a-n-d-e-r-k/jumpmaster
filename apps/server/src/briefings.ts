@@ -4,6 +4,7 @@ import type { DropZoneConfig } from './config.js';
 import { applyCreditsEffect, CREDITS_STOP } from './credits.js';
 import { crewBodySha, liveCrewBody } from './crew/flush.js';
 import {
+  COMMAND_DONE_REASON,
   type CrewIssue,
   getArbitration,
   getCrewIssue,
@@ -11,6 +12,8 @@ import {
   issueArbitrationSubject,
   listCrewIssues,
   setCrewIssue,
+  unfinishedList,
+  unfinishedObjectiveIssues,
 } from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
@@ -812,7 +815,7 @@ export async function applyCloseItem(
     }
     return failedTry(message);
   }
-  setWorkItemState(db, item.id, 'done', 'closed by Command as done', now);
+  setWorkItemState(db, item.id, 'done', COMMAND_DONE_REASON, now);
   return true;
 }
 
@@ -956,6 +959,37 @@ export function syncParkBriefings(db: Db, zone: DropZoneConfig, now: Date): void
     const at = judged && judged > parkedAtTime ? judged : parkedAtTime;
     if (ruledSince.get(zone.id, subject, at, OUT_OF_DATE, CLOSE_FAILED)) continue;
     raiseBriefing(db, want, now);
+  }
+}
+
+/** How the line an open `objective_done` briefing gains for unfinished issues begins (#882). */
+export const SINCE_RAISED = 'Since this was raised, ';
+const SINCE_SEP = `\n\n${SINCE_RAISED}`;
+
+/** The why without a trailing `SINCE_RAISED` line, as the lead wrote it. */
+function withoutSinceLine(why: string): string {
+  const at = why.lastIndexOf(SINCE_SEP);
+  return at >= 0 && !why.slice(at + SINCE_SEP.length).includes('\n') ? why.slice(0, at) : why;
+}
+
+/**
+ * Keeps each open `objective_done` briefing's why honest (#882): while a crew issue of its
+ * objective is unfinished (one filed after it was raised, by an audit say), the why ends with one
+ * line naming them; the line changes with the list and goes once nothing is unfinished. The
+ * briefing stays open and its options are untouched; Command still decides.
+ */
+export function syncObjectiveDoneBriefings(db: Db, zoneId: string, now: Date): void {
+  const update = db.prepare('UPDATE briefings SET why = ?, updated_at = ? WHERE id = ?');
+  for (const b of listBriefings(db, { zoneId, state: 'open' })) {
+    if (b.kind !== 'objective_done' || !b.subject.startsWith(OBJECTIVE_PREFIX)) continue;
+    const objective = b.subject.slice(OBJECTIVE_PREFIX.length);
+    const unfinished = unfinishedObjectiveIssues(db, zoneId, objective);
+    const base = withoutSinceLine(b.why);
+    const why =
+      unfinished.length === 0
+        ? base
+        : `${base}${SINCE_SEP}${unfinished.length} issue(s) of the objective are unfinished: ${unfinishedList(unfinished)}.`;
+    if (why !== b.why) update.run(why, now.toISOString(), b.id);
   }
 }
 
