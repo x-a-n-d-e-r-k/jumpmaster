@@ -764,6 +764,8 @@ export function renderGoals(s: {
   zones: readonly ZoneRef[];
   goals: GoalRow | undefined;
   crewIssues: CrewIssue[];
+  /** Why a crew issue's promotion waits (#843), by its id: what it waits for. */
+  crewWaits?: ReadonlyMap<number, string>;
   items: WorkItem[];
   skippedCrewUnpromoted: number[];
   /** Objectives Command marked done by a ruling: key to the ruling's id. */
@@ -826,7 +828,9 @@ export function renderGoals(s: {
       } catch {
         findings = '';
       }
-      return `<tr><td>${escapeHtml(c.objective)}</td><td><code>${escapeHtml(c.key)}</code></td><td>${escapeHtml(c.title)}</td><td>${escapeHtml(c.state)}</td><td>${c.number === null ? '-' : `#${escapeHtml(c.number)}`}</td><td>${escapeHtml(wi?.state ?? '-')}</td><td>${findings}</td></tr>`;
+      const wait = s.crewWaits?.get(c.id);
+      const state = `${escapeHtml(c.state)}${wait ? `<br><small>${escapeHtml(wait)}</small>` : ''}`;
+      return `<tr><td>${escapeHtml(c.objective)}</td><td><code>${escapeHtml(c.key)}</code></td><td>${escapeHtml(c.title)}</td><td>${state}</td><td>${c.number === null ? '-' : `#${escapeHtml(c.number)}`}</td><td>${escapeHtml(wi?.state ?? '-')}</td><td>${findings}</td></tr>`;
     })
     .join('');
   const rowByNumber = new Map(

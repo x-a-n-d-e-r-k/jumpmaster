@@ -24,6 +24,7 @@ import { configReader } from './config/source.js';
 import { ConfigStore } from './config/store.js';
 import type { Config } from './config.js';
 import { creditDropsSince, creditSignal } from './credits.js';
+import { promotionWait } from './crew/flush.js';
 import { listCrewIssues } from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
@@ -928,11 +929,18 @@ export function createApp(
     const zone = config.dropZones.find((z) => z.id === req.params.id);
     if (!zone) return reply.code(404).type('text/plain').send('not found');
     const now = deps.now();
+    const crewIssues = listCrewIssues(db, zone.id);
     const html = renderGoals({
       zone,
       zones: config.dropZones,
       goals: getGoals(db, zone.id),
-      crewIssues: listCrewIssues(db, zone.id),
+      crewIssues,
+      crewWaits: new Map(
+        crewIssues.flatMap((c) => {
+          const wait = c.state === 'promoting' ? promotionWait(db, zone, c) : null;
+          return wait === null ? [] : [[c.id, wait] as const];
+        }),
+      ),
       items: listWorkItems(db, zone.id),
       skippedCrewUnpromoted: lastSyncResult(zone.id)?.skippedCrewUnpromoted ?? [],
       doneByRuling: objectivesDone(db, zone.id),

@@ -275,6 +275,27 @@ describe('crew roles', () => {
     expect(schema).toContain('"replaces"');
   });
 
+  test('a crew-lead issue may list the keys that merge first; results without after still parse (#843)', () => {
+    expect(parseCrewOutput('crew-lead', lead)).toEqual({ ok: true, value: lead });
+    const item = lead.fileIssues[0];
+    const ordered = {
+      ...lead,
+      fileIssues: [
+        { ...item, after: ['add-y'] },
+        { ...item, after: [] },
+      ],
+    };
+    expect(parseCrewOutput('crew-lead', ordered)).toEqual({ ok: true, value: ordered });
+    // Six keys parse: the server refuses that one issue, with the reason, not the whole result.
+    const six = { ...lead, fileIssues: [{ ...item, after: ['a', 'b', 'c', 'd', 'e', 'f'] }] };
+    expect(parseCrewOutput('crew-lead', six).ok).toBe(true);
+    const bad = { ...lead, fileIssues: [{ ...item, after: ['Not A Key'] }] };
+    const bad_r = parseCrewOutput('crew-lead', bad);
+    expect(bad_r.ok).toBe(false);
+    if (!bad_r.ok) expect(bad_r.reason).toMatch(/fileIssues\.0\.after/);
+    expect(JSON.stringify(crewOutputJsonSchema('crew-lead'))).toContain('"after"');
+  });
+
   test('crew-lead output may report the current objective done, and nothing else in it', () => {
     const done = { ...lead, objectiveDone: { key: 'ship-the-cli', why: 'all merged' } };
     expect(parseCrewOutput('crew-lead', done)).toEqual({ ok: true, value: done });

@@ -503,6 +503,16 @@ export const CrewLeadOutputSchema = z.strictObject({
           .string()
           .regex(/^[a-z0-9-]{1,40}$/)
           .optional(),
+        /**
+         * The crew issue keys of the same objective that must merge before this one is promoted
+         * (#843): `[]` when it is independent; absent, after every earlier unmerged issue of the
+         * objective. The server refuses an issue naming more than 5, an unknown key, its own key,
+         * another objective's issue or a later item, each with the reason.
+         */
+        after: z
+          .array(z.string().regex(/^[a-z0-9-]{1,40}$/))
+          .max(20)
+          .optional(),
       }),
     )
     .max(5),
