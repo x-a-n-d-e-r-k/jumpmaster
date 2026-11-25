@@ -17,6 +17,7 @@ import {
   type PullFacts,
   RUNNER_CONCLUSIONS,
 } from '../forge/github.js';
+import { GitLabForge } from '../forge/gitlab.js';
 import { promptVersions } from '../payloads.js';
 import { usageCfg, zoneWorld } from '../test/fixtures.js';
 import { t0 } from '../test/helpers.js';
@@ -250,6 +251,33 @@ describe('rules in order', () => {
         snap({ pr: { ...pr('x'), headSha: null }, missingSince: minutesAgo(46), branchSha: null }),
       ),
     ).toEqual({ kind: 'park', reason: 'forge data missing: head' }));
+
+  test('a GitLab MR read while locked (merge in progress) with a pending merge waits', async () => {
+    const mr = {
+      iid: 1,
+      title: 't',
+      description: null,
+      state: 'locked',
+      sha: 's',
+      source_branch: 'agent/one',
+      target_branch: 'trunk',
+      source_project_id: 7,
+      target_project_id: 7,
+      author: { username: 'bot' },
+      labels: [],
+    };
+    const forge = new GitLabForge('https://gitlab.example', 'group/project', 'token', {
+      fetch: async () =>
+        new Response(JSON.stringify(mr), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+    });
+    const locked = await forge.getPull(1);
+    expect(locked).not.toBeNull();
+    const action = decide(snap({ pr: locked as PullFacts, mergeOp: { state: 'pending' } }));
+    expect(action).toEqual({ kind: 'wait', on: 'outbox' });
+  });
 
   test('6, 7: merge failed parks, merge unknown waits', () => {
     expect(decide(snap({ mergeOp: { state: 'failed', error: '405' } }))).toEqual({
