@@ -9,7 +9,7 @@ import {
 } from '@jumpmaster/protocol';
 import { describe, expect, test } from 'vitest';
 import type { CloneClient, CloneGrantReply, ClonePlanReply } from './client.js';
-import { type CloneDeps, cloneContainer, cloneNetwork, runClone } from './clone.js';
+import { type CloneDeps, cloneContainer, cloneNetwork, privateHint, runClone } from './clone.js';
 import type { ContainerDriver, ContainerHandle, DropNet } from './driver.js';
 import { sweepDropNetworks } from './runner.js';
 
@@ -45,7 +45,13 @@ type Script = { before: string[]; after?: string[]; hang?: boolean; stderr?: str
 
 function fakeDriver(
   script: Script,
-  o: { networks?: { name: string; labels: Record<string, string> }[] } = {},
+  o: {
+    networks?: { name: string; labels: Record<string, string> }[];
+    /** Lines the proxy logs once it is stopped: only a drain reads them. */
+    proxyLines?: string[];
+    /** The proxy's log stream fails once its lines are read. */
+    proxyFail?: boolean;
+  } = {},
 ) {
   const order: string[] = [];
   const starts: Parameters<ContainerDriver['start']>[0][] = [];
@@ -130,6 +136,9 @@ function fakeDriver(
           async *logs() {
             yield '{"ready":true}';
             await end;
+            order.push('proxy drained');
+            for (const l of o.proxyLines ?? []) yield l;
+            if (o.proxyFail) throw new Error('log stream broke');
           },
           async stop() {
             order.push('proxy stop');
@@ -166,9 +175,16 @@ function fakeClient(o: { plan?: ClonePlanReply; grant?: CloneGrantReply; planErr
 
 function setup(
   script: Script,
-  o: Parameters<typeof fakeClient>[0] & { deps?: Partial<CloneDeps> } = {},
+  o: Parameters<typeof fakeClient>[0] & {
+    deps?: Partial<CloneDeps>;
+    proxyLines?: string[];
+    proxyFail?: boolean;
+  } = {},
 ) {
-  const d = fakeDriver(script);
+  const d = fakeDriver(script, {
+    ...(o.proxyLines ? { proxyLines: o.proxyLines } : {}),
+    ...(o.proxyFail ? { proxyFail: true } : {}),
+  });
   const client = fakeClient(o);
   const logs: string[] = [];
   const active = new Set<string>();
@@ -385,6 +401,197 @@ describe('runClone', () => {
     expect(s.d.order).toContain(`removeVolume ${VOLUME}`);
   });
 
+  describe('a GitLab host the proxy refused as a private address', () => {
+    const privateDeny = (host: string) =>
+      JSON.stringify({ at: 't', host, port: 443, decision: 'deny', reason: 'private address' });
+    const FAILED = resultLine({
+      status: 'failed',
+      reason: 'git: could not connect to gitlab.example.com',
+      retryable: true,
+    });
+    const HINT =
+      "; the egress proxy refused gitlab.example.com: it resolves to a private address. If it is a GitLab on your network, list gitlab.example.com in the zone's egress.private (a guarded setting)";
+
+    test('a failed clone names the host and egress.private; cleanup is unchanged', async () => {
+      const s = setup(
+        { before: [READY_LINE], after: [FAILED] },
+        { plan: EGRESS_PLAN, proxyLines: [privateDeny('GitLab.Example.com')] },
+      );
+      const r = await s.run();
+      expect(r).toEqual({
+        ok: false,
+        reason: `git: could not connect to gitlab.example.com${HINT}`,
+        retryable: true,
+      });
+      const at = (p: string) => s.d.order.indexOf(p);
+      expect(at('removeAndWait jumpmaster-clone-d1-3')).toBeGreaterThanOrEqual(0);
+      expect(at('proxy stop')).toBeGreaterThan(at('removeAndWait jumpmaster-clone-d1-3'));
+      expect(at('proxy drained')).toBeGreaterThan(at('proxy stop'));
+      expect(at('teardown jm-clone-d1-3')).toBeGreaterThan(at('proxy drained'));
+      expect(at(`removeVolume ${VOLUME}`)).toBeGreaterThan(at('teardown jm-clone-d1-3'));
+      expect(s.active.size).toBe(0);
+    });
+
+    test('retryable follows the clone result', async () => {
+      const s = setup(
+        {
+          before: [READY_LINE],
+          after: [resultLine({ status: 'failed', reason: 'no route', retryable: false })],
+        },
+        { plan: EGRESS_PLAN, proxyLines: [privateDeny('gitlab.example.com')] },
+      );
+      expect(await s.run()).toEqual({ ok: false, reason: `no route${HINT}`, retryable: false });
+    });
+
+    test('a drain that fails still cleans up and keeps the hint from lines already read', async () => {
+      const s = setup(
+        { before: [READY_LINE], after: [FAILED] },
+        { plan: EGRESS_PLAN, proxyLines: [privateDeny('gitlab.example.com')], proxyFail: true },
+      );
+      expect(await s.run()).toEqual({
+        ok: false,
+        reason: `git: could not connect to gitlab.example.com${HINT}`,
+        retryable: true,
+      });
+      const at = (p: string) => s.d.order.indexOf(p);
+      expect(at('teardown jm-clone-d1-3')).toBeGreaterThan(at('proxy stop'));
+      expect(at(`removeVolume ${VOLUME}`)).toBeGreaterThan(at('teardown jm-clone-d1-3'));
+      expect(s.active.size).toBe(0);
+    });
+
+    test('a drain that fails before any line keeps the reason and still cleans up', async () => {
+      const s = setup(
+        { before: [READY_LINE], after: [FAILED] },
+        { plan: EGRESS_PLAN, proxyFail: true },
+      );
+      expect(await s.run()).toEqual({
+        ok: false,
+        reason: 'git: could not connect to gitlab.example.com',
+        retryable: true,
+      });
+      expect(s.d.order).toContain('teardown jm-clone-d1-3');
+      expect(s.d.order).toContain(`removeVolume ${VOLUME}`);
+    });
+
+    test('an upper-case host in the plan is matched and named as the plan spells it', async () => {
+      const plan = {
+        ...EGRESS_PLAN,
+        egress: { mode: 'enforce' as const, allow: ['GitLab.Example.com'] },
+      };
+      const s = setup(
+        { before: [READY_LINE], after: [FAILED] },
+        { plan, proxyLines: [privateDeny('gitlab.example.com')] },
+      );
+      const r = await s.run();
+      expect(r).toMatchObject({ ok: false, retryable: true });
+      expect(r.ok === false && r.reason).toBe(
+        "git: could not connect to gitlab.example.com; the egress proxy refused GitLab.Example.com: it resolves to a private address. If it is a GitLab on your network, list GitLab.Example.com in the zone's egress.private (a guarded setting)",
+      );
+    });
+
+    test('a successful clone is unchanged', async () => {
+      const s = setup(
+        { before: [READY_LINE], after: [CLONED] },
+        { plan: EGRESS_PLAN, proxyLines: [privateDeny('gitlab.example.com')] },
+      );
+      expect(await s.run()).toEqual({ ok: true, bytes: 4242 });
+    });
+
+    test('a host already in egress.private keeps the reason as it is', async () => {
+      const plan = {
+        ...EGRESS_PLAN,
+        egress: {
+          mode: 'enforce' as const,
+          allow: ['gitlab.example.com'],
+          private: ['GITLAB.example.com'],
+        },
+      };
+      const s = setup(
+        { before: [READY_LINE], after: [FAILED] },
+        { plan, proxyLines: [privateDeny('gitlab.example.com')] },
+      );
+      expect(await s.run()).toEqual({
+        ok: false,
+        reason: 'git: could not connect to gitlab.example.com',
+        retryable: true,
+      });
+    });
+
+    test('another host refused as private is never named', async () => {
+      const s = setup(
+        { before: [READY_LINE], after: [FAILED] },
+        { plan: EGRESS_PLAN, proxyLines: [privateDeny('internal.evil.example')] },
+      );
+      const r = await s.run();
+      expect(r).toEqual({
+        ok: false,
+        reason: 'git: could not connect to gitlab.example.com',
+        retryable: true,
+      });
+    });
+
+    test('a failure without such a denial keeps the reason as it is', async () => {
+      const deny = JSON.stringify({
+        host: 'gitlab.example.com',
+        decision: 'deny',
+        reason: 'port not allowed',
+      });
+      const s = setup(
+        { before: [READY_LINE], after: [FAILED] },
+        { plan: EGRESS_PLAN, proxyLines: [deny] },
+      );
+      expect(await s.run()).toEqual({
+        ok: false,
+        reason: 'git: could not connect to gitlab.example.com',
+        retryable: true,
+      });
+    });
+
+    test('a halted clone keeps its reason', async () => {
+      let halted = false;
+      const s = setup(
+        { before: [READY_LINE], after: [], hang: true },
+        {
+          plan: EGRESS_PLAN,
+          proxyLines: [privateDeny('gitlab.example.com')],
+          deps: { halted: () => halted, haltPollMs: 5 },
+        },
+      );
+      const p = s.run();
+      setTimeout(() => {
+        halted = true;
+      }, 20);
+      expect(await p).toEqual({ ok: false, reason: 'halted', retryable: false });
+    });
+
+    test('a timed-out clone keeps its reason', async () => {
+      const s = setup(
+        { before: [READY_LINE], after: [], hang: true },
+        {
+          plan: EGRESS_PLAN,
+          proxyLines: [privateDeny('gitlab.example.com')],
+          deps: { timeoutMs: 30 },
+        },
+      );
+      expect(await s.run()).toEqual({ ok: false, reason: 'clone timed out', retryable: false });
+    });
+
+    test('the hint is scrubbed like the rest of the reason', async () => {
+      const s = setup(
+        {
+          before: [READY_LINE],
+          after: [resultLine({ status: 'failed', reason: `leak ${TOKEN}`, retryable: true })],
+        },
+        { plan: EGRESS_PLAN, proxyLines: [privateDeny('gitlab.example.com')] },
+      );
+      const r = await s.run();
+      expect(r).toMatchObject({ ok: false });
+      const reason = (r as { reason: string }).reason;
+      expect(reason).not.toContain(TOKEN);
+      expect(reason.endsWith(HINT)).toBe(true);
+    });
+  });
+
   test('a container that is not confirmed gone keeps the volume', async () => {
     const s = setup({
       before: [READY_LINE],
@@ -474,5 +681,35 @@ describe('runClone', () => {
     const before = s.d.order.length;
     expect(await sweepDropNetworks(s.d.driver, 's1', s.active)).toBe(1);
     expect(s.d.order.slice(before)).toEqual(['teardown jm-clone-d1-3']);
+  });
+});
+
+describe('privateHint', () => {
+  const refused = ['gitlab.example.com'];
+
+  test('names the single allowed host when the proxy refused it as private', () => {
+    expect(privateHint({ mode: 'enforce', allow: ['gitlab.example.com'] }, refused)).toContain(
+      'list gitlab.example.com in the zone',
+    );
+  });
+
+  test('compares an upper-case plan host case-insensitively', () => {
+    expect(privateHint({ mode: 'enforce', allow: ['GITLAB.EXAMPLE.COM'] }, refused)).toContain(
+      'list GITLAB.EXAMPLE.COM in the zone',
+    );
+  });
+
+  test('adds nothing when the plan allows no host', () => {
+    expect(privateHint({ mode: 'enforce', allow: [] }, refused)).toBe('');
+  });
+
+  test('adds nothing when the plan allows several hosts', () => {
+    expect(
+      privateHint({ mode: 'enforce', allow: ['gitlab.example.com', 'other.example.com'] }, refused),
+    ).toBe('');
+  });
+
+  test('adds nothing without egress', () => {
+    expect(privateHint(undefined, refused)).toBe('');
   });
 });

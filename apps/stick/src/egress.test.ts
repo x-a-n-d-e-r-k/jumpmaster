@@ -279,6 +279,47 @@ describe('the egress capability', () => {
     expect(await run({ mode: 'enforce', allow, private: [] })).toEqual(today);
   });
 
+  test('a session reports the hosts its proxy refused as private address, after finish', async () => {
+    const d = probeDriver();
+    (d.driver as unknown as { startEgressProxy: unknown }).startEgressProxy = async () => {
+      let release: () => void = () => {};
+      const stopped = new Promise<void>((r) => {
+        release = r;
+      });
+      return {
+        async *logs() {
+          yield '{"ready":true}';
+          await stopped;
+          yield line('gitlab.corp.example', 'deny', 'private address');
+          yield line('other.example', 'deny', 'unlisted');
+        },
+        async stop() {
+          release();
+        },
+      };
+    };
+    const s = await startEgress(
+      d.driver,
+      {
+        dropId: 'd',
+        epoch: 1,
+        egress: { mode: 'enforce', allow: ['gitlab.corp.example'] },
+        net: { proxy: '172.30.0.2' } as never,
+        image: 'i',
+        labels: {},
+        readyMs: 50,
+        env: {},
+      },
+      null,
+    );
+    const events = await s.finish();
+    expect(events.map((e) => e.data)).toEqual([
+      { host: 'gitlab.corp.example', decision: 'deny', count: 1 },
+      { host: 'other.example', decision: 'deny', count: 1 },
+    ]);
+    expect(s.privateRefused()).toEqual(['gitlab.corp.example']);
+  });
+
   test('startEgress outside the ceiling throws before any proxy starts', async () => {
     const d = probeDriver();
     const o = {
@@ -533,5 +574,45 @@ describe('EgressTally', () => {
     expect(over.map((e) => e.data)).toEqual([
       { host: '(3 more unlisted hosts)', decision: 'unlisted', count: 6, hosts: 3, overflow: true },
     ]);
+  });
+
+  test('records only the hosts denied as private address, without changing the events', () => {
+    const lines = [
+      line('GitLab.Corp.Example', 'deny', 'private address'),
+      line('gitlab.corp.example', 'deny', 'private address'),
+      line('other.example', 'deny', 'unlisted'),
+      line('port.example', 'deny', 'port not allowed'),
+      line('fine.example', 'allow'),
+      line('leak.example', 'allow', 'unlisted'),
+      line('allowed.example', 'allow', 'private address'),
+    ];
+    const t = new EgressTally();
+    for (const l of lines) t.add(l);
+    expect(t.privateRefused()).toEqual(['gitlab.corp.example']);
+    expect(t.events('t')).toEqual([
+      {
+        ts: 't',
+        kind: 'egress',
+        data: { host: 'GitLab.Corp.Example', decision: 'deny', count: 1 },
+      },
+      {
+        ts: 't',
+        kind: 'egress',
+        data: { host: 'gitlab.corp.example', decision: 'deny', count: 1 },
+      },
+      { ts: 't', kind: 'egress', data: { host: 'other.example', decision: 'deny', count: 1 } },
+      { ts: 't', kind: 'egress', data: { host: 'port.example', decision: 'deny', count: 1 } },
+      { ts: 't', kind: 'egress', data: { host: 'fine.example', decision: 'allow', count: 1 } },
+      { ts: 't', kind: 'egress', data: { host: 'leak.example', decision: 'unlisted', count: 1 } },
+      { ts: 't', kind: 'egress', data: { host: 'allowed.example', decision: 'allow', count: 1 } },
+    ]);
+  });
+
+  test('the private-refused record holds at most MAX_EGRESS_HOSTS hosts', () => {
+    const t = new EgressTally();
+    for (let i = 0; i < MAX_EGRESS_HOSTS + 50; i++)
+      t.add(line(`p${i}.example`, 'deny', 'private address'));
+    expect(t.privateRefused()).toHaveLength(MAX_EGRESS_HOSTS);
+    expect(t.privateRefused()[0]).toBe('p0.example');
   });
 });

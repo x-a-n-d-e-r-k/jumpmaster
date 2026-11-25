@@ -79,6 +79,8 @@ export class EgressTally {
   private readonly counts = new Map<string, { host: string; decision: Decision; count: number }>();
   private readonly shown: Record<Decision, number> = { allow: 0, deny: 0, unlisted: 0 };
   private readonly overflow = new Map<Decision, Map<string, number>>();
+  /** Hosts the proxy denied as `private address`, lower-cased, at most `MAX_EGRESS_HOSTS`. */
+  private readonly privates = new Set<string>();
 
   add(line: string): void {
     let v: unknown;
@@ -92,6 +94,10 @@ export class EgressTally {
     const decision: Decision =
       l.decision === 'deny' ? 'deny' : l.reason === 'unlisted' ? 'unlisted' : 'allow';
     const host = l.host.slice(0, 253);
+    if (l.decision === 'deny' && l.reason === 'private address') {
+      const lower = host.toLowerCase();
+      if (this.privates.size < MAX_EGRESS_HOSTS) this.privates.add(lower);
+    }
     const key = `${decision}\u0000${host}`;
     const seen = this.counts.get(key);
     if (seen) {
@@ -107,6 +113,11 @@ export class EgressTally {
     this.overflow.set(decision, over);
     // Distinct overflow hosts are counted up to a bound, so the stick's memory stays bounded too.
     if (over.has(host) || over.size < 100_000) over.set(host, (over.get(host) ?? 0) + 1);
+  }
+
+  /** The hosts the proxy refused because they resolved to a private address (lower-cased). */
+  privateRefused(): string[] {
+    return [...this.privates];
   }
 
   events(ts = new Date().toISOString()): TrooperEvent[] {
@@ -141,6 +152,11 @@ export type EgressSession = {
   /** Stops the proxy, drains its last lines and returns the drop's egress events. */
   finish(): Promise<TrooperEvent[]>;
   stop(): Promise<void>;
+  /**
+   * The hosts the proxy refused as resolving to a private address, so far (lower-cased). Still
+   * readable after the session is stopped; complete only after `finish()` drained the last lines.
+   */
+  privateRefused(): string[];
 };
 
 /** Reads lines until `{"ready":true}`; false when the stream ends or the time runs out first. */
@@ -229,6 +245,7 @@ export async function startEgress(
   };
   return {
     stop,
+    privateRefused: () => tally.privateRefused(),
     async finish() {
       await stop();
       let timer: NodeJS.Timeout | undefined;

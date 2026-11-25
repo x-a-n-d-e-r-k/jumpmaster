@@ -119,6 +119,13 @@ export async function runClone(
     reason: scrub(reason),
     retryable,
   });
+  // A halt or timeout is never the GitLab host's fault: its reason is never extended.
+  const halts = new WeakSet<object>();
+  const stopOutcome = (why: Stop): CloneOutcome => {
+    const o = fail(STOP_REASON[why], false);
+    if (typeof o === 'object') halts.add(o);
+    return o;
+  };
 
   const labels = {
     'jumpmaster.drop': dropId,
@@ -156,10 +163,11 @@ export async function runClone(
   let net: DropNet | undefined;
   let session: EgressSession | undefined;
   let netActive = false;
+  let planEgress: ClonePlan['egress'];
   let outcome: CloneOutcome = fail('clone did not finish', true);
   try {
     outcome = await (async (): Promise<CloneOutcome> => {
-      if (stopped) return fail(STOP_REASON[stopped], false);
+      if (stopped) return stopOutcome(stopped);
       let plan: Awaited<ReturnType<CloneClient['clonePlan']>> | 'aborted';
       try {
         plan = await Promise.race([client.clonePlan(dropId, epoch), aborted]);
@@ -167,7 +175,7 @@ export async function runClone(
         say('plan failed', { error: message(e) });
         return fail(`clone plan failed: ${message(e)}`, true);
       }
-      if (plan === 'aborted') return fail(STOP_REASON[stopped ?? 'halted'], false);
+      if (plan === 'aborted') return stopOutcome(stopped ?? 'halted');
       if (plan === 'stale') return 'stale';
       if ('refused' in plan) {
         const refused = redactTokenShapes(plan.refused);
@@ -191,6 +199,7 @@ export async function runClone(
         return fail(outside, false);
       }
 
+      planEgress = ok.egress;
       if (ok.egress) {
         // In the active set before it exists, so the sweep never takes it from under the clone.
         active.add(network);
@@ -214,7 +223,7 @@ export async function runClone(
           ceiling,
         );
       }
-      if (stopped) return fail(STOP_REASON[stopped], false);
+      if (stopped) return stopOutcome(stopped);
 
       const payload: ClonePayload = ClonePayloadSchema.parse({
         protocol: 1,
@@ -237,7 +246,7 @@ export async function runClone(
       if (stopped) {
         handle.endStdin();
         await handle.kill().catch(() => {});
-        return fail(STOP_REASON[stopped], false);
+        return stopOutcome(stopped);
       }
       return await drive(handle);
     })();
@@ -254,7 +263,14 @@ export async function runClone(
       gone = false;
       say('clone container not removed', { error: message(e) });
     });
-    if (session) await session.stop().catch(() => {});
+    if (session) {
+      // Stopped, then its last lines read (bounded), so its refusals are known before the reason.
+      await session.finish().catch(() => {});
+      if (typeof outcome === 'object' && !outcome.ok && !halts.has(outcome)) {
+        const hint = privateHint(planEgress, session.privateRefused());
+        if (hint) outcome = { ...outcome, reason: scrub(outcome.reason + hint) };
+      }
+    }
     if (net) {
       await driver.removeServices(network, labels).catch((e: unknown) => {
         say('clone network not removed', { error: message(e) });
@@ -314,7 +330,7 @@ export async function runClone(
         return undefined;
       }
     };
-    const halt = () => fail(STOP_REASON[stopped ?? 'halted'], false);
+    const halt = () => stopOutcome(stopped ?? 'halted');
     const noResult = async (): Promise<CloneOutcome> => {
       const { exitCode } = await h.wait().catch(() => ({ exitCode: -1 }));
       if (stopped) return halt();
@@ -374,6 +390,20 @@ export async function runClone(
     if (last === 'end') return noResult();
     return finish(last.line);
   }
+}
+
+/**
+ * What a failed clone adds when its proxy refused the plan's GitLab host (the single host the plan
+ * allows) as resolving to a private address, and the plan does not already list it as private.
+ * Any other refused host is never named.
+ */
+export function privateHint(egress: ClonePlan['egress'], refused: string[]): string {
+  if (!egress || egress.allow.length !== 1) return '';
+  const host = egress.allow[0] as string;
+  const lower = host.toLowerCase();
+  if (!refused.some((h) => h.toLowerCase() === lower)) return '';
+  if ((egress.private ?? []).some((h) => h.toLowerCase() === lower)) return '';
+  return `; the egress proxy refused ${host}: it resolves to a private address. If it is a GitLab on your network, list ${host} in the zone's egress.private (a guarded setting)`;
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
