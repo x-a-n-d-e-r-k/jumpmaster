@@ -455,6 +455,50 @@ describe('write tools', () => {
     expect(listCrewIssues(s.db, 'main')).toHaveLength(3);
   });
 
+  test('file_staged_issues refuses an issue copying a ruling note, naming only the ruling (#893)', async () => {
+    const s = await setup();
+    const b = raiseBriefing(
+      s.db,
+      {
+        zoneId: 'main',
+        kind: 'crew',
+        subject: 'crew:none:q',
+        decision: 'Which option?',
+        why: 'Two ways.',
+        options: [
+          { id: 'o1', label: 'Use the first option', effect: 'none' },
+          { id: 'o2', label: 'Use the second option', effect: 'none' },
+        ],
+        onHold: 'nothing',
+        source: 'crew',
+        sourceRef: 'd0',
+      },
+      t0,
+    );
+    const ruled = ruleBriefing(
+      s.db,
+      b,
+      'o2',
+      'Use the second option and tell the platform team before the March move',
+      t0,
+      { via: 'session' },
+    );
+    if (!ruled.ok) throw new Error('not ruled');
+    const body = ISSUE_BODY.replace(
+      'The API has no docs.',
+      'Then *tell* the platform team, before the\nMarch move.',
+    );
+    const r = await call(s.write, 'file_staged_issues', { issues: [issue({ body })] });
+    expect(r.isError).toBe(true);
+    expect(textOf(r)).toContain(
+      `docs-index: copies Command's ruling note (ruling ${ruled.rulingId})`,
+    );
+    expect(listCrewIssues(s.db, 'main')).toEqual([]);
+    for (const out of [textOf(r), JSON.stringify(audit(s)), ...s.logs]) {
+      expect(out.toLowerCase()).not.toMatch(/platform|march/);
+    }
+  });
+
   // Red team §7.1: every protocol bound applies over MCP.
   test('input parity: each schema bound refuses the call and inserts nothing', async () => {
     const s = await setup({ mcp: { writesPerHour: 100 } });
