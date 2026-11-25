@@ -224,7 +224,9 @@ describe('global checks', () => {
       const c = one(await w.run(), 'stick.capabilities');
       expect(c).toMatchObject({ status: 'fail', zoneId: 'main' });
       expect(c.summary).toContain('clone-v1');
-      expect(c.summary).toContain('stick-1 lacks clone-v1');
+      expect(c.summary).toContain(
+        "stick-1 lacks clone-v1 (the clone container a GitLab project's drops need)",
+      );
       expect(c.fix).toBe(
         'clone-v1: run a stick from a release with the clone container: it advertises clone-v1 only once its volume self-check and base image pass, with 10 GiB free, and the stick log says why when it does not',
       );

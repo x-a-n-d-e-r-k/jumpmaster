@@ -1411,4 +1411,27 @@ describe('a stick whose egress ceiling a zone exceeds (#780)', () => {
       }).zones[0]?.cannotRun,
     ).toBeUndefined();
   });
+
+  test('a GitLab zone whose only live stick lacks clone-v1 says what clone-v1 is for (#871)', () => {
+    const db = openDb(tmpDbFile());
+    insertStick(db, { id: 's1', name: 'no-clone', tokenHash: 'h1', slots: 1 });
+    const advert = { imagePolicy: 'allowlist' as const, version: null, pinnedImages: [] };
+    stampStick(db, 's1', { ...advert, capabilities: ['egress-v1', 'image-verify-v1'] }, t0);
+    const zoneCfg = makeZone({
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    } as Parameters<typeof makeZone>[0]);
+    const config = { dropZones: [zoneCfg], usage: usageCfg, secrets: {} } as unknown as Config;
+    const pages = { zones: true, settings: true, credentials: true };
+    expect(statusInputOf({ db, config, now: t0, pages }).zones[0]?.cannotRun).toBe(
+      "no live stick has clone-v1 (the clone container a GitLab project's drops need)",
+    );
+    stampStick(
+      db,
+      's1',
+      { ...advert, capabilities: ['egress-v1', 'image-verify-v1', 'clone-v1'] },
+      t0,
+    );
+    expect(statusInputOf({ db, config, now: t0, pages }).zones[0]?.cannotRun).toBeUndefined();
+  });
 });
