@@ -68,6 +68,7 @@ import {
 } from './setting-controls.js';
 import { appOptionsFor, CLAUDE_SAVED, forgeGuideFor, guideSection } from './setup.js';
 import {
+  PROJECT_WORDS_FN,
   projectWords,
   type ZoneRef,
   zoneName,
@@ -1003,7 +1004,7 @@ ${FLAGS_SCRIPT}`,
  * redraws, or goes to the confirmation page the change waits on (issue #254); Check asks the server to fetch `<publicUrl>/healthz` and says what it answered.
  */
 export const OTHER_MACHINES_SCRIPT = `<script>
-function jmGo(to) {
+${PROJECT_WORDS_FN}function jmGo(to) {
   const u = new URL(to, location.href);
   // Only the hash differs (Other machines is a section of this page): draw the page again.
   if (u.pathname === location.pathname && u.search === location.search) { location.hash = u.hash; location.reload(); return; }
@@ -1015,7 +1016,7 @@ async function jmSavePublicUrl(value, status, go) {
   try { j = await r.json(); } catch (e) {}
   if (r.ok) { status.textContent = 'Saved as revision ' + j.revision + '.'; go('${SYSTEM_OTHER_MACHINES_HREF}'); return 'saved'; }
   if (r.status === 409 && j.needsConfirmation) { go(j.confirm); return 'confirm'; }
-  if (j.issues) { status.textContent = j.issues.map((i) => i.message).join('; '); return 'refused'; }
+  if (j.issues) { status.textContent = j.issues.map((i) => projectWords(i.message)).join('; '); return 'refused'; }
   status.textContent = j.error || ('Refused (' + r.status + ')');
   return 'refused';
 }
@@ -1263,7 +1264,7 @@ const HISTORY_LIMIT = 50;
  * that weakens a guard goes to the confirmation page (`go`), as any session apply does.
  */
 export const HISTORY_SCRIPT = `<script>
-async function jmRevert(r, status, ask, go) {
+${PROJECT_WORDS_FN}async function jmRevert(r, status, ask, go) {
   const n = r.readds.length;
   const readds = n === 0 ? '' : ' It re-adds project' + (n > 1 ? 's ' : ' ') + r.readds.join(', ') + ' with ' + (n > 1 ? 'their' : 'its') + ' history; ' + (n > 1 ? 'they come' : 'it comes') + ' back paused.';
   if (!ask('Revert to revision ' + r.id + '? It is applied as a new revision, and the history is kept.' + readds)) return 'cancelled';
@@ -1274,7 +1275,7 @@ async function jmRevert(r, status, ask, go) {
   if (res.status === 409 && j.needsConfirmation) { go(j.confirm); return 'confirm'; }
   if (res.status === 409 && j.conflict) { status.textContent = 'The config changed since this page was drawn: reload it and revert again.'; return 'conflict'; }
   if (res.status === 403 && j.sessionForbidden) { status.textContent = 'Not from the browser: ' + j.sessionForbidden.join(', ') + ' is set with jumpmaster ctl or in the config file.'; return 'forbidden'; }
-  if (j.issues) { status.textContent = j.issues.map((i) => (i.path ? i.path + ': ' : '') + i.message).join('; '); return 'refused'; }
+  if (j.issues) { status.textContent = j.issues.map((i) => (i.path ? i.path + ': ' : '') + projectWords(i.message)).join('; '); return 'refused'; }
   status.textContent = j.error || ('Refused (' + res.status + ')');
   return 'refused';
 }

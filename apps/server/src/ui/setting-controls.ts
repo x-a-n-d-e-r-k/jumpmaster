@@ -1,4 +1,5 @@
 import { escapeHtml } from './pages.js';
+import { PROJECT_WORDS_FN } from './zone-name.js';
 
 /**
  * The controls and the save-answer handling shared by the settings pages: the Install tab
@@ -60,9 +61,10 @@ export function settingControl(s: Control): string {
  * `jmConfigAnswer(r, status, go, savedTo, onIssues)` follows `PATCH /api/control/config`'s answer:
  * applied (to `savedTo?saved=<revision>`), the confirmation page (`go`), a conflict, the
  * ctl-or-file note, or the issues: to `onIssues` when given, else into `status`. It returns
- * which one it was. Each page's script embeds it.
+ * which one it was. Each page's script embeds it, with `projectWords`: an issue reads "project"
+ * where the validator says "zone" (#872).
  */
-export const CONFIG_ANSWER_FN = `async function jmConfigAnswer(r, status, go, savedTo, onIssues) {
+export const CONFIG_ANSWER_FN = `${PROJECT_WORDS_FN}async function jmConfigAnswer(r, status, go, savedTo, onIssues) {
   let j = {};
   try { j = await r.json(); } catch (e) {}
   if (r.ok) {
@@ -77,7 +79,7 @@ export const CONFIG_ANSWER_FN = `async function jmConfigAnswer(r, status, go, sa
   if (r.status === 403 && j.sessionForbidden) { status.textContent = 'Not from the browser: ' + j.sessionForbidden.join(', ') + ' is set with jumpmaster ctl or in the config file.'; return 'forbidden'; }
   if (j.issues) {
     if (onIssues) onIssues(j.issues);
-    else status.textContent = j.issues.map((i) => (i.path ? i.path + ': ' : '') + i.message).join('; ');
+    else status.textContent = j.issues.map((i) => (i.path ? i.path + ': ' : '') + projectWords(i.message)).join('; ');
     return 'refused';
   }
   status.textContent = j.error || ('Refused (' + r.status + ')');

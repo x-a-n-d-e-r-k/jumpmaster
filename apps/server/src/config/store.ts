@@ -232,6 +232,13 @@ type Valid = {
 const asStored = (doc: unknown): unknown =>
   doc === undefined ? undefined : (JSON.parse(canonicalJson(doc)) as unknown);
 
+/**
+ * The issue for adding an id with history and no resume. It keeps the validator's word, zone, for
+ * the API, ctl and the log; a page shows it through `projectWords` (#872). The control API spots
+ * it by this text, to answer with the history Resume would bring back.
+ */
+export const ZONE_HISTORY_ISSUE = 'this zone has history: pick another id, or resume it';
+
 export class ConfigStore implements ConfigSource {
   private modeValue: ConfigMode = 'db';
   private rev = 0;
@@ -529,7 +536,7 @@ export class ConfigStore implements ConfigSource {
       const i = zones.findIndex((z) => z.id === id);
       const at = `dropZones.${i}.id`;
       if (meta.via !== 'rollback' && !meta.resume?.includes(id)) {
-        issues.push({ path: at, message: 'this zone has history: pick another id, or resume it' });
+        issues.push({ path: at, message: ZONE_HISTORY_ISSUE });
         continue;
       }
       const repo = zoneHistoryRepo(db, id);

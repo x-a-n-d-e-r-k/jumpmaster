@@ -1,5 +1,13 @@
+import vm from 'node:vm';
 import { describe, expect, test } from 'vitest';
-import { projectWords, zoneName, zoneNamer, zoneNameText, zoneTextNamer } from './zone-name.js';
+import {
+  PROJECT_WORDS_FN,
+  projectWords,
+  zoneName,
+  zoneNamer,
+  zoneNameText,
+  zoneTextNamer,
+} from './zone-name.js';
 
 const main = { id: 'main', repo: 'octo/demo' };
 const ref = { id: 'ref', repo: 'octo/reference' };
@@ -66,5 +74,30 @@ describe('projectWords', () => {
     expect(projectWords('a zone id may not be zone_x; not zone')).toBe(
       'a project id may not be zone_x; not zone',
     );
+  });
+});
+
+describe('PROJECT_WORDS_FN (#872)', () => {
+  // The page scripts' copy: the same rule, so a refusal a script prints reads as the server's pages.
+  const INPUTS = [
+    'a starter zone requires ciRequired: true; githubApp applies to two-bot zones only; Zone ids clash',
+    'dropZones.1.id shares JM_ZONE_SECRET_A_<NAME>',
+    'duplicate zone id: drop-zone',
+    'duplicate zone id: zone',
+    'zone zone: preset python needs the lock',
+    'zone ids zone-a and zone share JM_ZONE_SECRET_ZONE_<NAME>',
+    'a zone id may not be zone_x; not zone',
+    'this zone has history: pick another id, or resume it',
+    'a zone needs image or preset',
+  ];
+
+  test('agrees with projectWords on its inputs', () => {
+    const ctx = vm.createContext({});
+    vm.runInContext(PROJECT_WORDS_FN, ctx);
+    for (const input of INPUTS) expect(ctx.projectWords(input), input).toBe(projectWords(input));
+  });
+
+  test('is safe inside a <script>', () => {
+    expect(PROJECT_WORDS_FN).not.toMatch(/<\/script|<!--/i);
   });
 });
