@@ -88,7 +88,12 @@ export async function runTrooper(payload: DropPayload, deps: TrooperDeps): Promi
   };
   // Every failure from here on posts a result, so the server records why the drop stopped.
   const fail = (reason: string) => finish({ status: 'failed', reason, gates: [] });
-  if (payload.role === 'implement' && payload.credentials.forgeToken === undefined) {
+  // A provided mirror needs no token: implement then reads the mirror and never the remote.
+  if (
+    payload.role === 'implement' &&
+    payload.repo.mirror !== 'provided' &&
+    payload.credentials.forgeToken === undefined
+  ) {
     return fail('forge token required for implement');
   }
   const runner = ROLES[payload.role];

@@ -19,6 +19,8 @@ import {
   type PushEntry,
   type PushOutcome,
   pushOnce,
+  TROOPER_MIRROR_LABEL,
+  TROOPER_PUSH_LABEL,
 } from './push.js';
 
 const SHA = 'b'.repeat(40);
@@ -620,5 +622,12 @@ describe('the stick egress ceiling (JM_EGRESS_CEILING)', () => {
     expect(await pushOnce(s.entry, { ...s.deps, egressImage: 'egress:1', ceiling })).toBe('done');
     expect(s.d.order).toContain('proxy api.anthropic.com,github.com');
     expect(s.d.starts).toHaveLength(1);
+  });
+});
+
+describe('the provided-mirror image label (#842)', () => {
+  test('TROOPER_MIRROR_LABEL names the mirror label, beside the push label', () => {
+    expect(TROOPER_MIRROR_LABEL).toBe('org.jumpmaster.trooper.mirror');
+    expect(TROOPER_PUSH_LABEL).toBe('org.jumpmaster.trooper.push');
   });
 });

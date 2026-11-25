@@ -10,7 +10,7 @@ import {
   RESULT_PREFIX,
   withBasicAuth,
 } from '@jumpmaster/protocol';
-import type { initBare, mirrorFetch } from '../git.js';
+import { type initBare, type mirrorFetch, PROVIDED_MIRROR_DIR } from '../git.js';
 import { redact } from '../redact.js';
 import { readCloneGrant, StdinClosedError } from '../stdin.js';
 
@@ -18,7 +18,7 @@ import { readCloneGrant, StdinClosedError } from '../stdin.js';
  * Where the clone container builds the drop's mirror, and where an agent container later finds it
  * (mounted read-only). Fixed, so the stick and the provided-mirror roles agree on it.
  */
-export const CLONE_MIRROR_DIR = '/jm/mirror';
+export const CLONE_MIRROR_DIR = PROVIDED_MIRROR_DIR;
 
 export interface CloneDeps {
   /** The rest of stdin after the payload line: the grant arrives here, after the ready line. */

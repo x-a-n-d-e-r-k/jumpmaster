@@ -17,7 +17,7 @@ import {
 import { buildClaudeArgs, type ParsedLine, parseStreamLine } from '../claude.js';
 import { eventLines } from '../events.js';
 import { scrubEnv } from '../gates.js';
-import { repoTarget } from '../git.js';
+import { providedMirrorDir, repoTarget } from '../git.js';
 import type { TrooperDeps } from '../main.js';
 import { sweepUid, type TrooperIdentities } from '../privilege.js';
 import { redact } from '../redact.js';
@@ -63,11 +63,48 @@ export function emitEvent(
   for (const line of lines) deps.emit(line);
 }
 
-/** The agent's working copy: under its own home in container mode, else in the workdir. */
-/** The root-owned mirror, never inside the agent's home. */
-export function mirrorDirOf(ctx: RoleCtx): string {
-  return join(ctx.workdir, 'mirror');
+/** Whether a clone container already fetched the project into the read-only provided mirror. */
+export function mirrorProvided(payload: DropPayload): boolean {
+  return payload.repo.mirror === 'provided';
 }
+
+/**
+ * The root-owned mirror, never inside the agent's home: the provided one (read-only, at a fixed
+ * path) or the trooper's own at `<workdir>/mirror`.
+ */
+export function mirrorDirOf(ctx: RoleCtx, payload?: DropPayload): string {
+  return payload && mirrorProvided(payload) ? providedMirrorDir() : join(ctx.workdir, 'mirror');
+}
+
+/**
+ * A provided mirror: checks it (`checkMirror`), then the agent clones its working copy from it at
+ * the default branch. No remote call and no token. The agent's git config goes in the workdir,
+ * since the mirror's mount can't be written.
+ */
+export async function cloneFromProvidedMirror(
+  payload: DropPayload,
+  deps: TrooperDeps,
+  ctx: RoleCtx,
+  dir: string,
+): Promise<void> {
+  const mirrorDir = mirrorDirOf(ctx, payload);
+  try {
+    await deps.git.checkMirror(mirrorDir);
+  } catch (err) {
+    throw new Error(
+      `provided mirror check failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  await deps.git.cloneFromMirror({
+    mirrorDir,
+    dir,
+    branch: payload.repo.defaultBranch,
+    configDir: ctx.workdir,
+    as: ctx.ids?.agent ?? null,
+  });
+}
+
+/** The agent's working copy: under its own home in container mode, else in the workdir. */
 
 export function repoDirOf(ctx: RoleCtx): string {
   return ctx.ids ? join(ctx.ids.agent.home, 'repo') : join(ctx.workdir, 'repo');
@@ -83,13 +120,21 @@ export const READ_TOKEN_REFUSED = 'the read token was refused (401): renew it';
 const AUTH_REFUSED =
   /could not read Username|Authentication failed|Invalid username or (password|token)|returned error: 401/i;
 
-/** Clones through the root mirror at `<workdir>/mirror`; returns the working copy. */
+/**
+ * Clones through the root mirror (the provided one, checked first, or `<workdir>/mirror`);
+ * returns the working copy.
+ */
 export async function cloneAndPrepare(
   payload: AgentPayload,
   deps: TrooperDeps,
   ctx: RoleCtx,
 ): Promise<string> {
   const dir = repoDirOf(ctx);
+  if (mirrorProvided(payload)) {
+    emitEvent(deps, ctx, 'phase', { phase: 'clone' });
+    await cloneFromProvidedMirror(payload, deps, ctx, dir);
+    return dir;
+  }
   // Review may run without a forge token (public repo); git then clones anonymously.
   const token = payload.credentials.forgeToken ?? '';
   emitEvent(deps, ctx, 'phase', { phase: 'clone' });

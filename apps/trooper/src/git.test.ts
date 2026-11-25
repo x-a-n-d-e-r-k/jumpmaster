@@ -4,19 +4,26 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
 import {
   addedRuns,
+  agentGitConfigFile,
   aheadOfBase,
   authHeader,
+  BARE_CONFIG,
+  checkMirror,
+  checkoutBranch,
+  cloneFromMirror,
   cloneRepo,
   commitIfDirty,
   conflictMarkers,
@@ -24,14 +31,18 @@ import {
   headSha,
   initBare,
   mergeInProgress,
+  mirrorBranchSha,
   mirrorFetch,
+  PROVIDED_MIRROR_DIR,
   prePushCheck,
   prepareBranch,
+  providedMirrorDir,
   remoteBranchExists,
   remoteBranchSha,
   removeInstructionFiles,
   runGit,
   setGitOutputMaxBytes,
+  setProvidedMirrorDir,
   setSpawn,
   sweepProcesses,
   treeState,
@@ -634,5 +645,187 @@ describe('addedRuns', () => {
       '-z',
     ].join('\n');
     expect(addedRuns(patch)).toEqual([{ path: 'x', runs: ['a\n++ b/not-a-header', 'b'] }]);
+  });
+});
+
+describe('a provided mirror (#842)', () => {
+  /** A root-owned bare mirror laid out as the clone role leaves it, made read-only. */
+  async function providedMirror(name: string): Promise<string> {
+    const parent = join(tmp, name);
+    mkdirSync(parent);
+    const mirror = join(parent, 'mirror');
+    await initBare(mirror);
+    await mirrorFetch(mirror, '', target(), ['*']);
+    setProvidedMirrorDir(mirror);
+    readOnly(mirror, true);
+    return mirror;
+  }
+  function readOnly(p: string, on: boolean): void {
+    const walk = (d: string) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const q = join(d, e.name);
+        if (e.isDirectory()) walk(q);
+        if (!e.isSymbolicLink()) chmodSync(q, on ? (e.isDirectory() ? 0o555 : 0o444) : 0o755);
+      }
+    };
+    if (!on) chmodSync(p, 0o755);
+    walk(p);
+    if (on) chmodSync(p, 0o555);
+  }
+  /** Every path under the mirror, with its mtime and (for a file) its bytes. */
+  function snapshot(p: string): Record<string, string> {
+    const out: Record<string, string> = {};
+    const walk = (d: string) => {
+      out[d] = `dir ${statSync(d).mtimeMs}`;
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const q = join(d, e.name);
+        if (e.isDirectory()) walk(q);
+        else out[q] = `${statSync(q).mtimeMs} ${readFileSync(q).toString('base64')}`;
+      }
+    };
+    walk(p);
+    return out;
+  }
+  const workdir = (name: string): string => {
+    const w = join(tmp, `${name}-work`);
+    mkdirSync(w);
+    return w;
+  };
+
+  afterEach(() => {
+    const m = providedMirrorDir();
+    if (m !== PROVIDED_MIRROR_DIR && existsSync(m)) readOnly(m, false);
+    setProvidedMirrorDir(null);
+  });
+
+  test('the mirror path defaults to /jm/mirror; the test setter overrides and restores it', () => {
+    expect(PROVIDED_MIRROR_DIR).toBe('/jm/mirror');
+    expect(providedMirrorDir()).toBe('/jm/mirror');
+    setProvidedMirrorDir('/tmp/x');
+    expect(providedMirrorDir()).toBe('/tmp/x');
+    setProvidedMirrorDir(null);
+    expect(providedMirrorDir()).toBe('/jm/mirror');
+  });
+
+  test('the mirror check accepts the layout the clone role leaves', async () => {
+    const mirror = await providedMirror('pm-ok');
+    await expect(checkMirror(providedMirrorDir())).resolves.toBeUndefined();
+    expect(readFileSync(join(mirror, 'config'), 'utf8')).toBe(BARE_CONFIG);
+  });
+
+  test('the mirror check refuses another config', async () => {
+    const mirror = await providedMirror('pm-config');
+    chmodSync(mirror, 0o755);
+    chmodSync(join(mirror, 'config'), 0o644);
+    writeFileSync(join(mirror, 'config'), `${BARE_CONFIG}[core]\n\tfsmonitor = /bin/sh\n`);
+    await expect(checkMirror(mirror)).rejects.toThrow(/config is not the fixed bare config/);
+  });
+
+  test('the mirror check refuses a hooks directory', async () => {
+    const mirror = await providedMirror('pm-hooks');
+    chmodSync(mirror, 0o755);
+    mkdirSync(join(mirror, 'hooks'));
+    await expect(checkMirror(mirror)).rejects.toThrow(/hooks directory/);
+  });
+
+  test('the mirror check refuses a missing path', async () => {
+    await expect(checkMirror(join(tmp, 'pm-none', 'mirror'))).rejects.toThrow(/no mirror at/);
+  });
+
+  test('the mirror check refuses a symlinked path', async () => {
+    const mirror = await providedMirror('pm-link');
+    const link = join(tmp, 'pm-link', 'link');
+    symlinkSync(mirror, link);
+    await expect(checkMirror(link)).rejects.toThrow(/symlink/);
+  });
+
+  test('the mirror check refuses a directory that is not a bare repository', async () => {
+    const d = join(tmp, 'pm-empty');
+    mkdirSync(d);
+    await expect(checkMirror(d)).rejects.toThrow(/not a bare repository/);
+  });
+
+  test('with a root getuid, the mirror check names the path component that fails ownership or mode', async () => {
+    const mirror = await providedMirror('pm-root');
+    // The first component from / down that is not root-owned and closed.
+    let cur = '/';
+    let bad: string | null = null;
+    for (const part of mirror.split('/').filter(Boolean)) {
+      const st = statSync(cur);
+      if (st.uid !== 0 || (st.mode & 0o022) !== 0) {
+        bad = cur;
+        break;
+      }
+      cur = join(cur, part);
+    }
+    bad ??= mirror;
+    const err = await checkMirror(mirror, () => 0).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain(`unsafe root git dir: ${bad}`);
+  });
+
+  test('the clone from the mirror is a working copy at the default branch', async () => {
+    const mirror = await providedMirror('pm-clone');
+    const dir = join(tmp, 'pm-clone', 'repo');
+    await cloneFromMirror({
+      mirrorDir: mirror,
+      dir,
+      branch: 'main',
+      configDir: workdir('pm-clone'),
+    });
+    expect(git(dir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe('main');
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(git(origin, 'rev-parse', 'refs/heads/main'));
+    expect(readFileSync(join(dir, 'a.txt'), 'utf8')).toBe('a\n');
+    expect(git(dir, 'config', 'user.name')).toBe('Jumpmaster Agent');
+  });
+
+  test('the branch lookup answers from the mirror, present or absent', async () => {
+    git(origin, 'branch', 'agent/issue-842', 'main');
+    try {
+      const mirror = await providedMirror('pm-lookup');
+      expect(await mirrorBranchSha(mirror, 'agent/issue-842')).toBe(
+        git(origin, 'rev-parse', 'refs/heads/agent/issue-842'),
+      );
+      expect(await mirrorBranchSha(mirror, 'agent/issue')).toBeNull();
+      expect(await mirrorBranchSha(mirror, 'agent/issue-9999')).toBeNull();
+    } finally {
+      git(origin, 'branch', '-D', 'agent/issue-842');
+    }
+  });
+
+  test('clone, lookup and a later branch fetch name no remote URL and carry no token; the mirror is untouched', async () => {
+    git(origin, 'branch', 'agent/issue-843', 'main');
+    try {
+      const mirror = await providedMirror('pm-wire');
+      const before = snapshot(mirror);
+      const calls: { argv: string[]; env: NodeJS.ProcessEnv }[] = [];
+      setSpawn((cmd, args, opts) => {
+        calls.push({ argv: [cmd, ...args], env: (opts.env ?? {}) as NodeJS.ProcessEnv });
+        return spawn(cmd, args, opts);
+      });
+      const work = workdir('pm-wire');
+      const dir = join(tmp, 'pm-wire', 'repo');
+      await cloneFromMirror({ mirrorDir: mirror, dir, branch: 'main', configDir: work });
+      const sha = await mirrorBranchSha(mirror, 'agent/issue-843');
+      expect(sha).not.toBeNull();
+      await checkoutBranch(dir, 'agent/issue-843', sha as string);
+      setSpawn(null);
+      expect(calls.length).toBeGreaterThan(0);
+      for (const c of calls) {
+        const text = [...c.argv, ...Object.values(c.env).map(String)].join('\n');
+        expect(text).not.toMatch(/https?:\/\//);
+        expect(text).not.toMatch(/extraheader|AUTHORIZATION|x-access-token|oauth2/i);
+        expect(text).not.toContain(origin);
+      }
+      // The agent's git config lands outside the mirror's parent; nothing is written in the mirror.
+      expect(agentGitConfigFile()).toBe(join(work, 'agent.gitconfig'));
+      expect(readFileSync(join(work, 'agent.gitconfig'), 'utf8')).toContain(
+        `directory = ${mirror}`,
+      );
+      expect(existsSync(join(dirname(mirror), 'agent.gitconfig'))).toBe(false);
+      expect(snapshot(mirror)).toEqual(before);
+    } finally {
+      git(origin, 'branch', '-D', 'agent/issue-843');
+    }
   });
 });

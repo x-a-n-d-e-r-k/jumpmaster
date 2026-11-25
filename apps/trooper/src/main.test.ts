@@ -1,9 +1,10 @@
 import { PassThrough, Readable } from 'node:stream';
 import type { DropPayload, GateResult } from '@jumpmaster/protocol';
-import { expect, test } from 'vitest';
+import { describe, expect, test } from 'vitest';
 import type { TrooperDeps } from './main.js';
 import { claudeSpawnArgs, describeFatal, readPayload, runTrooper } from './main.js';
 import { readCloneGrant, readGrant } from './stdin.js';
+import { roleWorld } from './test/roleWorld.js';
 
 const payload: DropPayload = {
   protocol: 1,
@@ -493,6 +494,31 @@ test('implement without a forge token is refused with a result', async () => {
   const r = await runTrooper(p, f.deps);
   expect(r).toMatchObject({ status: 'failed', reason: 'forge token required for implement' });
   expect(f.lines.some((l) => l.startsWith('JM_RESULT '))).toBe(true);
+});
+
+describe('implement with a provided mirror (#842)', () => {
+  const tokenless = { claudeToken: payload.credentials.claudeToken };
+  test('runs without a forge token, reading the mirror', async () => {
+    const w = roleWorld();
+    const p = {
+      ...payload,
+      repo: { ...payload.repo, mirror: 'provided' as const },
+      credentials: tokenless,
+    };
+    const r = await runTrooper(p, w.deps);
+    expect(r.status).toBe('completed');
+    expect(w.names()).toContain('cloneFromMirror');
+    expect(w.names()).not.toContain('cloneRepo');
+    expect(w.claude.runs).toBe(1);
+  });
+
+  test('the same payload without a mirror is refused, as before', async () => {
+    const w = roleWorld();
+    const r = await runTrooper({ ...payload, credentials: tokenless }, w.deps);
+    expect(r).toMatchObject({ status: 'failed', reason: 'forge token required for implement' });
+    expect(w.calls).toEqual([]);
+    expect(w.claude.runs).toBe(0);
+  });
 });
 
 test('a setup failure before the role runs still posts a redacted result', async () => {
