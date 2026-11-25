@@ -87,7 +87,8 @@ export type ZoneRequirements = {
  * What a stick must have to run this zone's drops: `egress-v1` unless egress is off,
  * `image-verify-v1` under the `signed` policy when signed images are required (install-wide, or
  * by the zone itself), and `clone-v1` for a GitLab zone, whose drops say `repo.mirror: provided`
- * (ruling 121: the stick's clone container fills the mirror). `egress` is what the drops are
+ * (ruling 121: the stick's clone container fills the mirror), and `egress-private-v1` when egress is
+ * on and the zone lists `egress.private` hosts (#897). `egress` is what the drops are
  * given, judged against a stick's ceiling.
  */
 export function zoneRequirements(
@@ -96,7 +97,11 @@ export function zoneRequirements(
 ): ZoneRequirements {
   const caps = new Set<StickCapability>();
   if (forgeKind(zone) === 'gitlab') caps.add('clone-v1');
-  if ((zone.egress?.mode ?? 'off') !== 'off') caps.add('egress-v1');
+  if ((zone.egress?.mode ?? 'off') !== 'off') {
+    caps.add('egress-v1');
+    // An older stick strips the payload's `private`, and its proxy refuses the host (#897).
+    if ((zone.egress?.private?.length ?? 0) > 0) caps.add('egress-private-v1');
+  }
   // Strengthen-only: the zone can add the requirement, never remove the install's.
   const signed = config.requireSignedImages === true || zone.requireSignedImages === true;
   if (signed) caps.add('image-verify-v1');

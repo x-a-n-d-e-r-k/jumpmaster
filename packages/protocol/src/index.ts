@@ -69,6 +69,7 @@ export const PresetSchema = z.enum(PRESETS);
  */
 export const STICK_CAPABILITIES = [
   'clone-v1',
+  'egress-private-v1',
   'egress-v1',
   'image-verify-v1',
   'push-v1',

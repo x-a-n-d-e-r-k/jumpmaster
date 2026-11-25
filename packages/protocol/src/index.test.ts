@@ -1234,3 +1234,10 @@ describe('EgressPayloadSchema private (#888)', () => {
     expect(ClonePlanSchema.safeParse({ ...clone, egress: bad }).success).toBe(false);
   });
 });
+
+describe('egress-private-v1 (#897)', () => {
+  test('STICK_CAPABILITIES names egress-private-v1 and stays sorted', () => {
+    expect(STICK_CAPABILITIES).toContain('egress-private-v1');
+    expect([...STICK_CAPABILITIES]).toEqual([...STICK_CAPABILITIES].sort());
+  });
+});

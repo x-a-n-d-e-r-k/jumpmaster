@@ -664,6 +664,56 @@ describe('stick capabilities, per zone', () => {
     });
   });
 
+  describe('a zone with egress.private needs egress-private-v1 (#897)', () => {
+    const gitlab = makeZone({ forge: 'gitlab', gitlab: { baseUrl: 'https://gitlab.example.com' } });
+    const withPrivate = (mode: 'off' | 'monitor' | 'enforce', priv?: string[]) => ({
+      ...gitlab,
+      egress: {
+        mode,
+        allow: ['gitlab.example.com'],
+        ...(priv === undefined ? {} : { private: priv }),
+      },
+    });
+
+    test.each(['monitor', 'enforce'] as const)(
+      'required for a GitLab zone with egress.private under %s',
+      (mode) => {
+        expect(
+          [...zoneRequirements(withPrivate(mode, ['gitlab.example.com']), {}).caps].sort(),
+        ).toEqual(['clone-v1', 'egress-private-v1', 'egress-v1']);
+      },
+    );
+
+    test('not required with mode off, without the setting, or for a GitHub zone', () => {
+      expect([...zoneRequirements(withPrivate('off', ['gitlab.example.com']), {}).caps]).toEqual([
+        'clone-v1',
+      ]);
+      expect([...zoneRequirements(withPrivate('enforce'), {}).caps].sort()).toEqual([
+        'clone-v1',
+        'egress-v1',
+      ]);
+      expect([...zoneRequirements(withPrivate('enforce', []), {}).caps].sort()).toEqual([
+        'clone-v1',
+        'egress-v1',
+      ]);
+      expect([
+        ...zoneRequirements(makeZone({ egress: { mode: 'enforce', allow: [] } }), {}).caps,
+      ]).toEqual(['egress-v1']);
+    });
+
+    test('a stick with egress-v1 and clone-v1 but not egress-private-v1 is passed over', () => {
+      const need = zoneRequirements(withPrivate('enforce', ['gitlab.example.com']), {});
+      const older = { capabilities: ['egress-v1', 'clone-v1'], imagePolicy: 'allowlist' as const };
+      expect(missingFor(older, need)).toEqual(['egress-private-v1']);
+      expect(
+        missingFor(
+          { ...older, capabilities: ['egress-v1', 'egress-private-v1', 'clone-v1'] },
+          need,
+        ),
+      ).toEqual([]);
+    });
+  });
+
   function secondZone() {
     upsertDropZone(db, {
       id: 'locked',
