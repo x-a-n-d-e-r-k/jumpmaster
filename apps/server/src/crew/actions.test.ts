@@ -805,3 +805,94 @@ describe('refiling a rejected issue with `replaces` (#784)', () => {
     expect(third.refused).toEqual(['v4: replaced twice already: raise a briefing']);
   });
 });
+
+describe('the order of an objective’s issues: `after` (#843)', () => {
+  const placed = (path: string) => `${BODY}\n## Placement\n\n- \`${path}\`\n`;
+  const zone5 = () => ({ ...w.zone, crew: { ...w.zone.crew, maxStaged: 10 } });
+  const apply5 = (input: Parameters<typeof applyCrewActions>[2]) =>
+    applyCrewActions(w.db, zone5(), input, DROP, t0);
+
+  test('an issue may follow an existing issue and an earlier item; the keys are stored', () => {
+    apply5({ fileIssues: [issue({ key: 'a', title: 'A', body: placed('src/a.ts') })] });
+    const r = apply5({
+      fileIssues: [
+        issue({ key: 'b', title: 'B', body: placed('src/b.ts'), after: ['a'] }),
+        issue({ key: 'c', title: 'C', body: placed('src/c.ts'), after: ['a', 'b'] }),
+        issue({ key: 'd', title: 'D', body: placed('src/d.ts'), after: [] }),
+        issue({ key: 'e', title: 'E', body: BODY }),
+      ],
+    });
+    expect(r.refused).toEqual([]);
+    expect(r.filed.map((id) => getCrewIssue(w.db, id)?.after)).toEqual([
+      ['a'],
+      ['a', 'b'],
+      [],
+      null,
+    ]);
+  });
+
+  test('an unknown key, its own key, another objective’s, a later item and six keys are refused with the reason', () => {
+    apply5({
+      fileIssues: [
+        issue({ key: 'cli', objective: 'ship-the-cli', title: 'Cli', body: placed('cli.ts') }),
+      ],
+    });
+    for (const k of ['k1', 'k2', 'k3', 'k4', 'k5', 'k6']) {
+      apply5({ fileIssues: [issue({ key: k, title: k, body: placed(`${k}.ts`) })] });
+    }
+    const r = apply5({
+      fileIssues: [
+        issue({ key: 'n1', title: 'N1', body: placed('x.ts'), after: ['nope'] }),
+        issue({ key: 'n2', title: 'N2', body: placed('x.ts'), after: ['n2'] }),
+        issue({ key: 'n3', title: 'N3', body: placed('x.ts'), after: ['cli'] }),
+        issue({ key: 'n4', title: 'N4', body: placed('x.ts'), after: ['n5'] }),
+        issue({
+          key: 'n5',
+          title: 'N5',
+          body: placed('x.ts'),
+          after: ['k1', 'k2', 'k3', 'k4', 'k5', 'k6'],
+        }),
+      ],
+    });
+    expect(r.filed).toEqual([]);
+    expect(r.refused).toEqual([
+      'n1: after nope: no such crew issue',
+      'n2: after n2: its own key',
+      "n3: after cli: another objective's issue",
+      'n4: after n5: a later item of this result',
+      'n5: after names more than 5 issues',
+    ]);
+    expect(
+      apply5({
+        fileIssues: [
+          issue({
+            key: 'n6',
+            title: 'N6',
+            body: placed('x.ts'),
+            after: ['k1', 'k2', 'k3', 'k4', 'k5'],
+          }),
+        ],
+      }).refused,
+    ).toEqual([]);
+  });
+
+  test('an issue with after but no Placement path is refused; without after it is filed', () => {
+    const r = apply5({
+      fileIssues: [
+        issue({ key: 'a', title: 'A', after: [] }),
+        issue({
+          key: 'b',
+          title: 'B',
+          body: `${BODY}\n## Placement\n\nthe docs folder\n`,
+          after: [],
+        }),
+        issue({ key: 'c', title: 'C' }),
+      ],
+    });
+    expect(r.refused).toEqual([
+      'a: an issue with after needs a Placement section',
+      'b: an issue with after needs a Placement section',
+    ]);
+    expect(r.filed).toHaveLength(1);
+  });
+});

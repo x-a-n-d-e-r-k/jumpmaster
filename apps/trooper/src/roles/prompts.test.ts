@@ -205,3 +205,34 @@ describe('what the last cycle had refused (#808)', () => {
     expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   });
 });
+
+describe('the order of an objective’s issues (#843)', () => {
+  const lead = prompt('crew-lead.md');
+  const ruleOf = (n: number) => lead.split('\n').find((l) => l.startsWith(`${n}. `)) ?? '';
+
+  test('rule 3 asks for a Placement section listing the files as code spans, never a protected path', () => {
+    expect(ruleOf(3)).toContain(
+      'a `## Placement` section listing the files it changes, each as a code span',
+    );
+    expect(ruleOf(3)).toContain('Protected paths still never belong in an issue');
+    expect(ruleOf(3)).toContain('(rule 5)');
+  });
+
+  test('rule 4 asks for an after list, [] only for an issue independent of every other open one', () => {
+    expect(ruleOf(4)).toContain('Give each issue an `after` list');
+    expect(ruleOf(4)).toContain('must merge first');
+    expect(ruleOf(4)).toContain('or `[]` when none');
+    expect(ruleOf(4)).toContain(
+      'Set `[]` only when the issue could be built and merged before or after every other open one',
+    );
+  });
+
+  test('the rules are still 1 to 12, in order', () => {
+    const numbers = lead
+      .split('\n')
+      .map((l) => /^(\d+)\. /.exec(l)?.[1])
+      .filter((n): n is string => n !== undefined)
+      .map(Number);
+    expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  });
+});

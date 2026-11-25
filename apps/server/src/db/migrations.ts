@@ -1681,6 +1681,15 @@ const V65_SQL = `
 ALTER TABLE drops ADD COLUMN fable_reason TEXT;
 `;
 
+/**
+ * v66 (#843): the crew issue keys of its objective that must merge before a crew issue is
+ * promoted, a JSON array, or null: absent, after every earlier unmerged issue of the objective,
+ * as for every crew issue filed before it.
+ */
+const V66_SQL = `
+ALTER TABLE crew_issues ADD COLUMN after_json TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1747,6 +1756,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 63, sql: V63_SQL },
   { version: 64, sql: V64_SQL },
   { version: 65, sql: V65_SQL },
+  { version: 66, sql: V66_SQL },
 ];
 
 /**
