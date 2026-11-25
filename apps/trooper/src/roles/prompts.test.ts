@@ -236,3 +236,47 @@ describe('the order of an objective’s issues (#843)', () => {
     expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
   });
 });
+
+describe('what a drop can run (#876)', () => {
+  const lead = prompt('crew-lead.md');
+  const rule2 = lead.split('\n').find((l) => l.startsWith('2. ')) ?? '';
+
+  test('rule 2 of the lead says a drop has no Docker engine or forge tool, and what to ask for instead', () => {
+    expect(rule2).toContain(
+      "A drop has no Docker engine and no forge command-line tool, and reaches only the zone's allowed hosts: no acceptance criterion or required test may need them in the drop.",
+    );
+    expect(rule2).toContain(
+      'When something can be proved only there, the issue asks for the code plus the checks a drop can run (unit tests, static tests of the script), and says in its `## Out of scope` section where the live proof happens, for example in CI.',
+    );
+    expect(rule2).toContain('When CI would have to change for it, raise a briefing for that part.');
+    // What #784 and #808 added is unchanged.
+    expect(rule2).toContain('Rejected issues of the current objective');
+    expect(rule2).toContain('Refused in your last cycle');
+  });
+
+  test('the lead still has rules 1 to 12, in order', () => {
+    const numbers = lead
+      .split('\n')
+      .map((l) => /^(\d+)\. /.exec(l)?.[1])
+      .filter((n): n is string => n !== undefined)
+      .map(Number);
+    expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  });
+
+  test('the refute prompt makes such an issue a finding, naming which and how to reword it', () => {
+    const text = prompt('refute.md');
+    expect(text).toContain(
+      "An issue whose acceptance criteria or required tests need, in the drop, a Docker engine, a forge command-line tool (such as `gh`) or a host outside the zone's allowed hosts is a finding: say which it needs, and how to reword it so the drop runs the checks it can (unit tests, static tests of the script) and its `## Out of scope` section names where the live proof happens, for example in CI.",
+    );
+  });
+
+  test('the review prompt approves on what can be checked, and still requires changes for a defect', () => {
+    const text = prompt('review.md');
+    expect(text).toContain(
+      "Don't request changes only because a live run that no drop can do is missing (one that needs a Docker engine, a forge command-line tool or a host outside the zone's allowed hosts): approve on what can be checked, and list the unproved part in the `findings` as a `minor` follow-up.",
+    );
+    // A defect the review can see still requires changes.
+    expect(text).toContain('introduces no defect');
+    expect(text).toContain('Any `blocker` or `major` finding means `request_changes`.');
+  });
+});
