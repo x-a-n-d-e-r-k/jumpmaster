@@ -1978,6 +1978,16 @@ crew and doctor drops clone with a token minted for the reviewer app, so no read
 app can't read its files: install the reviewer app on the repository, with Contents: Read-only,
 and run the doctor again. GitHub's rate limit is a warn.
 
+On a GitLab project the clone container, where no agent runs, clones the project, whatever its
+visibility. It uses the read deploy token in the vault entry `gitlab-pat/<zone>/read` when that is
+set, and the author token otherwise. With the read entry set, the doctor tests it live (git's
+smart-HTTP `info/refs`): a pass names it, a 401 or 403 fails (create a project deploy token with
+only `read_repository`, store it as `<username>:<token>` in that entry, or remove the entry so the
+clone falls back to the author token), and no usable answer is a warn. Without it (or with a value
+not in the `<username>:<token>` form, which drops treat as unset) the check passes when the author
+token reads the project, and says a deploy token would keep the author token to pushes. With
+neither entry set it skips: `credential.missing` reports the author token.
+
 ### `zone.mode`
 
 **Action:** Open Projects (`/projects`).

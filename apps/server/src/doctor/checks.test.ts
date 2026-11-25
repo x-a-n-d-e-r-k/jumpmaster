@@ -5368,3 +5368,160 @@ describe('forge.labels on a GitLab zone (issue #812)', () => {
     expect(`${c.summary}\n${c.fix ?? ''}`).not.toMatch(/GitHub|JM_GITHUB_/);
   });
 });
+
+describe('forge.private-clone on a GitLab zone: the clone container token (issue #865)', () => {
+  const GL = 'https://gitlab.clone.test';
+  const PATH = 'acme/demo';
+  // Made-up tokens, built at run time so no token-shaped literal sits in the tracked file.
+  const A_TOKEN = ['glpat', 'A'.repeat(20)].join('-');
+  const R_TOKEN = ['glpat', 'R'.repeat(20)].join('-');
+  const D_USER = 'gitlab+deploy-token-42';
+  const D_TOKEN = ['gldt', 'D'.repeat(20)].join('-');
+  const D_VALUE = `${D_USER}:${D_TOKEN}`;
+  const D_BASIC = Buffer.from(D_VALUE).toString('base64');
+  const INFO_REFS = `/${PATH}.git/info/refs`;
+  const ADVERT = { 'content-type': 'application/x-git-upload-pack-advertisement' };
+  let gl: FakeGitLab | undefined;
+
+  beforeAll(() => nock.disableNetConnect());
+  afterEach(() => {
+    gl?.stop();
+    gl = undefined;
+    nock.cleanAll();
+  });
+  afterAll(() => nock.enableNetConnect());
+
+  async function clone(o: {
+    read?: boolean;
+    author?: boolean;
+    /** The author bot is a member of the project (default true). */
+    member?: boolean;
+    visibility?: 'private' | 'internal' | 'public';
+  }) {
+    const w = world({ zone: { repo: PATH, forge: 'gitlab', gitlab: { baseUrl: GL } } });
+    gl = fakeGitLab({
+      baseUrl: GL,
+      project: { id: 7, path: PATH, visibility: o.visibility ?? 'private' },
+    });
+    gl.addUser({
+      username: 'jm-author',
+      token: A_TOKEN,
+      scopes: ['api'],
+      ...(o.member === false ? {} : { accessLevel: ACCESS.developer }),
+    });
+    gl.addUser({
+      username: 'jm-reviewer',
+      token: R_TOKEN,
+      scopes: ['api'],
+      accessLevel: ACCESS.developer,
+    });
+    w.deps.forges = () => ({
+      author: new GitLabForge(GL, PATH, A_TOKEN),
+      reviewer: new GitLabForge(GL, PATH, R_TOKEN),
+    });
+    const pats = {
+      ...(o.author !== false ? { author: A_TOKEN, reviewer: R_TOKEN } : {}),
+      ...(o.read ? { read: { username: D_USER, token: D_TOKEN } } : {}),
+    };
+    w.deps.resolvedGitlabPats = () => new Map([[w.zone.id, pats]]);
+    const scrub = new ScrubSet();
+    w.deps.gitlabRead = { scrub };
+    const c = one(await zoneChecks(w.deps, w.zone, []), 'forge.private-clone');
+    const text = JSON.stringify(c);
+    for (const secret of [A_TOKEN, R_TOKEN, D_TOKEN, D_VALUE, D_BASIC])
+      expect(text).not.toContain(secret);
+    expect(text).not.toContain('JM_GITHUB_READ_TOKEN');
+    // The doc link is the project's own runbook; what the operator reads names no GitHub setting.
+    const said = `${c.summary}\n${c.fix ?? ''}`;
+    for (const word of ['JM_GITHUB_', 'reviewReadToken', 'fine-grained', 'github.com'])
+      expect(said).not.toContain(word);
+    return { c, scrub, zone: w.zone.id };
+  }
+
+  test('a read entry that tests ok passes, naming the read deploy token', async () => {
+    const probe = nock(GL, { reqheaders: { authorization: `Basic ${D_BASIC}` } })
+      .get(INFO_REFS)
+      .query({ service: 'git-upload-pack' })
+      .reply(200, '001e# service=git-upload-pack\n', ADVERT);
+    const { c, scrub, zone } = await clone({ read: true });
+    expect(probe.isDone()).toBe(true);
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('clone container');
+    expect(c.summary).toContain('read deploy token');
+    expect(c.summary).toContain(`gitlab-pat/${zone}/read`);
+    expect(scrub.values()).toEqual(expect.arrayContaining([D_TOKEN, D_VALUE, D_BASIC]));
+  });
+
+  test('takes the GitLab branch whatever the visibility', async () => {
+    for (const visibility of ['public', 'internal'] as const) {
+      nock(GL).get(INFO_REFS).query(true).reply(200, '', ADVERT);
+      const { c } = await clone({ read: true, visibility });
+      expect(c.status, visibility).toBe('pass');
+      expect(c.summary).toContain('read deploy token');
+      gl?.stop();
+      nock.cleanAll();
+    }
+  });
+
+  test('a read entry answered 401 fails with the deploy-token fix', async () => {
+    nock(GL).get(INFO_REFS).query(true).reply(401, 'HTTP Basic: Access denied');
+    const { c, zone } = await clone({ read: true });
+    expect(c.status).toBe('fail');
+    expect(c.fix).toContain('deploy token');
+    expect(c.fix).toContain('read_repository');
+    expect(c.fix).toContain('<username>:<token>');
+    expect(c.fix).toContain(`gitlab-pat/${zone}/read`);
+    expect(c.fix).toContain('remove that entry');
+    expect(c.fix).toContain('author token');
+    expect(c.fix).not.toContain('ctl');
+    expect(c.fix).not.toContain('Settings');
+  });
+
+  test('a read entry answered 403 fails too', async () => {
+    nock(GL).get(INFO_REFS).query(true).reply(403, 'Forbidden');
+    expect((await clone({ read: true })).c.status).toBe('fail');
+  });
+
+  test('an unreachable read entry probe warns that the check did not run', async () => {
+    nock(GL).get(INFO_REFS).query(true).replyWithError('socket hang up');
+    const { c } = await clone({ read: true });
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('did not run');
+    expect(c.fix).toBe(`check the server can reach ${GL}, then run the doctor again`);
+  });
+
+  test('a probe with no upload-pack advertisement warns the same way', async () => {
+    nock(GL)
+      .get(INFO_REFS)
+      .query(true)
+      .reply(302, '', { location: `${GL}/users/sign_in` });
+    const { c } = await clone({ read: true });
+    expect(c.status).toBe('warn');
+    expect(c.fix).toBe(`check the server can reach ${GL}, then run the doctor again`);
+  });
+
+  test('no read entry, and the author reads the project: passes naming the author fallback', async () => {
+    const { c, zone } = await clone({});
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('clone container');
+    expect(c.summary).toContain('author token');
+    expect(c.summary).toContain('push');
+    expect(c.summary).toContain('read_repository');
+    expect(c.summary).toContain('<username>:<token>');
+    expect(c.summary).toContain(`gitlab-pat/${zone}/read`);
+  });
+
+  test("no read entry, and the author's read gets 404: the GitLab readFailed result", async () => {
+    const { c, zone } = await clone({ member: false });
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('HTTP 404');
+    expect(c.fix).toContain('Developer');
+    expect(c.fix).toContain(`gitlab-pat/${zone}/author`);
+  });
+
+  test('no entries: skip, naming credential.missing', async () => {
+    const { c } = await clone({ author: false });
+    expect(c.status).toBe('skip');
+    expect(c.summary).toContain('credential.missing');
+  });
+});

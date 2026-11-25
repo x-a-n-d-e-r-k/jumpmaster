@@ -568,7 +568,7 @@ describe('doctor routes', () => {
     });
     afterAll(() => nock.enableNetConnect());
 
-    function gitlabApp(authorAccess: number) {
+    function gitlabApp(authorAccess: number, o: Pick<ControlDeps, 'resolvedGitlabPats'> = {}) {
       const w = world({ zone: { repo: PATH, forge: 'gitlab', gitlab: { baseUrl: GL } } });
       gl = fakeGitLab({ baseUrl: GL, project: { id: 7, path: PATH, visibility: 'private' } });
       gl.addUser({ username: 'jm-author', token: A_TOKEN, accessLevel: authorAccess });
@@ -583,6 +583,7 @@ describe('doctor routes', () => {
           reviewer: new GitLabForge(GL, PATH, R_TOKEN),
         }),
         doctorEnv: w.deps.env,
+        ...o,
       });
       return w;
     }
@@ -605,6 +606,37 @@ describe('doctor routes', () => {
         ['jm-author', 'drop-ready'],
         ['jm-author', 'agent-retry'],
       ]);
+    });
+
+    test("a doctor run sees the zone's read deploy token from resolvedGitlabPats (issue #865)", async () => {
+      const D_USER = 'gitlab+deploy-token-42';
+      const D_TOKEN = ['gldt', 'D'.repeat(20)].join('-');
+      const basic = Buffer.from(`${D_USER}:${D_TOKEN}`).toString('base64');
+      const probe = nock(GL, { reqheaders: { authorization: `Basic ${basic}` } })
+        .get(`/${PATH}.git/info/refs`)
+        .query({ service: 'git-upload-pack' })
+        .reply(200, '', { 'content-type': 'application/x-git-upload-pack-advertisement' });
+      gitlabApp(ACCESS.developer, {
+        resolvedGitlabPats: () =>
+          new Map([
+            [
+              'main',
+              { author: A_TOKEN, reviewer: R_TOKEN, read: { username: D_USER, token: D_TOKEN } },
+            ],
+          ]),
+      });
+      const ran = await post('/api/control/doctor', { zone: 'main' });
+      expect(ran?.statusCode).toBe(200);
+      const c = (ran?.json().run.checks as DoctorCheck[]).find(
+        (x) => x.id === 'forge.private-clone',
+      );
+      expect(c).toMatchObject({
+        status: 'pass',
+        summary: expect.stringContaining('read deploy token (gitlab-pat/main/read)'),
+      });
+      expect(probe.isDone()).toBe(true);
+      noToken(ran?.body ?? '');
+      for (const t of [D_TOKEN, `${D_USER}:${D_TOKEN}`, basic]) expect(ran?.body).not.toContain(t);
     });
 
     test('a refused create answers in GitLab words, not GitHub', async () => {

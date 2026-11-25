@@ -51,6 +51,7 @@ import {
   type InstallationVerifier,
 } from '../forge/installation-verifier.js';
 import { forgeKind } from '../forge/kind.js';
+import type { ScrubSet } from '../forge/scrub-set.js';
 import { APP_MANIFEST_PERMISSIONS } from '../github/app-manifest.js';
 import { FORBIDDEN, type ZoneGuidance } from '../github/guidance.js';
 import { getGoals } from '../goals.js';
@@ -81,12 +82,14 @@ import {
   testAppEntry,
 } from '../vault/credentials.js';
 import type { GitHubAppEntry } from '../vault/github-app-entries.js';
+import { testGitlabReadEntry } from '../vault/gitlab-pat-entries.js';
 import type { CredentialProblem } from '../vault/problems.js';
 import {
   credentialFor,
   isAppAuthorZone,
   isAppReviewerZone,
   type ResolvedApps,
+  type ResolvedGitlabPats,
 } from '../vault/resolution.js';
 import { KEY_CHANGED, VAULT_KEY_IN_DATA_DIR } from '../vault/vault.js';
 
@@ -199,6 +202,13 @@ export type DoctorDeps = {
   readForge?(zoneId: string): Forge | undefined;
   /** The GitHub App entries as they resolved; absent, every zone is judged as a PAT zone. */
   resolvedApps?(): ResolvedApps;
+  /**
+   * Each GitLab zone's `gitlab-pat` entries as they resolved (`ConfigStore.resolvedGitlabPats`):
+   * `forge.private-clone` judges the token the clone container clones with (issue #865).
+   */
+  resolvedGitlabPats?(): ResolvedGitlabPats;
+  /** What the read deploy token's live test uses (default: `fetch` and the server scrub set). */
+  gitlabRead?: { fetch?: typeof fetch; scrub?: Pick<ScrubSet, 'add'> };
   /** The GitHub API an app role's key is tested against (`GET /app`; default GitHub's). */
   appApiBase?: string;
   /**
@@ -3111,6 +3121,7 @@ async function privateCloneCheck(
   zone: DropZoneConfig,
   r: ZoneReads,
 ): Promise<DoctorCheck> {
+  if (forgeKind(zone) === 'gitlab') return gitlabPrivateCloneCheck(d, zone, r);
   const base = { id: 'forge.private-clone', zoneId: zone.id, doc: doc('read-token') };
   const access = await r.access.author();
   if (!access.ok)
@@ -3155,6 +3166,69 @@ async function privateCloneCheck(
     ...base,
     status: 'pass',
     summary: `${zone.repo} is private; the read token can read its files (review, crew and doctor drops clone with it)`,
+  };
+}
+
+/**
+ * `forge.private-clone` on a GitLab zone (issue #865, ruling 121): the clone container, where no
+ * agent runs, clones with the read deploy token `gitlab-pat/<zone>/read` when it resolves, else with
+ * the author token, whatever the project's visibility (the rule `clone-token` follows). A read entry
+ * that does not parse resolves to nothing, so it reads as missing here, as it does for the drop.
+ * No line holds a token in any form.
+ */
+async function gitlabPrivateCloneCheck(
+  d: DoctorDeps,
+  zone: DropZoneConfig,
+  r: ZoneReads,
+): Promise<DoctorCheck> {
+  const base = { id: 'forge.private-clone', zoneId: zone.id, doc: doc('forgeprivate-clone') };
+  const baseUrl = zone.gitlab?.baseUrl ?? 'the GitLab instance';
+  const entry = `gitlab-pat/${zone.id}/read`;
+  const deployToken = `a project deploy token with only the read_repository scope, stored as <username>:<token> in the vault entry ${entry}`;
+  const pats = d.resolvedGitlabPats?.().get(zone.id);
+  const read = pats?.read;
+  if (read) {
+    const t = await testGitlabReadEntry(`${read.username}:${read.token}`, zone, {
+      ...(d.gitlabRead?.fetch ? { fetch: d.gitlabRead.fetch } : {}),
+      ...(d.gitlabRead?.scrub ? { scrub: d.gitlabRead.scrub } : {}),
+    });
+    if (t.ok)
+      return {
+        ...base,
+        status: 'pass',
+        summary: `the clone container clones ${zone.repo} with the read deploy token (${entry}), which can read the project`,
+      };
+    if (t.status === 401 || t.status === 403)
+      return {
+        ...base,
+        status: 'fail',
+        summary: `GitLab rejected the read deploy token (${entry}) with HTTP ${t.status}: the clone container can't clone ${zone.repo}`,
+        fix: `Create ${deployToken} (replacing the value there), or remove that entry so the clone falls back to the author token.`,
+      };
+    return {
+      ...base,
+      status: 'warn',
+      summary: `could not test the read deploy token (${entry}) against ${zone.repo}: ${t.problem ?? 'GitLab gave no usable answer'}; the check did not run`,
+      fix: `check the server can reach ${baseUrl}, then run the doctor again`,
+    };
+  }
+  if (pats?.author === undefined)
+    return {
+      ...base,
+      status: 'skip',
+      summary:
+        'neither the read deploy token nor the author token is set, so nothing can clone the project; credential.missing reports the author token',
+    };
+  const access = await r.access.author();
+  if (!access.ok)
+    return readFailed(base, 'author', `read the project ${zone.repo}`, 'the api scope', access, {
+      zoneId: zone.id,
+      baseUrl,
+    });
+  return {
+    ...base,
+    status: 'pass',
+    summary: `the clone container clones ${zone.repo} with the author token (which can also push), as no read deploy token is set; ${deployToken} keeps the author token to pushes`,
   };
 }
 
