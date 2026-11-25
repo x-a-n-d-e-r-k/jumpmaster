@@ -287,3 +287,48 @@ describe('what a drop can run (#876)', () => {
     expect(text).toContain('Any `blocker` or `major` finding means `request_changes`.');
   });
 });
+
+describe("a ruling's note stays out of public text (#893)", () => {
+  const lead = prompt('crew-lead.md');
+  const rule = (n: number): string => lead.split('\n').find((l) => l.startsWith(`${n}. `)) ?? '';
+  const ISSUES =
+    "In an issue's text, which may be public, say what a ruling's note asks for in your own words: never quote it, and leave out anything in it about Command's organisation, network, people, customers, dates or plans.";
+
+  test('rule 1 acts on a note, names it to Command only, and words it anew in public text', () => {
+    const rule1 = rule(1);
+    expect(rule1).toContain(
+      'in a briefing or the `summary`, which only Command sees, name the note; in an issue or a goal change, which may be public, say what the note asks for in your own words.',
+    );
+    expect(rule1).toContain(
+      "Never quote a note in an issue or a goal change, and leave out anything in it about Command's organisation, network, people, customers, dates or plans.",
+    );
+    expect(rule1).toContain(
+      "If what is left can't be understood without such a detail, raise a briefing instead.",
+    );
+  });
+
+  test('rule 9 keeps the note to briefings and points public text to rule 1', () => {
+    expect(rule(9)).toContain(
+      'and with their note, if they have one (a briefing only Command sees; an issue or a goal change never quotes a note, as rule 1 says)',
+    );
+  });
+
+  test.each(['refute.md', 'triage.md'])('%s says the same about issues', (name) => {
+    expect(prompt(name)).toContain(ISSUES);
+  });
+
+  test('triage raises a briefing when the note cannot be worded without such a detail', () => {
+    expect(prompt('triage.md')).toContain(
+      "If what is left can't be understood without such a detail, raise a briefing instead.",
+    );
+  });
+
+  test('the lead still has rules 1 to 12, in order', () => {
+    const numbers = lead
+      .split('\n')
+      .map((l) => /^(\d+)\. /.exec(l)?.[1])
+      .filter((n): n is string => n !== undefined)
+      .map(Number);
+    expect(numbers).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+  });
+});
