@@ -1,3 +1,4 @@
+import { gitlabBasicAuth } from '@jumpmaster/protocol';
 import { type ForgeKind, forgeKind } from '../forge/kind.js';
 import { type ScrubSet, serverScrubSet } from '../forge/scrub-set.js';
 import type { InstallCredential } from './credentials.js';
@@ -187,8 +188,8 @@ export type ResolvedGitlabPats = ReadonlyMap<string, Readonly<GitlabPats>>;
 /**
  * The `gitlab-pat/<zoneId>/<role>` vault entries of every GitLab zone (§9): the author always, the
  * reviewer for a two-bot zone only, and the read deploy token in either mode. A disabled vault, an absent entry and one that won't decrypt
- * all read as missing, without a throw or a log line. Each present value is pinned in the scrub
- * set before resolution returns: configured, long-lived credentials are never evicted.
+ * all read as missing, without a throw or a log line. Each present value, and for the author and
+ * reviewer its git basic-auth form, is pinned in the scrub set before resolution returns: configured, long-lived credentials are never evicted.
  */
 export function resolveGitlabPatEntries(
   zones: readonly ZoneForGitlabPats[],
@@ -203,7 +204,10 @@ export function resolveGitlabPatEntries(
       if (role === 'reviewer' && !isTwoBot(z)) continue;
       const v = readGitlabPat(o.vault, gitlabPatEntryName(z.id, role));
       if (v === undefined) continue;
+      // The token and the git basic-auth form the trooper sends (base64 of `oauth2:<token>`),
+      // which no token shape matches.
       set.pin(v);
+      set.pin(gitlabBasicAuth(v));
       roles[role] = v;
     }
     // The read deploy token, in either mode; an unparseable value is left absent.
