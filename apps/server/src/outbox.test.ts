@@ -2,12 +2,14 @@ import { readFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
 import nock from 'nock';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
+import { getCrewIssueByKey, insertCrewIssue } from './crew/store.js';
 import { MIGRATIONS } from './db/migrations.js';
 import { type Db, openDb } from './db/open.js';
 import {
   getOutbox,
   insertOutbox,
   listOutbox,
+  listWorkItems,
   type OutboxRow,
   setKilled,
   setZoneMode,
@@ -36,7 +38,9 @@ import {
   sanitizeForgeText,
   unsanitizeForgeText,
 } from './outbox.js';
+import { syncDropZone } from './sync.js';
 import { FORGE_WRITES, fakeForgePair } from './test/fakes.js';
+import { makeZone } from './test/fixtures.js';
 import { plus, t0, tmpDbFile } from './test/helpers.js';
 import type { Resolved } from './vault/credentials.js';
 import type { AppEntryRead, AppRole, CredentialRef } from './vault/github-app-entries.js';
@@ -1920,6 +1924,365 @@ describe('resend after a clean read-back (issue #787)', () => {
     raw.close();
     const migrated = openDb(file);
     expect(getOutbox(migrated, 'merge:9:h1')?.resends).toBe(0);
+    migrated.close();
+  });
+});
+
+describe('resend a lost issue filing or review after three clean reads (issue #900)', () => {
+  const at = (minutes: number) => new Date(t0.getTime() + minutes * MIN);
+  const pass = (minutes: number) => resolveUnknown(db, forges, 'main', at(minutes), 45);
+  const passes = async (...minutes: number[]) => {
+    for (const m of minutes) await pass(m);
+  };
+  const issueKey = opKeys.issue('main', 'obj', 'k');
+  const issueOp = () => ({
+    kind: 'create_issue' as const,
+    opKey: issueKey,
+    zoneId: 'main',
+    itemId: null,
+    payload: {
+      title: 'Crew issue',
+      body: 'Do it.',
+      labels: ['agent-ready'],
+      since: t0.toISOString(),
+    },
+  });
+  const marker = opMarker(issueKey);
+  /** An issue carrying `body`'s last line, by `author`, as a late first write would appear. */
+  const lateIssue = (body = `Do it.\n\n${marker}`, author = 'author-bot'): number => {
+    const n = Math.max(0, ...f.state.issues.keys(), ...f.state.pulls.keys()) + 1;
+    f.state.addIssue({
+      number: n,
+      body,
+      author,
+      labels: ['agent-ready'],
+      createdAt: at(0).toISOString(),
+    });
+    return n;
+  };
+  const issuesWithMarker = () =>
+    [...f.state.issues].filter(([, e]) => e.issue?.body.endsWith(marker)).map(([n]) => n);
+
+  /** A create_issue whose answer is lost to a 503: the row is `unknown`, GitHub has no issue. */
+  async function lostIssue(): Promise<void> {
+    f.author.failNext('createIssue', { status: 503 });
+    expect((await runOp(db, forges, issueOp(), t0)).state).toBe('unknown');
+  }
+  /** A post_review whose answer is lost to a 503, on open PR #1 at h1. */
+  async function lostReview(): Promise<void> {
+    f.state.addPull({ headRef: 'agent/issue-1', headSha: 'h1', author: 'author-bot' });
+    f.reviewer.failNext('createReview', { status: 503 });
+    expect((await runOp(db, forges, reviewOp(), t0)).state).toBe('unknown');
+  }
+
+  beforeEach(() => setZoneMode(db, 'main', 'active', t0));
+  afterEach(() => vi.restoreAllMocks());
+
+  describe.each([
+    ['create_issue', lostIssue, 'createIssue', 'findIssueByMarker', () => issueKey],
+    ['post_review', lostReview, 'createReview', 'findReviewByMarker', () => reviewOp().opKey],
+  ] as const)('%s', (_kind, lose, send, read, key) => {
+    test('a 503, the forge well again after 3 minutes: sent again at minute 5', async () => {
+      await lose();
+      f.author.failNext(read, { status: 503 });
+      f.reviewer.failNext(read, { status: 503 });
+      await passes(2, 3, 4);
+      expect(calls(send)).toHaveLength(1);
+      expect(await pass(5)).toBe(1);
+      expect(calls(send)).toHaveLength(2);
+      expect(getOutbox(db, key())).toMatchObject({ state: 'done', resends: 1 });
+    });
+
+    test('a first write that landed is found by the first read, and nothing is resent', async () => {
+      f.author.failNext('createIssue', '5xx-after-success');
+      f.state.addPull({ headRef: 'agent/issue-1', headSha: 'h1', author: 'author-bot' });
+      f.reviewer.failNext('createReview', '5xx-after-success');
+      const op = _kind === 'create_issue' ? issueOp() : reviewOp();
+      expect((await runOp(db, forges, op, t0)).state).toBe('unknown');
+      expect(await pass(2)).toBe(1);
+      await passes(3, 4, 5);
+      expect(calls(send)).toHaveLength(1);
+      expect(getOutbox(db, key())).toMatchObject({ state: 'done', resends: 0 });
+    });
+
+    test('two clean reads, a failed one, then two clean: no send; a third clean: sent', async () => {
+      await lose();
+      await passes(2, 3);
+      f.author.failNext(read, 'throw');
+      f.reviewer.failNext(read, 'throw');
+      await passes(4, 5, 6);
+      expect(calls(send)).toHaveLength(1);
+      expect(getOutbox(db, key())).toMatchObject({ state: 'unknown', resends: 0 });
+      await pass(7);
+      expect(calls(send)).toHaveLength(2);
+      expect(getOutbox(db, key())).toMatchObject({ state: 'done', resends: 1 });
+    });
+
+    test('reads 30 seconds apart count once', async () => {
+      await lose();
+      await passes(2, 2.5, 3, 3.5);
+      expect(calls(send)).toHaveLength(1);
+      await pass(4);
+      expect(calls(send)).toHaveLength(2);
+    });
+
+    test('reads before 2 minutes after the last send do not count', async () => {
+      await lose();
+      await passes(1, 1.5, 2, 3);
+      expect(calls(send)).toHaveLength(1);
+      await pass(4);
+      expect(calls(send)).toHaveLength(2);
+    });
+
+    test('two resends that fail: at most 2, then failed at the deadline as today', async () => {
+      await lose();
+      for (let i = 0; i < 10; i++) {
+        f.author.failNext(send, 'throw');
+        f.reviewer.failNext(send, 'throw');
+      }
+      for (let m = 2; m <= 44; m++) await pass(m);
+      expect(calls(send)).toHaveLength(3);
+      expect(getOutbox(db, key())).toMatchObject({ state: 'unknown', resends: 2 });
+      await pass(46);
+      expect(getOutbox(db, key())).toMatchObject({
+        state: 'failed',
+        error: 'unresolved after 45 min',
+      });
+      expect(calls(send)).toHaveLength(3);
+    });
+
+    test.each([
+      ['the kill switch', () => setKilled(db, true, t0)],
+      ['a paused zone', () => setZoneMode(db, 'main', 'paused', t0)],
+      ['an observing zone', () => setZoneMode(db, 'main', 'observe', t0)],
+    ])('%s: nothing is sent', async (_name, hold) => {
+      await lose();
+      hold();
+      await passes(2, 3, 4, 5, 6);
+      expect(calls(send)).toHaveLength(1);
+      expect(getOutbox(db, key())).toMatchObject({ state: 'unknown', resends: 0 });
+    });
+
+    test('two passes at once send once', async () => {
+      await lose();
+      await passes(2, 3);
+      await Promise.all([pass(4), pass(4)]);
+      expect(calls(send)).toHaveLength(2);
+      expect(getOutbox(db, key())).toMatchObject({ state: 'done', resends: 1 });
+    });
+  });
+
+  test('a filing that landed while the search index lagged 2 minutes is found, not resent', async () => {
+    await lostIssue();
+    await pass(2);
+    lateIssue();
+    await passes(3, 4, 5);
+    expect(calls('createIssue')).toHaveLength(1);
+    expect(getOutbox(db, issueKey)).toMatchObject({ state: 'done', resends: 0 });
+    expect(issuesWithMarker()).toHaveLength(1);
+  });
+
+  test('the wide search finds it on the third read: done, no send', async () => {
+    await lostIssue();
+    // Updated (by the forge's clock) before `since`: only the day-wider search sees it.
+    const n = lateIssue();
+    const e = f.state.issues.get(n);
+    if (e) e.updatedAt = plus(t0, -60 * MIN).toISOString();
+    await passes(2, 3);
+    expect(getOutbox(db, issueKey)?.state).toBe('unknown');
+    expect(await pass(4)).toBe(1);
+    expect(calls('createIssue')).toHaveLength(1);
+    expect(getOutbox(db, issueKey)).toMatchObject({ state: 'done', resends: 0 });
+    expect(JSON.parse(getOutbox(db, issueKey)?.resultJson ?? '{}')).toEqual({ number: n });
+  });
+
+  test('a wide search that fails on the third read is not clean: the count starts again', async () => {
+    await lostIssue();
+    await passes(2, 3);
+    const real = f.author.findIssueByMarker.bind(f.author);
+    let n = 0;
+    f.author.findIssueByMarker = async (m, since) => {
+      if (++n === 2) throw new Error('fake 502 in the wide search');
+      return real(m, since);
+    };
+    await passes(4, 5, 6);
+    expect(calls('createIssue')).toHaveLength(1);
+    await pass(7);
+    expect(calls('createIssue')).toHaveLength(2);
+  });
+
+  test.each([
+    ['its head moved', () => f.state.setHead(1, 'h2')],
+    ['it closed', () => f.state.close(1)],
+  ])('a review is not resent when the PR %s', async (_name, change) => {
+    await lostReview();
+    change();
+    await passes(2, 3, 4, 5, 6, 7);
+    expect(calls('createReview')).toHaveLength(1);
+    expect(getOutbox(db, reviewOp().opKey)).toMatchObject({ state: 'unknown', resends: 0 });
+    await pass(46);
+    expect(getOutbox(db, reviewOp().opKey)?.state).toBe('failed');
+  });
+
+  test('a comment_issue is never resent', async () => {
+    f.state.addIssue({ number: 5 });
+    const op = {
+      kind: 'comment_issue' as const,
+      opKey: 'comment:5',
+      zoneId: 'main',
+      itemId: null,
+      payload: { number: 5, body: 'b', marker: commentMarker('main', 'k') },
+    };
+    f.author.failNext('createIssueComment', { status: 503 });
+    expect((await runOp(db, forges, op, t0)).state).toBe('unknown');
+    for (let m = 2; m <= 44; m++) await pass(m);
+    expect(calls('createIssueComment')).toHaveLength(1);
+    expect(getOutbox(db, op.opKey)).toMatchObject({ state: 'unknown', resends: 0 });
+  });
+
+  describe('a duplicate after the resend', () => {
+    /** Resent at minute 4 as issue #1. */
+    async function resent(): Promise<void> {
+      await lostIssue();
+      await passes(2, 3, 4);
+      expect(getOutbox(db, issueKey)).toMatchObject({ state: 'done', resends: 1 });
+      expect(JSON.parse(getOutbox(db, issueKey)?.resultJson ?? '{}')).toMatchObject({ number: 1 });
+    }
+    const closes = () =>
+      calls('updateIssue').filter((c) => (c.args[1] as { state?: string }).state);
+
+    test('the higher number is closed, once, and one line is logged', async () => {
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await resent();
+      const dup = lateIssue();
+      expect(dup).toBe(2);
+      await passes(5, 6, 7, 10);
+      expect(f.state.issues.get(2)?.state).toBe('closed');
+      expect(f.state.issues.get(1)?.state).toBe('open');
+      expect(closes()).toHaveLength(1);
+      expect(closes()[0]?.args[0]).toBe(2);
+      const lines = logged.mock.calls.map((c) => String(c[0])).filter((l) => l.includes('#2'));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(/duplicate/);
+    });
+
+    test('another issue without the marker is never touched', async () => {
+      await resent();
+      const other = lateIssue(`Other.\n\n${opMarker(opKeys.issue('main', 'obj', 'other'))}`);
+      const human = lateIssue('A human issue.', 'human');
+      const forged = lateIssue(`Forged.\n\n${marker}`, 'stranger');
+      await passes(5, 6, 7);
+      for (const n of [1, other, human, forged]) expect(f.state.issues.get(n)?.state).toBe('open');
+      expect(closes()).toHaveLength(0);
+    });
+
+    test('after 30 minutes nothing is closed', async () => {
+      await resent();
+      await pass(20);
+      lateIssue();
+      await passes(35, 36);
+      expect(f.state.issues.get(2)?.state).toBe('open');
+      expect(closes()).toHaveLength(0);
+    });
+
+    test('a filing never resent is not searched for duplicates', async () => {
+      await runOp(db, forges, issueOp(), t0);
+      lateIssue();
+      await passes(1, 2, 3);
+      expect(f.state.issues.get(2)?.state).toBe('open');
+      expect(closes()).toHaveLength(0);
+    });
+
+    test.each([
+      ['the kill switch', () => setKilled(db, true, t0)],
+      ['a paused zone', () => setZoneMode(db, 'main', 'paused', t0)],
+      ['an observing zone', () => setZoneMode(db, 'main', 'observe', t0)],
+    ])('%s: nothing is closed', async (_name, hold) => {
+      await resent();
+      lateIssue();
+      hold();
+      await passes(5, 6);
+      expect(f.state.issues.get(2)?.state).toBe('open');
+      expect(closes()).toHaveLength(0);
+    });
+
+    test('a lower-numbered first write is kept: the resent issue is closed, the record moves', async () => {
+      insertCrewIssue(db, {
+        zoneId: 'main',
+        key: 'k',
+        source: 'crew-lead',
+        objective: 'obj',
+        title: 'Crew issue',
+        body: 'Do it.',
+        priority: null,
+        state: 'promoted',
+        createdAt: t0.toISOString(),
+      });
+      await lostIssue();
+      // The first write landed as #1, but no search sees it until after the resend files #2.
+      const first = lateIssue();
+      const e = f.state.issues.get(first);
+      if (e) e.updatedAt = plus(t0, -3 * 24 * 60 * MIN).toISOString();
+      await passes(2, 3, 4);
+      expect(JSON.parse(getOutbox(db, issueKey)?.resultJson ?? '{}')).toMatchObject({ number: 2 });
+      expect(getCrewIssueByKey(db, 'main', 'k')?.number).toBe(2);
+      if (e) e.updatedAt = at(5).toISOString();
+      await passes(5, 6);
+      expect(f.state.issues.get(1)?.state).toBe('open');
+      expect(f.state.issues.get(2)?.state).toBe('closed');
+      expect(closes()).toHaveLength(1);
+      expect(getCrewIssueByKey(db, 'main', 'k')?.number).toBe(1);
+      expect(JSON.parse(getOutbox(db, issueKey)?.resultJson ?? '{}')).toMatchObject({ number: 1 });
+    });
+
+    test('the crew issue keeps the recorded number, and intake never starts the duplicate', async () => {
+      insertCrewIssue(db, {
+        zoneId: 'main',
+        key: 'k',
+        source: 'crew-lead',
+        objective: 'obj',
+        title: 'Crew issue',
+        body: 'Do it.',
+        priority: null,
+        state: 'promoted',
+        createdAt: t0.toISOString(),
+      });
+      await resent();
+      expect(getCrewIssueByKey(db, 'main', 'k')?.number).toBe(1);
+      lateIssue();
+      const zone = makeZone({ crew: { ...makeZone().crew, enabled: true } });
+      await syncDropZone(db, forges, zone, at(5));
+      expect(listWorkItems(db, 'main').map((w) => w.issueNumber)).not.toContain(2);
+      await pass(6);
+      expect(f.state.issues.get(2)?.state).toBe('closed');
+      expect(getCrewIssueByKey(db, 'main', 'k')?.number).toBe(1);
+      await syncDropZone(db, forges, zone, at(7));
+      const started = listWorkItems(db, 'main').map((w) => w.issueNumber);
+      expect(started).toContain(1);
+      expect(started).not.toContain(2);
+    });
+  });
+
+  test('the migration reads existing outbox rows with no clean reads', () => {
+    const file = tmpDbFile();
+    const raw = new Database(file);
+    raw.pragma('synchronous = OFF');
+    raw.exec('CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+    for (const m of MIGRATIONS.filter((m) => m.version <= 67)) {
+      raw.exec(m.sql);
+      m.after?.(raw as unknown as Db);
+      raw.prepare('INSERT INTO schema_version VALUES (?, ?)').run(m.version, 'x');
+    }
+    raw.exec(
+      `INSERT INTO outbox (id, op_key, kind, zone_id, payload_json, state, created_at, updated_at)
+       VALUES ('o1', 'issue:main:o:k', 'create_issue', 'main', '{}', 'unknown', 'a', 'a')`,
+    );
+    raw.close();
+    const migrated = openDb(file);
+    expect(getOutbox(migrated, 'issue:main:o:k')).toMatchObject({
+      cleanReads: 0,
+      cleanReadAt: null,
+    });
     migrated.close();
   });
 });

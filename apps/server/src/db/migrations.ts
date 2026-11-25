@@ -1707,6 +1707,16 @@ CREATE TABLE clone_grants (
 );
 `;
 
+/**
+ * v68: the clean read-backs in a row of an `unknown` issue filing or review, and when the last one
+ * counted (#900): three, at least a minute apart, before it may be sent again. Existing rows have
+ * none.
+ */
+const V68_SQL = `
+ALTER TABLE outbox ADD COLUMN clean_reads INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE outbox ADD COLUMN clean_read_at TEXT;
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1775,6 +1785,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 65, sql: V65_SQL },
   { version: 66, sql: V66_SQL },
   { version: 67, sql: V67_SQL },
+  { version: 68, sql: V68_SQL },
 ];
 
 /**

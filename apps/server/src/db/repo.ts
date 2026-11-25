@@ -1168,11 +1168,16 @@ export interface OutboxRow {
   updatedAt: string;
   /** How many times an `unknown` write was sent again after a clean read-back (#787). */
   resends: number;
+  /** Clean read-backs in a row since the last send, for an issue filing or a review (#900). */
+  cleanReads: number;
+  /** When the last of `cleanReads` counted; null when none has. */
+  cleanReadAt: string | null;
 }
 
 const OUTBOX_COLS = `o.id, o.op_key AS opKey, o.kind, o.work_item_id AS workItemId, o.zone_id AS zoneId,
   o.payload_json AS payloadJson, o.state, o.result_json AS resultJson, o.error,
-  o.created_at AS createdAt, o.updated_at AS updatedAt, o.resends`;
+  o.created_at AS createdAt, o.updated_at AS updatedAt, o.resends,
+  o.clean_reads AS cleanReads, o.clean_read_at AS cleanReadAt`;
 
 export function getOutbox(db: Db, opKey: string): OutboxRow | undefined {
   return db.prepare(`SELECT ${OUTBOX_COLS} FROM outbox o WHERE o.op_key = ?`).get(opKey) as
@@ -1183,7 +1188,10 @@ export function getOutbox(db: Db, opKey: string): OutboxRow | undefined {
 /** `INSERT OR IGNORE` on `op_key`; returns whether a row was inserted. */
 export function insertOutbox(
   db: Db,
-  row: Omit<OutboxRow, 'resultJson' | 'error' | 'updatedAt' | 'resends'>,
+  row: Omit<
+    OutboxRow,
+    'resultJson' | 'error' | 'updatedAt' | 'resends' | 'cleanReads' | 'cleanReadAt'
+  >,
 ): boolean {
   const r = db
     .prepare(
@@ -1250,17 +1258,71 @@ export function deleteFailedOutbox(db: Db, itemId: number, kind?: OutboxRow['kin
 
 /**
  * Claims one resend of an `unknown` write: a compare-and-set on its state and the `resends` count
- * the caller read, which counts the resend and stamps `updated_at`. Of two passes that read the
- * same row, one wins; returns whether this caller did.
+ * the caller read, which counts the resend, stamps `updated_at` (the last send) and starts the
+ * clean reads again (#900). Of two passes that read the same row, one wins; returns whether this
+ * caller did.
  */
 export function claimOutboxResend(db: Db, opKey: string, resends: number, now: Date): boolean {
   return (
     db
       .prepare(
-        `UPDATE outbox SET resends = resends + 1, updated_at = ?
+        `UPDATE outbox SET resends = resends + 1, updated_at = ?, clean_reads = 0,
+           clean_read_at = NULL
            WHERE op_key = ? AND state = 'unknown' AND resends = ?`,
       )
       .run(now.toISOString(), opKey, resends).changes === 1
+  );
+}
+
+/**
+ * Counts one clean read-back of an `unknown` write (#900), when the last one counted at least
+ * `gapMs` before `now`: a compare-and-set, so of two passes at once only one counts. Returns the
+ * count after it, or null when this read did not count. Leaves `updated_at` (the last send) alone.
+ */
+export function countOutboxCleanRead(
+  db: Db,
+  opKey: string,
+  now: Date,
+  gapMs: number,
+): number | null {
+  const changed = db
+    .prepare(
+      `UPDATE outbox SET clean_reads = clean_reads + 1, clean_read_at = @at
+         WHERE op_key = @opKey AND state = 'unknown'
+           AND (clean_read_at IS NULL OR clean_read_at <= @earliest)`,
+    )
+    .run({ opKey, at: now.toISOString(), earliest: new Date(now.getTime() - gapMs).toISOString() });
+  if (changed.changes !== 1) return null;
+  return getOutbox(db, opKey)?.cleanReads ?? null;
+}
+
+/** A failed read-back: the clean reads of an `unknown` write start again (#900, D2). */
+export function resetOutboxCleanReads(db: Db, opKey: string): void {
+  db.prepare(
+    `UPDATE outbox SET clean_reads = 0, clean_read_at = NULL WHERE op_key = ? AND state = 'unknown'`,
+  ).run(opKey);
+}
+
+/**
+ * Done issue filings resent at least once (#900) and done since `since` (by `updated_at`), which
+ * the duplicate search looks at.
+ */
+export function listResentIssueFilings(db: Db, zoneId: string, since: Date): OutboxRow[] {
+  return db
+    .prepare(
+      `SELECT ${OUTBOX_COLS} FROM outbox o
+       WHERE o.zone_id = ? AND o.kind = 'create_issue' AND o.state = 'done' AND o.resends > 0
+         AND o.updated_at >= ?
+       ORDER BY o.created_at, o.rowid`,
+    )
+    .all(zoneId, since.toISOString()) as OutboxRow[];
+}
+
+/** Repoints a done row's result, leaving `updated_at` alone (a kept duplicate, #900). */
+export function setOutboxResult(db: Db, opKey: string, resultJson: string): void {
+  db.prepare(`UPDATE outbox SET result_json = ? WHERE op_key = ? AND state = 'done'`).run(
+    resultJson,
+    opKey,
   );
 }
 

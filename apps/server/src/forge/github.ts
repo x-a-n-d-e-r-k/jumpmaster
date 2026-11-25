@@ -284,6 +284,11 @@ export interface Forge {
   }): Promise<{ number: number }>;
   /** An issue this identity created whose body ends with `marker`, updated since `since`. */
   findIssueByMarker(marker: string, since: string): Promise<{ number: number } | null>;
+  /**
+   * Every issue this identity created whose body ends with `marker`, updated since `since`, lowest
+   * number first: how a resent filing's duplicate is found (#900).
+   */
+  findIssuesByMarker(marker: string, since: string): Promise<{ number: number }[]>;
   updateIssue(
     number: number,
     patch: {
@@ -1048,6 +1053,23 @@ export class GitHubForge implements Forge {
       (c) => c.user?.login === me && (c.body ?? '').trimEnd().endsWith(marker),
     );
     return hit ? { id: hit.id } : null;
+  }
+
+  async findIssuesByMarker(marker: string, since: string): Promise<{ number: number }[]> {
+    const me = await this.viewerLogin();
+    const items = await this.octokit.paginate(this.octokit.rest.issues.listForRepo, {
+      owner: this.owner,
+      repo: this.repo,
+      creator: me,
+      state: 'all',
+      since,
+      per_page: 100,
+    });
+    return items
+      .filter((i) => !i.pull_request && lastLine(i.body ?? '') === marker && i.user?.login === me)
+      .map((i) => i.number)
+      .sort((a, b) => a - b)
+      .map((number) => ({ number }));
   }
 
   async findIssueByMarker(marker: string, since: string): Promise<{ number: number } | null> {
