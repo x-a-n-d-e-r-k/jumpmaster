@@ -20,6 +20,7 @@ import {
 import { GitLabForge } from '../forge/gitlab.js';
 import { promptVersions } from '../payloads.js';
 import { usageCfg, zoneWorld } from '../test/fixtures.js';
+import { type GitLabPipelineCase, gitlabPipelineReads } from '../test/gitlab-pipeline-reads.js';
 import { t0 } from '../test/helpers.js';
 import { fingerprint } from './budgets.js';
 import { decide, gateParkAllowable, HOLD_REASON, OVERRIDE_HINT, type Snapshot } from './decide.js';
@@ -1335,5 +1336,43 @@ describe('the goal file (#363)', () => {
       reason: 'protected path: GOAL.md',
     });
     expect(w.f.state.merges).toEqual([]);
+  });
+});
+
+describe('GitLab: the required pipeline (#885)', () => {
+  const gitlabSnap = async (c: GitLabPipelineCase, over: Partial<Snapshot> = {}) => {
+    const r = await gitlabPipelineReads(c);
+    return snap({
+      pr: pr(r.sha),
+      branchSha: r.sha,
+      verdictsOnHead: [approve(r.sha)],
+      checks: r.checks,
+      requiredChecks: r.requiredChecks,
+      ...over,
+    });
+  };
+
+  test('a green pipeline (jobs build, test) merges on a CI-required zone', async () => {
+    const s = await gitlabSnap('green', { headFirstSeenAt: minutesAgo(46) });
+    expect(s.zone.ciRequired).toBe(true);
+    expect(s.requiredChecks).toEqual(['pipeline']);
+    expect(decide(s)).toEqual({ kind: 'merge', sha: s.branchSha });
+  });
+
+  test('no pipeline waits, then parks naming the missing pipeline', async () => {
+    expect(decide(await gitlabSnap('none'))).toEqual({ kind: 'wait', on: 'ci' });
+    expect(decide(await gitlabSnap('none', { headFirstSeenAt: minutesAgo(46) }))).toEqual({
+      kind: 'park',
+      reason: 'no CI result: missing pipeline',
+    });
+  });
+
+  test('a running pipeline waits for CI', async () =>
+    expect(decide(await gitlabSnap('running'))).toEqual({ kind: 'wait', on: 'ci' }));
+
+  test.each(['failed', 'jobless-failed'] as const)('a %s pipeline never merges', async (c) => {
+    const a = decide(await gitlabSnap(c));
+    expect(a.kind).not.toBe('merge');
+    expect(a).toMatchObject({ kind: 'enqueue', role: 'heal' });
   });
 });

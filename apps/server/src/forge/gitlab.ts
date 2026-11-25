@@ -111,7 +111,18 @@
 //   - A pipeline with no current jobs (say one that failed on a .gitlab-ci.yml error) counts by its
 //     own `status`: `success`/`skipped` add nothing, `failed`/`canceled` make the result `failure`
 //     with no named entry in `failed` (there is no job to name), anything else makes it at least
-//     `pending`. It adds nothing to `names` or `queued`, and never makes the result `none`.
+//     `pending`. It adds no job name to `names` and nothing to `queued`, and never makes the
+//     result `none`.
+//   - The required check and the names (#885): `getBranchRules` maps "Pipelines must succeed" to
+//     the one required check `pipeline` (PIPELINE_CHECK), so the operator names no job anywhere.
+//     `checksFor` puts `pipeline` in `names` whenever at least one pipeline ran on the commit
+//     (jobless ones included), and the result's `state` (every pipeline's jobs, jobless pipelines'
+//     own status and the external statuses) says whether it passed. So a green pipeline with jobs
+//     of any name satisfies the required check; no pipeline leaves it missing (the flow waits,
+//     then parks "no CI result: missing pipeline"); a pending or failed one is named but not
+//     `success`. An external status named `pipeline` still counts in `state` and `failed` but
+//     never puts the name in `names`: only a GitLab pipeline does. `failed`, `queued` and
+//     `rerunFailedChecks` keep naming real jobs and statuses.
 //   - Then the commit's external statuses (`GET repository/commits/:sha/statuses`, newest per
 //     name). Dedupe: real GitLab lists CI jobs there too, so a status named like an effective job
 //     is not counted twice.
@@ -196,7 +207,7 @@
 //     still throws.
 //   - `dismissStaleOnPush` is `reset_approvals_on_push` from `GET approvals` (403 or 404: false).
 //   - `requiredChecks` is `['pipeline']` when the project's `only_allow_merge_if_pipeline_succeeds`
-//     is set, else []; `unpinnedChecks` is []; `nonActionsChecks`, `bypass`, `asApp` and
+//     is set, else [] (the name `checksFor` reports for a pipeline: see the checks notes); `unpinnedChecks` is []; `nonActionsChecks`, `bypass`, `asApp` and
 //     `unsupportedRules` are left unset.
 //   - A 403 or 404 on `protected_branches`, or a 403 on the member read, gives `unreachable`. Any
 //     other error (the project read's included) rejects with a GitLabForgeError, as on GitHub.
@@ -1160,7 +1171,15 @@ export class GitLabForge implements Forge {
     const jobNames = new Set(jobs.map((j) => j.name));
     // Real GitLab lists CI jobs among a commit's statuses too: a job's name is counted once.
     const external = statuses.filter((s) => !jobNames.has(s.name));
-    const names = [...jobs.map((j) => j.name), ...external.map((s) => s.name)];
+    // The required check `pipeline` (Pipelines must succeed, `getBranchRules`) is named once any
+    // pipeline runs on `sha`; `state` says whether it passed. An external status never names it.
+    const names = [
+      ...new Set([
+        ...(pipelines.length > 0 ? [PIPELINE_CHECK] : []),
+        ...jobs.map((j) => j.name),
+        ...external.map((s) => s.name).filter((n) => n !== PIPELINE_CHECK),
+      ]),
+    ];
     const failures: FailedCheck[] = [];
     let failed = false;
     let pending = false;
@@ -1333,7 +1352,8 @@ export class GitLabForge implements Forge {
       rules: {
         requiredApprovals,
         dismissStaleOnPush,
-        requiredChecks: project.only_allow_merge_if_pipeline_succeeds === true ? ['pipeline'] : [],
+        requiredChecks:
+          project.only_allow_merge_if_pipeline_succeeds === true ? [PIPELINE_CHECK] : [],
         unpinnedChecks: [],
         viewerCanBypass: canPush,
         viewerIsAdmin: level >= ACCESS_MAINTAINER,
@@ -1538,6 +1558,12 @@ function namespaceOwnerType(p: RawProject): 'User' | 'Organization' {
   if (kind === 'group') return 'Organization';
   throw new GitLabForgeError('GitLabForge: the project namespace kind is neither user nor group');
 }
+
+/**
+ * The required check name standing for GitLab's "Pipelines must succeed": `getBranchRules` requires
+ * it, and `checksFor` names it whenever a pipeline ran on the commit.
+ */
+export const PIPELINE_CHECK = 'pipeline';
 
 /** A pipeline id GitLab gave, as a path segment; anything but a positive integer is refused. */
 function positiveId(id: unknown): string {
