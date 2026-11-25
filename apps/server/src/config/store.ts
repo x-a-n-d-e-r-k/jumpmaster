@@ -45,7 +45,11 @@ import {
   readAppEntry,
   serializeAppEntry,
 } from '../vault/github-app-entries.js';
-import { type GitLabPatRole, gitlabPatEntryName } from '../vault/gitlab-pat-entries.js';
+import {
+  type GitLabPatRole,
+  gitlabPatEntryName,
+  gitlabReadEntryName,
+} from '../vault/gitlab-pat-entries.js';
 import { type CredentialProblem, credentialProblems } from '../vault/problems.js';
 import {
   type ResolvedApps,
@@ -943,9 +947,46 @@ export class ConfigStore implements ConfigSource {
     value: string,
     test: { result: string; login?: string },
   ): { ok: true; meta: VaultMeta } | { ok: false; issues: ConfigIssue[] } {
+    return this.putGitlabEntry(gitlabPatEntryName(zoneId, role), value, test);
+  }
+
+  /**
+   * Removes a GitLab zone's `gitlab-pat/<zoneId>/<role>` vault entry and swaps the credentials:
+   * when the new set does not load, the entry is put back.
+   */
+  deleteGitlabPat(
+    zoneId: string,
+    role: GitLabPatRole,
+  ): { ok: true; deleted: boolean } | { ok: false; issues: ConfigIssue[] } {
+    return this.deleteGitlabEntry(gitlabPatEntryName(zoneId, role));
+  }
+
+  /**
+   * Stores a GitLab zone's read deploy token `gitlab-pat/<zoneId>/read` (`<username>:<token>`,
+   * issue #866) with its test result and swaps it in, as `putGitlabPat` does.
+   */
+  putGitlabRead(
+    zoneId: string,
+    value: string,
+    test: { result: string },
+  ): { ok: true; meta: VaultMeta } | { ok: false; issues: ConfigIssue[] } {
+    return this.putGitlabEntry(gitlabReadEntryName(zoneId), value, test);
+  }
+
+  /** Removes a GitLab zone's `gitlab-pat/<zoneId>/read` vault entry, as `deleteGitlabPat` does. */
+  deleteGitlabRead(
+    zoneId: string,
+  ): { ok: true; deleted: boolean } | { ok: false; issues: ConfigIssue[] } {
+    return this.deleteGitlabEntry(gitlabReadEntryName(zoneId));
+  }
+
+  private putGitlabEntry(
+    name: string,
+    value: string,
+    test: { result: string; login?: string },
+  ): { ok: true; meta: VaultMeta } | { ok: false; issues: ConfigIssue[] } {
     const vault = this.vault();
     if (vault === 'disabled') return { ok: false, issues: [{ path: '', message: VAULT_DISABLED }] };
-    const name = gitlabPatEntryName(zoneId, role);
     const before = vault.snapshot(name);
     const now = this.o.now();
     const meta = vault.put(name, value, { now });
@@ -958,17 +999,11 @@ export class ConfigStore implements ConfigSource {
     return { ok: true, meta: vault.meta(name) ?? meta };
   }
 
-  /**
-   * Removes a GitLab zone's `gitlab-pat/<zoneId>/<role>` vault entry and swaps the credentials:
-   * when the new set does not load, the entry is put back.
-   */
-  deleteGitlabPat(
-    zoneId: string,
-    role: GitLabPatRole,
+  private deleteGitlabEntry(
+    name: string,
   ): { ok: true; deleted: boolean } | { ok: false; issues: ConfigIssue[] } {
     const vault = this.vault();
     if (vault === 'disabled') return { ok: false, issues: [{ path: '', message: VAULT_DISABLED }] };
-    const name = gitlabPatEntryName(zoneId, role);
     const before = vault.snapshot(name);
     const deleted = vault.delete(name);
     const r = this.refreshSecrets();

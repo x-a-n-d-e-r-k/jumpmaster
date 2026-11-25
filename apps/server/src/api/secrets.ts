@@ -34,11 +34,16 @@ import {
 } from '../vault/github-app-entries.js';
 import {
   GITLAB_PAT_ROLES,
+  GITLAB_READ_BAD_VALUE,
   type GitLabPatRole,
   type GitLabPatZone,
   gitlabPatEntryName,
+  gitlabReadEntryName,
   parseGitlabPatEntryName,
+  parseGitlabReadEntryName,
+  parseGitlabReadValue,
   testGitlabPatEntry,
+  testGitlabReadEntry,
 } from '../vault/gitlab-pat-entries.js';
 import { credentialProblems } from '../vault/problems.js';
 import { fingerprintOf } from '../vault/vault.js';
@@ -63,6 +68,11 @@ export type SecretRouteDeps = {
   testApp?: typeof testAppEntry;
   /** The test of a GitLab zone's token (default: `testGitlabPatEntry`, `GET /user` on its instance). */
   testGitlabPat?: (value: string, zone: GitLabPatZone) => ReturnType<typeof testGitlabPatEntry>;
+  /**
+   * The test of a GitLab zone's read deploy token (default: `testGitlabReadEntry`, the smart-HTTP
+   * `info/refs` probe, its secret forms in the server scrub set).
+   */
+  testGitlabRead?: (value: string, zone: GitLabPatZone) => ReturnType<typeof testGitlabReadEntry>;
 };
 
 const TEST_TIMEOUT_MS = 30_000;
@@ -90,7 +100,7 @@ const BAD_APP_NAME =
   'an app entry is github-app/<owner>/<role>: a lowercase GitHub owner name, and author or reviewer';
 
 const BAD_GITLAB_NAME =
-  'a GitLab token is gitlab-pat/<zone>/<role>: a project id, and author or reviewer';
+  'a GitLab token is gitlab-pat/<zone>/<role>: a project id, and author, reviewer or read';
 const UNKNOWN_GITLAB_ZONE = 'unknown GitLab project';
 const STARTER_NO_REVIEWER = 'a starter project has no reviewer token';
 /** A GitLab token's body: one line, the token only. */
@@ -248,6 +258,9 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
   const forge = deps.credentialForge ?? defaultForge;
   const testApp = deps.testApp ?? testAppEntry;
   const testGitlabPat = deps.testGitlabPat ?? ((value, zone) => testGitlabPatEntry(value, zone));
+  const testGitlabRead =
+    deps.testGitlabRead ??
+    ((value, zone) => testGitlabReadEntry(value, zone, { scrub: serverScrubSet }));
   /** One write per name at a time: a PUT's test, store and swap finish before the next begins. */
   const queues = new Map<string, Promise<unknown>>();
   const serialized = <T>(name: string, fn: () => Promise<T>): Promise<T> => {
@@ -633,13 +646,19 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
   );
 
   /**
-   * A GitLab zone's `gitlab-pat/<zone>/<role>` token (issue #776, §9): set, test and remove. The
+   * A GitLab zone's `gitlab-pat/<zone>/<role>` token (issue #776, §9) and its read deploy token
+   * `gitlab-pat/<zone>/read` (`<username>:<token>`, issue #866): set, test and remove. The
    * zone and role are parsed first and every refusal is fixed text, never the input (a token in
    * the wrong slot would leak); answers and audits carry names and fingerprints only.
    */
   type GitlabParams = { Params: { zone: string; role: string } };
   const gitlabTarget = (req: FastifyRequest<GitlabParams>, reply: FastifyReply) => {
-    const parsed = parseGitlabPatEntryName(`gitlab-pat/${req.params.zone}/${req.params.role}`);
+    const raw = `gitlab-pat/${req.params.zone}/${req.params.role}`;
+    // The read deploy token (issue #866) is not a role: it has its own value form and test.
+    const read = parseGitlabReadEntryName(raw);
+    const parsed = read
+      ? { zoneId: read.zoneId, role: 'read' as const }
+      : parseGitlabPatEntryName(raw);
     if (!parsed) {
       void reply.code(400).send({ error: BAD_GITLAB_NAME });
       return undefined;
@@ -652,7 +671,10 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
     return {
       zone,
       role: parsed.role,
-      name: gitlabPatEntryName(parsed.zoneId, parsed.role),
+      name:
+        parsed.role === 'read'
+          ? gitlabReadEntryName(parsed.zoneId)
+          : gitlabPatEntryName(parsed.zoneId, parsed.role),
       starterReviewer: parsed.role === 'reviewer' && zone.identity === 'starter',
     };
   };
@@ -677,11 +699,14 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
     if (/\s/.test(value))
       return reply.code(400).send({ error: 'a credential is one line with no whitespace' });
     const { zone, role, name } = target;
+    if (role === 'read' && !parseGitlabReadValue(value))
+      return reply.code(400).send({ error: GITLAB_READ_BAD_VALUE });
     return serialized(name, async () => {
       if (store.vault() === 'disabled') return reply.code(409).send({ error: VAULT_DISABLED });
       if (target.starterReviewer) return reply.code(409).send({ error: STARTER_NO_REVIEWER });
+      // A read value's fingerprint is of `<username>:<token>`, as resolution computes it.
       const fingerprint = fingerprintOf(value);
-      const t = await testGitlabPat(value, zone);
+      const t = await (role === 'read' ? testGitlabRead : testGitlabPat)(value, zone);
       if (!t.ok) {
         audit(req, 'secret.set', {
           name,
@@ -690,10 +715,13 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
         });
         return reply.code(422).send(gitlabRefusal(t));
       }
-      const stored = store.putGitlabPat(zone.id, role, value, {
-        result: t.result,
-        ...(t.login ? { login: t.login } : {}),
-      });
+      const stored =
+        role === 'read'
+          ? store.putGitlabRead(zone.id, value, { result: t.result })
+          : store.putGitlabPat(zone.id, role, value, {
+              result: t.result,
+              ...(t.login ? { login: t.login } : {}),
+            });
       if (!stored.ok) {
         audit(req, 'secret.set', { name, fingerprint, result: 'refused' });
         return reply.code(400).send({ issues: stored.issues });
@@ -722,13 +750,16 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
         const vault = store.vault();
         if (vault === 'disabled') return reply.code(409).send({ error: VAULT_DISABLED });
         if (target.starterReviewer) return reply.code(409).send({ error: STARTER_NO_REVIEWER });
-        const value = store.resolvedGitlabPats().get(zone.id)?.[role];
+        const pats = store.resolvedGitlabPats().get(zone.id);
+        const read = pats?.read;
+        const value =
+          role === 'read' ? (read ? `${read.username}:${read.token}` : undefined) : pats?.[role];
         const meta = vault.meta(name);
         if (value === undefined || !meta)
           return reply.code(409).send({
             error: meta ? 'the token does not decrypt with this vault key' : 'the token is not set',
           });
-        const t = await testGitlabPat(value, zone);
+        const t = await (role === 'read' ? testGitlabRead : testGitlabPat)(value, zone);
         const words = t.ok ? t.result : `failed (${t.status ?? 'no answer'})`;
         vault.recordTest(name, {
           at: deps.now(),
@@ -754,6 +785,16 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       if (vault === 'disabled') return reply.code(409).send({ error: VAULT_DISABLED });
       const entry = vault.meta(name);
       if (!entry) return reply.code(409).send({ error: 'the vault holds no such token' });
+      if (role === 'read') {
+        // Never refused for parking: without it the clone fetches with the author token.
+        const done = store.deleteGitlabRead(zone.id);
+        if (!done.ok) {
+          audit(req, 'secret.remove', { name, fingerprint: entry.fingerprint, result: 'refused' });
+          return reply.code(400).send({ issues: done.issues });
+        }
+        audit(req, 'secret.remove', { name, fingerprint: entry.fingerprint, result: 'removed' });
+        return { removed: done.deleted, name, problems: store.problems() };
+      }
       // Refused while a zone needs the entry: judged on the resolved tokens without it.
       const pats = store.resolvedGitlabPats();
       const { [role]: _gone, ...rest } = pats.get(zone.id) ?? {};

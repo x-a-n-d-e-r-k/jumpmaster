@@ -28,12 +28,12 @@ import { scrub } from '../scrub.js';
 import { statusInputOf, statusOf } from '../status.js';
 import { plus, t0, tmpDbFile } from '../test/helpers.js';
 import { appEntryName, serializeAppEntry } from '../vault/github-app-entries.js';
-import { gitlabPatEntryName } from '../vault/gitlab-pat-entries.js';
-import { openVault } from '../vault/vault.js';
+import { gitlabPatEntryName, gitlabReadEntryName } from '../vault/gitlab-pat-entries.js';
+import { fingerprintOf, openVault } from '../vault/vault.js';
 import { type BootConfig, loadBoot, RESTART_PATHS } from './boot.js';
 import { mergeConfigPatch, mergePatch } from './diff.js';
 import { canonicalJson, getSetting, hashOf } from './revisions.js';
-import { ConfigStore, type StoreOptions, startVault } from './store.js';
+import { ConfigStore, type StoreOptions, startVault, VAULT_DISABLED } from './store.js';
 
 const env: NodeJS.ProcessEnv = {
   JM_CLAUDE_TOKEN: 'claude-secret-value-1',
@@ -1596,6 +1596,73 @@ describe('GitHub App entries in the store (§4.4)', () => {
       const reviewer = gitlabPatEntryName('web', 'reviewer');
       expect(store.putGitlabPat('web', 'reviewer', AUTHOR_2, { result: 'ok' }).ok).toBe(false);
       expect(vault.snapshot(reviewer)).toBeUndefined();
+    });
+  });
+
+  describe('putGitlabRead and deleteGitlabRead (issue #866)', () => {
+    const glZone = zone('web', {
+      repo: 'group/sub/web',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+    });
+    const USER = 'gitlab+deploy-token-42';
+    const TOKEN = 'plain-gitlab-deploy-value-000001';
+    const TOKEN_2 = 'plain-gitlab-deploy-value-000002';
+    const name = gitlabReadEntryName('web');
+
+    test('store, record the test, swap in a replacement and remove; read reflects each change', () => {
+      const { vault, open } = withVault({ dropZones: [glZone] });
+      const store = open();
+      expect(store.resolvedGitlabPats().get('web')?.read).toBeUndefined();
+      const r = store.putGitlabRead('web', `${USER}:${TOKEN}`, { result: 'ok' });
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.meta.fingerprint).toBe(fingerprintOf(`${USER}:${TOKEN}`));
+      expect(store.resolvedGitlabPats().get('web')?.read).toEqual({ username: USER, token: TOKEN });
+      expect(vault.meta(name)).toMatchObject({ testResult: 'ok', testedAt: t0.toISOString() });
+      expect(store.putGitlabRead('web', `${USER}:${TOKEN_2}`, { result: 'ok' }).ok).toBe(true);
+      expect(store.resolvedGitlabPats().get('web')?.read).toEqual({
+        username: USER,
+        token: TOKEN_2,
+      });
+      expect(store.deleteGitlabRead('web')).toEqual({ ok: true, deleted: true });
+      expect(vault.meta(name)).toBeUndefined();
+      expect(store.resolvedGitlabPats().get('web')?.read).toBeUndefined();
+      expect(store.deleteGitlabRead('web')).toEqual({ ok: true, deleted: false });
+    });
+
+    test('a refresh that fails puts the previous row back, for a put and for a delete', () => {
+      const { vault, open, secrets } = withVault({
+        dropZones: [glZone, zone('main', { repo: 'acme/main' })],
+      });
+      vault.put(name, `${USER}:${TOKEN}`, { now: t0 });
+      vault.recordTest(name, { at: t0, result: 'ok' });
+      const store = open();
+      const before = vault.snapshot(name);
+      mkdirSync(join(secrets, 'github-app', 'acme'), { recursive: true });
+      writeFileSync(
+        join(secrets, 'github-app', 'acme', 'author.json'),
+        appEntry.replace('"42"', '"forty-two"'),
+        { mode: 0o600 },
+      );
+      const put = store.putGitlabRead('web', `${USER}:${TOKEN_2}`, { result: 'ok' });
+      expect(put.ok).toBe(false);
+      expect(vault.snapshot(name)).toEqual(before);
+      expect(JSON.stringify(put)).not.toContain(TOKEN_2);
+      const del = store.deleteGitlabRead('web');
+      expect(del.ok).toBe(false);
+      expect(vault.snapshot(name)).toEqual(before);
+      expect(store.resolvedGitlabPats().get('web')?.read).toEqual({ username: USER, token: TOKEN });
+    });
+
+    test('refused with VAULT_DISABLED on a disabled vault', () => {
+      const w = world({ dropZones: [glZone] });
+      const store = w.open({ vault: 'disabled' });
+      const issues = [{ path: '', message: VAULT_DISABLED }];
+      expect(store.putGitlabRead('web', `${USER}:${TOKEN}`, { result: 'ok' })).toEqual({
+        ok: false,
+        issues,
+      });
+      expect(store.deleteGitlabRead('web')).toEqual({ ok: false, issues });
     });
   });
 
