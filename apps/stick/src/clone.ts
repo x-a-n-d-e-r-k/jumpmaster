@@ -319,7 +319,7 @@ export async function runClone(
       const { exitCode } = await h.wait().catch(() => ({ exitCode: -1 }));
       if (stopped) return halt();
       // The stderr tail is for the stick's log only, redacted; never returned or posted.
-      say('no result', { exitCode, stderr: h.stderrTail().slice(-STDERR_LOG_CHARS) });
+      say('no result', { exitCode, stderr: scrub(h.stderrTail()).slice(-STDERR_LOG_CHARS) });
       return fail(`clone container exited without a result (exit ${exitCode})`, true);
     };
     const finish = (line: string): Promise<CloneOutcome> | CloneOutcome => {

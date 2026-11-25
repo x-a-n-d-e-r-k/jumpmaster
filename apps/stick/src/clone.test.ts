@@ -429,6 +429,19 @@ describe('runClone', () => {
       expect(s.logs.join('\n')).toContain('[REDACTED]');
       for (const text of [reason, ...s.logs]) expect(text).not.toContain(leaked);
     });
+    test('a token cut by the stderr truncation does not leak its tail', async () => {
+      const stderr = `fatal: ${TOKEN}${'x'.repeat(1990)}`;
+      const s = setup({ before: [READY_LINE], after: [], stderr });
+      await s.run();
+      for (const l of s.logs) expect(l).not.toContain(TOKEN.slice(-10));
+    });
+    test('a token straddling the stderr log cut never appears in part', async () => {
+      // 3000 chars; the cut at -2000 lands 10 chars into TOKEN.
+      const stderr = `${'x'.repeat(990)}${TOKEN}${'y'.repeat(1980)}`;
+      const s = setup({ before: [READY_LINE], after: [], stderr });
+      await s.run();
+      for (const l of s.logs) expect(l).not.toContain(TOKEN.slice(10));
+    });
   });
 
   test('the real sweep keeps the clone network while it is active and removes it after', async () => {
