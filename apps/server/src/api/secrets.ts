@@ -76,6 +76,14 @@ export type SecretRouteDeps = {
 };
 
 const TEST_TIMEOUT_MS = 30_000;
+
+/**
+ * The 409 for removing a credential some project still needs (a vault entry or a GitLab token).
+ * Prose System, Credentials shows as it is (and ctl prints), so it says projects; nothing parses
+ * it (#872).
+ */
+export const neededCredentialError = (name: string): string =>
+  `projects need ${name}: removing it would park them`;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const PutBody = z.strictObject({
   value: z.string().min(1).max(MAX_SECRET_FILE_BYTES),
@@ -807,7 +815,7 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
       ).filter((p) => p.credential === name && p.kind === 'missing');
       if (created.length > 0)
         return reply.code(409).send({
-          error: `zones need ${name}: removing it would park them`,
+          error: neededCredentialError(name),
           problems: created,
         });
       const done = store.deleteGitlabPat(zone.id, role);
@@ -849,7 +857,7 @@ export function registerSecretRoutes(scope: FastifyInstance, deps: SecretRouteDe
         .filter((p) => p.credential === name && p.kind === 'missing');
       if (created.length > 0)
         return reply.code(409).send({
-          error: `zones need ${name}: removing it would park them`,
+          error: neededCredentialError(name),
           problems: created,
         });
       const done = store.deleteCredential(name);

@@ -44,6 +44,12 @@ export const ISSUE_SPEC_HEADINGS = [
 /** Filings one zone may make in a trailing hour (counted in `crew_issues`). */
 export const INTAKE_PER_HOUR = 10;
 
+/**
+ * The 429 past the hourly limit. Prose the owner reads on the New issue page (and ctl prints), so
+ * it says project; nothing parses it (#872).
+ */
+export const INTAKE_LIMIT_ERROR = `at most ${INTAKE_PER_HOUR} intake issues per project per hour; try again later`;
+
 const item = (max: number) => z.string().trim().min(1).max(max);
 
 export const GoalStubSchema = z.strictObject({
@@ -281,7 +287,7 @@ export async function fileIntakeIssue(
     if (filingsLastHour(db, zone.id, now) >= INTAKE_PER_HOUR)
       return {
         status: 429,
-        error: `at most ${INTAKE_PER_HOUR} intake issues per zone per hour; try again later`,
+        error: INTAKE_LIMIT_ERROR,
       };
     const id = insertCrewIssue(db, {
       zoneId: zone.id,

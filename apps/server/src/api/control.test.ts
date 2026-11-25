@@ -912,6 +912,9 @@ describe('intake routes', () => {
       ...issue,
     });
     expect(r.statusCode).toBe(429);
+    // Prose, not a key: the owner reads it on the New issue page, so it says project (#872).
+    expect(r.json().error).toBe('at most 10 intake issues per project per hour; try again later');
+    expect(r.json().error).not.toMatch(/\bzones?\b/i);
     expect(creates(f)).toBe(10);
     // The count is kept in the database, so a restart does not reset it.
     await app?.close();
@@ -3570,7 +3573,7 @@ describe('vault routes: turn on, prefer, copy, turn off (#101)', () => {
     expect(put.statusCode).toBe(200);
     const rm = await del('/api/control/secrets/githubAuthorToken');
     expect(rm.statusCode).toBe(409);
-    expect(rm.json().error).toContain('would park');
+    expect(rm.json().error).toBe('projects need githubAuthorToken: removing it would park them');
   });
 });
 
