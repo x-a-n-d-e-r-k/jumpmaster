@@ -54,6 +54,8 @@ function run(o: {
   dry?: string;
   /** Bytes `inspect --raw` serves per ref; the joined index is stored under its digest. */
   store?: Record<string, string>;
+  /** Errors `inspect --raw` prints (and fails with) for a ref's first reads, one per read. */
+  fails?: Record<string, string[]>;
 }) {
   const dir = mkdtempSync(join(tmpdir(), 'jm-index-'));
   mkdirSync(join(dir, 'digests'));
@@ -70,6 +72,7 @@ function run(o: {
   };
   writeFileSync(join(dir, 'dry.json'), `${dry}\n`);
   writeFileSync(join(dir, 'store.json'), JSON.stringify(store));
+  writeFileSync(join(dir, 'fails.json'), JSON.stringify(o.fails ?? {}));
   writeFileSync(
     join(dir, 'bin/docker'),
     `#!/bin/sh
@@ -77,12 +80,19 @@ echo "$*" >> "${dir}/calls"
 case "$*" in
   "buildx imagetools create --dry-run "*) cat "${dir}/dry.json" ;;
   "buildx imagetools create "*) exit 0 ;;
-  "buildx imagetools inspect "*" --raw") jq -j --arg r "$4" '.[$r] // error("no manifest")' "${dir}/store.json" ;;
+  "buildx imagetools inspect "*" --raw")
+    n="$(grep -cxF "$*" "${dir}/calls")"
+    e="$(jq -r --arg r "$4" --argjson n "$n" '.[$r][$n - 1] // empty' "${dir}/fails.json")"
+    if [ -n "$e" ]; then echo "$e" >&2; exit 1; fi
+    jq -j --arg r "$4" '.[$r] // error("no manifest")' "${dir}/store.json" ;;
   *) echo "unexpected docker $*" >&2; exit 9 ;;
 esac
 `,
     { mode: 0o755 },
   );
+  writeFileSync(join(dir, 'bin/sleep'), `#!/bin/sh\necho "sleep $*" >> "${dir}/calls"\n`, {
+    mode: 0o755,
+  });
   writeFileSync(join(dir, 'out'), '');
   const r = spawnSync('bash', ['--norc', '--noprofile', SCRIPT], {
     cwd: dir,
@@ -190,6 +200,78 @@ describe('release-index.sh', () => {
       store: { [`${REG}/${NAME}@${d('1')}`]: AMD_BUILD, [`${REG}/${NAME}@${d('2')}`]: ARM_BUILD },
     });
     expect(missing.status).not.toBe(0);
+  });
+
+  describe('the read-back after the push waits for the registry to serve the index', () => {
+    const at = `${REG}/${NAME}@${sha(JOINED)}`;
+    const notFound = `ERROR: ${at}: not found`;
+    const readBack = `buildx imagetools inspect ${at} --raw`;
+    const summary = (calls: string[]) => ({
+      reads: calls.filter((c) => c === readBack).length,
+      sleeps: calls.filter((c) => c.startsWith('sleep')),
+      pushes: calls.filter((c) => c.startsWith('buildx imagetools create -t')).length,
+    });
+
+    test('"not found" twice, then the manifest: goes on after two 5 s waits', () => {
+      const r = run({ release: true, fails: { [at]: [notFound, notFound] } });
+      expect(r.status, r.stdout).toBe(0);
+      expect(r.out).toBe(`${NAME}=${sha(JOINED)}\n`);
+      expect(summary(r.calls)).toEqual({ reads: 3, sleeps: ['sleep 5', 'sleep 5'], pushes: 1 });
+    });
+
+    test('"not found" six times: fails with that error after six reads', () => {
+      const r = run({ release: true, fails: { [at]: Array(6).fill(notFound) } });
+      expect(r.status).not.toBe(0);
+      expect(r.out).toBe('');
+      expect(r.stdout).toContain(notFound);
+      expect(summary(r.calls)).toEqual({ reads: 6, sleeps: Array(5).fill('sleep 5'), pushes: 1 });
+    });
+
+    test('a manifest that appears on the sixth read still passes', () => {
+      const r = run({ release: true, fails: { [at]: Array(5).fill(notFound) } });
+      expect(r.status, r.stdout).toBe(0);
+      expect(summary(r.calls)).toEqual({ reads: 6, sleeps: Array(5).fill('sleep 5'), pushes: 1 });
+    });
+
+    test('"denied" fails at once', () => {
+      const denied = `ERROR: ${at}: denied: permission_denied`;
+      const r = run({ release: true, fails: { [at]: [denied] } });
+      expect(r.status).not.toBe(0);
+      expect(r.out).toBe('');
+      expect(r.stdout).toContain(denied);
+      expect(summary(r.calls)).toEqual({ reads: 1, sleeps: [], pushes: 1 });
+    });
+
+    test('a network error fails at once', () => {
+      const r = run({
+        release: true,
+        fails: { [at]: ['ERROR: dial tcp: lookup ghcr.io: no such host'] },
+      });
+      expect(r.status).not.toBe(0);
+      expect(summary(r.calls)).toEqual({ reads: 1, sleeps: [], pushes: 1 });
+    });
+
+    test('a manifest that is read but differs fails at once, even after a "not found"', () => {
+      const store = {
+        [`${REG}/${NAME}@${d('1')}`]: AMD_BUILD,
+        [`${REG}/${NAME}@${d('2')}`]: ARM_BUILD,
+        [at]: JSON.stringify(JSON.parse(JOINED)),
+      };
+      const r = run({ release: true, store, fails: { [at]: [notFound] } });
+      expect(r.status).not.toBe(0);
+      expect(r.out).toBe('');
+      expect(r.stdout).toContain('does not serve the planned index');
+      expect(summary(r.calls)).toEqual({ reads: 2, sleeps: ['sleep 5'], pushes: 1 });
+    });
+
+    test('a source read that fails "not found" before the push fails at once, with no push', () => {
+      const src = `${REG}/${NAME}@${d('2')}`;
+      const r = run({ release: true, fails: { [src]: [`ERROR: ${src}: not found`] } });
+      expect(r.status).not.toBe(0);
+      expect(r.out).toBe('');
+      expect(r.calls.filter((c) => c === `buildx imagetools inspect ${src} --raw`)).toHaveLength(1);
+      expect(summary(r.calls)).toEqual({ reads: 0, sleeps: [], pushes: 0 });
+    });
   });
 
   test('a per-arch build that is not the arch it claims is refused', () => {
