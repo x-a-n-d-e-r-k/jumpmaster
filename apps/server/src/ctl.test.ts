@@ -850,11 +850,43 @@ describe('ctl secrets (Task 4)', () => {
     );
     // The usage names the new forms.
     for (const form of [
-      'ctl secrets set gitlab-pat/<zone>/<role>',
-      'ctl secrets test gitlab-pat/<zone>/<role>',
-      'ctl secrets remove gitlab-pat/<zone>/<role>',
+      'ctl secrets set gitlab-pat/<zone>/<role|read>',
+      'ctl secrets test gitlab-pat/<zone>/<role|read>',
+      'ctl secrets remove gitlab-pat/<zone>/<role|read>',
     ])
       expect(SECRETS_USAGE).toContain(form);
+  });
+
+  test('secrets set, test and remove gitlab-pat/<zone>/read reach the read deploy token routes (issue #866)', async () => {
+    const VALUE = ['gitlab+deploy-token-7:gldt', 'C'.repeat(20)].join('-');
+    const fromStdin = await run(['secrets', 'set', 'gitlab-pat/web/read'], `${VALUE}\n`);
+    expect(fromStdin.code).toBe(0);
+    expect(fromStdin.calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets/gitlab-pat/web/read',
+      init: { method: 'PUT' },
+    });
+    expect(bodyOf(fromStdin)).toEqual({ value: VALUE });
+    const file = join(mkdtempSync(join(tmpdir(), 'jm-ctl-gitlab-read-')), 'v');
+    writeFileSync(file, `${VALUE}\n`, { mode: 0o600 });
+    const fromFile = await run(['secrets', 'set', 'gitlab-pat/web/read', '--from-file', file], '');
+    expect(fromFile.calls[0]?.url).toBe(
+      'http://127.0.0.1:7420/api/control/secrets/gitlab-pat/web/read',
+    );
+    expect(bodyOf(fromFile)).toEqual({ value: VALUE });
+    expect((await run(['secrets', 'test', 'gitlab-pat/web/read'])).calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets/gitlab-pat/web/read/test',
+      init: { method: 'POST' },
+    });
+    expect((await run(['secrets', 'remove', 'gitlab-pat/web/read'])).calls[0]).toMatchObject({
+      url: 'http://127.0.0.1:7420/api/control/secrets/gitlab-pat/web/read',
+      init: { method: 'DELETE' },
+    });
+    const argv = await run(['secrets', 'set', 'gitlab-pat/web/read', VALUE]);
+    expect(argv.code).toBe(2);
+    expect(argv.calls).toHaveLength(0);
+    for (const r of [fromStdin, fromFile, argv])
+      expect(`${r.out.join('\n')}${r.err.join('\n')}${r.calls[0]?.url ?? ''}`).not.toContain(VALUE);
+    expect(SECRETS_USAGE).toContain('gitlab-pat/<zone>/<role|read>');
   });
 
   test('secrets remove github-app/<owner>/<role> reaches the app entry remove route (issue #599)', async () => {

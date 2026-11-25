@@ -9,6 +9,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
+import { gitlabBasicAuthAs } from '@jumpmaster/protocol';
 import Fastify, { type FastifyInstance } from 'fastify';
 import nock from 'nock';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
@@ -25,6 +26,8 @@ import {
   GITLAB_PAT_FORBIDDEN,
   GITLAB_PAT_REJECTED,
   GITLAB_PAT_UNREACHABLE,
+  GITLAB_READ_BAD_VALUE,
+  GITLAB_READ_REJECTED,
 } from '../vault/gitlab-pat-entries.js';
 import { fingerprintOf, openVault, type Vault } from '../vault/vault.js';
 import { type ControlDeps, registerControlRoutes } from './control.js';
@@ -40,7 +43,25 @@ const REVIEWER = glpat('R');
 const WRONG = glpat('W');
 const NOSCOPE = glpat('N');
 const LEFTOVER = glpat('L');
-const ALL = [AUTHOR, REVIEWER, WRONG, NOSCOPE, LEFTOVER];
+const D_USER = 'gitlab+deploy-token-42';
+const D_TOKEN = ['gldt', 'D'.repeat(20)].join('-');
+const D_VALUE = `${D_USER}:${D_TOKEN}`;
+const D_BASIC = gitlabBasicAuthAs(D_USER, D_TOKEN);
+const D_WRONG_TOKEN = ['gldt', 'X'.repeat(20)].join('-');
+const D_WRONG = `${D_USER}:${D_WRONG_TOKEN}`;
+const ALL = [
+  AUTHOR,
+  REVIEWER,
+  WRONG,
+  NOSCOPE,
+  LEFTOVER,
+  D_TOKEN,
+  D_VALUE,
+  D_BASIC,
+  D_WRONG_TOKEN,
+  D_WRONG,
+  gitlabBasicAuthAs(D_USER, D_WRONG_TOKEN),
+];
 
 beforeAll(() => nock.disableNetConnect());
 afterAll(() => nock.enableNetConnect());
@@ -437,6 +458,213 @@ describe('GET /api/control/secrets lists gitlabPats (issue #776)', () => {
     ]);
     expect(JSON.stringify(second.json().gitlabPats)).not.toContain('"value"');
     expectNoTokens(w, [first.body, second.body]);
+  });
+});
+
+/**
+ * The smart-HTTP probe `testGitlabReadEntry` sends for `project`, matched on the basic auth of
+ * `value`: 200 with the upload-pack advertisement for `D_VALUE`, 401 for any other value.
+ */
+function infoRefs(project: string, value = D_VALUE) {
+  const [user = '', token = ''] = value.split(':');
+  const probe = nock(BASE, {
+    reqheaders: { authorization: `Basic ${gitlabBasicAuthAs(user, token)}` },
+  })
+    .get(`/${project}.git/info/refs`)
+    .query({ service: 'git-upload-pack' });
+  return value === D_VALUE
+    ? probe.reply(200, '', { 'content-type': 'application/x-git-upload-pack-advertisement' })
+    : probe.reply(401, 'HTTP Basic: Access denied');
+}
+
+describe('the read deploy token gitlab-pat/:zone/read (issue #866)', () => {
+  test('set ok: tested, stored, resolved, audited with the fingerprint of <username>:<token>', async () => {
+    const w = world();
+    const probe = infoRefs('acme/widgets');
+    const r = await put('gl', 'read', D_VALUE);
+    expect(r.statusCode).toBe(200);
+    expect(probe.isDone()).toBe(true);
+    expect(r.json()).toMatchObject({
+      name: 'gitlab-pat/gl/read',
+      fingerprint: fingerprintOf(D_VALUE),
+      tested: true,
+      setAt: t0.toISOString(),
+    });
+    expect(w.store.resolvedGitlabPats().get('gl')?.read).toEqual({
+      username: D_USER,
+      token: D_TOKEN,
+    });
+    expect(w.vault.meta('gitlab-pat/gl/read')).toMatchObject({
+      fingerprint: fingerprintOf(D_VALUE),
+      createdAt: t0.toISOString(),
+      testedAt: t0.toISOString(),
+      testResult: 'ok',
+    });
+    expect(listAudit(w.db).find((a) => a.action === 'secret.set')?.detail).toEqual({
+      name: 'gitlab-pat/gl/read',
+      fingerprint: fingerprintOf(D_VALUE),
+      result: 'stored',
+    });
+    expect(w.fake.requests).toHaveLength(0);
+    expectNoTokens(w, [r.body]);
+  });
+
+  test('set in a starter zone is accepted', async () => {
+    const w = world();
+    infoRefs('acme/solo');
+    const r = await put('solo', 'read', D_VALUE);
+    expect(r.statusCode).toBe(200);
+    expect(w.store.resolvedGitlabPats().get('solo')?.read).toEqual({
+      username: D_USER,
+      token: D_TOKEN,
+    });
+    expectNoTokens(w, [r.body]);
+  });
+
+  test('a malformed value: 400 GITLAB_READ_BAD_VALUE; whitespace: 400 with the whitespace text; nothing sent or stored', async () => {
+    const w = world();
+    const bodies: string[] = [];
+    for (const v of [D_TOKEN, `${D_USER}:`, `:${D_TOKEN}`]) {
+      const r = await put('gl', 'read', v);
+      bodies.push(r.body);
+      expect(r.statusCode).toBe(400);
+      expect(r.json()).toEqual({ error: GITLAB_READ_BAD_VALUE });
+    }
+    const spaced = await put('gl', 'read', `${D_USER}: ${D_TOKEN}`);
+    bodies.push(spaced.body);
+    expect(spaced.statusCode).toBe(400);
+    expect(spaced.json()).toEqual({ error: 'a credential is one line with no whitespace' });
+    expect(w.vault.meta('gitlab-pat/gl/read')).toBeUndefined();
+    expectNoTokens(w, bodies);
+  });
+
+  test('GitLab answers 401: 422 with the problem, nothing stored, the failure audited', async () => {
+    const w = world();
+    const probe = infoRefs('acme/widgets', D_WRONG);
+    const r = await put('gl', 'read', D_WRONG);
+    expect(probe.isDone()).toBe(true);
+    expect(r.statusCode).toBe(422);
+    expect(r.json()).toEqual({
+      tested: false,
+      status: 401,
+      problem: GITLAB_READ_REJECTED,
+      error: GITLAB_READ_REJECTED,
+    });
+    expect(w.vault.meta('gitlab-pat/gl/read')).toBeUndefined();
+    expect(w.store.resolvedGitlabPats().get('gl')?.read).toBeUndefined();
+    expect(listAudit(w.db).find((a) => a.action === 'secret.set')?.detail).toEqual({
+      name: 'gitlab-pat/gl/read',
+      fingerprint: fingerprintOf(D_WRONG),
+      result: 'test failed (401)',
+    });
+    expectNoTokens(w, [r.body]);
+  });
+
+  test('test ok, and a failed test recorded, both audited', async () => {
+    const w = world();
+    infoRefs('acme/widgets');
+    await put('gl', 'read', D_VALUE);
+    w.clock.now = plus(t0, 60_000);
+    const probe = infoRefs('acme/widgets');
+    const r = await testRoute('gl', 'read');
+    expect(probe.isDone()).toBe(true);
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toEqual({ tested: true, result: 'ok' });
+    expect(w.vault.meta('gitlab-pat/gl/read')).toMatchObject({
+      testedAt: plus(t0, 60_000).toISOString(),
+      testResult: 'ok',
+    });
+    // A stored value GitLab no longer accepts.
+    w.vault.put('gitlab-pat/gl/read', D_WRONG, { now: t0 });
+    w.store.refreshSecrets();
+    infoRefs('acme/widgets', D_WRONG);
+    const failed = await testRoute('gl', 'read');
+    expect(failed.json()).toEqual({
+      tested: false,
+      status: 401,
+      problem: GITLAB_READ_REJECTED,
+      error: GITLAB_READ_REJECTED,
+    });
+    expect(w.vault.meta('gitlab-pat/gl/read')?.testResult).toBe('failed (401)');
+    expect(
+      listAudit(w.db)
+        .filter((a) => a.action === 'secret.test')
+        .map((a) => a.detail),
+    ).toEqual([
+      { name: 'gitlab-pat/gl/read', fingerprint: fingerprintOf(D_WRONG), result: 'failed (401)' },
+      { name: 'gitlab-pat/gl/read', fingerprint: fingerprintOf(D_VALUE), result: 'ok' },
+    ]);
+    expectNoTokens(w, [r.body, failed.body]);
+  });
+
+  test('test when not set, or set but not resolving: the author/reviewer answers', async () => {
+    const w = world();
+    const r = await testRoute('gl', 'read');
+    expect(r.statusCode).toBe(409);
+    expect(r.json()).toEqual({ error: 'the token is not set' });
+    // A value that does not parse has meta but resolves to nothing.
+    w.vault.put('gitlab-pat/gl/read', D_TOKEN, { now: t0 });
+    w.store.refreshSecrets();
+    const unresolved = await testRoute('gl', 'read');
+    expect(unresolved.statusCode).toBe(409);
+    expect(unresolved.json()).toEqual({
+      error: 'the token does not decrypt with this vault key',
+    });
+    expectNoTokens(w, [r.body, unresolved.body]);
+  });
+
+  test('remove: never refused for parking a zone, audited; 409 once gone', async () => {
+    const w = world();
+    infoRefs('acme/widgets');
+    await put('gl', 'read', D_VALUE);
+    const r = await remove('gl', 'read');
+    expect(r.statusCode).toBe(200);
+    expect(r.json()).toMatchObject({ removed: true, name: 'gitlab-pat/gl/read' });
+    expect(w.vault.meta('gitlab-pat/gl/read')).toBeUndefined();
+    expect(w.store.resolvedGitlabPats().get('gl')?.read).toBeUndefined();
+    expect(listAudit(w.db).find((a) => a.action === 'secret.remove')?.detail).toEqual({
+      name: 'gitlab-pat/gl/read',
+      fingerprint: fingerprintOf(D_VALUE),
+      result: 'removed',
+    });
+    const again = await remove('gl', 'read');
+    expect(again.statusCode).toBe(409);
+    expect(again.json()).toEqual({ error: 'the vault holds no such token' });
+    expectNoTokens(w, [r.body, again.body]);
+  });
+
+  test('a GitHub zone or an unknown zone: 404 on all three; a session needs sudo', async () => {
+    const w = world();
+    const bodies: string[] = [];
+    for (const zone of ['web', 'nowhere']) {
+      for (const r of [
+        await put(zone, 'read', D_VALUE),
+        await testRoute(zone, 'read'),
+        await remove(zone, 'read'),
+      ]) {
+        bodies.push(r.body);
+        expect(r.statusCode).toBe(404);
+      }
+    }
+    for (const r of [
+      await put('gl', 'read', D_VALUE, w.asSession),
+      await testRoute('gl', 'read', w.asSession),
+      await remove('gl', 'read', w.asSession),
+    ]) {
+      bodies.push(r.body);
+      expect(r.statusCode).toBe(403);
+      expect(r.json()).toMatchObject({ sudo: 'required' });
+    }
+    expect(w.vault.count()).toBe(0);
+    expectNoTokens(w, bodies);
+  });
+
+  test('the bad name refusal names read beside author and reviewer', async () => {
+    const w = world();
+    const r = await put('gl', 'maintainer', D_VALUE);
+    expect(r.statusCode).toBe(400);
+    expect(r.json().error).toMatch(/author.*reviewer.*read|read.*author.*reviewer/);
+    expectNoTokens(w, [r.body]);
   });
 });
 
