@@ -218,6 +218,36 @@ describe('clone-plan (#840)', () => {
     },
   );
 
+  test.each([
+    [['gitlab.example.com'], 'enforce'],
+    [['*.example.com'], 'monitor'],
+  ] as const)(
+    'a GitLab zone listing its host in egress.private (allow %j, %s) plans private: [host] (#899)',
+    async (allow, mode) => {
+      const w = await setup({
+        zone: gitlabZone({
+          egress: { mode, allow: [...allow], private: ['gitlab.example.com'] },
+        }),
+      });
+      const res = await plan(w.stickToken);
+      expect(res.statusCode).toBe(200);
+      expect(ClonePlanSchema.parse(res.json()).egress).toEqual({
+        mode,
+        allow: ['gitlab.example.com'],
+        private: ['gitlab.example.com'],
+      });
+    },
+  );
+
+  test('a GitLab zone without egress.private plans no private key (#899)', async () => {
+    const w = await setup({
+      zone: gitlabZone({ egress: { mode: 'enforce', allow: ['gitlab.example.com'] } }),
+    });
+    const res = await plan(w.stickToken);
+    expect(res.statusCode).toBe(200);
+    expect(res.json().egress).not.toHaveProperty('private');
+  });
+
   test('a GitLab host outside egress is refused as egress, retryable, revoking nothing', async () => {
     const w = await setup({
       zone: gitlabZone({ egress: { mode: 'enforce', allow: ['other.example.org'] } }),

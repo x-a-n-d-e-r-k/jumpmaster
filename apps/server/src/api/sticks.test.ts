@@ -1950,6 +1950,34 @@ describe('push container routes', () => {
       },
     );
 
+    test.each([
+      [['gitlab.example.com'], 'enforce'],
+      [['*.example.com'], 'monitor'],
+    ] as const)(
+      'a zone listing its host in egress.private (allow %j, %s) plans private: [host] (#899)',
+      async (allow, mode) => {
+        const cfg = glZone('https://gitlab.example.com', [...allow], mode);
+        const z = cfg.dropZones[0]!;
+        cfg.dropZones[0] = {
+          ...z,
+          egress: { ...z.egress!, private: ['gitlab.example.com'] },
+        };
+        const { res } = await planFor(cfg);
+        expect(res.statusCode).toBe(200);
+        expect(PushPlanSchema.parse(res.json()).egress).toEqual({
+          mode,
+          allow: ['gitlab.example.com'],
+          private: ['gitlab.example.com'],
+        });
+      },
+    );
+
+    test('a zone without egress.private plans no private key (#899)', async () => {
+      const { res } = await planFor(glZone('https://gitlab.example.com', ['gitlab.example.com']));
+      expect(res.statusCode).toBe(200);
+      expect(res.json().egress).not.toHaveProperty('private');
+    });
+
     test('a zone whose list allows neither host is refused, retryable, and the log names the host', async () => {
       const logs: string[] = [];
       const { res } = await planFor(

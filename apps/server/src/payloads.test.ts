@@ -1575,6 +1575,31 @@ describe('GitLab zone payloads (#765)', () => {
     }
   });
 
+  test('a GitLab zone with egress.private carries it on the drop payload (#899)', () => {
+    const host = 'gitlab.example.com';
+    for (const allow of [[host], ['*.example.com']]) {
+      const z = {
+        ...gitlabZone(),
+        egress: { mode: 'enforce', allow, private: [host] },
+      } as DropZoneConfig;
+      for (const d of [impl, review, doctorDrop]) {
+        const p = buildPayload(db, z, d, secrets);
+        check(p);
+        expect(p.egress?.private).toEqual([host]);
+        expect(p.egress?.allow).toContain(host);
+        expect(DropPayloadSchema.parse(p).egress).toEqual(p.egress);
+      }
+    }
+  });
+
+  test('a GitHub zone payload carries no egress.private (#899)', () => {
+    const z = { ...zone, egress: { mode: 'enforce', allow: ['pypi.org'] } } as DropZoneConfig;
+    const p = buildPayload(db, z, impl, secrets);
+    expect(p.egress).toEqual({ mode: 'enforce', allow: expect.any(Array) });
+    expect(p.egress).not.toHaveProperty('private');
+    expect(JSON.stringify(p)).not.toContain('"private"');
+  });
+
   test('a GitHub zone payload has no forge key and keeps its shape', () => {
     for (const d of [impl, review, heal, resolve, doctorDrop]) {
       const p = buildPayload(db, { ...zone, reviewReadToken: true }, d, secrets);

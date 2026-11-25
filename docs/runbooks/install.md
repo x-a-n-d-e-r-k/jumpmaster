@@ -1111,6 +1111,13 @@ when the zone's `egress.allow` lists it, by name or by a `*.` entry. The egress 
 on. Until the host is allowed, each push is refused (`egress`) and retried; the work waits on the
 stick, and the server log names the host to add. A stick's ceiling must list the host too (below).
 
+A self-managed GitLab host on a private-network address is refused by the proxy unless the
+zone lists it in `egress.private`, a guarded setting: only on a GitLab zone, only the host of
+`gitlab.baseUrl`, and only when the zone's `egress.allow` allows it. The server then sends that
+host as private in the egress of the zone's drops, pushes and clones, so every container of the
+zone, the agent's included, may reach it at a private address. The zone's drops need a stick
+with `egress-private-v1`.
+
 Egress rules cover what a drop's containers reach, not how their images arrive: pulling the
 trooper's image or a service's is done by the Docker engine or the stick itself, outside any
 drop network, and no allow list or ceiling applies to it.
@@ -1318,7 +1325,8 @@ Until a live stick advertises it, a GitLab zone's drops stay queued, and
 zone's GitLab host, which must be in the zone's `egress.allow`
 ([Egress](#egress)). A stick with a ceiling must list that host in `JM_EGRESS_CEILING` too
 ([The stick's egress ceiling](#the-sticks-egress-ceiling)). A zone with egress off gets no proxy.
-The proxy still refuses a GitLab host on a private address.
+The proxy refuses a GitLab host on a private address unless the zone lists that host in
+`egress.private` (below).
 
 **Failures.**
 

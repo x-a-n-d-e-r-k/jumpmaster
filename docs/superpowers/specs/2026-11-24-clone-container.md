@@ -67,7 +67,7 @@ The last rule guards against bugs, not a bad stick, because the stick itself rel
 
 - **A compromised stick.** It can ask for the token of any drop it holds. That is already so for pushes; with the read-only token set, it has only read access outside pushes.
 - **The GitLab host from the agent.** The zone's egress list covers both the agent and the clone, so the agent can reach the host without a token. Splitting the two lists would be a later step.
-- **Private addresses.** The proxy still refuses a GitLab on an internal network. That is a separate decision.
+- **Private addresses.** The proxy still refuses a GitLab on an internal network. That is a separate decision. (Since decided by Command's Ruling 125: a GitLab zone may list its host in `egress.private`, and the server then sends it to the zone's drop, push and clone proxies.)
 
 ## Alternatives
 
