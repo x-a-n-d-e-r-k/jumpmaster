@@ -1334,6 +1334,7 @@ The proxy refuses a GitLab host on a private address unless the zone lists that 
 |---|---|
 | GitLab refuses the token | The drop fails with that reason, and the zone's credential check reports it (a doctor drop reports it instead) |
 | The GitLab host is outside the zone's egress or the stick's ceiling | Nothing starts; the host is named |
+| The GitLab host resolves to a private address and is not in `egress.private` | The drop fails, and the reason names the host and `egress.private`: list the host there ([Egress](#egress), the `egress.private` paragraph) |
 | The clone runs over 15 minutes, or over the size limit | The container is killed, its volume removed, and the drop fails |
 | The kill switch fires mid-clone | The container is killed at once and its volume removed |
 | The stick dies mid-clone | The drop is lost and a new drop is made; the old volume is swept |
