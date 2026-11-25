@@ -280,6 +280,13 @@ export const GUARDED_PATHS: GuardedPath[] = [
     'additions',
     (h, ctx) => `Drops in ${zoneOf(ctx)} will be able to send data to ${h}`,
   ),
+  // Issue #890 (Ruling 125): the proxy lets a listed host resolve to a private-network address.
+  setRule(
+    'dropZones[].egress.private',
+    'additions',
+    (h, ctx) =>
+      `Drops in ${zoneOf(ctx)} will be able to reach ${h} at private-network addresses, agent containers included`,
+  ),
   {
     path: 'dropZones[].services',
     kind: 'set',
@@ -488,16 +495,17 @@ export const NOT_GUARDED: FreePath[] = [
 /**
  * The value a setting runs with: the schema default for a removed key (the document is parsed
  * first), a zone's `requireSignedImages` falling back to the install's, and an absent `egress` as
- * mode `off` with no extra hosts. `doc` is a zone (for zone paths) or the install document.
+ * mode `off` with no extra or private hosts. `doc` is a zone (for zone paths) or the install document.
  */
 export function effective(
   doc: Record<string, unknown> | undefined,
   path: string,
   install: Partial<EditableDoc> | Record<string, unknown>,
 ): unknown {
-  const egress = doc?.egress as { mode?: unknown; allow?: unknown } | undefined;
+  const egress = doc?.egress as { mode?: unknown; allow?: unknown; private?: unknown } | undefined;
   if (path === 'egress.mode') return egress?.mode ?? 'off';
   if (path === 'egress.allow') return egress?.allow ?? [];
+  if (path === 'egress.private') return egress?.private ?? [];
   if (path === 'requireSignedImages')
     return (
       doc?.requireSignedImages ??
@@ -553,7 +561,7 @@ function flatten(v: unknown, prefix: string, out: Map<string, unknown>): Map<str
 /** A zone's leaves with the effective values the rules judge. */
 function zoneLeaves(zone: Record<string, unknown>, install: Partial<EditableDoc>) {
   const out = flatten(zone, '', new Map());
-  for (const p of ['egress.mode', 'egress.allow', 'requireSignedImages'])
+  for (const p of ['egress.mode', 'egress.allow', 'egress.private', 'requireSignedImages'])
     out.set(p, effective(zone, p, install));
   return out;
 }

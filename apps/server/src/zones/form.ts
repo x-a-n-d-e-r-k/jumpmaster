@@ -128,7 +128,9 @@ export function issueField(path: string, zoneIndex: number): string | undefined 
   if (!path.startsWith(prefix)) return undefined;
   const rest = path.slice(prefix.length).split('.');
   const head = rest[0] ?? '';
-  if (head === 'egress') return rest[1] === 'allow' ? 'egress.allow' : 'egress.mode';
+  // egress.private (#890) has no field of its own: its issues are about the allowed host.
+  if (head === 'egress')
+    return rest[1] === 'allow' || rest[1] === 'private' ? 'egress.allow' : 'egress.mode';
   const fields = [
     'readyLabel',
     'retryLabel',

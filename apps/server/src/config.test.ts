@@ -1686,3 +1686,135 @@ describe('zone forge kind (issue #667)', () => {
     expect(r.fullIssues.map((i) => i.path)).toEqual(['dropZones.0.ciRequired']);
   });
 });
+
+describe('zone egress.private (issue #890)', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json'), strict: true };
+  const gitlabZone = {
+    ...baseZone,
+    repo: 'group/project',
+    forge: 'gitlab',
+    gitlab: { baseUrl: 'https://GitLab.Internal.example' },
+  };
+  const withPrivate = (priv: unknown[], allow: string[] = ['gitlab.internal.example']) => ({
+    ...gitlabZone,
+    egress: { mode: 'enforce', allow, private: priv },
+  });
+  const issues = (zone: Record<string, unknown>) => {
+    const full = parseEditable({ dropZones: [zone] }, noLock);
+    const object = DropZoneObject.safeParse(zone);
+    return {
+      full,
+      object,
+      fullIssues: full.ok ? [] : full.issues,
+      objectIssues: object.success
+        ? []
+        : object.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+    };
+  };
+
+  test('a config without it parses deep-equal to before, with no private key', () => {
+    for (const zone of [baseZone, { ...baseZone, egress: { mode: 'enforce', allow: ['a.io'] } }]) {
+      const r = parseEditable({ dropZones: [zone] }, noLock);
+      expect(r.ok).toBe(true);
+      if (!r.ok) continue;
+      const egress = r.config.dropZones[0]?.egress;
+      if (egress) {
+        expect(Object.hasOwn(egress, 'private')).toBe(false);
+        expect(egress).toEqual({ mode: 'enforce', allow: ['a.io'] });
+      } else expect(r.config.dropZones[0]).not.toHaveProperty('egress');
+    }
+  });
+
+  test.each(['gitlab.internal.example', 'GitLab.INTERNAL.example', 'gitlab.internal.example.'])(
+    'a GitLab zone accepts its own host %s, canonical when parsed',
+    (entry) => {
+      const r = issues(withPrivate([entry]));
+      expect(r.fullIssues).toEqual([]);
+      expect(r.objectIssues).toEqual([]);
+      if (r.full.ok)
+        expect(r.full.config.dropZones[0]?.egress?.private).toEqual(['gitlab.internal.example']);
+      if (r.object.success)
+        expect(r.object.data.egress?.private).toEqual(['gitlab.internal.example']);
+    },
+  );
+
+  test('a wildcard allow entry allows it', () => {
+    const r = issues(withPrivate(['gitlab.internal.example'], ['*.internal.example']));
+    expect(r.objectIssues).toEqual([]);
+  });
+
+  const refused: [string, string, string[], RegExp][] = [
+    ['a *. entry', '*.internal.example', ['*.internal.example'], /not a plain host name/],
+    ['an IPv4 literal', '10.0.0.5', ['gitlab.internal.example'], /not a plain host name/],
+    ['an IPv6 literal', '[fd00::1]', ['gitlab.internal.example'], /not a plain host name/],
+    ['a port', 'gitlab.internal.example:443', ['gitlab.internal.example'], /not a plain host name/],
+    ['a path', 'gitlab.internal.example/x', ['gitlab.internal.example'], /not a plain host name/],
+    [
+      'a URL',
+      'https://gitlab.internal.example',
+      ['gitlab.internal.example'],
+      /not a plain host name/,
+    ],
+    [
+      'a host egress.allow does not allow',
+      'gitlab.internal.example',
+      ['other.example'],
+      /add it to egress\.allow or remove it from egress\.private/,
+    ],
+    [
+      'a host other than the GitLab host',
+      'other.example',
+      ['gitlab.internal.example', 'other.example'],
+      /not this zone's GitLab host/,
+    ],
+  ];
+
+  test.each(refused)('%s is refused, naming the entry, on its index', (_n, entry, allow, why) => {
+    const r = issues(withPrivate(['gitlab.internal.example', entry], allow));
+    expect(r.full.ok).toBe(false);
+    const mine = r.objectIssues.filter((i) => i.path === 'egress.private.1');
+    expect(mine).toHaveLength(1);
+    expect(mine[0]?.message).toMatch(why);
+    expect(mine[0]?.message).toContain(`"${entry}"`);
+    expect(r.fullIssues.map((i) => i.path)).toContain('dropZones.0.egress.private.1');
+  });
+
+  test('removing the host from egress.allow while egress.private lists it is refused', () => {
+    const r = issues(withPrivate(['gitlab.internal.example'], []));
+    expect(r.objectIssues).toEqual([
+      {
+        path: 'egress.private.0',
+        message:
+          'egress.private entry "gitlab.internal.example" is not allowed by the zone\'s egress.allow: add it to egress.allow or remove it from egress.private',
+      },
+    ]);
+  });
+
+  test('a message shows printable text only, cut short', () => {
+    const r = issues(withPrivate([`bad\u0000${'x'.repeat(300)}`]));
+    const msg = r.objectIssues.find((i) => i.path === 'egress.private.0')?.message ?? '';
+    expect(msg).not.toContain('\u0000');
+    expect(msg).toContain('bad?');
+    expect(msg.length).toBeLessThan(250);
+  });
+
+  test.each([
+    ['explicit forge: github', { ...baseZone, forge: 'github' }],
+    ['the default forge', baseZone],
+  ])('a GitHub zone (%s) with a non-empty egress.private is refused', (_n, zone) => {
+    const r = issues({
+      ...zone,
+      egress: { mode: 'enforce', allow: ['h.example'], private: ['h.example'] },
+    });
+    expect(r.full.ok).toBe(false);
+    expect(r.objectIssues).toEqual([
+      {
+        path: 'egress.private',
+        message: 'egress.private applies only to a zone with forge: gitlab, for its GitLab host',
+      },
+    ]);
+    // Empty or absent: nothing changes.
+    expect(issues({ ...zone, egress: { mode: 'enforce', private: [] } }).objectIssues).toEqual([]);
+    expect(issues({ ...zone, egress: { mode: 'enforce' } }).objectIssues).toEqual([]);
+  });
+});

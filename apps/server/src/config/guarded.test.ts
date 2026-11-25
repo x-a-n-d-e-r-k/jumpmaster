@@ -688,6 +688,59 @@ describe('a zone forge (issue #667)', () => {
     ]);
   });
 
+  describe('egress.private (issue #890)', () => {
+    const host = 'gitlab.example.com';
+    const lab = (priv?: string[]) => ({
+      ...gitlab(),
+      egress: { mode: 'enforce', allow: [host], ...(priv ? { private: priv } : {}) },
+    });
+
+    test('an addition is a weakening naming the zone and the host', () => {
+      expect(edit(lab(), lab([host])).guarded).toEqual([
+        {
+          path: 'dropZones[web].egress.private',
+          consequence: `Drops in web will be able to reach ${host} at private-network addresses, agent containers included`,
+        },
+      ]);
+      expect(edit(lab([]), lab([host])).guarded.map((g) => g.path)).toEqual([
+        'dropZones[web].egress.private',
+      ]);
+    });
+
+    test('a removal is not', () => {
+      expect(edit(lab([host]), lab()).guarded).toEqual([]);
+      expect(edit(lab([host]), lab([])).guarded).toEqual([]);
+      // The form turning egress off with an empty list deletes egress, private included.
+      expect(
+        edit(lab([host]), { ...gitlab(), egress: undefined }).guarded.map((g) => g.path),
+      ).not.toContain('dropZones[web].egress.private');
+    });
+
+    test('an absent value reads as []', () => {
+      expect(effective(zone('web', lab()), 'egress.private', {})).toEqual([]);
+      expect(effective(zone('web', { egress: undefined }), 'egress.private', {})).toEqual([]);
+      expect(effective(zone('web', lab([host])), 'egress.private', {})).toEqual([host]);
+      expect(edit(lab(), lab([])).guarded).toEqual([]);
+    });
+
+    test('adding a zone with egress.private set asks for confirmation', () => {
+      const added = zone('new', {
+        ...gitlab(),
+        egress: { mode: 'monitor', allow: [host], private: [host] },
+      });
+      expect(ADD_BASELINE(added).egress).toEqual({ mode: 'monitor', allow: [] });
+      const c = classify(doc([]), doc([added]));
+      expect(c.guarded).toContainEqual({
+        path: 'dropZones[new].egress.private',
+        consequence: `Drops in new will be able to reach ${host} at private-network addresses, agent containers included`,
+      });
+      const without = zone('new', { ...gitlab(), egress: { mode: 'monitor', allow: [host] } });
+      expect(classify(doc([]), doc([without])).guarded.map((g) => g.path)).not.toContain(
+        'dropZones[new].egress.private',
+      );
+    });
+  });
+
   test('the add baseline refuses a nested path on a GitHub zone', () => {
     expect(() => ADD_BASELINE(zone('new', { repo: 'group/sub/web' }))).toThrow();
     expect(() => ADD_BASELINE(zone('new', { repo: 'group/sub/web', forge: 'github' }))).toThrow();

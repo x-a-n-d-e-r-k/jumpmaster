@@ -136,6 +136,42 @@ describe('zone form', () => {
     expect(issueField('pollSeconds', 2)).toBeUndefined();
   });
 
+  test('an egress.private issue shows on the allow list, never on the mode selector (#890)', () => {
+    expect(issueField('dropZones.0.egress.private.0', 0)).not.toBe('egress.mode');
+    expect(issueField('dropZones.0.egress.private.0', 0)).toBe('egress.allow');
+    expect(issueField('dropZones.0.egress.private', 0)).toBe('egress.allow');
+  });
+
+  test('a form patch of the egress mode or allow list keeps egress.private (#890)', () => {
+    const stored = {
+      id: 'z',
+      egress: { mode: 'monitor', allow: ['gitlab.example.com'], private: ['gitlab.example.com'] },
+    };
+    const original = zoneToForm(stored as unknown as DropZoneConfig);
+    const apply = (changes: Record<string, string>) =>
+      mergePatch(
+        stored,
+        toMergePatch(formToZone(original), formToZone({ ...original, ...changes })),
+      );
+    expect(apply({ 'egress.mode': 'enforce' })).toEqual({
+      id: 'z',
+      egress: { mode: 'enforce', allow: ['gitlab.example.com'], private: ['gitlab.example.com'] },
+    });
+    expect(apply({ 'egress.allow': 'gitlab.example.com\nnpm.example.com' })).toEqual({
+      id: 'z',
+      egress: {
+        mode: 'monitor',
+        allow: ['gitlab.example.com', 'npm.example.com'],
+        private: ['gitlab.example.com'],
+      },
+    });
+    expect(apply({ 'egress.mode': 'off' })).toMatchObject({
+      egress: { mode: 'off', private: ['gitlab.example.com'] },
+    });
+    // Off with an empty list deletes egress, private included: a removal, never a weakening.
+    expect(apply({ 'egress.mode': 'off', 'egress.allow': '' })).toEqual({ id: 'z' });
+  });
+
   test('toMergePatch turns an edited zone into the RFC 7396 patch that makes it, nulls for removals', () => {
     const before = { id: 'z', a: 1, b: { c: 2, d: 3 }, list: [1, 2], gone: true };
     const after = { id: 'z', a: 1, b: { c: 5 }, list: [2], added: 'x' };

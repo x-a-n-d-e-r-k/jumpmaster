@@ -2,8 +2,10 @@ import { readdirSync, readFileSync } from 'node:fs';
 import {
   ContainerLimitsSchema,
   GateSpecSchema,
+  hostAllowed,
   isGitLabProjectPath,
   isRepoFullName,
+  normalizeHost,
   PresetSchema,
   protectedPathMatches,
   type Role,
@@ -217,7 +219,13 @@ const CrewSchema = z
 const GitHubId = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 
 /** A zone's raw fields as a refinement sees them: the other fields may have failed. */
-type ZoneInput = { repo?: unknown; forge?: unknown; gitlab?: unknown; githubApp?: unknown };
+type ZoneInput = {
+  repo?: unknown;
+  forge?: unknown;
+  gitlab?: unknown;
+  githubApp?: unknown;
+  egress?: unknown;
+};
 const zoneInput = (v: unknown): ZoneInput =>
   typeof v === 'object' && v !== null ? (v as ZoneInput) : {};
 /** `when`: run even if another field failed, as a field refinement would (the forge is known). */
@@ -230,10 +238,63 @@ const whenForge =
     return forgeKind(zone as { forge?: 'github' | 'gitlab' }) === kind;
   };
 
+/** Operator text shown in a message: printable ASCII only, cut short (as the egress proxy's). */
+const shown = (s: string): string => s.replace(/[^\x20-\x7e]/g, '?').slice(0, 100);
+
+/** The canonical host of a GitLab zone's `gitlab.baseUrl`, or null when it has none. */
+function gitlabHostOf(zone: ZoneInput): string | null {
+  const baseUrl = (zone.gitlab as { baseUrl?: unknown } | undefined)?.baseUrl;
+  if (typeof baseUrl !== 'string') return null;
+  try {
+    return normalizeHost(new URL(baseUrl).hostname);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `egress.private` (issue #890, Ruling 125): only a GitLab zone's own host, as a plain host name
+ * its `egress.allow` allows. Unlike the other forge rules, each message names the entry: a host
+ * name is not a secret, and the operator needs to see which entry to fix. It is shown printable
+ * and cut short, as the egress proxy shows `JM_EGRESS_PRIVATE` entries.
+ */
+function egressPrivateRule(v: unknown, ctx: z.RefinementCtx<unknown>, isGitlab: boolean): void {
+  const zone = zoneInput(v);
+  const egress = zone.egress as { allow?: unknown; private?: unknown } | undefined;
+  const list = Array.isArray(egress?.private) ? (egress.private as unknown[]) : [];
+  if (list.length === 0) return;
+  if (!isGitlab) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['egress', 'private'],
+      message: 'egress.private applies only to a zone with forge: gitlab, for its GitLab host',
+    });
+    return;
+  }
+  const allow = Array.isArray(egress?.allow)
+    ? (egress.allow as unknown[]).filter((e): e is string => typeof e === 'string')
+    : [];
+  const own = gitlabHostOf(zone);
+  list.forEach((entry, i) => {
+    const text = typeof entry === 'string' ? entry : String(entry);
+    const host = typeof entry !== 'string' || entry.startsWith('*.') ? null : normalizeHost(entry);
+    const name = `egress.private entry "${shown(text)}"`;
+    const message =
+      host === null
+        ? `${name} is not a plain host name: no wildcard, IP address, port, path or URL`
+        : !hostAllowed(host, allow)
+          ? `${name} is not allowed by the zone's egress.allow: add it to egress.allow or remove it from egress.private`
+          : host !== own
+            ? `${name} is not this zone's GitLab host (the host of gitlab.baseUrl)`
+            : null;
+    if (message !== null) ctx.addIssue({ code: 'custom', path: ['egress', 'private', i], message });
+  });
+}
+
 /**
  * The rules that depend on a zone's forge (issue #667), on `DropZoneObject` itself so every parse
  * of a zone, the add baseline's and the catalog's included, keeps them. Each message names the
- * field, never the value.
+ * field, never the value, except `egress.private`'s (a host name, not a secret).
  */
 function zoneForgeRules() {
   const github = whenForge('github');
@@ -265,6 +326,9 @@ function zoneForgeRules() {
       path: ['githubApp'],
       message: 'githubApp applies to GitHub zones only',
       when: gitlab,
+    }),
+    z.superRefine((v: unknown, ctx) => egressPrivateRule(v, ctx, gitlab({ value: v })), {
+      when: (p) => github(p) || gitlab(p),
     }),
   ];
 }
@@ -347,6 +411,13 @@ export const DropZoneObject = z
             }),
           )
           .default([]),
+        /**
+         * A GitLab zone's own host (from `gitlab.baseUrl`), reachable at private-network addresses
+         * by every container of the zone (Ruling 125). Absent reads as `[]`; nothing fills it in.
+         * Parsed canonical (`normalizeHost`), the document is not rewritten. Its rules depend on
+         * `forge`, `gitlab` and `allow`, so they are on the zone (`zoneForgeRules`).
+         */
+        private: z.array(z.string().overwrite((h) => normalizeHost(h) ?? h)).optional(),
       })
       .optional(),
     /**
