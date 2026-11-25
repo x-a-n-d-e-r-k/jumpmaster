@@ -83,7 +83,8 @@ export type GitLabMergeRequest = {
   project_id: number;
   title: string;
   description: string | null;
-  state: 'opened' | 'closed' | 'merged';
+  /** `locked`: GitLab is carrying out the MR's merge (transient). */
+  state: 'opened' | 'closed' | 'locked' | 'merged';
   source_branch: string;
   target_branch: string;
   /** The source branch's head, kept current while the MR is open. */
@@ -1789,6 +1790,12 @@ export function fakeGitLab(opts: {
     /** Mark open merge request `iid` closed, at `closedAt` (now by default). */
     closeMergeRequest: (iid: number, o: { closedAt?: string } = {}) =>
       finish(iid, 'closed', o.closedAt),
+    /** Put open merge request `iid` in the transient `locked` state (its merge in progress). */
+    lockMergeRequest(iid: number) {
+      const mr = findMr(iid);
+      if (!mr) throw new Error(`unknown merge request ${iid}`);
+      mr.state = 'locked';
+    },
     /** The stored merge request, as the fake holds it now. */
     mergeRequest: (iid: number) => findMr(iid),
     /** Set whether merge request `iid` may be merged (true by default); a merge of one that

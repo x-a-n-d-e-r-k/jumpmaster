@@ -47,8 +47,10 @@
 // - Merge requests (third slice, #690) stand in for pull requests. A PR's `number` is the MR's
 //   project-scoped `iid` (refused unsent unless a positive integer); `title` is `title`, `body` is
 //   `description` (null gives ''), `labels` is the MR's `labels`, `author` is `author.username`.
-//   `state` maps `opened` to `open` and `closed`/`merged` to `closed`; `merged` is true only for
-//   `merged`. `headSha` is `sha` (null when absent), `headRef` is `source_branch`, `baseRef` is
+//   `state` maps `opened` and `locked` (GitLab carrying out the MR's merge: neither closed nor yet
+//   merged) to `open`, and `closed`/`merged` to `closed`; `merged` is true only for `merged`. Any
+//   other state throws, rather than reading as closed (which would park or restore the item as
+//   abandoned). `headSha` is `sha` (null when absent), `headRef` is `source_branch`, `baseRef` is
 //   `target_branch`. `headRepo` is this project's path when `source_project_id` equals
 //   `target_project_id`, and null for an MR from a fork.
 // - An MR is "ours" only when `source_project_id` equals `target_project_id`: like GitHub's match
@@ -842,12 +844,32 @@ export class GitLabForge implements Forge {
     return mr.source_project_id !== undefined && mr.source_project_id === mr.target_project_id;
   }
 
+  /**
+   * An MR's `state` as a PR's `state` and `merged`. `locked` (GitLab carrying out the merge) is
+   * open and not yet merged. A state GitLab may add later is refused: reading it as closed would
+   * park the item or restore it as abandoned.
+   */
+  private static pullState(mr: RawMergeRequest): Pick<PullFacts, 'state' | 'merged'> {
+    switch (mr.state) {
+      case 'opened':
+      case 'locked':
+        return { state: 'open', merged: false };
+      case 'closed':
+        return { state: 'closed', merged: false };
+      case 'merged':
+        return { state: 'closed', merged: true };
+      default:
+        throw new GitLabForgeError(
+          `GitLabForge: reading merge request !${mr.iid} failed: unknown merge request state ${JSON.stringify(mr.state)}`,
+        );
+    }
+  }
+
   private toPullFacts(mr: RawMergeRequest): PullFacts {
     return {
       number: mr.iid,
       title: mr.title,
-      state: mr.state === 'opened' ? 'open' : 'closed',
-      merged: mr.state === 'merged',
+      ...GitLabForge.pullState(mr),
       headSha: mr.sha ?? null,
       headRef: mr.source_branch,
       headRepo: GitLabForge.ours(mr) ? this.projectPath : null,

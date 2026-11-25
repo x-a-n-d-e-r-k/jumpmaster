@@ -1164,6 +1164,31 @@ describe('merge requests: getPull', () => {
     expect(gl.requests.map((r) => r.path)).toEqual([1, 2, 3, 99].map((n) => `${MRS}/${n}`));
   });
 
+  test('a locked MR (merge in progress) is open and unmerged, with its refs and head', async () => {
+    const { gl, forge } = setup();
+    const { head } = mrRepo(gl);
+    gl.seedMergeRequest({ sourceBranch: 'agent/one', targetBranch: 'trunk', title: 'One' });
+    gl.lockMergeRequest(1);
+    expect(await forge.getPull(1)).toMatchObject({
+      number: 1,
+      state: 'open',
+      merged: false,
+      headSha: head,
+      headRef: 'agent/one',
+      baseRef: 'trunk',
+    });
+  });
+
+  test('an MR state the adapter does not know is refused, not read as closed', async () => {
+    const { gl, forge } = setup();
+    mrRepo(gl);
+    gl.seedMergeRequest({ sourceBranch: 'agent/one', targetBranch: 'trunk', title: 'One' });
+    (gl.mergeRequest(1) as unknown as { state: string }).state = 'reopened-ish';
+    const err = await forge.getPull(1).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GitLabForgeError);
+    expect((err as Error).message).toContain('unknown merge request state');
+  });
+
   test('a fork MR is returned with headRepo null; a missing sha gives headSha null', async () => {
     const { gl, forge } = setup();
     mrRepo(gl);
