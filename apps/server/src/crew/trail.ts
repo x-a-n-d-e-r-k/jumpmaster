@@ -25,6 +25,7 @@ import {
 } from '../outbox.js';
 import { triageFailed } from './results.js';
 import {
+  CLAIM_DONE_REASON,
   type DoneClaim,
   type DoneEvidence,
   getDoneClaim,
@@ -500,8 +501,7 @@ export async function flushTriageTrail(
   return ran;
 }
 
-/** The work item's state once a verified claim closed its issue. */
-export const CLAIM_DONE_REASON = 'already done (crew, verified)';
+export { CLAIM_DONE_REASON };
 /** The briefing's recommendation once a claim was refused: the reason follows. */
 export const CLAIM_REFUSED = "the crew's claim that this is already done was refused: ";
 
