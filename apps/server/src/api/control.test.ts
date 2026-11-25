@@ -3238,6 +3238,33 @@ describe('zones page routes', () => {
     ]);
     expect(store.revisions(1)[0]?.note).toBe('adopt observed hosts: new.example.com');
   });
+
+  test("adopt keeps the zone's egress.private (#890)", async () => {
+    const { db, store } = pageApp();
+    const host = 'gitlab.internal.example';
+    const g = zd('g', {
+      repo: 'group/project',
+      forge: 'gitlab',
+      gitlab: { baseUrl: `https://${host}` },
+      egress: { mode: 'monitor', allow: [host], private: [host] },
+    });
+    const added = store.apply(
+      { dropZones: [zd('a'), zd('b'), g] },
+      { via: 'ctl', principal: token, expectRevision: store.revision() },
+    );
+    expect(added.ok, JSON.stringify(added)).toBe(true);
+    upsertDropZone(db, { id: 'g', repo: 'group/project', defaultBranch: 'main', configJson: '{}' });
+    seen(db, 'dg', 'g', 'new.example.com');
+    const r = await call('POST', '/api/control/zones/g/egress/adopt', {
+      hosts: ['new.example.com'],
+    });
+    expect(r.statusCode, r.body).toBe(200);
+    expect(store.current().dropZones.find((z) => z.id === 'g')?.egress).toEqual({
+      mode: 'monitor',
+      allow: [host, 'new.example.com'],
+      private: [host],
+    });
+  });
 });
 
 describe('pending pushes: extend-retention and cancel', () => {

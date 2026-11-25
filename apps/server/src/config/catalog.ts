@@ -424,6 +424,12 @@ const WORDS: Words[] = [
     'Hosts beyond the base and preset lists that drops may send data to. Each new host asks for confirmation.',
     'list',
   ),
+  z_(
+    'egress.private',
+    'Hosts reachable at private addresses',
+    "A GitLab project's own GitLab host, reachable at private-network addresses by every container of the project, agent containers included. Each new host asks for confirmation.",
+    'list',
+  ),
 
   // A zone: merging.
   z_(
