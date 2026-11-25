@@ -1138,6 +1138,7 @@ describe('volume self-check', () => {
     expect(await volumeSelfCheck(w.driver, 'trooper@x', 's1')).toEqual({
       selfCheck: true,
       freeBytes: 42 * 2 ** 30,
+      clone: false,
     });
     expect(w.log).toEqual([
       'createVolume jm-selfcheck-s1',
@@ -1165,6 +1166,7 @@ describe('volume self-check', () => {
     expect(await volumeSelfCheck(broken.driver, 'trooper@x', 's1')).toEqual({
       selfCheck: false,
       freeBytes: null,
+      clone: false,
     });
     const dead: ContainerDriver = {
       ...broken.driver,
@@ -1175,6 +1177,7 @@ describe('volume self-check', () => {
     expect(await volumeSelfCheck(dead, 'trooper@x', 's1')).toEqual({
       selfCheck: false,
       freeBytes: null,
+      clone: false,
     });
   });
 });
@@ -1269,6 +1272,7 @@ describe('startup recovery and health', () => {
     expect(refused).toEqual({
       selfCheck: false,
       freeBytes: null,
+      clone: false,
       base: {
         ok: false,
         reason: 'base image jumpmaster-trooper:dev: image not allowed: jumpmaster-trooper:dev',
@@ -1283,7 +1287,55 @@ describe('startup recovery and health', () => {
       trust: { policy: 'allowlist', allowed: new Set(['jumpmaster-trooper:dev']) },
       log: () => {},
     });
-    expect(fixed).toEqual({ selfCheck: true, freeBytes: 100 * 2 ** 30, base: { ok: true } });
+    expect(fixed).toEqual({
+      selfCheck: true,
+      freeBytes: 100 * 2 ** 30,
+      clone: false,
+      base: { ok: true },
+    });
+  });
+
+  test('the health records the clone label from the base image, and none from a refused one', async () => {
+    const CURRENT = {
+      'org.jumpmaster.trooper.push': '1',
+      'org.jumpmaster.trooper.clone': '1',
+    };
+    const trusted = { policy: 'allowlist' as const, allowed: new Set(['jumpmaster-trooper:dev']) };
+    const o = { image: 'jumpmaster-trooper:dev', stickId: 's1', log: () => {} };
+    const w = volumeWorld([], { labels: CURRENT });
+    expect(await stickHealth(w.driver, { ...o, trust: trusted })).toEqual({
+      selfCheck: true,
+      freeBytes: 100 * 2 ** 30,
+      clone: true,
+      base: { ok: true },
+    });
+    // The same inspection as the push label: the image is read once.
+    const inspected: string[] = [];
+    const counting: ContainerDriver = {
+      ...w.driver,
+      async imageLabels(i) {
+        inspected.push(i);
+        return CURRENT;
+      },
+    };
+    await volumeSelfCheck(counting, 'trooper@x', 's1');
+    expect(inspected).toEqual(['trooper@x']);
+    // A wrong value is no label.
+    const old = volumeWorld([], { labels: { ...CURRENT, 'org.jumpmaster.trooper.clone': '2' } });
+    expect((await stickHealth(old.driver, { ...o, trust: trusted })).clone).toBe(false);
+    // A refused base image reads as not carrying it, and nothing is inspected.
+    const refusedWorld = volumeWorld([], { labels: CURRENT });
+    const refused = await stickHealth(refusedWorld.driver, {
+      ...o,
+      trust: { policy: 'allowlist', allowed: new Set(['other:1']) },
+    });
+    expect(refused.clone).toBe(false);
+    expect(refused.base.ok).toBe(false);
+    // Before the first check: no clone label.
+    const monitor = new HealthMonitor(w.driver, { ...o, trust: trusted });
+    expect(monitor.latest().clone).toBe(false);
+    await monitor.check();
+    expect(monitor.latest().clone).toBe(true);
   });
 
   test('a sweep never removes the volume of a self-check in flight', async () => {

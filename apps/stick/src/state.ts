@@ -12,7 +12,7 @@ import {
 } from '@jumpmaster/protocol';
 import type { ImageSource } from './pull.js';
 import { MAX_PENDING_PUSHES } from './push.js';
-import { allowedImages, type StickHealth, type VolumeHealth } from './runner.js';
+import { allowedImages, type BaseVerdict, type StickHealth, type VolumeHealth } from './runner.js';
 import type { ReleaseInfo } from './verify.js';
 import { VOLUME_FREE_FLOOR_BYTES } from './volumes.js';
 
@@ -102,19 +102,21 @@ const DIGEST_REF = /@sha256:[0-9a-f]{64}$/;
  * The capabilities a stick advertises from what its checks proved: `egress-v1` when the egress
  * check passed, `image-verify-v1` only under the signed policy (a stick that doesn't verify
  * signatures must never lease a drop from a zone that requires signed images), and `push-v1`
- * while the latest volume self-check passed above the free floor. `upgrade-v1` when `upgrade`
- * (see `canUpgrade`) and the policy is signed.
+ * while the latest volume self-check passed above the free floor. `clone-v1` when `clone` (see
+ * `leaseTerms`). `upgrade-v1` when `upgrade` (see `canUpgrade`) and the policy is signed.
  */
 export function advertisedCapabilities(o: {
   egress: boolean;
   policy: ImagePolicy;
   push?: boolean;
+  clone?: boolean;
   upgrade?: boolean;
 }): StickCapability[] {
   return [
     ...(o.egress ? (['egress-v1'] as const) : []),
     ...(o.policy === 'signed' ? (['image-verify-v1'] as const) : []),
     ...(o.push ? (['push-v1'] as const) : []),
+    ...(o.clone ? (['clone-v1'] as const) : []),
     ...(o.upgrade && o.policy === 'signed' ? (['upgrade-v1'] as const) : []),
   ];
 }
@@ -149,23 +151,27 @@ export function freeSpace(h: VolumeHealth): 'unmeasured' | 'below' | 'ok' {
 /**
  * What the next lease says, from the latest health check. A measured value below the free floor:
  * null (the stick doesn't lease at all). Unmeasured: a lease without push-v1 (non-pushing roles
- * still run). At or above the floor: push-v1 when the self-check passed. `noPush` at
+ * still run). At or above the floor: push-v1 when the self-check passed, and clone-v1 when, as
+ * well, the base image's verdict is ok and it carries the clone label. `noPush` at
  * `MAX_PENDING_PUSHES`.
  */
 export function leaseTerms(o: {
   egress: boolean;
   policy: ImagePolicy;
-  health: VolumeHealth;
+  /** The latest health check; without a base verdict clone-v1 is withheld. */
+  health: VolumeHealth & { base?: BaseVerdict };
   pending: number;
   /** `canUpgrade` holds (issue #430). */
   upgrade?: boolean;
 }): { capabilities: StickCapability[]; noPush?: true } | null {
   const space = freeSpace(o.health);
   if (space === 'below') return null;
+  const push = space === 'ok' && o.health.selfCheck;
   const capabilities = advertisedCapabilities({
     egress: o.egress,
     policy: o.policy,
-    push: space === 'ok' && o.health.selfCheck,
+    push,
+    clone: push && o.health.base?.ok === true && o.health.clone,
     ...(o.upgrade ? { upgrade: true } : {}),
   });
   return o.pending >= MAX_PENDING_PUSHES ? { capabilities, noPush: true } : { capabilities };

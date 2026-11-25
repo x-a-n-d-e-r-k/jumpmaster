@@ -19,7 +19,8 @@ import {
   type TrooperEvent,
   TrooperEventSchema,
 } from '@jumpmaster/protocol';
-import type { Ack, DropClient } from './client.js';
+import type { Ack, CloneClient, DropClient } from './client.js';
+import { runClone, TROOPER_CLONE_LABEL, TROOPER_CLONE_VERSION } from './clone.js';
 import type { ContainerDriver, DropNet, VolumeInfo } from './driver.js';
 import {
   type EgressSession,
@@ -36,13 +37,16 @@ import {
   type PendingPushes,
   PUSH_BACKOFF_MAX_MS,
   pushContainer,
+  TROOPER_MIRROR_LABEL,
   TROOPER_PUSH_LABEL,
   TROOPER_PUSH_VERSION,
 } from './push.js';
 import { dropSubnetPool } from './subnets.js';
 import { digestOf, type ImageTrust, verifyBaseImage, verifyImage } from './verify.js';
 import {
+  createMirrorVolume,
   MIRROR_LABEL,
+  MIRROR_MOUNT,
   prepareVolume,
   REMOVE_TIMEOUT_MS,
   REPO_MOUNT,
@@ -118,9 +122,10 @@ export const SELFCHECK_LABEL = 'jumpmaster.selfcheck';
 
 /**
  * The latest volume self-check. `freeBytes` is null when it couldn't be measured, which counts as
- * below the floor.
+ * below the floor. `clone`: the base trooper image carries the clone label (read in the same
+ * inspection as the push label), so it can run a drop's clone container.
  */
-export type VolumeHealth = { selfCheck: boolean; freeBytes: number | null };
+export type VolumeHealth = { selfCheck: boolean; freeBytes: number | null; clone: boolean };
 
 /** The latest verdict on the stick's own trooper image (Ruling 17). */
 export type BaseVerdict = { ok: true } | { ok: false; reason: string };
@@ -141,11 +146,11 @@ export async function volumeSelfCheck(
 ): Promise<VolumeHealth> {
   const name = `jm-selfcheck-${stickId}-${randomBytes(4).toString('hex')}`;
   const labels = { [STICK_LABEL]: stickId, [SELFCHECK_LABEL]: '1' };
+  let clone = false;
   try {
-    const pushLabel = await driver
-      .imageLabels(image)
-      .then((l) => l[TROOPER_PUSH_LABEL] === TROOPER_PUSH_VERSION)
-      .catch(() => false);
+    const imageLabels = await driver.imageLabels(image).catch(() => ({}) as Record<string, string>);
+    const pushLabel = imageLabels[TROOPER_PUSH_LABEL] === TROOPER_PUSH_VERSION;
+    clone = imageLabels[TROOPER_CLONE_LABEL] === TROOPER_CLONE_VERSION;
     await driver.createVolume(name, labels);
     try {
       const init = await driver
@@ -157,13 +162,14 @@ export async function volumeSelfCheck(
       return {
         selfCheck: pushLabel && init === 0 && probe?.writable === true,
         freeBytes: probe?.freeBytes ?? null,
+        clone,
       };
     } finally {
       // A leaked self-check volume is the sweep's to remove.
       await driver.removeVolume(name).catch(() => {});
     }
   } catch {
-    return { selfCheck: false, freeBytes: null };
+    return { selfCheck: false, freeBytes: null, clone };
   }
 }
 
@@ -177,7 +183,7 @@ export async function stickHealth(
   o: { image: string; stickId: string; trust: ImageTrust; log: (line: string) => void },
 ): Promise<StickHealth> {
   const base = await verifyBaseImage(o.image, { trust: o.trust, driver, log: o.log });
-  if (!base.ok) return { selfCheck: false, freeBytes: null, base };
+  if (!base.ok) return { selfCheck: false, freeBytes: null, clone: false, base };
   return { ...(await volumeSelfCheck(driver, o.image, o.stickId)), base };
 }
 
@@ -190,6 +196,7 @@ export class HealthMonitor {
   private current: StickHealth = {
     selfCheck: false,
     freeBytes: null,
+    clone: false,
     base: { ok: false, reason: 'base image not checked yet' },
   };
   private inFlight: Promise<StickHealth> | undefined;
