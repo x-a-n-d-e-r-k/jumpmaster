@@ -33,7 +33,7 @@ import {
 } from './github.js';
 import { linkTarget, SYSTEM_CREDENTIALS_HREF, SYSTEM_HREF } from './links.js';
 import { breadcrumb, escapeHtml, page } from './pages.js';
-import { projectWords, type ZoneRef, zoneName, zoneNamer } from './zone-name.js';
+import { PROJECT_WORDS_FN, projectWords, type ZoneRef, zoneName, zoneNamer } from './zone-name.js';
 
 /**
  * The setup wizard (§10.3, M4.5): after the passphrase, five steps, each a thin frame over a
@@ -536,7 +536,7 @@ export function projectBody(
 <div id="guidance"></div></div>
 ${COPY_SCRIPT}
 <script>
-const HOSTS = ${scriptJson(presetHosts())};
+${PROJECT_WORDS_FN}const HOSTS = ${scriptJson(presetHosts())};
 let found = null;
 const gates = document.getElementById('gates');
 function gateRow(g) {
@@ -634,7 +634,8 @@ async function createZone(zone, resume, out) {
   if (r.ok) { location.href = ${scriptJson(opts.done)}; return; }
   // A guarded add (every new project, from a browser): the confirmation page, then on.
   if (r.status === 409 && j.needsConfirmation) { location.href = j.confirm; return; }
-  out.textContent = j.error || (j.issues || []).map((i) => (i.path ? i.path + ': ' : '') + i.message).join('; ') || ('Refused (' + r.status + ')');
+  // Store and validator issues keep "zone" in the API; the page says project (#872).
+  out.textContent = j.error || (j.issues || []).map((i) => (i.path ? i.path + ': ' : '') + projectWords(i.message)).join('; ') || ('Refused (' + r.status + ')');
   // An id with history: what Resume brings back, and the button to bring it back (paused).
   if (j.history) {
     const h = j.history;

@@ -65,8 +65,16 @@ export function zoneTextNamer(zones: readonly ZoneRef[]): (id: string, repo?: st
  * that follows the words that introduce an id ("zone ", "id ", "id: ", "ids ", "not ", "be ",
  * "and "), as in "duplicate zone id: zone".
  */
-export const projectWords = (text: string): string =>
-  text.replace(
+export function projectWords(text: string): string {
+  return text.replace(
     /(?<![\w/-]|\b(?:[Zz]ones?|ids?:?|not|be|and) )([Zz])one(s?)(?![\w/-])/g,
-    (_, z: string, s: string) => `${z === 'Z' ? 'P' : 'p'}roject${s}`,
+    (_, z: string, s: string) => (z === 'Z' ? 'P' : 'p') + 'roject' + s,
   );
+}
+
+/**
+ * `projectWords` for a page script: its own source, so a refusal a script prints from an API
+ * answer (validator and store issues, which keep "zone" in the API, ctl and the log) reads by the
+ * same rule as the pages the server draws (#872). Self-contained: it calls nothing else.
+ */
+export const PROJECT_WORDS_FN = `var __name = function (f) { return f; };\n${projectWords.toString()}\n`;

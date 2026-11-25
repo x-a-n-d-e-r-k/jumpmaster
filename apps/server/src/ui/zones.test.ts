@@ -257,7 +257,8 @@ describe('the zones page', () => {
     for (const f of ['readyLabel', 'gates', 'ciDeadlineMinutes', 'egress.allow', 'advanced'])
       expect(page, f).toContain(`data-issues="${f}"`);
     expect(page).toContain('const ZONE_INDEX = 0;');
-    expect(page).toContain('issueField(i.path, ZONE_INDEX)');
+    expect(page).toContain('jmShowIssues(issues, out, ZONE_INDEX)');
+    expect(page).toContain('issueField(i.path, zoneIndex)');
     const r = await w.api('PATCH', '/api/control/config', {
       patch: { dropZones: [{ id: 'main', ciDeadlineMinutes: 'soon' }] },
       expectRevision: w.store.revision(),

@@ -1,13 +1,17 @@
+import vm from 'node:vm';
 import { describe, expect, test, vi } from 'vitest';
+import { neededCredentialError } from '../api/secrets.js';
 import { raiseBriefing } from '../briefings.js';
 import { recordCard } from '../chat/cards.js';
 import { appendMessage, createThread } from '../chat/store.js';
 import { GUARDED_PATHS, type GuardCtx, REFUSED_PATHS } from '../config/guarded.js';
 import { LEGACY_READY_LABEL } from '../config/ready-label.js';
+import { ZONE_HISTORY_ISSUE } from '../config/store.js';
 import { type ConfigIssue, parseEditable } from '../config.js';
 import { type Drop, insertDrop, setZoneMode, stampStick, type WorkItem } from '../db/repo.js';
 import { type DoctorCheck, SHADOWED_TOKEN_FIX } from '../doctor/checks.js';
 import { GITLAB_UNSUPPORTED } from '../forge/kind.js';
+import { INTAKE_LIMIT_ERROR } from '../intake.js';
 import { modeCardSummary, refusedCardSummary } from '../mcp/chat-actions.js';
 import { applyRefusal, DISCOVER_PATH, INSTALLED_PATH } from '../setup/github-app-installed.js';
 import { type StatusInput, type StatusZone, statusOf } from '../status.js';
@@ -15,10 +19,15 @@ import { ago, world } from '../test/doctorWorld.js';
 import { makeZone } from '../test/fixtures.js';
 import { harness } from '../test/flowHarness.js';
 import { operatorSession, plus, t0 } from '../test/helpers.js';
+import { FORM_SCRIPT } from '../zones/form.js';
+import { FLAGS_SCRIPT } from './flags.js';
 import { githubSection } from './github.js';
-import { codeHtml } from './pages.js';
-import { fixHtml } from './setup.js';
+import { codeHtml, ISSUE_SCRIPT } from './pages.js';
+import { CONFIG_ANSWER_FN } from './setting-controls.js';
+import { CREDENTIALS_SCRIPT, HISTORY_SCRIPT, OTHER_MACHINES_SCRIPT } from './settings.js';
+import { fixHtml, projectBody } from './setup.js';
 import { projectWords } from './zone-name.js';
+import { ISSUES_SCRIPT } from './zones.js';
 
 /**
  * What a reader sees of a page: no `<script>`, `<style>`, `<code>` or `<pre>` content, no tags
@@ -842,5 +851,230 @@ describe('status lines say project', () => {
       ...(s.also ?? []).map((a) => a.text),
     ].join(' | ');
     expect(offenders(words), words).toEqual([]);
+  });
+});
+
+/**
+ * A page script's refusals: what it prints from an API answer, run against the words the server
+ * actually answers with (#872). `visibleText` drops `<script>` content, so these are driven here.
+ */
+describe('refusals a page script prints say project', () => {
+  type El = {
+    textContent: string;
+    value: string;
+    hidden: boolean;
+    dataset: Record<string, string>;
+    children: unknown[];
+    listeners: Record<string, ((e: unknown) => unknown)[]>;
+    [k: string]: unknown;
+  };
+  /** A fake element: enough DOM for the scripts' top level and their refusal paths. */
+  const fakeEl = (o: Partial<El> = {}): El => {
+    const el: El = {
+      textContent: '',
+      value: '',
+      hidden: false,
+      dataset: {},
+      children: [],
+      listeners: {},
+      ...o,
+    };
+    Object.assign(el, {
+      addEventListener: (t: string, f: (e: unknown) => unknown) => {
+        (el.listeners[t] ??= []).push(f);
+      },
+      append: (...kids: unknown[]) => {
+        for (const k of kids) el.children.push(k);
+      },
+      replaceChildren: (...kids: unknown[]) => {
+        el.children = kids;
+        el.textContent = kids.map((k) => (typeof k === 'string' ? k : '')).join('');
+      },
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      reset: () => {},
+      focus: () => {},
+    });
+    return el;
+  };
+  /** Everything an element shows: its text and its children's, depth first. */
+  const shown = (el: unknown): string => {
+    if (typeof el === 'string') return el;
+    const e = el as El;
+    return [e.textContent, ...e.children.map(shown)].join(' ');
+  };
+  const answer = (status: number, body: unknown) => async () => ({
+    ok: status < 300,
+    status,
+    json: async () => body,
+  });
+  const body = (script: string) => script.replace(/^<script>|<\/script>$/gi, '');
+
+  /** The validator's issues for a starter project with ciRequired: false and one with no image or preset. */
+  function validatorIssues(): ConfigIssue[] {
+    const { image: _i, ...bare } = fileZone('b');
+    const r = parseEditable(
+      { dropZones: [fileZone('a', { identity: 'starter', ciRequired: false }), bare] },
+      { devImages: true },
+    );
+    const issues = 'issues' in r ? r.issues : [];
+    // Non-vacuous: the validator says zone, under dropZones paths.
+    const said = issues.map((i) => `${i.path}: ${i.message}`).join('\n');
+    expect(said).toMatch(/dropZones\.0\.[^\n]*starter zone requires ciRequired/);
+    expect(said).toMatch(/dropZones\.1[^\n]*: a zone needs image or preset/);
+    return issues;
+  }
+
+  test('the New issue page past the hourly limit', async () => {
+    expect(INTAKE_LIMIT_ERROR).toContain('per project per hour');
+    const els: Record<string, El> = {};
+    const byId = (id: string) => {
+      els[id] ??= fakeEl(id === 'new-issue' ? { dataset: { base: '/b', issues: '/i/' } } : {});
+      return els[id];
+    };
+    const ctx = vm.createContext({
+      document: { getElementById: byId, createElement: () => fakeEl() },
+      sessionStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
+      crypto: { randomUUID: () => 'uuid-1' },
+      jmFetch: answer(429, { error: INTAKE_LIMIT_ERROR }),
+    });
+    vm.runInContext(body(ISSUE_SCRIPT), ctx);
+    byId('issue-title').value = 'A title';
+    for (const fn of byId('issue-form').listeners.submit ?? [])
+      await fn({ preventDefault: () => {}, submitter: { disabled: false } });
+    const text = shown(byId('issue-status'));
+    expect(text).toContain('per project per hour');
+    expect(offenders(text), text).toEqual([]);
+  });
+
+  test('System, Credentials refusing to remove a credential a project needs', async () => {
+    for (const [fnName, arg, name] of [
+      ['jmRemoveCredential', 'githubAuthorToken', 'githubAuthorToken'],
+      ['jmRemoveGitlabPat', { zone: 'gl', role: 'author' }, 'gitlab-pat/gl/author'],
+    ] as const) {
+      const ctx = vm.createContext({
+        document: { addEventListener: () => {}, querySelectorAll: () => [] },
+        encodeURIComponent,
+        jmFetch: answer(409, { error: neededCredentialError(name) }),
+      });
+      vm.runInContext(body(CREDENTIALS_SCRIPT), ctx);
+      const status = fakeEl();
+      const fn = ctx[fnName] as (...a: unknown[]) => Promise<string>;
+      expect(await fn(arg, { sudo: true, passphrase: '' }, status), fnName).toBe('refused');
+      expect(status.textContent).toContain(`projects need ${name}: removing it would park them`);
+      expect(offenders(status.textContent), status.textContent).toEqual([]);
+    }
+  });
+
+  test("the wizard's project step, an id with history: the refusal says project and Resume is offered", async () => {
+    const html = projectBody('two-bot', { returnTo: '/r', cancelTo: '/c', done: '/d' });
+    const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/gi)]
+      .map((m) => m[1] as string)
+      .find((s) => s.includes('async function createZone')) as string;
+    expect(script).toBeDefined();
+    const els: Record<string, El> = {};
+    const ctx = vm.createContext({
+      document: {
+        getElementById: (id: string) => {
+          els[id] ??= fakeEl();
+          return els[id];
+        },
+        createElement: () => fakeEl(),
+        querySelector: () => fakeEl(),
+        querySelectorAll: () => [],
+      },
+      location: { href: '' },
+      URLSearchParams,
+      JSON,
+      jmFetch: answer(400, {
+        issues: [{ path: 'dropZones.1.id', message: ZONE_HISTORY_ISSUE }],
+        history: { workItems: 3, drops: 2, outbox: 1, crewIssues: 0, goals: 1 },
+      }),
+    });
+    vm.runInContext(script, ctx);
+    const out = fakeEl();
+    await (ctx.createZone as (...a: unknown[]) => Promise<void>)(
+      { repo: 'octo/old', id: 'old' },
+      false,
+      out,
+    );
+    expect(out.textContent).toBe(
+      'dropZones.1.id: this project has history: pick another id, or resume it',
+    );
+    const text = shown(out);
+    expect(text).toContain('Resume brings back its history (paused)');
+    expect(text).toContain('Resume old');
+    expect(offenders(text), text).toEqual([]);
+  });
+
+  test("the project Setup form's issues and the stop and adopt lines", () => {
+    const issues = validatorIssues();
+    const placed: Record<string, El> = { image: fakeEl() };
+    const ctx = vm.createContext({
+      document: {
+        querySelector: (sel: string) =>
+          placed[/data-issues="([^"]+)"/.exec(sel)?.[1] ?? ''] ?? null,
+      },
+    });
+    vm.runInContext(`${FORM_SCRIPT}\n${ISSUES_SCRIPT}`, ctx);
+    for (const index of [0, 1]) {
+      const out = fakeEl();
+      (ctx.jmShowIssues as (...a: unknown[]) => void)(issues, out, index);
+      const text = [out.textContent, placed.image?.textContent].join(' | ');
+      expect(offenders(text), text).toEqual([]);
+      // The paths shown are kept as the validator gives them.
+      expect(out.textContent).toMatch(/dropZones\.\d/);
+    }
+    expect(placed.image?.textContent).toContain('a project needs image or preset');
+    const line = (ctx.jmIssuesText as (i: ConfigIssue[]) => string)(issues);
+    expect(line).toContain('a starter project requires ciRequired');
+    expect(offenders(line), line).toEqual([]);
+  });
+
+  test('the shared setting controls and the advanced settings rows', async () => {
+    const issues = validatorIssues();
+    const ctx = vm.createContext({});
+    vm.runInContext(CONFIG_ANSWER_FN, ctx);
+    const status = fakeEl();
+    const r = await answer(400, { issues })();
+    const said = await (ctx.jmConfigAnswer as (...a: unknown[]) => Promise<string>)(
+      r,
+      status,
+      () => {},
+      '/s',
+    );
+    expect(said).toBe('refused');
+    expect(status.textContent).toContain('dropZones.1');
+    expect(status.textContent).toContain('a project needs image or preset');
+    expect(offenders(status.textContent), status.textContent).toEqual([]);
+
+    const flags = vm.createContext({
+      document: {
+        addEventListener: () => {},
+        querySelector: () => null,
+        querySelectorAll: () => [],
+      },
+    });
+    vm.runInContext(body(FLAGS_SCRIPT), flags);
+    const above = fakeEl();
+    (flags.jmShowFlagIssues as (...a: unknown[]) => void)(issues, { zone: { id: 'a' } }, above);
+    expect(above.textContent).toContain('dropZones.0');
+    expect(offenders(above.textContent), above.textContent).toEqual([]);
+
+    for (const script of [HISTORY_SCRIPT, OTHER_MACHINES_SCRIPT]) {
+      const c = vm.createContext({
+        document: { addEventListener: () => {}, querySelectorAll: () => [] },
+        jmFetch: answer(400, { issues }),
+      });
+      vm.runInContext(body(script), c);
+      const st = fakeEl();
+      const fn = (c.jmRevert ?? c.jmSavePublicUrl) as (...a: unknown[]) => Promise<string>;
+      const args =
+        c.jmRevert !== undefined
+          ? [{ id: 1, revision: 2, readds: [] }, st, () => true, () => {}]
+          : ['https://jm.example', st, () => {}];
+      expect(await fn(...args)).toBe('refused');
+      expect(offenders(st.textContent), st.textContent).toEqual([]);
+    }
   });
 });

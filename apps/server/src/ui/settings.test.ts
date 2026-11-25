@@ -2455,7 +2455,7 @@ describe("each GitLab zone's gitlab-pat entries on the Credentials tab (#821, sp
         ['jmSetGitlabPat', 'the vault is off'],
         ['jmSetGitlabPat', 'a starter project has no reviewer token'],
         ['jmTestGitlabPat', 'the vault is off'],
-        ['jmRemoveGitlabPat', 'zones need gitlab-pat/gl/author: removing it would park them'],
+        ['jmRemoveGitlabPat', 'projects need gitlab-pat/gl/author: removing it would park them'],
       ] as const) {
         const r = await run(fnName, {
           zone: 'gl',

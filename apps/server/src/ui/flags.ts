@@ -225,8 +225,9 @@ function jmShowFlagIssues(issues, target, status) {
   const above = [];
   for (const i of issues) {
     const at = jmFlagIssueAt(i.path, target);
-    if (at) at.textContent = (at.textContent ? at.textContent + ' ' : '') + i.message;
-    else above.push((i.path ? i.path + ': ' : '') + i.message);
+    const said = projectWords(i.message);
+    if (at) at.textContent = (at.textContent ? at.textContent + ' ' : '') + said;
+    else above.push((i.path ? i.path + ': ' : '') + said);
   }
   status.textContent = above.join('; ');
 }

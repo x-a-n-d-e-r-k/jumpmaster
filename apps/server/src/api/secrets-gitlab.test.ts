@@ -385,7 +385,7 @@ describe('DELETE /api/control/secrets/gitlab-pat/:zone/:role (issue #776)', () =
       bodies.push(r.body);
       expect(r.statusCode).toBe(409);
       expect(r.json().error).toBe(
-        `zones need gitlab-pat/${zone}/${role}: removing it would park them`,
+        `projects need gitlab-pat/${zone}/${role}: removing it would park them`,
       );
       expect(w.vault.meta(`gitlab-pat/${zone}/${role}`)).toBeDefined();
     }

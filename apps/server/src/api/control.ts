@@ -32,7 +32,7 @@ import {
 } from '../briefings.js';
 import { mergeConfigPatch, mergePatch } from '../config/diff.js';
 import { configReader, type LiveConfig, statusOf } from '../config/source.js';
-import { type ApplyResult, ConfigStore } from '../config/store.js';
+import { type ApplyResult, ConfigStore, ZONE_HISTORY_ISSUE } from '../config/store.js';
 import { type Config, mcpConfigOf, secretList } from '../config.js';
 import { requestCrewCycle } from '../crew/schedule.js';
 import type { Db } from '../db/open.js';
@@ -1628,11 +1628,7 @@ function registerConfigRoutes(
       },
     );
     // An id with history: say what Resume would bring back, beside the store's issue.
-    if (
-      !r.ok &&
-      'issues' in r &&
-      r.issues.some((i) => i.message.startsWith('this zone has history'))
-    )
+    if (!r.ok && 'issues' in r && r.issues.some((i) => i.message === ZONE_HISTORY_ISSUE))
       return reply.code(400).send({ issues: r.issues, history: zoneHistoryCounts(db, id) });
     const out = answer(req, reply, 'zone.add', r, {}, id);
     if (!r.ok) return out;

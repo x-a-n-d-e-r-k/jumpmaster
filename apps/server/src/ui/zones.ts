@@ -38,7 +38,7 @@ import {
 } from './pages.js';
 import { getWizard, projectBody } from './setup.js';
 import { relativeTime } from './time.js';
-import { type ZoneRef, zoneName, zoneNameText } from './zone-name.js';
+import { PROJECT_WORDS_FN, type ZoneRef, zoneName, zoneNameText } from './zone-name.js';
 
 /**
  * The zones page (§10.3): every zone with its mode, egress, identity, last drop, doctor fails and
@@ -139,15 +139,37 @@ const stopButton = (id: string, name: string): string => {
   return `<button class="stop" data-zone="${escapeHtml(id)}" data-name="${escapeHtml(name)}" data-confirm="${escapeHtml(confirm)}">Stop managing</button> `;
 };
 
+/**
+ * The page scripts' words for a refusal's validator or store issues (`jmIssuesText`, joined with
+ * "; ") and the Setup form's `jmShowIssues(issues, out, zoneIndex)`, which puts each issue beside
+ * its field (by `issueField`) and the rest, with their paths, in `out`. Both say "project" where
+ * the validator says "zone", by `projectWords`; keys and ids are kept (#872).
+ */
+export const ISSUES_SCRIPT = `${PROJECT_WORDS_FN}function jmIssuesText(issues) {
+  return (issues || []).map((i) => projectWords(i.message)).join('; ');
+}
+function jmShowIssues(issues, out, zoneIndex) {
+  let placed = 0;
+  let rest = '';
+  for (const i of issues) {
+    const f = issueField(i.path, zoneIndex);
+    const at = f && document.querySelector('[data-issues="' + f + '"]');
+    const said = projectWords(i.message);
+    if (at) { at.textContent = said; placed++; } else rest += (i.path ? i.path + ': ' : '') + said + ' ';
+  }
+  out.textContent = (placed ? placed + (placed === 1 ? ' field error' : ' field errors') + (rest ? '. ' : '') : '') + rest;
+}
+`;
+
 /** The Stop managing buttons' handler; `#stop-out` holds a refusal. */
-const STOP_SCRIPT = `for (const b of document.querySelectorAll('button.stop')) b.addEventListener('click', async () => {
+const STOP_SCRIPT = `${ISSUES_SCRIPT}for (const b of document.querySelectorAll('button.stop')) b.addEventListener('click', async () => {
   if (!confirm(b.dataset.confirm)) return;
   const r = await jmFetch('/api/control/zones/' + encodeURIComponent(b.dataset.zone), {}, 'DELETE');
   const j = await r.json().catch(() => ({}));
   // 200: removed now; 202: stopping, removed by the server once drained.
   if (r.status === 200) { location.href = ${scriptJson(PROJECTS_HREF)}; return; }
   if (r.status === 202) { location.reload(); return; }
-  document.getElementById('stop-out').textContent = b.dataset.name + ': ' + (j.error || (j.issues || []).map((i) => i.message).join('; ') || ('refused (' + r.status + ')'));
+  document.getElementById('stop-out').textContent = b.dataset.name + ': ' + (j.error || jmIssuesText(j.issues) || ('refused (' + r.status + ')'));
 });`;
 
 const FORBIDDEN_NOTE = 'set with <code>jumpmaster ctl</code> or in the config file';
@@ -269,6 +291,7 @@ function setupScript(o: {
 }): string {
   return `<script id="setup-script">
 ${FORM_SCRIPT}
+${ISSUES_SCRIPT}
 (() => {
 const REVISION = ${o.revision};
 const ZONE_INDEX = ${o.index};
@@ -334,16 +357,7 @@ function discard() {
   syncStarter();
   refresh();
 }
-function showIssues(issues) {
-  let placed = 0;
-  let rest = '';
-  for (const i of issues) {
-    const f = issueField(i.path, ZONE_INDEX);
-    const at = f && document.querySelector('[data-issues="' + f + '"]');
-    if (at) { at.textContent = i.message; placed++; } else rest += (i.path ? i.path + ': ' : '') + i.message + ' ';
-  }
-  out.textContent = (placed ? placed + (placed === 1 ? ' field error' : ' field errors') + (rest ? '. ' : '') : '') + rest;
-}
+function showIssues(issues) { jmShowIssues(issues, out, ZONE_INDEX); }
 async function save() {
   clearIssues();
   const patch = toMergePatch(formToZone(original), formToZone(fieldsOf(form)));
@@ -387,7 +401,7 @@ if (adopt) adopt.addEventListener('click', async () => {
   const j = await r.json().catch(() => ({}));
   if (r.ok) { location.reload(); return; }
   if (r.status === 409 && j.needsConfirmation) { location.href = j.confirm; return; }
-  said.textContent = j.error || (j.issues || []).map((i) => i.message).join('; ') || ('Refused (' + r.status + ')');
+  said.textContent = j.error || jmIssuesText(j.issues) || ('Refused (' + r.status + ')');
 });
 // Danger zone: Stop managing waits for the repository's exact name.
 const typed = document.getElementById('stop-confirm');
@@ -405,7 +419,7 @@ if (typed && stop) {
     if (r.status === 200) { location.href = ${scriptJson(PROJECTS_HREF)}; return; }
     if (r.status === 202) { location.reload(); return; }
     sync();
-    document.getElementById('stop-out').textContent = REPO + ': ' + (j.error || (j.issues || []).map((i) => i.message).join('; ') || ('refused (' + r.status + ')'));
+    document.getElementById('stop-out').textContent = REPO + ': ' + (j.error || jmIssuesText(j.issues) || ('refused (' + r.status + ')'));
   });
 }
 refresh();

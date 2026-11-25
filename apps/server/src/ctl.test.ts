@@ -419,6 +419,39 @@ describe('ctl config', () => {
     await s.app.close();
   });
 
+  test("config issues keep the validator's words in the API and in ctl: they say zone (#872)", async () => {
+    const s = server();
+    s.store.apply(
+      { dropZones: [zoneDoc()] },
+      { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
+    );
+    const { image: _i, ...bare } = zoneDoc('bare');
+    const doc = {
+      ...JSON.parse(s.store.exportJson()),
+      dropZones: [zoneDoc('main', { identity: 'starter', ciRequired: false }), bare],
+    };
+    const file = join(s.dir, 'bad.json');
+    writeFileSync(file, JSON.stringify(doc));
+    // The control API: the issues as the validator words them.
+    const api = await s.app.inject({
+      method: 'POST',
+      url: '/api/control/config/import',
+      headers: { authorization: `Bearer ${TOKEN}`, host: '127.0.0.1:7420' },
+      payload: { config: doc, dryRun: true },
+    });
+    const messages = (api.json() as { issues: { message: string }[] }).issues.map((i) => i.message);
+    expect(messages.join('\n'), api.body).toMatch(/a starter zone requires ciRequired: true/);
+    expect(messages.join('\n')).toMatch(/a zone needs image or preset/);
+    // ctl prints them as the API gave them.
+    const dry = await run(['config', 'import', file, '--dry-run'], '', s.fetch);
+    expect(dry.code).toBe(1);
+    expect(dry.out.join('\n')).toMatch(
+      /issue: dropZones\.0[^\n]*: a starter zone requires ciRequired/,
+    );
+    expect(dry.out.join('\n')).toMatch(/issue: dropZones\.1[^\n]*: a zone needs image or preset/);
+    await s.app.close();
+  });
+
   test('ctl config set applies a merge patch and ctl config import --dry-run prints the diff without applying', async () => {
     const s = server();
     s.store.apply(
