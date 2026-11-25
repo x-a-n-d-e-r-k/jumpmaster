@@ -210,7 +210,8 @@ export function appEntryViews(store: Pick<ConfigStore, 'vault' | 'resolvedApps'>
 /** A GitLab zone's `gitlab-pat` entry as the list shows it (issue #776): never its value. */
 export type GitlabPatView = {
   zone: string;
-  role: GitLabPatRole;
+  /** `read` is the zone's read deploy token `gitlab-pat/<zone>/read` (issue #875). */
+  role: GitLabPatRole | 'read';
   name: string;
   set: boolean;
   undecryptable?: true;
@@ -223,7 +224,8 @@ export type GitlabPatView = {
 /**
  * Each GitLab zone's `gitlab-pat` entries, in zone order: the author, and the reviewer of a
  * two-bot zone, or of a starter zone whose vault still holds one (a leftover from two-bot mode,
- * which resolution skips, so it is read from the vault's metadata).
+ * which resolution skips, so it is read from the vault's metadata), then the optional read deploy
+ * token `gitlab-pat/<zone>/read` of every GitLab zone (issue #875). Never a value or a username.
  */
 export function gitlabPatViews(
   store: Pick<ConfigStore, 'vault' | 'current' | 'resolvedGitlabPats'>,
@@ -234,8 +236,8 @@ export function gitlabPatViews(
     .current()
     .dropZones.filter((z) => forgeKind(z) === 'gitlab')
     .flatMap((z) =>
-      GITLAB_PAT_ROLES.flatMap((role): GitlabPatView[] => {
-        const name = gitlabPatEntryName(z.id, role);
+      [...GITLAB_PAT_ROLES, 'read' as const].flatMap((role): GitlabPatView[] => {
+        const name = role === 'read' ? gitlabReadEntryName(z.id) : gitlabPatEntryName(z.id, role);
         const meta = vault === 'disabled' ? undefined : vault.meta(name);
         const starterReviewer = role === 'reviewer' && z.identity === 'starter';
         if (starterReviewer && !meta) return [];

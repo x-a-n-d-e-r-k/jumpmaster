@@ -18,6 +18,7 @@ import { insertDrop, recordUsageWindows, setZoneMode, upsertDropZone } from '../
 import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import { gateSecretName } from '../vault/credentials.js';
 import { appEntryName, serializeAppEntry } from '../vault/github-app-entries.js';
+import { GITLAB_READ_BAD_VALUE } from '../vault/gitlab-pat-entries.js';
 import { fingerprintOf, openVault, VAULT_KEY_IN_DATA_DIR } from '../vault/vault.js';
 import { FLAGS_SCRIPT, renderFlagsForm } from './flags.js';
 import { LIVE_MARKER } from './pages.js';
@@ -2343,6 +2344,191 @@ describe("each GitLab zone's gitlab-pat entries on the Credentials tab (#821, sp
     expect(markup).not.toContain('GitLab tokens');
     expect(markup).not.toContain('gitlab-pat');
     expect(markup).not.toContain('gitlab-pats');
+  });
+
+  describe("each GitLab zone's read deploy token gitlab-pat/<zone>/read (#875)", () => {
+    const D_USER = 'gitlab+deploy-token-42';
+    const D_TOKEN = ['gldt', 'D'.repeat(20)].join('-');
+    const D_VALUE = `${D_USER}:${D_TOKEN}`;
+
+    test('each GitLab zone, starter or two-bot, has a read row with a username field and a password field', async () => {
+      const w = await world({ dbMode: true, doc: GITLAB_DOC });
+      const html = (await w.get('/system/credentials')).body;
+      const markup = withoutScripts(html);
+      for (const zone of ['gl', 'solo']) {
+        const row = glRowOf(markup, zone, 'read');
+        expect(row).toContain(`<code>gitlab-pat/${zone}/read</code>`);
+        expect(row).toContain(`<td data-col="zone">${zone}</td>`);
+        expect(row).toContain('<td data-col="role">read</td>');
+        expect(row).toContain('<td data-col="set">not set</td>');
+        expect(row).toContain('<td data-col="fingerprint">-</td>');
+        expect(row).toContain('<td data-col="set-at">-</td>');
+        expect(row).toContain('<td data-col="test">-</td>');
+        expect(row).toContain(
+          `<form class="gitlab-read-set" data-zone="${zone}" data-role="read"><input type="text" name="username" autocomplete="off"`,
+        );
+        expect(row).toMatch(/<input type="password" name="token" autocomplete="off"/);
+        expect(row).not.toContain('name="value"');
+        // Not set: nothing to test or remove.
+        expect(row).not.toContain('class="gitlab-test"');
+        expect(row).not.toContain('class="gitlab-remove"');
+      }
+      // After the author and reviewer of its zone.
+      const order = ['gl/author', 'gl/reviewer', 'gl/read', 'solo/author', 'solo/read'].map((k) =>
+        markup.indexOf(`data-gitlab-pat="${k}"`),
+      );
+      expect(order.every((n, i) => n >= 0 && (i === 0 || n > (order[i - 1] as number)))).toBe(true);
+    });
+
+    test('once set: its fingerprint, dates, Test and Remove; never the token or the username', async () => {
+      const w = await world({ dbMode: true, doc: GITLAB_DOC });
+      const r = w.store.putGitlabRead('gl', D_VALUE, { result: 'ok' });
+      if (!r.ok) throw new Error(JSON.stringify(r));
+      const html = (await w.get('/system/credentials')).body;
+      const row = glRowOf(withoutScripts(html), 'gl', 'read');
+      const today = t0.toISOString().slice(0, 10);
+      expect(row).toContain('<td data-col="set">set</td>');
+      expect(row).toContain(`<code>${fingerprintOf(D_VALUE)}</code>`);
+      expect(row).toContain(`<td data-col="set-at">${today}</td>`);
+      expect(row).toContain(`<td data-col="test">ok <small>${today}</small></td>`);
+      expect(row).toContain(
+        '<button type="button" class="gitlab-test" data-zone="gl" data-role="read">Test</button>',
+      );
+      expect(row).toContain(
+        '<button type="button" class="gitlab-remove" data-zone="gl" data-role="read">Remove</button>',
+      );
+      expect(row).not.toMatch(/name="(username|token)"[^>]* value=/);
+      for (const t of [D_USER, D_TOKEN, D_VALUE]) expect(html).not.toContain(t);
+    });
+
+    test('an undecryptable read entry offers Remove, not Test', async () => {
+      const w = await world({ dbMode: true, doc: GITLAB_DOC });
+      const otherKey = join(mkdtempSync(join(tmpdir(), 'jm-other-')), 'other_key');
+      writeFileSync(otherKey, randomBytes(32).toString('base64url'), { mode: 0o600 });
+      openVault(otherKey, w.db).put('gitlab-pat/solo/read', D_VALUE, { now: t0 });
+      w.store.refreshSecrets();
+      const html = (await w.get('/system/credentials')).body;
+      const row = glRowOf(withoutScripts(html), 'solo', 'read');
+      expect(row).toContain('<td data-col="set">can&#39;t be decrypted</td>');
+      expect(row).toContain(
+        '<button type="button" class="gitlab-remove" data-zone="solo" data-role="read">Remove</button>',
+      );
+      expect(row).not.toContain('class="gitlab-test"');
+      for (const t of [D_USER, D_TOKEN]) expect(html).not.toContain(t);
+    });
+
+    test('the intro names the read token as optional and used for the clone; the author token stays for API calls and pushes', async () => {
+      const w = await world({ dbMode: true, doc: GITLAB_DOC });
+      const markup = withoutScripts((await w.get('/system/credentials')).body);
+      const at = markup.indexOf('<section id="gitlab-pats">');
+      const intro = markup.slice(at, markup.indexOf('</p>', at));
+      expect(intro).toContain('The read token is optional');
+      expect(intro).toContain('project deploy token with only <code>read_repository</code>');
+      expect(intro).toContain('drops clone with it instead of the author token');
+      expect(intro).toContain('without it, the clone container uses the author token');
+      expect(intro).toContain("the author token stays the bot's token for API calls and pushes");
+      expect(intro).not.toMatch(/only for push/i);
+    });
+
+    test('no GitLab zone: no section and no read row', async () => {
+      const w = await world();
+      const markup = withoutScripts((await w.get('/system/credentials')).body);
+      expect(markup).not.toContain('gitlab-pats');
+      expect(markup).not.toContain('gitlab-read-set');
+      expect(markup).not.toContain('/read');
+    });
+
+    describe('the page script', () => {
+      type Answer = { status: number; body: Record<string, unknown> };
+      const runRead = async (o: {
+        zone: string;
+        username: string;
+        token: string;
+        state?: object;
+        answer?: Answer;
+      }) => {
+        const calls: Call[] = [];
+        const ctx = vm.createContext({
+          document: { addEventListener: () => {}, querySelectorAll: () => [] },
+          encodeURIComponent,
+          jmFetch: async (path: string, body: unknown, method?: string) => {
+            calls.push({ method: method ?? 'POST', path, body });
+            const a = path === '/api/control/sudo' ? { status: 200, body: {} } : o.answer;
+            const ans = a ?? { status: 200, body: { tested: true, result: 'ok' } };
+            return { ok: ans.status < 300, status: ans.status, json: async () => ans.body };
+          },
+        });
+        vm.runInContext(CREDENTIALS_SCRIPT.replace(/^<script>|<\/script>$/gi, ''), ctx);
+        const username = { value: o.username };
+        const token = { value: o.token };
+        const status = stubStatus();
+        const state = { sudo: true, passphrase: '', ...o.state };
+        const fn = ctx.jmSetGitlabRead as (...a: unknown[]) => Promise<string>;
+        const result = await fn({ zone: o.zone, username, token }, state, status);
+        return { result, calls, username, token, status: status.textContent };
+      };
+
+      test('Set sends {"value": "<username>:<token>"} to the read route and clears both fields', async () => {
+        const r = await runRead({ zone: 'gl', username: D_USER, token: D_TOKEN });
+        expect(r.result).toBe('saved');
+        expect(r.calls).toEqual([
+          {
+            method: 'PUT',
+            path: '/api/control/secrets/gitlab-pat/gl/read',
+            body: { value: D_VALUE },
+          },
+        ]);
+        expect(r.username.value).toBe('');
+        expect(r.token.value).toBe('');
+        for (const t of [D_USER, D_TOKEN]) expect(r.status).not.toContain(t);
+      });
+
+      test('an empty username or token sends nothing, not even sudo', async () => {
+        for (const [username, token] of [
+          ['', D_TOKEN],
+          [D_USER, ''],
+        ]) {
+          const r = await runRead({
+            zone: 'gl',
+            username: username as string,
+            token: token as string,
+            state: { sudo: false, passphrase: PASS },
+          });
+          expect(r.result).toBe('empty');
+          expect(r.calls).toEqual([]);
+        }
+      });
+
+      test('without sudo, the fields are kept for after the passphrase', async () => {
+        const r = await runRead({
+          zone: 'gl',
+          username: D_USER,
+          token: D_TOKEN,
+          state: { sudo: false },
+        });
+        expect(r.result).toBe('sudo');
+        expect(r.calls).toEqual([]);
+        expect(r.token.value).toBe(D_TOKEN);
+      });
+
+      test('a 400 GITLAB_READ_BAD_VALUE shows that text, never the input; the fields are cleared', async () => {
+        const r = await runRead({
+          zone: 'gl',
+          username: D_USER,
+          token: D_TOKEN,
+          answer: { status: 400, body: { error: GITLAB_READ_BAD_VALUE } },
+        });
+        expect(r.result).toBe('refused');
+        expect(r.status).toContain(GITLAB_READ_BAD_VALUE);
+        for (const t of [D_USER, D_TOKEN]) expect(r.status).not.toContain(t);
+        expect(r.username.value).toBe('');
+        expect(r.token.value).toBe('');
+      });
+
+      test('the page wires the read form', () => {
+        expect(CREDENTIALS_SCRIPT).toContain("querySelectorAll('form.gitlab-read-set')");
+      });
+    });
   });
 
   describe('the page script', () => {
