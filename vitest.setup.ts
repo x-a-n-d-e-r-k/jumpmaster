@@ -30,8 +30,19 @@ export const DROP_PROXY_ENV = [
   'no_proxy',
 ] as const;
 
+/**
+ * The foreground settings a drop gives its agent (the trooper's `foregroundEnv`). The trooper's
+ * tests assert that only the agent roles set them, so a gate run by that agent must not inherit them.
+ */
+export const AGENT_FOREGROUND_ENV = [
+  'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS',
+  'BASH_DEFAULT_TIMEOUT_MS',
+  'BASH_MAX_TIMEOUT_MS',
+] as const;
+
 export function clearDropEnv(env: NodeJS.ProcessEnv = process.env): void {
-  for (const name of [...CONTAINER_ENV, ...DROP_PROXY_ENV]) delete env[name];
+  for (const name of [...CONTAINER_ENV, ...DROP_PROXY_ENV, ...AGENT_FOREGROUND_ENV])
+    delete env[name];
 }
 
 clearDropEnv();
