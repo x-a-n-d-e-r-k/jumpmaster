@@ -593,6 +593,77 @@ describe('stick capabilities, per zone', () => {
     });
   });
 
+  describe('a GitLab zone needs clone-v1 (#862)', () => {
+    const gitlab = makeZone({ forge: 'gitlab', gitlab: { baseUrl: 'https://gitlab.example.com' } });
+
+    test('zoneRequirements adds clone-v1 for a GitLab zone, never for a GitHub one', () => {
+      expect([...zoneRequirements(gitlab, {}).caps]).toEqual(['clone-v1']);
+      expect([...zoneRequirements(makeZone(), {}).caps]).toEqual([]);
+      expect([...zoneRequirements(makeZone({ forge: 'github' }), {}).caps]).toEqual([]);
+      expect(
+        [...zoneRequirements({ ...gitlab, egress: { mode: 'enforce' } }, {}).caps].sort(),
+      ).toEqual(['clone-v1', 'egress-v1']);
+    });
+
+    test('missingFor reports clone-v1 for a GitLab zone and not for a GitHub zone', () => {
+      expect(missingFor(m3, zoneRequirements(gitlab, {}))).toEqual(['clone-v1']);
+      expect(missingFor(m3, zoneRequirements(makeZone(), {}))).toEqual([]);
+      expect(
+        missingFor(
+          { capabilities: ['clone-v1'], imagePolicy: 'allowlist' },
+          zoneRequirements(gitlab, {}),
+        ),
+      ).toEqual([]);
+    });
+
+    test('a stick lacking clone-v1 is leased no drop of a GitLab zone, in any role', () => {
+      upsertDropZone(db, {
+        id: 'gl',
+        repo: 'grp/sub/proj',
+        defaultBranch: 'main',
+        configJson: '{}',
+      });
+      const roles = ['implement', 'heal', 'resolve', 'review', 'crew-lead', 'doctor'] as const;
+      roles.forEach((role, i) => {
+        const w = upsertWorkItem(db, {
+          dropZoneId: 'gl',
+          issueNumber: 7 + i,
+          title: 't',
+          body: 'b',
+          author: 'a',
+          priority: 0,
+          isFix: false,
+          issueCreatedAt: t0.toISOString(),
+        });
+        insertDrop(db, {
+          id: `gl-${role}`,
+          dropZoneId: 'gl',
+          workItemId: role === 'doctor' || role === 'crew-lead' ? null : w.id,
+          role,
+          state: 'queued',
+          createdAt: plus(t0, -60_000 - i).toISOString(),
+        });
+      });
+      db.prepare("UPDATE drops SET state = 'succeeded' WHERE id = 'd1'").run();
+      const zones = [
+        { id: 'gl', z: { ...gitlab, id: 'gl' } },
+        { id: 'main', z: makeZone() },
+      ];
+      const exclude = zones
+        .filter(({ z }) => missingFor(m3, zoneRequirements(z, {})).length > 0)
+        .map(({ id }) => id);
+      expect(exclude).toEqual(['gl']);
+      expect(leaseNextDrop(db, 's1', t0, 'open', exclude)).toBeNull();
+      for (const role of roles) expect(getDrop(db, `gl-${role}`)?.state, role).toBe('queued');
+      // A stick with clone-v1 excludes nothing and leases them.
+      const able = { capabilities: ['clone-v1'], imagePolicy: 'allowlist' as const };
+      expect(zones.filter(({ z }) => missingFor(able, zoneRequirements(z, {})).length > 0)).toEqual(
+        [],
+      );
+      expect(leaseNextDrop(db, 's1', t0, 'open', [])?.dropId).toMatch(/^gl-/);
+    });
+  });
+
   function secondZone() {
     upsertDropZone(db, {
       id: 'locked',

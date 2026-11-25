@@ -512,7 +512,8 @@ export function fableWanted(drop: Pick<Drop, 'inputJson'>): boolean {
  * GitLab zone's names its remote in `forge` (issue #765); `owner` and `name` then name nothing on
  * the wire but must still pass the GitHub name checks, so they are placeholders: the first path
  * segment when it is a valid owner, else `gitlab`, and the last when it is a valid repo name, else
- * `project`.
+ * `project`. It also says `mirror: 'provided'` (#862, ruling 121): the stick's clone container
+ * fills the mirror before the agent starts, so the agent fetches nothing with a token.
  */
 export function payloadRepo(zone: DropZoneConfig, defaultBranch: string): DropPayload['repo'] {
   const segments = zone.repo.split('/');
@@ -532,6 +533,7 @@ export function payloadRepo(zone: DropZoneConfig, defaultBranch: string): DropPa
       origin: new URL(zone.gitlab?.baseUrl ?? '').origin,
       projectPath: zone.repo,
     },
+    mirror: 'provided',
   };
 }
 
@@ -723,6 +725,8 @@ export function leaseModel(
  *
  * A GitLab zone's drops (issue #765) name its remote in `repo.forge` (`payloadRepo`) and carry no
  * forge token in any role: no GitHub token, the passed `readToken` included, and no GitLab one.
+ * Under ruling 121 they say `repo.mirror: provided` (#862) and only go to a stick advertising
+ * `clone-v1`: its clone container fills the mirror, so the agent needs no credential.
  */
 export function buildPayload(
   db: Db,
@@ -736,7 +740,9 @@ export function buildPayload(
   // a review runs on Fable (#836), for the drop's page.
   updateDrop(db, drop.id, { requestedModel: model, fableReason });
   // A GitLab zone's drops carry no forge token at all (issue #765): no GitHub token names its
-  // remote, and whether its agent containers may hold a GitLab credential is for Command.
+  // remote, and under ruling 121 its agent containers hold no GitLab credential either. The
+  // stick's clone container fetches with a short-lived clone token and fills the mirror the
+  // payload names (`repo.mirror: provided`, #862).
   const gitlab = forgeKind(zone) === 'gitlab';
   // The clone token of review, crew and doctor drops (never an author's).
   const readToken = gitlab

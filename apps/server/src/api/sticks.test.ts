@@ -3017,7 +3017,14 @@ describe('a GitLab zone drop (#765)', () => {
     } as Config['dropZones'][number];
     setup({ config: withZone(gitlab), appTokens: minted(calls), resolvedApps: () => apps });
     const { stickToken } = await enroll();
-    const res = await lease(stickToken);
+    // A stick without clone-v1 cannot fill the provided mirror (#862): the drop stays queued.
+    expect((await lease(stickToken)).statusCode).toBe(204);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/sticks/lease',
+      headers: bearer(stickToken),
+      payload: { freeSlots: 1, capabilities: ['push-v1', 'clone-v1'] },
+    });
     expect(res.statusCode).toBe(200);
     const payload = res.json() as DropPayload;
     expect(DropPayloadSchema.parse(payload)).toEqual(payload);
@@ -3026,6 +3033,7 @@ describe('a GitLab zone drop (#765)', () => {
       origin: 'https://gitlab.example.com',
       projectPath: 'octo/demo',
     });
+    expect(payload.repo.mirror).toBe('provided');
     expect(payload.credentials).toEqual({ claudeToken: 'claude-secret' });
     expect(calls).toEqual([]);
     for (const t of ['minted-app-token', 'gh-read', 'gh-secret', 'gh-reviewer'])

@@ -1515,7 +1515,10 @@ describe('GitLab zone payloads (#765)', () => {
   const check = (p: ReturnType<typeof buildPayload>, repo = 'grp/sub/proj') => {
     expect(DropPayloadSchema.parse(p)).toEqual(p);
     expect(p.repo.forge).toEqual({ kind: 'gitlab', origin, projectPath: repo });
+    // The stick's clone container fills the mirror (#862, ruling 121): no forge token reaches it.
+    expect(p.repo.mirror).toBe('provided');
     expect(p.credentials).toEqual({ claudeToken: 'claude-secret' });
+    expect(p.credentials.forgeToken).toBeUndefined();
     const text = JSON.stringify(p);
     for (const t of githubValues) expect(text).not.toContain(t);
   };
@@ -1576,7 +1579,10 @@ describe('GitLab zone payloads (#765)', () => {
     for (const d of [impl, review, heal, resolve, doctorDrop]) {
       const p = buildPayload(db, { ...zone, reviewReadToken: true }, d, secrets);
       expect(JSON.stringify(p.repo)).toBe('{"owner":"octo","name":"demo","defaultBranch":"main"}');
+      expect(p.repo).toEqual({ owner: 'octo', name: 'demo', defaultBranch: 'main' });
+      expect('mirror' in p.repo).toBe(false);
       expect(JSON.stringify(p)).not.toContain('"forge"');
+      expect(JSON.stringify(p)).not.toContain('"mirror"');
     }
     expect(buildPayload(db, zone, impl, secrets).credentials).toEqual({
       claudeToken: 'claude-secret',
