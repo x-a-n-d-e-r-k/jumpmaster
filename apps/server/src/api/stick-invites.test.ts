@@ -520,7 +520,9 @@ describe('the sticks page from invite to live', () => {
     await lease({ imageFetch: null, health: { docker: '27.3.1', freeBytes: 50_000_000_000 } });
     page = await w.page();
     expect(row()).toContain('<span class="stage">Live</span>');
-    expect(row()).toContain('Docker 27.3.1, egress-v1 yes, image-verify-v1 yes, 50.0 GB free');
+    expect(row()).toContain(
+      'Docker 27.3.1, egress-v1 yes, image-verify-v1 yes, clone-v1 no, 50.0 GB free',
+    );
     expect(row()).not.toContain('data-poll');
     expect(row()).toContain('vps-1');
     expect(row()).toMatch(/data-remove="\/api\/control\/sticks\/[^"]+\/remove"/);

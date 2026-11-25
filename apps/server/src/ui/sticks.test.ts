@@ -6,6 +6,7 @@ import { escapeHtml } from './pages.js';
 import {
   COPY_DIGEST_JS,
   ceilingLine,
+  healthLine,
   renderInviteResult,
   renderStickImages,
   renderSticks,
@@ -501,6 +502,27 @@ describe("a stick's egress ceiling on /sticks (#780)", () => {
       now: t0,
     });
     expect(html).toContain('lacks gitlab.example.com in the stick&#39;s JM_EGRESS_CEILING');
+  });
+
+  test('what a GitLab zone needs of clone-v1, in words (#871)', () => {
+    const html = renderSticks({
+      sticks: [{ ...row, cannotRun: [{ zoneId: 'gl', missing: ['clone-v1'] }] }],
+      zones: [],
+      now: t0,
+    });
+    expect(html).toContain(
+      'lacks clone-v1 (the clone container a GitLab project&#39;s drops need)',
+    );
+  });
+
+  test('the health line says clone-v1 yes or no, after image-verify-v1 (#871)', () => {
+    const health = { dockerVersion: '27.3.1', freeBytes: 50_000_000_000 };
+    expect(healthLine({ ...row, ...health, capabilities: ['egress-v1', 'image-verify-v1'] })).toBe(
+      'Docker 27.3.1, egress-v1 yes, image-verify-v1 yes, clone-v1 no, 50.0 GB free',
+    );
+    expect(
+      healthLine({ ...row, ...health, capabilities: ['egress-v1', 'image-verify-v1', 'clone-v1'] }),
+    ).toBe('Docker 27.3.1, egress-v1 yes, image-verify-v1 yes, clone-v1 yes, 50.0 GB free');
   });
 
   test('an empty ceiling covers nothing', () => {

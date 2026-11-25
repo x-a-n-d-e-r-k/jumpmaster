@@ -92,13 +92,17 @@ export function stickStage(st: StickRow, now: Date): { words: string; live: bool
 
 const gb = (bytes: number): string => `${(bytes / 1_000_000_000).toFixed(1)} GB free`;
 
-/** Its health from its advert: the Docker version, egress-v1, image-verify-v1 and free disk. */
+/**
+ * Its health from its advert: the Docker version, egress-v1, image-verify-v1, clone-v1 (which a
+ * GitLab project's drops need) and free disk.
+ */
 export function healthLine(st: StickRow): string {
   const has = (c: string) => `${c} ${st.capabilities.includes(c) ? 'yes' : 'no'}`;
   return [
     `Docker ${st.dockerVersion ?? 'unknown'}`,
     has('egress-v1'),
     has('image-verify-v1'),
+    has('clone-v1'),
     st.freeBytes === null || st.freeBytes === undefined ? 'free disk unmeasured' : gb(st.freeBytes),
   ].join(', ');
 }
