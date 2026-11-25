@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from 'vitest';
-import { leaseLogger, StickClient } from './client.js';
+import { HttpStatusError, leaseLogger, StickClient } from './client.js';
 import { stickInfo } from './state.js';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -371,6 +371,101 @@ describe('push calls', () => {
       .postResult('d1', 2, { status: 'completed', gates: [] })
       .catch((e: Error & { status?: number }) => e);
     expect((err as { status?: number }).status).toBe(422);
+  });
+
+  describe('clone calls', () => {
+    const forge = { kind: 'gitlab', origin: 'https://gitlab.example', projectPath: 'g/sub/p' };
+    const planted = 'glpat-' + 'planted-secret-value';
+
+    test('clonePlan parses a plan; 409 is stale; 403 with refused is a refusal', async () => {
+      const plan = {
+        forge,
+        maxBytes: 1_000_000,
+        limits: { pids: 256, memoryMb: 512 },
+        egress: { mode: 'enforce', allow: ['gitlab.example'] },
+      };
+      serve(
+        reply(200, plan),
+        reply(200, { forge, maxBytes: 5 }),
+        reply(409, { stale: true }),
+        reply(403, { refused: 'egress', retryable: true }),
+        reply(403, { refused: 'forge' }),
+        reply(403, { error: 'nope' }),
+        reply(200, { forge, maxBytes: -1 }),
+      );
+      const c = client();
+      expect(await c.clonePlan('d1', 2)).toEqual(plan);
+      expect(calls[0]).toEqual({
+        url: 'http://server.test/api/sticks/clone-plan',
+        body: { dropId: 'd1', epoch: 2 },
+      });
+      expect(await c.clonePlan('d1', 2)).toEqual({ forge, maxBytes: 5 });
+      expect(await c.clonePlan('d1', 2)).toBe('stale');
+      expect(await c.clonePlan('d1', 2)).toEqual({ refused: 'egress', retryable: true });
+      expect(await c.clonePlan('d1', 2)).toEqual({ refused: 'forge', retryable: false });
+      const err = await c.clonePlan('d1', 2).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(HttpStatusError);
+      expect((err as Error).message).toBe('clone-plan failed: 403');
+      expect((err as HttpStatusError).status).toBe(403);
+      await expect(c.clonePlan('d1', 2)).rejects.toThrow('clone-plan failed: invalid plan');
+    });
+
+    test('cloneGrant tells a grant, a refusal, reserved and stale apart by the body', async () => {
+      const withUser = {
+        token: 'gldt-x',
+        username: 'gitlab+deploy-token-1',
+        forge,
+        secrets: ['s'],
+      };
+      const noUser = { token: 'glpat-y', forge, secrets: [] };
+      serve(
+        reply(200, { grant: withUser }),
+        reply(200, { grant: noUser }),
+        reply(403, { refused: 'started', retryable: false }),
+        reply(409, { refused: 'reserved', retryable: true }),
+        reply(409, { stale: true }),
+        reply(403, { error: 'nope' }),
+      );
+      const c = client();
+      expect(await c.cloneGrant('d1', 2)).toEqual({ grant: withUser });
+      expect(calls[0]).toEqual({
+        url: 'http://server.test/api/sticks/clone-token',
+        body: { dropId: 'd1', epoch: 2 },
+      });
+      expect(await c.cloneGrant('d1', 2)).toEqual({ grant: noUser });
+      expect(await c.cloneGrant('d1', 2)).toEqual({ refused: 'started', retryable: false });
+      expect(await c.cloneGrant('d1', 2)).toEqual({ refused: 'reserved', retryable: true });
+      expect(await c.cloneGrant('d1', 2)).toEqual({ stale: true });
+      const err = await c.cloneGrant('d1', 2).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(HttpStatusError);
+      expect((err as Error).message).toBe('clone-token failed: 403');
+    });
+
+    test('a grant that fails the schema is refused without echoing the token', async () => {
+      serve(reply(200, { grant: { token: planted, username: 'a:b', forge, secrets: [planted] } }));
+      const err = await client()
+        .cloneGrant('d1', 2)
+        .catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe('clone-token failed: invalid grant');
+      expect(String(err)).not.toContain(planted);
+    });
+
+    test('an unexpected 500 throws its status only, never the body', async () => {
+      serve(reply(500, { error: `boom ${planted}` }), reply(500, { error: `boom ${planted}` }));
+      const c = client();
+      const planErr = await c.clonePlan('d1', 2).catch((e: Error) => e);
+      const grantErr = await c.cloneGrant('d1', 2).catch((e: Error) => e);
+      for (const [err, what] of [
+        [planErr, 'clone-plan'],
+        [grantErr, 'clone-token'],
+      ] as const) {
+        expect(err).toBeInstanceOf(HttpStatusError);
+        expect((err as Error).message).toBe(`${what} failed: 500`);
+        expect((err as HttpStatusError).status).toBe(500);
+        expect(String(err)).not.toContain(planted);
+      }
+    });
   });
 });
 
