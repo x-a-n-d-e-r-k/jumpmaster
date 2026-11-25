@@ -1931,3 +1931,29 @@ test('v66 adds after_json to crew_issues: existing rows read as absent (#843)', 
   expect(getCrewIssueByKey(db, 'main', 'k')?.after).toBeNull();
   db.close();
 });
+
+test('v67 adds clone_grants, empty, and leaves every other row untouched (#840)', () => {
+  const f = dbAt(66, (raw) =>
+    raw.exec(
+      `INSERT INTO drop_zones (id, repo, default_branch, config_json) VALUES ('main', 'o/r', 'main', '{}');
+       INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, created_at)
+         VALUES ('d1', 'main', NULL, 'doctor', 'running', 'a');
+       INSERT INTO push_tokens (drop_id, epoch, seq, reserved_at, minted_at)
+         VALUES ('d1', 1, 1, 'a', 'b');`,
+    ),
+  );
+  const before = new Database(f);
+  const pushRows = before.prepare('SELECT * FROM push_tokens').all();
+  const dropRows = before.prepare('SELECT * FROM drops').all();
+  before.close();
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(count(db, 'clone_grants')).toBe(0);
+  const cols = (db.prepare('PRAGMA table_info(clone_grants)').all() as { name: string }[]).map(
+    (c) => c.name,
+  );
+  expect(cols).toEqual(['drop_id', 'epoch', 'seq', 'reserved_at', 'minted_at', 'revoked_at']);
+  expect(db.prepare('SELECT * FROM push_tokens').all()).toEqual(pushRows);
+  expect(db.prepare('SELECT * FROM drops').all()).toEqual(dropRows);
+  db.close();
+});

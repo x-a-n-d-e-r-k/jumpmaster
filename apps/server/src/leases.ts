@@ -18,6 +18,7 @@ import {
   isKilled,
   reclaimableSql,
   reclaimCutoff,
+  revokeCloneGrants,
   revokeGrants,
   setKilled,
   setUsageState,
@@ -415,7 +416,11 @@ export function expireLeases(
         )
         .all({ now: iso(now) }) as { id: string }[]
     ).map((r) => r.id);
-    for (const id of lostIds) releaseProbe(db, id, usageCfg, now, rand);
+    for (const id of lostIds) {
+      releaseProbe(db, id, usageCfg, now, rand);
+      // Bookkeeping only (#840): a GitLab token stays valid once handed out.
+      revokeCloneGrants(db, id, now);
+    }
     const lost = lostIds.length + expireRetention(db, now);
     db.prepare(
       `UPDATE work_items SET state = 'ready', updated_at = @now
