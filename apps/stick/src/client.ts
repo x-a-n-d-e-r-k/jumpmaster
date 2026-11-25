@@ -1,5 +1,9 @@
 import {
   type ArtifactUpload,
+  type CloneGrant,
+  CloneGrantSchema,
+  type ClonePlan,
+  ClonePlanSchema,
   type DropPayload,
   DropPayloadSchema,
   type DropResult,
@@ -47,6 +51,15 @@ export type GrantReply =
   | { refused: string; retryable: boolean }
   | { stale: true };
 
+/** A clone plan, `stale`, or why a clone is held back (403 `{refused, retryable}`). */
+export type ClonePlanReply = ClonePlan | 'stale' | { refused: string; retryable: boolean };
+
+/** A clone grant, why not, or stale; told apart by the body, as for a push grant. */
+export type CloneGrantReply =
+  | { grant: CloneGrant }
+  | { stale: true }
+  | { refused: string; retryable: boolean };
+
 /** The per-drop calls the runner needs. */
 export interface DropClient {
   /** What the server announced on its last lease answer (`push-v1`); none when unknown. */
@@ -65,6 +78,12 @@ export interface PushClient {
   pushPlan(dropId: string, epoch: number): Promise<PlanReply>;
   pushGrant(dropId: string, epoch: number): Promise<GrantReply>;
   postPushResult(dropId: string, epoch: number, result: PushResult): Promise<Ack>;
+}
+
+/** The calls a GitLab drop's clone container needs (issue #851). */
+export interface CloneClient {
+  clonePlan(dropId: string, epoch: number): Promise<ClonePlanReply>;
+  cloneGrant(dropId: string, epoch: number): Promise<CloneGrantReply>;
 }
 
 /**
@@ -147,7 +166,7 @@ export function leaseLogger(
   };
 }
 
-export class StickClient implements DropClient, PushClient {
+export class StickClient implements DropClient, PushClient, CloneClient {
   /** The features the server announced on its latest lease answer. */
   features: ReadonlySet<string> = new Set();
   /**
@@ -403,6 +422,43 @@ export class StickClient implements DropClient, PushClient {
     throw new HttpStatusError(`push-token failed: ${res.status}`, res.status);
   }
 
+  /**
+   * The plan for a clone container; `stale` on 409; a refusal on 403 `{refused, retryable}`. Any
+   * other failure throws its status only: no part of a response body goes into the error.
+   */
+  async clonePlan(dropId: string, epoch: number): Promise<ClonePlanReply> {
+    const res = await this.req('/api/sticks/clone-plan', { dropId, epoch });
+    if (res.status === 409) return 'stale';
+    if (res.status === 403) {
+      const refusal = refusalOf(await res.json().catch(() => null));
+      if (refusal) return refusal;
+    }
+    if (!res.ok) throw new HttpStatusError(`clone-plan failed: ${res.status}`, res.status);
+    const parsed = ClonePlanSchema.safeParse(await res.json().catch(() => null));
+    if (!parsed.success) throw new Error('clone-plan failed: invalid plan');
+    return parsed.data;
+  }
+
+  /**
+   * The clone grant, or why not. A refusal is 403 `{refused, retryable}`, except `reserved`, which
+   * is 409 like stale: the body tells them apart. No body is ever echoed (a grant holds a token).
+   */
+  async cloneGrant(dropId: string, epoch: number): Promise<CloneGrantReply> {
+    const res = await this.req('/api/sticks/clone-token', { dropId, epoch });
+    if (res.ok) {
+      const body = (await res.json().catch(() => null)) as { grant?: unknown } | null;
+      const parsed = CloneGrantSchema.safeParse(body?.grant);
+      if (!parsed.success) throw new Error('clone-token failed: invalid grant');
+      return { grant: parsed.data };
+    }
+    if (res.status === 403 || res.status === 409) {
+      const refusal = refusalOf(await res.json().catch(() => null));
+      if (refusal) return refusal;
+      if (res.status === 409) return { stale: true };
+    }
+    throw new HttpStatusError(`clone-token failed: ${res.status}`, res.status);
+  }
+
   /** 200 is ok, a retry after a lost response included (Ruling 13); 409 is stale; 5xx retried. */
   async postPushResult(dropId: string, epoch: number, result: PushResult): Promise<Ack> {
     let last = 0;
@@ -433,6 +489,13 @@ export class StickClient implements DropClient, PushClient {
     if (!res.ok) throw await failure('salvage', res);
     return 'ok';
   }
+}
+
+/** A `{refused, retryable}` body as a refusal; `retryable` only when the body says `true`. */
+function refusalOf(body: unknown): { refused: string; retryable: boolean } | null {
+  if (typeof body !== 'object' || body === null) return null;
+  const { refused, retryable } = body as { refused?: unknown; retryable?: unknown };
+  return typeof refused === 'string' ? { refused, retryable: retryable === true } : null;
 }
 
 /** The upgrade offer a lease answer carries; undefined when there is none or it is malformed. */
