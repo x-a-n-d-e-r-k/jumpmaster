@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import vm from 'node:vm';
 import type { FastifyInstance } from 'fastify';
+import nock from 'nock';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { GuidanceForge } from '../api/github.js';
 import { createApp } from '../app.js';
@@ -68,8 +69,9 @@ const fakeGuidanceForge = (_repo: string, _token: string): GuidanceForge => ({
  * A db-mode install (or file mode with `file`) with two zones: `main` (two-bot, no reviewer token,
  * so a credential problem) and `img` (an explicit image, starter).
  */
-async function world(o: { file?: boolean } = {}) {
+async function world(o: { file?: boolean; gitlab?: boolean } = {}) {
   const db = openDb(tmpDbFile());
+  const guidanceReads: string[] = [];
   const dir = mkdtempSync(join(tmpdir(), 'jm-zones-'));
   const keyFile = join(dir, 'vault_key');
   writeFileSync(keyFile, randomBytes(32).toString('base64url'), { mode: 0o600 });
@@ -82,6 +84,15 @@ async function world(o: { file?: boolean } = {}) {
       identity: 'starter',
       authorMayBeAdmin: true,
     }),
+    ...(o.gitlab
+      ? [
+          zoneDoc('lab', {
+            repo: 'acme/widgets',
+            forge: 'gitlab',
+            gitlab: { baseUrl: 'https://gitlab.example.test' },
+          }),
+        ]
+      : []),
   ];
   if (o.file) writeFileSync(filePath, JSON.stringify({ dataDir: './data', dropZones: zones }));
   const env = {
@@ -115,7 +126,10 @@ async function world(o: { file?: boolean } = {}) {
     leaseWaitMs: 0,
     leasePollMs: 0,
     // GitHub as the Setup tab's GitHub section reads it (#618): never the network in a test.
-    guidanceForge: fakeGuidanceForge,
+    guidanceForge: (repo: string, t: string) => {
+      guidanceReads.push(repo);
+      return fakeGuidanceForge(repo, t);
+    },
   });
   app = a;
   await setOperatorPassphrase(db, PASS, t0);
@@ -131,7 +145,7 @@ async function world(o: { file?: boolean } = {}) {
         : { host: HOST, cookie: s.cookie, 'x-jm-csrf': s.csrf },
       ...(body === undefined ? {} : { payload: body as object }),
     });
-  return { db, store, app: a, get, api, session: s };
+  return { db, store, app: a, get, api, session: s, guidanceReads };
 }
 
 /** The Setup form's `<section id=…>` HTML, for section assertions. */
@@ -1603,5 +1617,31 @@ describe('Setup has a GitHub section with each step’s doctor status (#618)', (
     expect(html).toContain('<button type="button" data-copy="codeowners-text">Copy</button>');
     expect(html).toContain('Create <code>.github/CODEOWNERS</code> on GitHub</a>');
     expect(html).toContain('navigator.clipboard.writeText');
+  });
+});
+
+describe("a GitLab project's Setup tab (#879)", () => {
+  test('answers 200 with the GitLab section, reads no guidance and sends no request', async () => {
+    nock.disableNetConnect();
+    try {
+      const w = await world({ gitlab: true });
+      const r = await w.get('/projects/lab/setup');
+      expect(r.statusCode, r.body).toBe(200);
+      const gitlab = section(r.body, 'github');
+      expect(gitlab).toContain('<h3>GitLab</h3>');
+      expect(gitlab).toContain('<code>acme/widgets</code>');
+      expect(gitlab).toContain('<code>gitlab-pat/lab/author</code>');
+      expect(gitlab).not.toContain('not supported yet');
+      expect(r.body).toContain('<a href="#github">GitLab</a>');
+      expect(w.guidanceReads).toEqual([]);
+      expect(nock.pendingMocks()).toEqual([]);
+      // A GitHub zone beside it still reads its guidance, and its nav still says GitHub.
+      const main = await w.get('/projects/main/setup');
+      expect(main.body).toContain('<a href="#github">GitHub</a>');
+      expect(w.guidanceReads.length).toBeGreaterThan(0);
+      expect(w.guidanceReads.every((r) => r === 'octo/main')).toBe(true);
+    } finally {
+      nock.enableNetConnect();
+    }
   });
 });

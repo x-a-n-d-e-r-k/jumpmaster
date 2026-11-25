@@ -1,0 +1,177 @@
+<section id="github" class="setup-section"><h3>GitHub</h3><style>.step-status .chip{display:inline-block;padding:0 .5rem;border-radius:999px;font-size:.85em;box-shadow:inset 0 0 0 1px var(--stroke-soft-200)}.step-status .chip-done{box-shadow:inset 0 0 0 1px var(--success-base)}.step-status .chip-missing{box-shadow:inset 0 0 0 1px var(--error-base)}.step-status .chip-check{box-shadow:inset 0 0 0 1px var(--warning-base)}</style>
+<p>What Jumpmaster needs on GitHub, as links and files: nothing here changes GitHub; the clicks and the commit are yours. The doctor checks each part; its last run's result is beside each step.</p>
+<section id="recommendation"><h3>Which accounts</h3>
+<p><strong>Recommended: Two bot accounts as GitHub Apps: an author app and a reviewer app</strong>.</p>
+<p>Use two GitHub Apps: an author app and a reviewer app, registered under the repository&#39;s owner and installed on the repository. There are no tokens to make or renew: each app signs in with a short-lived token Jumpmaster asks GitHub for. Neither app is an admin, so the ruleset guards every merge. To use tokens instead, the organization must allow fine-grained tokens (the organization&#39;s Settings → Personal access tokens → Settings) and may have to approve each token.</p>
+
+
+<p><a href="https://github.com/octo-org" target="_blank" rel="noopener noreferrer">the organization (Settings → Personal access tokens)</a></p>
+</section>
+<p>This project runs as two-bot.</p>
+<details id="use-tokens"><summary>Use tokens instead</summary>
+<section id="tokens"><h3>Create the tokens</h3>
+<p>Each link opens GitHub's fine-grained token page, filled in. For each token:</p>
+<ol id="token-steps">
+<li>Sign in as the account the token is for, then open its link below. Make a new token here rather than reusing one made for another tool or install: an older token may have expired, and its permissions may not fit. If this install already has this account's token, edit its repository access instead (the next step).</li>
+<li>Resource owner: check the Resource owner field: for an organization it may not pre-fill, and the link may set only what it shows, so re-select the organization even when it looks selected.</li>
+<li>Repository access: choose Only select repositories, then the repository (the link cannot choose it). For another project later, edit this token's repository access on GitHub to add it: no new token, and no account-wide access.</li>
+<li>Click Generate token.</li>
+<li>Paste it into Jumpmaster's <a href="/setup/forge">GitHub step</a>: it is tested before it is saved, and never shown back.</li>
+</ol>
+<p><small>Expiry: each link asks for 90 days; an organization&#39;s token lifetime policy may cap it at less, and the doctor warns two weeks before a token expires.</small></p>
+<ul><li><a href="https://github.com/settings/personal-access-tokens/new?name=jumpmaster-author-demo&amp;description=Jumpmaster+author+%28opens+and+merges+pull+requests%29+for+octo-org%2Fdemo.+Repository+access%3A+Only+select+repositories%2C+then+octo-org%2Fdemo.+No+Workflows+or+Administration+permission.&amp;target_name=octo-org&amp;expires_in=90&amp;contents=write&amp;pull_requests=write&amp;issues=write&amp;metadata=read&amp;statuses=read&amp;actions=read" target="_blank" rel="noopener noreferrer">The author token (the account that opens and merges pull requests)</a><br><small>Contents: Read and write · Pull requests: Read and write · Issues: Read and write · Metadata: Read-only · Commit statuses: Read-only · Actions: Read-only; no Workflows, no Administration.</small></li><li><a href="https://github.com/settings/personal-access-tokens/new?name=jumpmaster-reviewer-demo&amp;description=Jumpmaster+reviewer+%28approves+pull+requests%29+for+octo-org%2Fdemo.+Repository+access%3A+Only+select+repositories%2C+then+octo-org%2Fdemo.+No+Workflows+or+Administration+permission.&amp;target_name=octo-org&amp;expires_in=90&amp;pull_requests=write&amp;contents=read&amp;metadata=read" target="_blank" rel="noopener noreferrer">The reviewer token (a second account, which approves them)</a><br><small>Pull requests: Read and write · Contents: Read-only · Metadata: Read-only; no Workflows, no Administration.</small></li></ul></section></details>
+<section id="checklist"><h3>Give the accounts access</h3><p class="step-status" data-step="access"><span class="chip chip-not-checked" data-status="not-checked">not checked</span></p>
+<p>On the repository's <a href="https://github.com/octo-org/demo/settings/access" target="_blank" rel="noopener noreferrer">collaborators page</a>:</p>
+<ul><li>invite jm-author with the Write role</li><li>accept the invitation as jm-author</li><li>invite jm-reviewer with the Write role</li><li>accept the invitation as jm-reviewer</li></ul></section>
+<section id="ruleset"><h3>The branch ruleset</h3><p class="step-status" data-step="ruleset"><span class="chip chip-missing" data-status="missing">missing</span> <span class="step-finding">no ruleset &lt;b&gt;protects&lt;/b&gt; main</span></p>
+
+<p>Jumpmaster merges only under a ruleset that requires a pull request and your CI, with no bypass. This file is one, with the checks your workflows report, and a code owner's review on the protected paths:</p>
+
+<ol><li>Open the repository's <a href="https://github.com/octo-org/demo/settings/rules" target="_blank" rel="noopener noreferrer">Rulesets</a>, then New ruleset → Import a ruleset, and choose <code>jumpmaster-demo-ruleset.json</code>.</li>
+<li>Review it and click Create.</li></ol>
+<p><small>A matrix job reports one check per combination, such as build (ubuntu-latest), and a reusable workflow&#39;s jobs report as caller / inner: check the exact names on a pull request&#39;s Checks tab and correct the required checks to match.</small></p>
+<p><a href="data:application/json;charset=utf-8,%7B%0A%20%20%22name%22%3A%20%22jumpmaster%22%2C%0A%20%20%22target%22%3A%20%22branch%22%2C%0A%20%20%22enforcement%22%3A%20%22active%22%2C%0A%20%20%22bypass_actors%22%3A%20%5B%5D%2C%0A%20%20%22conditions%22%3A%20%7B%0A%20%20%20%20%22ref_name%22%3A%20%7B%0A%20%20%20%20%20%20%22include%22%3A%20%5B%0A%20%20%20%20%20%20%20%20%22~DEFAULT_BRANCH%22%0A%20%20%20%20%20%20%5D%2C%0A%20%20%20%20%20%20%22exclude%22%3A%20%5B%5D%0A%20%20%20%20%7D%0A%20%20%7D%2C%0A%20%20%22rules%22%3A%20%5B%0A%20%20%20%20%7B%0A%20%20%20%20%20%20%22type%22%3A%20%22pull_request%22%2C%0A%20%20%20%20%20%20%22parameters%22%3A%20%7B%0A%20%20%20%20%20%20%20%20%22required_approving_review_count%22%3A%201%2C%0A%20%20%20%20%20%20%20%20%22dismiss_stale_reviews_on_push%22%3A%20true%2C%0A%20%20%20%20%20%20%20%20%22require_code_owner_review%22%3A%20true%2C%0A%20%20%20%20%20%20%20%20%22require_last_push_approval%22%3A%20false%2C%0A%20%20%20%20%20%20%20%20%22required_review_thread_resolution%22%3A%20false%0A%20%20%20%20%20%20%7D%0A%20%20%20%20%7D%2C%0A%20%20%20%20%7B%0A%20%20%20%20%20%20%22type%22%3A%20%22required_status_checks%22%2C%0A%20%20%20%20%20%20%22parameters%22%3A%20%7B%0A%20%20%20%20%20%20%20%20%22strict_required_status_checks_policy%22%3A%20false%2C%0A%20%20%20%20%20%20%20%20%22required_status_checks%22%3A%20%5B%0A%20%20%20%20%20%20%20%20%20%20%7B%0A%20%20%20%20%20%20%20%20%20%20%20%20%22context%22%3A%20%22test%22%2C%0A%20%20%20%20%20%20%20%20%20%20%20%20%22integration_id%22%3A%2015368%0A%20%20%20%20%20%20%20%20%20%20%7D%0A%20%20%20%20%20%20%20%20%5D%0A%20%20%20%20%20%20%7D%0A%20%20%20%20%7D%0A%20%20%5D%0A%7D%0A" download="jumpmaster-demo-ruleset.json">Download jumpmaster-demo-ruleset.json</a> <button type="button" data-copy="ruleset-text">Copy</button></p>
+<pre id="ruleset-text">{
+  &quot;name&quot;: &quot;jumpmaster&quot;,
+  &quot;target&quot;: &quot;branch&quot;,
+  &quot;enforcement&quot;: &quot;active&quot;,
+  &quot;bypass_actors&quot;: [],
+  &quot;conditions&quot;: {
+    &quot;ref_name&quot;: {
+      &quot;include&quot;: [
+        &quot;~DEFAULT_BRANCH&quot;
+      ],
+      &quot;exclude&quot;: []
+    }
+  },
+  &quot;rules&quot;: [
+    {
+      &quot;type&quot;: &quot;pull_request&quot;,
+      &quot;parameters&quot;: {
+        &quot;required_approving_review_count&quot;: 1,
+        &quot;dismiss_stale_reviews_on_push&quot;: true,
+        &quot;require_code_owner_review&quot;: true,
+        &quot;require_last_push_approval&quot;: false,
+        &quot;required_review_thread_resolution&quot;: false
+      }
+    },
+    {
+      &quot;type&quot;: &quot;required_status_checks&quot;,
+      &quot;parameters&quot;: {
+        &quot;strict_required_status_checks_policy&quot;: false,
+        &quot;required_status_checks&quot;: [
+          {
+            &quot;context&quot;: &quot;test&quot;,
+            &quot;integration_id&quot;: 15368
+          }
+        ]
+      }
+    }
+  ]
+}
+</pre></section>
+<section id="codeowners"><h3>Code owners for the protected paths</h3><p class="step-status" data-step="codeowners"><span class="chip chip-check" data-status="check">check</span> <span class="step-finding">no CODEOWNERS file</span></p>
+<p>Changes to the protected paths need a person's review. Name yourself (and anyone else who may approve them) as code owners: each needs the Write role.</p>
+<p class="warn">The file starts with the reviewer bot on <code>*</code>, so its approval still merges ordinary pull requests. If your file already has a <code>*</code> line, add the reviewer bot to it, or nothing will merge.</p>
+<p><label>Your GitHub login <input name="reviewer" form="github-reviewer-form" value="alice" placeholder="your-github-login" pattern="[A-Za-z0-9@,._ \/\-]+"></label> <button form="github-reviewer-form">Show</button></p>
+<p><a href="https://github.com/octo-org/demo/new/main?filename=.github%2FCODEOWNERS" target="_blank" rel="noopener noreferrer">Create <code>.github/CODEOWNERS</code> on GitHub</a>, paste the text, and commit it. <button type="button" data-copy="codeowners-text">Copy</button></p>
+<pre id="codeowners-text"># Jumpmaster zone demo: changes to these paths need a human code owner&#39;s review.
+# The reviewer bot owns everything else, so its approval merges an ordinary pull request; the lines after this one give the protected paths back to people.
+* @jm-reviewer
+.github/** @alice
+CODEOWNERS @alice
+pnpm-workspace.yaml @alice
+</pre></section>
+<section id="labels"><h3>Labels</h3><p class="step-status" data-step="labels"><span class="chip chip-not-checked" data-status="not-checked">not checked</span></p><p>The labels Jumpmaster works with, the ready label <code>agent-ready</code> among them, must exist on the repository. The doctor page's Create the missing labels makes them.</p></section>
+</section>
+<!-- next -->
+<section id="github" class="setup-section"><h3>GitHub</h3><style>.step-status .chip{display:inline-block;padding:0 .5rem;border-radius:999px;font-size:.85em;box-shadow:inset 0 0 0 1px var(--stroke-soft-200)}.step-status .chip-done{box-shadow:inset 0 0 0 1px var(--success-base)}.step-status .chip-missing{box-shadow:inset 0 0 0 1px var(--error-base)}.step-status .chip-check{box-shadow:inset 0 0 0 1px var(--warning-base)}</style>
+<p>What Jumpmaster needs on GitHub, as links and files: nothing here changes GitHub; the clicks and the commit are yours. The doctor checks each part; its last run's result is beside each step.</p>
+<section id="recommendation"><h3>Which accounts</h3>
+<p><strong>Recommended: Two bot accounts as GitHub Apps: an author app and a reviewer app</strong>.</p>
+<p>Use two GitHub Apps: an author app and a reviewer app, registered under the repository&#39;s owner and installed on the repository. There are no tokens to make or renew: each app signs in with a short-lived token Jumpmaster asks GitHub for. Neither app is an admin, so the ruleset guards every merge. To use tokens instead, the organization must allow fine-grained tokens (the organization&#39;s Settings → Personal access tokens → Settings) and may have to approve each token.</p>
+
+
+<p><a href="https://github.com/octo-org" target="_blank" rel="noopener noreferrer">the organization (Settings → Personal access tokens)</a></p>
+</section>
+<p>This project runs as starter: not the recommendation above. Changing it changes which tokens and rules it needs.</p>
+<section id="tokens"><h3>Create the tokens</h3>
+<p>Each link opens GitHub's fine-grained token page, filled in. For each token:</p>
+<ol id="token-steps">
+<li>Sign in as the account the token is for, then open its link below. Make a new token here rather than reusing one made for another tool or install: an older token may have expired, and its permissions may not fit. If this install already has this account's token, edit its repository access instead (the next step).</li>
+<li>Resource owner: check the Resource owner field: for an organization it may not pre-fill, and the link may set only what it shows, so re-select the organization even when it looks selected.</li>
+<li>Repository access: choose Only select repositories, then the repository (the link cannot choose it). For another project later, edit this token's repository access on GitHub to add it: no new token, and no account-wide access.</li>
+<li>Click Generate token.</li>
+<li>Paste it into Jumpmaster's <a href="/setup/forge">GitHub step</a>: it is tested before it is saved, and never shown back.</li>
+</ol>
+<p><small>Expiry: each link asks for 90 days; an organization&#39;s token lifetime policy may cap it at less, and the doctor warns two weeks before a token expires.</small></p>
+<ul><li><a href="https://github.com/settings/personal-access-tokens/new?name=jumpmaster-author-demo&amp;description=Jumpmaster+author+%28opens+and+merges+pull+requests%29+for+octo-org%2Fdemo.+Repository+access%3A+Only+select+repositories%2C+then+octo-org%2Fdemo.+No+Workflows+or+Administration+permission.&amp;target_name=octo-org&amp;expires_in=90&amp;contents=write&amp;pull_requests=write&amp;issues=write&amp;metadata=read&amp;statuses=read&amp;actions=read" target="_blank" rel="noopener noreferrer">The author token (the account that opens and merges pull requests)</a><br><small>Contents: Read and write · Pull requests: Read and write · Issues: Read and write · Metadata: Read-only · Commit statuses: Read-only · Actions: Read-only; no Workflows, no Administration.</small></li></ul></section>
+<section id="checklist"><h3>Give the accounts access</h3><p class="step-status" data-step="access"><span class="chip chip-not-checked" data-status="not-checked">not checked</span></p>
+<p>On the repository's <a href="https://github.com/octo-org/demo/settings/access" target="_blank" rel="noopener noreferrer">collaborators page</a>:</p>
+<ul><li>invite jm-author with the Write role</li><li>accept the invitation as jm-author</li></ul></section>
+<section id="ruleset"><h3>The branch ruleset</h3><p class="step-status" data-step="ruleset"><span class="chip chip-not-checked" data-status="not-checked">not checked</span></p>
+
+<p>Jumpmaster merges only under a ruleset that requires a pull request and your CI, with no bypass. This file is one, with the checks your workflows report:</p>
+<p>In starter mode GitHub cannot require this review: you are the author and the only code owner, and GitHub never lets an author approve their own pull request. Jumpmaster parks every pull request that touches these paths for you to review and merge by hand.</p>
+<ol><li>Open the repository's <a href="https://github.com/octo-org/demo/settings/rules" target="_blank" rel="noopener noreferrer">Rulesets</a>, then New ruleset → Import a ruleset, and choose <code>jumpmaster-demo-ruleset.json</code>.</li>
+<li>Review it and click Create.</li></ol>
+<p><small>A matrix job reports one check per combination, such as build (ubuntu-latest), and a reusable workflow&#39;s jobs report as caller / inner: check the exact names on a pull request&#39;s Checks tab and correct the required checks to match.</small></p>
+<p><a href="data:application/json;charset=utf-8,%7B%0A%20%20%22name%22%3A%20%22jumpmaster%22%2C%0A%20%20%22target%22%3A%20%22branch%22%2C%0A%20%20%22enforcement%22%3A%20%22active%22%2C%0A%20%20%22bypass_actors%22%3A%20%5B%5D%2C%0A%20%20%22conditions%22%3A%20%7B%0A%20%20%20%20%22ref_name%22%3A%20%7B%0A%20%20%20%20%20%20%22include%22%3A%20%5B%0A%20%20%20%20%20%20%20%20%22~DEFAULT_BRANCH%22%0A%20%20%20%20%20%20%5D%2C%0A%20%20%20%20%20%20%22exclude%22%3A%20%5B%5D%0A%20%20%20%20%7D%0A%20%20%7D%2C%0A%20%20%22rules%22%3A%20%5B%0A%20%20%20%20%7B%0A%20%20%20%20%20%20%22type%22%3A%20%22pull_request%22%2C%0A%20%20%20%20%20%20%22parameters%22%3A%20%7B%0A%20%20%20%20%20%20%20%20%22required_approving_review_count%22%3A%200%2C%0A%20%20%20%20%20%20%20%20%22dismiss_stale_reviews_on_push%22%3A%20true%2C%0A%20%20%20%20%20%20%20%20%22require_code_owner_review%22%3A%20false%2C%0A%20%20%20%20%20%20%20%20%22require_last_push_approval%22%3A%20false%2C%0A%20%20%20%20%20%20%20%20%22required_review_thread_resolution%22%3A%20false%0A%20%20%20%20%20%20%7D%0A%20%20%20%20%7D%2C%0A%20%20%20%20%7B%0A%20%20%20%20%20%20%22type%22%3A%20%22required_status_checks%22%2C%0A%20%20%20%20%20%20%22parameters%22%3A%20%7B%0A%20%20%20%20%20%20%20%20%22strict_required_status_checks_policy%22%3A%20false%2C%0A%20%20%20%20%20%20%20%20%22required_status_checks%22%3A%20%5B%0A%20%20%20%20%20%20%20%20%20%20%7B%0A%20%20%20%20%20%20%20%20%20%20%20%20%22context%22%3A%20%22test%22%2C%0A%20%20%20%20%20%20%20%20%20%20%20%20%22integration_id%22%3A%2015368%0A%20%20%20%20%20%20%20%20%20%20%7D%0A%20%20%20%20%20%20%20%20%5D%0A%20%20%20%20%20%20%7D%0A%20%20%20%20%7D%0A%20%20%5D%0A%7D%0A" download="jumpmaster-demo-ruleset.json">Download jumpmaster-demo-ruleset.json</a> <button type="button" data-copy="ruleset-text">Copy</button></p>
+<pre id="ruleset-text">{
+  &quot;name&quot;: &quot;jumpmaster&quot;,
+  &quot;target&quot;: &quot;branch&quot;,
+  &quot;enforcement&quot;: &quot;active&quot;,
+  &quot;bypass_actors&quot;: [],
+  &quot;conditions&quot;: {
+    &quot;ref_name&quot;: {
+      &quot;include&quot;: [
+        &quot;~DEFAULT_BRANCH&quot;
+      ],
+      &quot;exclude&quot;: []
+    }
+  },
+  &quot;rules&quot;: [
+    {
+      &quot;type&quot;: &quot;pull_request&quot;,
+      &quot;parameters&quot;: {
+        &quot;required_approving_review_count&quot;: 0,
+        &quot;dismiss_stale_reviews_on_push&quot;: true,
+        &quot;require_code_owner_review&quot;: false,
+        &quot;require_last_push_approval&quot;: false,
+        &quot;required_review_thread_resolution&quot;: false
+      }
+    },
+    {
+      &quot;type&quot;: &quot;required_status_checks&quot;,
+      &quot;parameters&quot;: {
+        &quot;strict_required_status_checks_policy&quot;: false,
+        &quot;required_status_checks&quot;: [
+          {
+            &quot;context&quot;: &quot;test&quot;,
+            &quot;integration_id&quot;: 15368
+          }
+        ]
+      }
+    }
+  ]
+}
+</pre></section>
+<section id="codeowners"><h3>Code owners for the protected paths</h3><p class="step-status" data-step="codeowners"><span class="chip chip-not-checked" data-status="not-checked">not checked</span></p>
+<p>Changes to the protected paths need a person's review. Name yourself (and anyone else who may approve them) as code owners: each needs the Write role.</p>
+
+<p><label>Your GitHub login <input name="reviewer" form="github-reviewer-form" value="" placeholder="your-github-login" pattern="[A-Za-z0-9@,._ \/\-]+"></label> <button form="github-reviewer-form">Show</button></p>
+<p><a href="https://github.com/octo-org/demo/new/main?filename=.github%2FCODEOWNERS" target="_blank" rel="noopener noreferrer">Create <code>.github/CODEOWNERS</code> on GitHub</a>, paste the text, and commit it. <button type="button" data-copy="codeowners-text">Copy</button></p>
+<pre id="codeowners-text"># Jumpmaster zone demo: changes to these paths need a human code owner&#39;s review.
+# In starter mode GitHub cannot require this review: you are the author and the only code owner, and GitHub never lets an author approve their own pull request. Jumpmaster parks every pull request that touches these paths for you to review and merge by hand.
+.github/** @alice
+CODEOWNERS @alice
+pnpm-workspace.yaml @alice
+</pre></section>
+<section id="labels"><h3>Labels</h3><p class="step-status" data-step="labels"><span class="chip chip-not-checked" data-status="not-checked">not checked</span></p><p>The labels Jumpmaster works with, the ready label <code>agent-ready</code> among them, must exist on the repository. The doctor page's Create the missing labels makes them.</p></section>
+</section>
+<!-- next -->
+<section id="github" class="setup-section"><h3>GitHub</h3><style>.step-status .chip{display:inline-block;padding:0 .5rem;border-radius:999px;font-size:.85em;box-shadow:inset 0 0 0 1px var(--stroke-soft-200)}.step-status .chip-done{box-shadow:inset 0 0 0 1px var(--success-base)}.step-status .chip-missing{box-shadow:inset 0 0 0 1px var(--error-base)}.step-status .chip-check{box-shadow:inset 0 0 0 1px var(--warning-base)}</style>
+<p>What Jumpmaster needs on GitHub, as links and files: nothing here changes GitHub; the clicks and the commit are yours. The doctor checks each part; its last run's result is beside each step.</p>
+<p class="warn">GitHub rejected the author token (401)</p><p>Set or replace the tokens in the <a href="/setup/forge">GitHub step</a>, then come back.</p>
+<ul id="github-steps"><li>Give the accounts access <p class="step-status" data-step="access"><span class="chip chip-not-checked" data-status="not-checked">not checked</span></p></li><li>The branch ruleset <p class="step-status" data-step="ruleset"><span class="chip chip-missing" data-status="missing">missing</span> <span class="step-finding">no ruleset &lt;b&gt;protects&lt;/b&gt; main</span></p></li><li>Code owners for the protected paths <p class="step-status" data-step="codeowners"><span class="chip chip-check" data-status="check">check</span> <span class="step-finding">no CODEOWNERS file</span></p></li><li>Labels <p class="step-status" data-step="labels"><span class="chip chip-not-checked" data-status="not-checked">not checked</span></p></li></ul>
+</section>
