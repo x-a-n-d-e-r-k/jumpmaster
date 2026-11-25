@@ -412,10 +412,13 @@ export function throttleSince(db: Db, cfg: UsageConfig, now: Date): string | nul
 export const OVERRIDE_CEILING = 0.95;
 export const OVERRIDE_DEFAULTS = { starts: 5, hours: 3 } as const;
 
-/** Whether a report shows an account window, one that has not reset, at the override's ceiling. */
+/**
+ * Whether a report shows an account-wide window (by accountWide, the rule the gate reads #738), one
+ * that has not reset, at the override's ceiling.
+ */
 function reachesCeiling(data: RateLimitEventData, now: Date): boolean {
-  return [data.unifiedWindows?.five_hour, data.unifiedWindows?.seven_day].some((w) => {
-    if (!w || w.utilization < OVERRIDE_CEILING) return false;
+  return Object.entries(data.unifiedWindows ?? {}).some(([key, w]) => {
+    if (!accountWide(key) || w.utilization < OVERRIDE_CEILING) return false;
     const reset = ms(normalizeResetsAt(w.resetsAt));
     return reset === null || now.getTime() < reset;
   });
