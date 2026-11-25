@@ -134,7 +134,7 @@ import {
   type TestDeps,
 } from '../vault/credentials.js';
 import type { AppRole, GitHubAppEntry } from '../vault/github-app-entries.js';
-import type { ResolvedApps } from '../vault/resolution.js';
+import type { ResolvedApps, ResolvedGitlabPats } from '../vault/resolution.js';
 import { GITLAB_PRESET_GATES, gitlabZoneIdOf, readZoneAdd, sameProject } from '../zones/add-ref.js';
 import {
   type DetectForge,
@@ -251,6 +251,11 @@ export interface ControlDeps {
   heldReadTokens?: Pick<HeldDropTokens, 'sweep'>;
   /** The app entries as they resolved now, for the doctor's app-reviewer zones (issue #237). */
   resolvedApps?: () => ResolvedApps;
+  /**
+   * Each GitLab zone's `gitlab-pat` entries as they resolved now (`ConfigStore.resolvedGitlabPats`):
+   * the doctor's `forge.private-clone` judges the clone container's token (issue #865).
+   */
+  resolvedGitlabPats?: () => ResolvedGitlabPats;
   /**
    * The installation check every mint goes through (issue #267); the doctor's `forge.author` and
    * `forge.reviewer` fail a zone whose recorded ids it refuses.
@@ -890,6 +895,7 @@ export function registerControlRoutes(app: FastifyInstance, deps: ControlDeps): 
               ...(deps.readForgeFor ? { readForge: deps.readForgeFor } : {}),
               ...(deps.chatHealth ? { chatHealth: deps.chatHealth } : {}),
               ...(deps.resolvedApps ? { resolvedApps: deps.resolvedApps } : {}),
+              ...(deps.resolvedGitlabPats ? { resolvedGitlabPats: deps.resolvedGitlabPats } : {}),
               ...(deps.installationVerifier
                 ? {
                     verifiedInstallation: (
