@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
 import {
   addedRuns,
@@ -656,16 +657,34 @@ describe('a provided mirror (#842)', () => {
     const mirror = join(parent, 'mirror');
     await initBare(mirror);
     await mirrorFetch(mirror, '', target(), ['*']);
+    await maintenanceDone(mirror);
     setProvidedMirrorDir(mirror);
     readOnly(mirror, true);
     return mirror;
   }
+  /**
+   * Newer git runs auto-maintenance detached after a fetch; it holds `objects/maintenance.lock`
+   * (or `gc.pid`) until done. Wait for it, so it neither races the chmod walk nor writes later.
+   */
+  async function maintenanceDone(mirror: string): Promise<void> {
+    const locks = [join(mirror, 'objects', 'maintenance.lock'), join(mirror, 'gc.pid')];
+    for (let i = 0; i < 200 && locks.some((l) => existsSync(l)); i++) await sleep(25);
+    expect(locks.filter((l) => existsSync(l))).toEqual([]);
+  }
   function readOnly(p: string, on: boolean): void {
+    const chmodIfThere = (q: string, mode: number) => {
+      try {
+        chmodSync(q, mode);
+      } catch (e) {
+        // A lock file a detached git process removed between readdir and chmod.
+        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+      }
+    };
     const walk = (d: string) => {
       for (const e of readdirSync(d, { withFileTypes: true })) {
         const q = join(d, e.name);
         if (e.isDirectory()) walk(q);
-        if (!e.isSymbolicLink()) chmodSync(q, on ? (e.isDirectory() ? 0o555 : 0o444) : 0o755);
+        if (!e.isSymbolicLink()) chmodIfThere(q, on ? (e.isDirectory() ? 0o555 : 0o444) : 0o755);
       }
     };
     if (!on) chmodSync(p, 0o755);
