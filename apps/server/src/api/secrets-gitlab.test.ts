@@ -78,7 +78,7 @@ afterEach(async () => {
  * nothing answers for) and `web` (GitHub). The fake GitLab knows the author, the reviewer, a
  * token without a read scope; any other token is refused.
  */
-function world(o: { vaultOff?: boolean } = {}) {
+function world(o: { vaultOff?: boolean; githubOnly?: boolean } = {}) {
   const db = openDb(tmpDbFile());
   const dir = mkdtempSync(join(tmpdir(), 'jm-secrets-gitlab-'));
   const keyFile = join(dir, 'vault_key');
@@ -101,12 +101,13 @@ function world(o: { vaultOff?: boolean } = {}) {
     ...extra,
   });
   const gitlab = (baseUrl: string) => ({ forge: 'gitlab', gitlab: { baseUrl } });
-  const zones = [
+  const all = [
     zone('gl', 'acme/widgets', gitlab(BASE)),
     zone('solo', 'acme/solo', { ...gitlab(BASE), identity: 'starter', ciRequired: true }),
     zone('far', 'acme/far', gitlab('https://gitlab-far.example.test')),
     zone('web', 'octo/web'),
   ];
+  const zones = o.githubOnly ? all.filter((z) => z.id === 'web') : all;
   const applied = store.apply(
     { dropZones: zones },
     { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
@@ -426,7 +427,10 @@ describe('GET /api/control/secrets lists gitlabPats (issue #776)', () => {
     await put('gl', 'author', AUTHOR);
     const first = await list();
     expect(first.statusCode).toBe(200);
-    expect(first.json().gitlabPats).toEqual([
+    // The read deploy tokens (#875) are listed in their own describe below.
+    const roles = (r: { json: () => { gitlabPats: { role: string; zone: string }[] } }) =>
+      r.json().gitlabPats.filter((p) => p.role !== 'read');
+    expect(roles(first)).toEqual([
       {
         zone: 'gl',
         role: 'author',
@@ -445,7 +449,7 @@ describe('GET /api/control/secrets lists gitlabPats (issue #776)', () => {
     // A reviewer entry left from two-bot mode.
     w.vault.put('gitlab-pat/solo/reviewer', LEFTOVER, { now: t0 });
     const second = await list();
-    expect(second.json().gitlabPats.filter((p: { zone: string }) => p.zone === 'solo')).toEqual([
+    expect(roles(second).filter((p) => p.zone === 'solo')).toEqual([
       { zone: 'solo', role: 'author', name: 'gitlab-pat/solo/author', set: false },
       {
         zone: 'solo',
@@ -458,6 +462,90 @@ describe('GET /api/control/secrets lists gitlabPats (issue #776)', () => {
     ]);
     expect(JSON.stringify(second.json().gitlabPats)).not.toContain('"value"');
     expectNoTokens(w, [first.body, second.body]);
+  });
+});
+
+describe("GET /api/control/secrets lists each GitLab zone's read deploy token (issue #875)", () => {
+  type View = { zone: string; role: string };
+  const reads = (r: { json: () => { gitlabPats: View[] } }) =>
+    r.json().gitlabPats.filter((p) => p.role === 'read');
+
+  test('not set, then set with its fingerprint after a PUT, then not set after a DELETE', async () => {
+    const w = world();
+    const before = await list();
+    expect(before.statusCode).toBe(200);
+    expect(reads(before)).toEqual([
+      { zone: 'gl', role: 'read', name: 'gitlab-pat/gl/read', set: false },
+      { zone: 'solo', role: 'read', name: 'gitlab-pat/solo/read', set: false },
+      { zone: 'far', role: 'read', name: 'gitlab-pat/far/read', set: false },
+    ]);
+    // Each zone's read entry follows its author and reviewer.
+    expect(
+      before
+        .json()
+        .gitlabPats.filter((p: View) => p.zone === 'gl')
+        .map((p: View) => p.role),
+    ).toEqual(['author', 'reviewer', 'read']);
+    infoRefs('acme/widgets');
+    expect((await put('gl', 'read', D_VALUE)).statusCode).toBe(200);
+    const set = await list();
+    expect(reads(set)[0]).toEqual({
+      zone: 'gl',
+      role: 'read',
+      name: 'gitlab-pat/gl/read',
+      set: true,
+      fingerprint: fingerprintOf(D_VALUE),
+      setAt: t0.toISOString(),
+      testedAt: t0.toISOString(),
+      testResult: 'ok',
+    });
+    expect((await remove('gl', 'read')).statusCode).toBe(200);
+    const after = await list();
+    expect(reads(after)[0]).toEqual({
+      zone: 'gl',
+      role: 'read',
+      name: 'gitlab-pat/gl/read',
+      set: false,
+    });
+    expectNoTokens(w, [before.body, set.body, after.body]);
+  });
+
+  test('a starter zone lists its read view too; the planted token and username never appear', async () => {
+    const w = world();
+    infoRefs('acme/solo');
+    expect((await put('solo', 'read', D_VALUE)).statusCode).toBe(200);
+    const r = await list();
+    expect(reads(r).find((p) => p.zone === 'solo')).toMatchObject({
+      name: 'gitlab-pat/solo/read',
+      set: true,
+      fingerprint: fingerprintOf(D_VALUE),
+    });
+    expect(r.body).not.toContain(D_USER);
+    expect(r.body).not.toContain(D_TOKEN);
+    expectNoTokens(w, [r.body]);
+  });
+
+  test('an entry that does not decrypt is listed as undecryptable', async () => {
+    const w = world();
+    // Stored without the colon form, so resolution skips it while the vault keeps its meta.
+    w.vault.put('gitlab-pat/gl/read', 'no-colon-here', { now: t0 });
+    const r = await list();
+    expect(reads(r)[0]).toMatchObject({
+      name: 'gitlab-pat/gl/read',
+      set: false,
+      undecryptable: true,
+    });
+  });
+
+  test('a GitHub zone gets no read view; a GitHub-only install has none at all', async () => {
+    world();
+    const r = await list();
+    expect(r.json().gitlabPats.some((p: View) => p.zone === 'web')).toBe(false);
+    await app?.close();
+    world({ githubOnly: true });
+    const only = await list();
+    expect(only.statusCode).toBe(200);
+    expect(only.json().gitlabPats).toEqual([]);
   });
 });
 

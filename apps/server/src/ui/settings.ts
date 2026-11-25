@@ -299,7 +299,8 @@ function appEntriesSection(store: ConfigStore): string {
 /**
  * One `gitlab-pat/<zone>/<role>` entry's row (#821): its name, zone, role, state, fingerprint and
  * dates, never its value. Set takes a token in a password field; Test and Remove follow once it is
- * set. A starter zone's leftover reviewer offers Remove only: the routes refuse the rest.
+ * set. A starter zone's leftover reviewer offers Remove only: the routes refuse the rest. The read
+ * deploy token's row (#875) takes its username as text and its token in a password field.
  */
 function gitlabPatRow(v: GitlabPatView, starter: boolean): string {
   const zone = escapeHtml(v.zone);
@@ -308,9 +309,13 @@ function gitlabPatRow(v: GitlabPatView, starter: boolean): string {
   const state = v.undecryptable ? "can't be decrypted" : v.set ? 'set' : 'not set';
   const test = v.testResult ? `${escapeHtml(v.testResult)} <small>${day(v.testedAt)}</small>` : '-';
   const leftover = starter && v.role === 'reviewer';
+  const name = escapeHtml(v.name);
+  // The read deploy token (#875) is `<username>:<token>`: two fields, joined by the page script.
   const set = leftover
     ? ''
-    : `<form class="gitlab-set" ${data}><input type="password" name="value" autocomplete="off" spellcheck="false" aria-label="New token for ${escapeHtml(v.name)}"> <button>Set</button></form> `;
+    : v.role === 'read'
+      ? `<form class="gitlab-read-set" ${data}><input type="text" name="username" autocomplete="off" spellcheck="false" placeholder="deploy token username" aria-label="Deploy token username for ${name}"> <input type="password" name="token" autocomplete="off" spellcheck="false" aria-label="Deploy token for ${name}"> <button>Set</button></form> `
+      : `<form class="gitlab-set" ${data}><input type="password" name="value" autocomplete="off" spellcheck="false" aria-label="New token for ${name}"> <button>Set</button></form> `;
   const testButton =
     v.set && !leftover ? `<button type="button" class="gitlab-test" ${data}>Test</button> ` : '';
   const remove =
@@ -332,7 +337,7 @@ function gitlabPatsSection(store: ConfigStore): string {
     .map((v) => gitlabPatRow(v, starters.has(v.zone)))
     .join('');
   return `
-<section id="gitlab-pats"><h3>GitLab tokens</h3><p>Each GitLab project's bot tokens, kept in the vault: the author, and the reviewer for two bots. Jumpmaster tests a token with GitLab before storing it; <code>jumpmaster ctl secrets set gitlab-pat/&lt;zone&gt;/&lt;role&gt;</code> does the same from a terminal.</p><table><tr><th>Entry</th><th>Project</th><th>Role</th><th>State</th><th>Fingerprint</th><th>Set</th><th>Last test</th><th></th></tr>${rows}</table></section>`;
+<section id="gitlab-pats"><h3>GitLab tokens</h3><p>Each GitLab project's bot tokens, kept in the vault: the author, and the reviewer for two bots. The read token is optional: a project deploy token with only <code>read_repository</code>, set as its username and its token. When it is set, drops clone with it instead of the author token; without it, the clone container uses the author token. Either way the author token stays the bot's token for API calls and pushes. Jumpmaster tests a token with GitLab before storing it; <code>jumpmaster ctl secrets set gitlab-pat/&lt;zone&gt;/&lt;role&gt;</code> does the same from a terminal.</p><table><tr><th>Entry</th><th>Project</th><th>Role</th><th>State</th><th>Fingerprint</th><th>Set</th><th>Last test</th><th></th></tr>${rows}</table></section>`;
 }
 
 /**
@@ -496,6 +501,17 @@ async function jmGitlabPat(kind, c, state, status) {
   return j.tested ? 'tested' : 'failed';
 }
 function jmSetGitlabPat(c, state, status) { return jmGitlabPat('set', c, state, status); }
+// The read deploy token (#875): its username and token joined as <username>:<token>, both fields
+// cleared once the request is made. Never shown: a refusal shows the server's words only.
+async function jmSetGitlabRead(c, state, status) {
+  if (!c.username.value || !c.token.value) { status.textContent = 'Enter the deploy token username and token first.'; return 'empty'; }
+  const field = { value: c.username.value + ':' + c.token.value };
+  const outcome = await jmGitlabPat('set', { zone: c.zone, role: 'read', field }, state, status);
+  // jmGitlabPat clears the joined value once its request is made: then clear what was typed too.
+  if (field.value === '') { c.username.value = ''; c.token.value = ''; }
+  field.value = '';
+  return outcome;
+}
 function jmTestGitlabPat(c, state, status) { return jmGitlabPat('test', c, state, status); }
 function jmRemoveGitlabPat(c, state, status) { return jmGitlabPat('remove', c, state, status); }
 function jmConfirmRemove(name) {
@@ -566,6 +582,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const s = state();
     const outcome = await jmSetGitlabPat({ ...glOf(form), field: form.querySelector('input[name=value]') }, s, glOut(form));
     after(s, outcome);
+  });
+  for (const form of document.querySelectorAll('form.gitlab-read-set')) form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const s = state();
+    const c = { zone: form.dataset.zone, username: form.querySelector('input[name=username]'), token: form.querySelector('input[name=token]') };
+    after(s, await jmSetGitlabRead(c, s, glOut(form)));
   });
   for (const b of document.querySelectorAll('button.gitlab-test')) b.addEventListener('click', async () => {
     const s = state(); after(s, await jmTestGitlabPat(glOf(b), s, glOut(b)));
