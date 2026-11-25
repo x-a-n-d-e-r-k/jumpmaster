@@ -1101,7 +1101,10 @@ What egress does not stop: anything sent to an allowed host. An implement drop p
 agent's Claude token reaches `api.anthropic.com`.
 
 **A GitLab zone** needs its GitLab host (the host of `gitlab.baseUrl`, for example
-`gitlab.example.com`) in its `egress.allow`, for the clone and for the push. With egress on, a
+`gitlab.example.com`) in its `egress.allow`, for the clone and for the push: that one entry
+serves both the clone container's fetch
+([GitLab drops: the clone container](#gitlab-drops-the-clone-container)) and the push container.
+With egress on, a
 GitLab zone's push container reaches that one host and nothing else (not `github.com`), and only
 when the zone's `egress.allow` lists it, by name or by a `*.` entry. The egress proxy allows port
 443 only, so a `gitlab.baseUrl` on another port, or on an IP address, cannot push while egress is
@@ -1209,6 +1212,9 @@ carry the read token when one is set and the author token otherwise; they clone 
 push with it (the push container gets its own credential). A review or crew drop shows the read
 token's fingerprint or none. It is how to confirm, with no
 restart, that a changed gate timeout or a rotated token reached the next drop.
+A GitLab zone's drop carries no forge token, so its `drop-start` line has no `forgeToken` field:
+the clone container holds the token instead
+([GitLab drops: the clone container](#gitlab-drops-the-clone-container)).
 
 ### Sticks
 
@@ -1276,6 +1282,55 @@ heartbeating, so the older server sees the drop lost and requeues it. Nothing is
 unpushed branch. An older stick on a newer server gets no implement, heal or resolve drops (it
 doesn't advertise `push-v1`), only review, crew and doctor drops. With Compose, the
 [Upgrade](#upgrade) restarts both together, which is fine: a drop leased in between is requeued.
+
+### GitLab drops: the clone container
+
+A GitLab zone's drop clones before the agent starts, in a container of its own, so the agent's
+container never holds a GitLab token. This works for private and internal projects as well as
+public ones.
+
+1. **Lease.** A GitLab zone's drops go only to a stick that advertises `clone-v1`. The payload
+   carries no forge token.
+2. **Clone container.** Before any of the zone's services or the agent's container start, the
+   stick starts its own trooper image (`JM_TROOPER_IMAGE`, never the zone's image) in a `clone`
+   role, on its own network (`jm-clone-…`). Only once that container reports ready does the stick
+   ask the server for the token and hand it over.
+3. **Fetch.** The clone container fetches the project (all branches, no checkout, no submodules,
+   no hooks, redirects to another host refused, under a size limit) into a mirror volume, checks
+   that the token was not written into it, and exits.
+4. **Hand-over.** The stick confirms the clone container is gone and removes its network. Only then
+   does it create the drop network, the services and the agent's container, which gets the mirror
+   **read-only** at `/jm/mirror`. The agent's container makes no call to GitLab: it reads the
+   mirror instead. The mirror volume is removed with the drop.
+
+**Which token.** The clone container uses the zone's read token, `gitlab-pat/<zone>/read`, when it
+is set, else the author token. Create the read token on GitLab as a project deploy token with only
+the `read_repository` scope. With it set, the token that can push is handed out only for pushes.
+A GitLab token is not revoked when the clone ends: it stays valid on GitLab until it expires or you
+revoke it there. No GitLab token ever enters a container an agent runs in.
+
+**`clone-v1`.** A stick advertises `clone-v1` when its volume self-check and its base image (the
+trooper image) pass, with 10 GiB free, as for [`push-v1`](#sticks); otherwise its log says why.
+Until a live stick advertises it, a GitLab zone's drops stay queued, and
+[`stick.capabilities`](#stickcapabilities) names the missing capability (`clone-v1`).
+
+**Egress.** With egress on, the clone container gets its own egress proxy that allows only the
+zone's GitLab host, which must be in the zone's `egress.allow`
+([Egress](#egress)). A stick with a ceiling must list that host in `JM_EGRESS_CEILING` too
+([The stick's egress ceiling](#the-sticks-egress-ceiling)). A zone with egress off gets no proxy.
+The proxy still refuses a GitLab host on a private address.
+
+**Failures.**
+
+| What happens | Result |
+|---|---|
+| GitLab refuses the token | The drop fails with that reason, and the zone's credential check reports it (a doctor drop reports it instead) |
+| The GitLab host is outside the zone's egress or the stick's ceiling | Nothing starts; the host is named |
+| The clone runs over 15 minutes, or over the size limit | The container is killed, its volume removed, and the drop fails |
+| The kill switch fires mid-clone | The container is killed at once and its volume removed |
+| The stick dies mid-clone | The drop is lost and a new drop is made; the old volume is swept |
+
+**Chat.** The crew chat stays unavailable for GitLab projects.
 
 ## Image trust
 
@@ -1762,9 +1817,10 @@ did not come back, Docker is not starting at boot, or the services were last sto
 
 **Action:** See the sticks on home (`/`).
 
-No live stick can run this project: the fix names what it lacks (`egress-v1`, `image-verify-v1`, the
-signed policy, hosts missing from the stick's `JM_EGRESS_CEILING`, or `enforce` as the zone's egress
-mode when the stick has a ceiling). See [Stick](#stick) and
+No live stick can run this project: the fix names what it lacks (`egress-v1`, `clone-v1` for a
+GitLab zone, `image-verify-v1`, the signed policy, hosts missing from the stick's
+`JM_EGRESS_CEILING`, or `enforce` as the zone's egress mode when the stick has a ceiling). See
+[Stick](#stick), [GitLab drops: the clone container](#gitlab-drops-the-clone-container) and
 [The stick's egress ceiling](#the-sticks-egress-ceiling).
 
 ### `stick.image-policy`
