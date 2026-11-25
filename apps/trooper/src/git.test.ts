@@ -812,7 +812,12 @@ describe('a provided mirror (#842)', () => {
       setSpawn(null);
       expect(calls.length).toBeGreaterThan(0);
       for (const c of calls) {
-        const text = [...c.argv, ...Object.values(c.env).map(String)].join('\n');
+        // Only what the trooper sets for git: the runner's own environment (CI exports
+        // URLs such as GITHUB_SERVER_URL) passes through unchanged and is not the trooper's.
+        const added = Object.entries(c.env)
+          .filter(([k, v]) => process.env[k] !== v)
+          .map(([, v]) => String(v));
+        const text = [...c.argv, ...added].join('\n');
         expect(text).not.toMatch(/https?:\/\//);
         expect(text).not.toMatch(/extraheader|AUTHORIZATION|x-access-token|oauth2/i);
         expect(text).not.toContain(origin);
