@@ -1807,6 +1807,142 @@ describe('zone.egress on a GitLab zone checks its GitLab host (issue #820)', () 
   });
 });
 
+describe('zone.egress warns when a GitLab host resolves to a private address (issue #908)', () => {
+  const BASE = 'https://gitlab.internal.example';
+  const HOST = 'gitlab.internal.example';
+  const gitlabZone = (
+    egress: { mode: 'off' | 'monitor' | 'enforce'; allow: string[]; private?: string[] },
+    lookupHost: (host: string) => Promise<string[]> = async () => ['10.1.2.3'],
+  ) => {
+    const w = world({
+      zone: { repo: 'group/project', forge: 'gitlab', gitlab: { baseUrl: BASE }, egress },
+    });
+    const lookup = vi.fn(lookupHost);
+    w.deps.lookupHost = lookup;
+    return { w, lookup };
+  };
+  const egressOf = async (w: ReturnType<typeof world>) => one(await w.run(), 'zone.egress');
+
+  test('enforce, allowed host resolving to 10.1.2.3, no egress.private: warn naming the fix', async () => {
+    const { w, lookup } = gitlabZone({ mode: 'enforce', allow: [HOST] });
+    const c = await egressOf(w);
+    expect(lookup).toHaveBeenCalledWith(HOST);
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain(`${HOST} resolves to a private address`);
+    expect(c.summary).toContain('clones and pushes will fail');
+    expect(c.fix).toContain('egress.private');
+    expect(c.fix).toContain('egress-private-v1');
+    expect(c.fix).toContain('DNS');
+  });
+
+  test('monitor: warn, the private-address text first, the monitor-mode text after', async () => {
+    const { w } = gitlabZone({ mode: 'monitor', allow: [HOST] });
+    const c = await egressOf(w);
+    const plain = await egressOf(
+      gitlabZone({ mode: 'monitor', allow: [HOST] }, async () => ['93.184.216.34']).w,
+    );
+    expect(c.status).toBe('warn');
+    expect(c.summary?.startsWith(`${HOST} resolves to a private address`)).toBe(true);
+    expect(c.summary?.endsWith(plain.summary as string)).toBe(true);
+    expect(c.fix?.startsWith(`Add ${HOST} to the zone's egress.private`)).toBe(true);
+    expect(c.fix?.endsWith(plain.fix as string)).toBe(true);
+  });
+
+  test('with the host in egress.private, the result is the pass it is today', async () => {
+    const { w, lookup } = gitlabZone({
+      mode: 'enforce',
+      allow: [HOST],
+      private: ['GITLAB.internal.example'],
+    });
+    const c = await egressOf(w);
+    expect(lookup).not.toHaveBeenCalled();
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('egress is enforced');
+    expect(c.summary).not.toContain('private');
+  });
+
+  test("a host resolving only to public addresses gives today's result", async () => {
+    const pub = async () => ['93.184.216.34', '2606:2800:220:1::1'];
+    for (const mode of ['enforce', 'monitor'] as const) {
+      const c = await egressOf(gitlabZone({ mode, allow: [HOST] }, pub).w);
+      const before = await egressOf(gitlabZone({ mode, allow: [HOST] }, async () => []).w);
+      expect(c).toEqual(before);
+      expect(c.summary).not.toContain('private');
+    }
+    const one_ = await egressOf(gitlabZone({ mode: 'enforce', allow: [HOST] }, pub).w);
+    expect(one_.status).toBe('pass');
+  });
+
+  test('one private address among public ones is enough to warn', async () => {
+    const c = await egressOf(
+      gitlabZone({ mode: 'enforce', allow: [HOST] }, async () => ['93.184.216.34', 'fd00::1']).w,
+    );
+    expect(c.status).toBe('warn');
+  });
+
+  test('a resolver that rejects (ENOTFOUND) neither warns nor fails on DNS', async () => {
+    const fail = async (): Promise<string[]> => {
+      throw Object.assign(new Error(`getaddrinfo ENOTFOUND ${HOST}`), { code: 'ENOTFOUND' });
+    };
+    const c = await egressOf(gitlabZone({ mode: 'enforce', allow: [HOST] }, fail).w);
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('egress is enforced');
+    expect(c.summary).toContain('could not be resolved from the server');
+    expect(c.fix).toBeUndefined();
+  });
+
+  test("a resolver that never settles gives today's result after the 5 s bound, not a guard timeout", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { w } = gitlabZone({ mode: 'enforce', allow: [HOST] }, () => new Promise(() => {}));
+      const pending = w.run();
+      await vi.advanceTimersByTimeAsync(5_000);
+      const c = one(await pending, 'zone.egress');
+      expect(c.status).toBe('pass');
+      expect(c.summary).toContain('egress is enforced');
+      expect(c.summary).not.toContain('did not answer');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test('a GitHub zone and a GitLab zone with egress off never call the resolver', async () => {
+    const gh = world();
+    const lookup = vi.fn(async () => ['10.1.2.3']);
+    gh.deps.lookupHost = lookup;
+    expect((await egressOf(gh)).status).toBe('pass');
+    const ghMonitor = world({ zone: { egress: { mode: 'monitor', allow: [] } } });
+    ghMonitor.deps.lookupHost = lookup;
+    await egressOf(ghMonitor);
+    const off = gitlabZone({ mode: 'off', allow: [] });
+    expect((await egressOf(off.w)).summary).toBe(
+      'egress is off: a drop can reach any host on the internet',
+    );
+    expect(lookup).not.toHaveBeenCalled();
+    expect(off.lookup).not.toHaveBeenCalled();
+  });
+
+  test('a GitLab host not in egress.allow still fails, and the resolver is not called', async () => {
+    const { w, lookup } = gitlabZone({ mode: 'enforce', allow: [] });
+    const c = await egressOf(w);
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain(`its GitLab host is not allowed: add ${HOST}`);
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  test('the summary and fix never name the base URL or the project path', async () => {
+    for (const mode of ['enforce', 'monitor'] as const) {
+      const { w } = gitlabZone({ mode, allow: [HOST] });
+      const c = await egressOf(w);
+      expect(c.status).toBe('warn');
+      const text = `${c.summary} ${c.fix}`;
+      expect(text).not.toContain(BASE);
+      expect(text).not.toContain('gitlab.baseUrl');
+      expect(text).not.toContain('group/project');
+    }
+  });
+});
+
 describe('config store checks', () => {
   const status = (o: Partial<ConfigStatus> = {}): ConfigStatus => ({
     mode: 'db',

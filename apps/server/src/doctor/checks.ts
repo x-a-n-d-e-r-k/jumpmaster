@@ -1,3 +1,4 @@
+import { lookup } from 'node:dns/promises';
 import { realpathSync } from 'node:fs';
 import { resolve as resolvePath, sep } from 'node:path';
 /**
@@ -8,7 +9,13 @@ import { resolve as resolvePath, sep } from 'node:path';
  * A check that cannot run says so and why (`warn` when the cause is passing, such as a rate limit;
  * `fail` when the cause is a setting, such as a refused permission). It is never a `pass`.
  */
-import { DoctorResultSchema, type DropResult, hostAllowed } from '@jumpmaster/protocol';
+import {
+  DoctorResultSchema,
+  type DropResult,
+  hostAllowed,
+  isPrivateNetworkAddress,
+  normalizeHost,
+} from '@jumpmaster/protocol';
 import { LEGACY_READY_LABEL } from '../config/ready-label.js';
 import type { ConfigStatus } from '../config/source.js';
 import {
@@ -258,6 +265,11 @@ export type DoctorDeps = {
    * the install has no chat service (`JM_CHAT_SERVICE_URL` unset: an older compose file).
    */
   chatHealth?: ChatHealth;
+  /**
+   * The addresses a host name resolves to, from the server's DNS (default: `dns.lookup` with
+   * `all`). `zone.egress` asks it for a GitLab zone's host, bound to `LOOKUP_TIMEOUT_MS` (#908).
+   */
+  lookupHost?(host: string): Promise<string[]>;
 };
 
 /** The chat service's `GET /healthz`: its own state and whether it reaches Claude and the forge. */
@@ -286,6 +298,8 @@ const TOKEN_LIFE_DAYS = 365;
 const TOKEN_EXPIRY_WARN_MS = 14 * 86_400_000;
 /** An app key imported longer ago than this is due for rotation. */
 const APP_KEY_LIFE_DAYS = 365;
+/** How long `zone.egress` waits for a GitLab host's lookup: well inside the check's own deadline. */
+const LOOKUP_TIMEOUT_MS = 5_000;
 const EGRESS_WINDOW_MS = 14 * 86_400_000;
 const DAY_MS = 86_400_000;
 const DIGEST_REF = /^[^\s@-][^\s@]*@sha256:[0-9a-f]{64}$/;
@@ -3437,7 +3451,67 @@ function gitlabEgressHeld(
   };
 }
 
-function egressCheck(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
+const defaultLookupHost = async (host: string): Promise<string[]> =>
+  (await lookup(host, { all: true })).map((a) => a.address);
+
+/**
+ * Whether a host resolves, from the server, to a private-network address: `unresolved` when the
+ * lookup fails or passes `LOOKUP_TIMEOUT_MS`. The stick's proxy may see other DNS, so the doctor
+ * only warns on it (issue #908).
+ */
+async function resolvesPrivate(
+  d: DoctorDeps,
+  host: string,
+): Promise<'private' | 'public' | 'unresolved'> {
+  let timer: NodeJS.Timeout | undefined;
+  const late = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), LOOKUP_TIMEOUT_MS);
+  });
+  try {
+    const addrs = await Promise.race([
+      Promise.resolve().then(() => (d.lookupHost ?? defaultLookupHost)(host)),
+      late,
+    ]);
+    if (addrs === null) return 'unresolved';
+    return addrs.some((a) => isPrivateNetworkAddress(a)) ? 'private' : 'public';
+  } catch {
+    return 'unresolved';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * A GitLab zone's egress check, with what its host resolves to put ahead of today's result: a
+ * private address that `egress.private` does not list is a warn, as the proxy will refuse it.
+ */
+async function egressCheck(d: DoctorDeps, zone: DropZoneConfig): Promise<DoctorCheck> {
+  const today = egressToday(d, zone);
+  if ((zone.egress?.mode ?? 'off') === 'off' || forgeKind(zone) !== 'gitlab') return today;
+  if (today.status === 'fail') return today;
+  const target = gitlabPushHost(zone.gitlab?.baseUrl ?? '', egressFor(zone)?.allow ?? []);
+  if (!('host' in target)) return today;
+  const host = target.host;
+  const listed = (egressFor(zone)?.private ?? []).map((h) => normalizeHost(h) ?? h);
+  if (listed.includes(host)) return today;
+  const seen = await resolvesPrivate(d, host);
+  if (seen === 'public') return today;
+  if (seen === 'unresolved')
+    return {
+      ...today,
+      summary: `${today.summary} (${host} could not be resolved from the server, so whether it is a private address was not checked)`,
+    };
+  const summary = `${host} resolves to a private address the egress proxy will refuse, so the zone's clones and pushes will fail`;
+  const fix = `Add ${host} to the zone's egress.private (a guarded setting) and run the zone's drops on a stick with egress-private-v1. This is the server's DNS view; the stick's may differ.`;
+  return {
+    ...today,
+    status: 'warn',
+    summary: `${summary}; ${today.summary}`,
+    fix: today.fix ? `${fix} ${today.fix}` : fix,
+  };
+}
+
+function egressToday(d: DoctorDeps, zone: DropZoneConfig): DoctorCheck {
   const base = { id: 'zone.egress', zoneId: zone.id, doc: doc('egress') };
   const mode = zone.egress?.mode ?? 'off';
   if (mode === 'off')
