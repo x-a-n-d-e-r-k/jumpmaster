@@ -1569,6 +1569,49 @@ export function revokeGrants(db: Db, dropId: string, now: Date): void {
   );
 }
 
+/**
+ * Reserves a clone grant for a drop (#840): one live reservation blocks another (`reserved`), so a
+ * second `clone-token` needs a new `clone-plan` first, which revokes the old one. Never touches
+ * `push_tokens`. Run it inside the transaction that checked the grant's rules.
+ */
+export function reserveCloneGrant(
+  db: Db,
+  dropId: string,
+  epoch: number,
+  now: Date,
+): 'ok' | 'reserved' {
+  return db.transaction((): 'ok' | 'reserved' => {
+    const live = db
+      .prepare('SELECT 1 FROM clone_grants WHERE drop_id = ? AND revoked_at IS NULL')
+      .get(dropId);
+    if (live) return 'reserved';
+    const { m } = db
+      .prepare(
+        'SELECT COALESCE(MAX(seq), 0) AS m FROM clone_grants WHERE drop_id = ? AND epoch = ?',
+      )
+      .get(dropId, epoch) as { m: number };
+    db.prepare(
+      'INSERT INTO clone_grants (drop_id, epoch, seq, reserved_at) VALUES (?, ?, ?, ?)',
+    ).run(dropId, epoch, m + 1, now.toISOString());
+    return 'ok';
+  })();
+}
+
+/** Marks the drop's live clone reservation for this epoch as minted. */
+export function markCloneMinted(db: Db, dropId: string, epoch: number, now: Date): void {
+  db.prepare(
+    'UPDATE clone_grants SET minted_at = ? WHERE drop_id = ? AND epoch = ? AND revoked_at IS NULL',
+  ).run(now.toISOString(), dropId, epoch);
+}
+
+/** Revokes every live clone reservation of the drop (bookkeeping: a GitLab token stays valid). */
+export function revokeCloneGrants(db: Db, dropId: string, now: Date): void {
+  db.prepare('UPDATE clone_grants SET revoked_at = ? WHERE drop_id = ? AND revoked_at IS NULL').run(
+    now.toISOString(),
+    dropId,
+  );
+}
+
 /** Drops in flight plus forge writes not yet settled in the zone. */
 export function activeWorkCount(db: Db, zoneId: string): number {
   const row = db

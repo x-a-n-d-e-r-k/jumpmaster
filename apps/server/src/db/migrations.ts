@@ -1681,6 +1681,23 @@ const V65_SQL = `
 ALTER TABLE drops ADD COLUMN fable_reason TEXT;
 `;
 
+/**
+ * v66: a GitLab drop's clone container grants (#840, the clone container spec), modelled on
+ * `push_tokens`: one row per reservation, ids and times only, never a token. A GitLab token stays
+ * valid after its grant is revoked: the revocation is bookkeeping, and frees the next reservation.
+ */
+const V66_SQL = `
+CREATE TABLE clone_grants (
+  drop_id      TEXT NOT NULL,
+  epoch        INTEGER NOT NULL,
+  seq          INTEGER NOT NULL,
+  reserved_at  TEXT NOT NULL,
+  minted_at    TEXT,
+  revoked_at   TEXT,
+  PRIMARY KEY (drop_id, epoch, seq)
+);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1747,6 +1764,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 63, sql: V63_SQL },
   { version: 64, sql: V64_SQL },
   { version: 65, sql: V65_SQL },
+  { version: 66, sql: V66_SQL },
 ];
 
 /**

@@ -2,6 +2,8 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import {
   ArtifactUploadSchema,
   agentBranch,
+  type CloneGrant,
+  type ClonePlan,
   type DropResult,
   DropResultSchema,
   dropSecrets,
@@ -59,9 +61,12 @@ import {
   killHeldOrRecent,
   latestDropFor,
   liveDropsOn,
+  markCloneMinted,
   markMinted,
   PUSH_RETENTION_MS,
+  reserveCloneGrant,
   reserveGrant,
+  revokeCloneGrants,
   revokeGrants,
   type Stick,
   settleStickUpgrade,
@@ -105,6 +110,7 @@ import {
   rateLimitFromEvent,
   refundOverrideStart,
 } from '../usage.js';
+import { gitlabReadSecretForms } from '../vault/gitlab-pat-entries.js';
 import {
   appInstallationFor,
   credentialFor,
@@ -239,6 +245,16 @@ const PUSHING_ROLES: readonly Role[] = ['implement', 'heal', 'resolve'];
 const PUSH_EGRESS = ['github.com'];
 
 const LIVE: readonly DropState[] = ['leased', 'running'];
+
+/**
+ * The most bytes a GitLab drop's clone container may fetch (#840, the clone container spec's size
+ * limit). The spec gives no figure. A stick leases only with at least 10 GiB free on its drop
+ * volume, and the mirror shares that space with the agent's own working copy (checked out from the
+ * mirror, so about as large again), its build output and any pending push volume. 4 GiB leaves
+ * that room under the floor while still taking any repository an agent can sensibly work in.
+ */
+export const CLONE_MAX_BYTES = 4 * 1024 ** 3;
+
 /** The roles that clone with the reviewer's read token (§4.2): never an author's. */
 const readsAsReviewer = (role: string): boolean =>
   role === 'review' || role === 'doctor' || isCrewRole(role);
@@ -249,6 +265,13 @@ const PENDING: readonly DropState[] = ['push_pending'];
 const STALE = { error: 'stale', stale: true } as const;
 
 type Refusal = { refused: string; retryable: boolean };
+
+/** A GitLab zone's remote, as a grant carries it: the strict origin, and the project path. */
+const gitlabRemote = (zone: DropZoneConfig) => ({
+  kind: 'gitlab' as const,
+  origin: new URL(zone.gitlab?.baseUrl ?? '').origin,
+  projectPath: zone.repo,
+});
 
 /** The result body without its push request, when it has one (to tell a refused push from junk). */
 function withoutPush(body: unknown): { body: unknown; hadPush: boolean } {
@@ -825,6 +848,8 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const zone = config.dropZones.find((z) => z.id === drop.dropZoneId);
       if (!zone) return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
       const at = now();
+      // The drop's run is over: no clone grant of it stays live (bookkeeping only, #840).
+      revokeCloneGrants(db, drop.id, at);
       const rdeps = resultDeps(config, zone);
       const push = result.push;
       if (push) {
@@ -1038,6 +1063,112 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         },
         at,
         [...secretList(secrets), ...gitlabSecrets],
+      );
+      return { grant };
+    });
+
+    // A GitLab drop's clone container (#840, the clone container spec): first its plan, which holds
+    // no secret, then, once the container is ready, its read token.
+    scope.post('/api/sticks/clone-plan', async (req, reply) => {
+      const body = PushCallBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+      const drop = liveDrop(req, reply, body.data.dropId, body.data.epoch, LIVE);
+      if (!drop) return reply;
+      const zone = live().dropZones.find((z) => z.id === drop.dropZoneId);
+      if (!zone) return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
+      if (forgeKind(zone) !== 'gitlab') {
+        return reply.code(403).send({ refused: 'forge', retryable: false });
+      }
+      const egress = egressFor(zone);
+      let allow: string[] = [];
+      if (egress) {
+        // The push plan's rule: the one GitLab host the zone's own list allows. Refused before
+        // anything is revoked, so the operator can fix the list and the stick retry.
+        const target = gitlabPushHost(zone.gitlab?.baseUrl ?? '', egress.allow);
+        if ('why' in target) {
+          log(`clone of drop ${drop.id} refused in zone ${zone.id}: ${target.why}`);
+          return reply.code(403).send({ refused: 'egress', retryable: true });
+        }
+        allow = [target.host];
+      }
+      // A new attempt: a grant whose reply was lost no longer blocks the next clone-token.
+      revokeCloneGrants(db, drop.id, now());
+      const plan: ClonePlan = {
+        forge: gitlabRemote(zone),
+        limits: zone.limits,
+        ...(egress ? { egress: { mode: egress.mode, allow } } : {}),
+        maxBytes: CLONE_MAX_BYTES,
+      };
+      return plan;
+    });
+
+    scope.post('/api/sticks/clone-token', async (req, reply) => {
+      const body = PushCallBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: 'invalid body' });
+      const drop = liveDrop(req, reply, body.data.dropId, body.data.epoch, LIVE);
+      if (!drop) return reply;
+      const config = live();
+      const zone = config.dropZones.find((z) => z.id === drop.dropZoneId);
+      if (!zone) return reply.code(500).send({ error: `unknown drop zone ${drop.dropZoneId}` });
+      const at = now();
+      // Every rule afresh, and the reservation, in one transaction (the spec's "Server rules for
+      // the token"), so two requests can't both reserve.
+      const refusal = db.transaction((): Refusal | null => {
+        if (forgeKind(zone) !== 'gitlab') return { refused: 'forge', retryable: false };
+        const held = pushHeld(zone.id);
+        if (held) return held;
+        const row = db.prepare('SELECT repo FROM drop_zones WHERE id = ?').get(drop.dropZoneId) as
+          | { repo: string }
+          | undefined;
+        if (!row || row.repo !== zone.repo) return { refused: 'repo mismatch', retryable: false };
+        // The stick relays only trooper events, and only once the agent container starts: any
+        // event, or a result, means the agent has run, and the clone is too late.
+        const fresh = getDrop(db, drop.id);
+        const evented = db
+          .prepare('SELECT 1 FROM drop_events WHERE drop_id = ? LIMIT 1')
+          .get(drop.id);
+        if (!fresh || fresh.resultJson !== null || evented) {
+          return { refused: 'started', retryable: false };
+        }
+        if (reserveCloneGrant(db, drop.id, drop.epoch, at) === 'reserved') {
+          return { refused: 'reserved', retryable: true };
+        }
+        return null;
+      })();
+      if (refusal) return reply.code(refusal.refused === 'reserved' ? 409 : 403).send(refusal);
+      const pats = deps.resolvedGitlabPats?.().get(zone.id);
+      const read = pats?.read;
+      const token = read?.token ?? pats?.author;
+      if (!token) {
+        revokeCloneGrants(db, drop.id, at);
+        return reply.code(403).send({ refused: 'gitlab token', retryable: false });
+      }
+      const credential: 'read' | 'author' = read ? 'read' : 'author';
+      const secrets = [
+        ...new Set(
+          [pats?.author, pats?.reviewer, ...(read ? gitlabReadSecretForms(read) : [])].filter(
+            (v): v is string => !!v,
+          ),
+        ),
+      ];
+      const grant: CloneGrant = {
+        token,
+        ...(read ? { username: read.username } : {}),
+        forge: gitlabRemote(zone),
+        secrets,
+      };
+      markCloneMinted(db, drop.id, drop.epoch, at);
+      // Ids and which credential only: never a value.
+      recordAudit(
+        db,
+        {
+          via: 'system',
+          action: 'clone-token',
+          target: drop.id,
+          detail: { drop: drop.id, epoch: drop.epoch, credential },
+        },
+        at,
+        [...secretList(config.secrets), ...secrets],
       );
       return { grant };
     });
