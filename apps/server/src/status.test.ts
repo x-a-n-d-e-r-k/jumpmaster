@@ -99,6 +99,8 @@ const outbox = (o: Partial<OutboxRow> = {}): OutboxRow => ({
   createdAt: t0.toISOString(),
   updatedAt: t0.toISOString(),
   resends: 0,
+  cleanReads: 0,
+  cleanReadAt: null,
   ...o,
 });
 
