@@ -2089,7 +2089,11 @@ Each service image must be a digest reference pinned on the stick ([Services](#s
 **Action:** Edit the egress of <zone> (the **Egress** section of the project's **Setup** tab).
 
 The egress mode and the hosts seen; in monitor, the hosts to add before enforcing
-([Egress](#egress), [step 6](#step-6-run-the-doctor-to-zero-fails)).
+([Egress](#egress), [step 6](#step-6-run-the-doctor-to-zero-fails)). On a GitLab zone it warns
+when the GitLab host resolves, from the server, to a private-network address that `egress.private`
+does not list, since the egress proxy will refuse it: add the host to the zone's `egress.private`
+(a guarded setting) and run the zone's drops on a stick with `egress-private-v1` (the stick's DNS
+may differ from the server's).
 
 ### `zone.identity`
 

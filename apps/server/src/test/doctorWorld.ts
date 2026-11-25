@@ -113,6 +113,8 @@ export function world(
     readForge: () => (o.readToken ? read.author : undefined),
     // The chat service answers and reaches both (#336).
     chatHealth: async () => ({ ok: true, claude: true, forge: true }),
+    // Never real DNS in a test: every name resolves to a public address (#908).
+    lookupHost: async () => ['93.184.216.34'],
   };
   const run = () => runChecks(deps);
   return { db, f, read, zone, config, deps, run };
