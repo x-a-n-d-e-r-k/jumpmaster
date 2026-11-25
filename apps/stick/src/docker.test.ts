@@ -695,6 +695,77 @@ test('start with mount passes a single volume mount and no binds', async () => {
   expect((plain.created[0]?.HostConfig as Record<string, unknown>).Mounts).toBeUndefined();
 });
 
+test('start with mirror adds a second, read-only volume mount at /jm/mirror', async () => {
+  const { docker, created } = stdinDocker();
+  await new DockerDriver(docker as never).start({
+    image: 'i',
+    name: 'n',
+    labels: {},
+    payload: '{}',
+    mount: { volume: 'jm-drop-d1-3-0123abcd', target: '/home/agent/repo' },
+    mirror: { volume: 'jm-mirror-d1-3-0123abcd', target: '/jm/mirror' },
+  });
+  const hc = created[0]?.HostConfig as Record<string, unknown>;
+  expect(hc.Mounts).toEqual([
+    {
+      Type: 'volume',
+      Source: 'jm-drop-d1-3-0123abcd',
+      Target: '/home/agent/repo',
+      ReadOnly: false,
+      VolumeOptions: { NoCopy: true },
+    },
+    {
+      Type: 'volume',
+      Source: 'jm-mirror-d1-3-0123abcd',
+      Target: '/jm/mirror',
+      ReadOnly: true,
+      VolumeOptions: { NoCopy: true },
+    },
+  ]);
+  expect(hc.Binds).toBeUndefined();
+});
+
+test('start without mirror creates exactly the pinned container spec', async () => {
+  const { docker, created } = stdinDocker();
+  await new DockerDriver(docker as never).start({
+    image: 'i',
+    name: 'n',
+    labels: { a: 'b' },
+    payload: '{}',
+    mount: { volume: 'jm-drop-d1-3-0123abcd', target: '/home/agent/repo' },
+  });
+  expect(created[0]).toEqual({
+    Image: 'i',
+    name: 'n',
+    Labels: { a: 'b' },
+    OpenStdin: true,
+    StdinOnce: true,
+    AttachStdin: true,
+    AttachStdout: true,
+    AttachStderr: true,
+    Tty: false,
+    HostConfig: {
+      AutoRemove: true,
+      Init: true,
+      Privileged: false,
+      CapDrop: ['ALL'],
+      CapAdd: ['SETUID', 'SETGID', 'KILL'],
+      SecurityOpt: ['no-new-privileges'],
+      PidsLimit: 512,
+      Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }],
+      Mounts: [
+        {
+          Type: 'volume',
+          Source: 'jm-drop-d1-3-0123abcd',
+          Target: '/home/agent/repo',
+          ReadOnly: false,
+          VolumeOptions: { NoCopy: true },
+        },
+      ],
+    },
+  });
+});
+
 test('the payload is written newline-terminated and stdin ends after it by default', async () => {
   const { docker, stdin } = stdinDocker();
   await new DockerDriver(docker as never).start({

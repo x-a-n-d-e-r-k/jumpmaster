@@ -41,7 +41,13 @@ import {
 } from './push.js';
 import { dropSubnetPool } from './subnets.js';
 import { digestOf, type ImageTrust, verifyBaseImage, verifyImage } from './verify.js';
-import { prepareVolume, REMOVE_TIMEOUT_MS, REPO_MOUNT, VOLUME_LABEL } from './volumes.js';
+import {
+  MIRROR_LABEL,
+  prepareVolume,
+  REMOVE_TIMEOUT_MS,
+  REPO_MOUNT,
+  VOLUME_LABEL,
+} from './volumes.js';
 
 /** Services a drop network holds under egress: `.8` to `.14` of its /28. */
 const MAX_EGRESS_SERVICES = 6;
@@ -284,10 +290,10 @@ async function reconcileVolume(
   );
 }
 
-/** This stick's drop volumes (not the self-check's), as the engine lists them. */
+/** This stick's drop repo volumes (not the self-check's or a mirror), as the engine lists them. */
 async function dropVolumes(driver: ContainerDriver, stickId: string): Promise<VolumeInfo[]> {
   return (await driver.listVolumesByLabel(STICK_LABEL, stickId)).filter(
-    (v) => v.labels[VOLUME_LABEL] === '1',
+    (v) => v.labels[VOLUME_LABEL] === '1' && v.labels[MIRROR_LABEL] !== '1',
   );
 }
 
@@ -310,7 +316,9 @@ export async function rediscoverPending(
 /**
  * The 10-minute sweep's volumes. A volume a live drop (`dropId:epoch`) or a pending push holds
  * stays. Any other drop volume is reconciled as at startup (refused: removed). A leaked
- * self-check volume is removed, unless a self-check is in flight (it may be that check's).
+ * self-check volume is removed, unless a self-check is in flight (it may be that check's). A
+ * mirror volume no live drop holds is removed outright: it is never salvaged, and a pending push
+ * never needs it. A failed removal is left for the next sweep.
  */
 export async function sweepVolumes(
   driver: ContainerDriver,
@@ -330,8 +338,13 @@ export async function sweepVolumes(
       if (!checking) await driver.removeVolume(v.name).catch(() => {});
       continue;
     }
-    if (v.labels[VOLUME_LABEL] !== '1') continue;
     const dropId = v.labels['jumpmaster.drop'] ?? '';
+    if (v.labels[MIRROR_LABEL] === '1') {
+      if (!live.has(`${dropId}:${v.labels['jumpmaster.epoch']}`))
+        await driver.removeVolume(v.name).catch(() => {});
+      continue;
+    }
+    if (v.labels[VOLUME_LABEL] !== '1') continue;
     if (live.has(`${dropId}:${v.labels['jumpmaster.epoch']}`)) continue;
     if (pending.get(dropId)?.volume === v.name) continue;
     await reconcileVolume(driver, client, pending, v, log);

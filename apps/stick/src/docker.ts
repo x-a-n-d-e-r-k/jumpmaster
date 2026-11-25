@@ -9,6 +9,7 @@ import type {
   HelperMount,
   ImageLoader,
   IsolationFacts,
+  MirrorMount,
   ProxyHandle,
   RepoMount,
   UpgradeDriver,
@@ -141,6 +142,30 @@ const volumeMounts = (m: RepoMount): { Mounts: Docker.MountSettings[] } => ({
       ReadOnly: false,
       VolumeOptions: { NoCopy: true },
     } as Docker.MountSettings,
+  ],
+});
+
+/**
+ * The trooper's mounts: the repo volume read-write, then the mirror volume read-only. Both are
+ * volumes, never binds, and nothing from the image is copied into either.
+ */
+const trooperMounts = (
+  repo: RepoMount | undefined,
+  mirror: MirrorMount | undefined,
+): { Mounts: Docker.MountSettings[] } => ({
+  Mounts: [
+    ...(repo ? volumeMounts(repo).Mounts : []),
+    ...(mirror
+      ? [
+          {
+            Type: 'volume',
+            Source: mirror.volume,
+            Target: mirror.target,
+            ReadOnly: true,
+            VolumeOptions: { NoCopy: true },
+          } as Docker.MountSettings,
+        ]
+      : []),
   ],
 });
 
@@ -897,7 +922,7 @@ export class DockerDriver implements ContainerDriver, ImageLoader, ImageGcDriver
         Ulimits: [{ Name: 'core', Soft: 0, Hard: 0 }],
         // Egress: created on the drop network only, so it never touches a network with a route.
         ...(o.egress ? egressHostConfig(o.egress) : {}),
-        ...(o.mount ? volumeMounts(o.mount) : {}),
+        ...(o.mount || o.mirror ? trooperMounts(o.mount, o.mirror) : {}),
       },
       ...(o.egress
         ? {
