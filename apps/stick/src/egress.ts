@@ -203,6 +203,8 @@ export async function startEgress(
       JM_EGRESS_MODE: o.egress.mode,
       JM_EGRESS_ALLOW: o.egress.allow.join(','),
       JM_EGRESS_BIND: o.net.proxy,
+      // Hosts (each also on allow) the proxy lets resolve to private addresses; absent unless set.
+      ...(o.egress.private?.length ? { JM_EGRESS_PRIVATE: o.egress.private.join(',') } : {}),
       ...limits,
     },
     labels: o.labels,

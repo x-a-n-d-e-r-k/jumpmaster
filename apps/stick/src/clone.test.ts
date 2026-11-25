@@ -119,7 +119,9 @@ function fakeDriver(
         return { ...NET, name };
       },
       async startEgressProxy(p) {
-        order.push(`proxy ${p.env.JM_EGRESS_ALLOW}`);
+        order.push(
+          `proxy ${p.env.JM_EGRESS_ALLOW}${p.env.JM_EGRESS_PRIVATE === undefined ? '' : ` private=${p.env.JM_EGRESS_PRIVATE}`}`,
+        );
         let done: () => void = () => {};
         const end = new Promise<void>((r) => {
           done = r;
@@ -229,6 +231,20 @@ describe('runClone', () => {
     expect(at('proxy stop')).toBeGreaterThan(at('removeAndWait'));
     expect(at('teardown jm-clone-d1-3')).toBeGreaterThan(at('proxy stop'));
     expect(s.d.order).not.toContain(`removeVolume ${VOLUME}`);
+  });
+
+  test('a plan whose egress lists a private host starts a proxy with JM_EGRESS_PRIVATE', async () => {
+    const plan = {
+      ...EGRESS_PLAN,
+      egress: {
+        mode: 'enforce' as const,
+        allow: ['gitlab.example.com'],
+        private: ['gitlab.example.com'],
+      },
+    };
+    const s = setup({ before: [READY_LINE], after: [CLONED] }, { plan });
+    expect(await s.run()).toEqual({ ok: true, bytes: 4242 });
+    expect(s.d.order).toContain('proxy gitlab.example.com private=gitlab.example.com');
   });
 
   test('without egress: no network, no proxy, no egress in the payload', async () => {

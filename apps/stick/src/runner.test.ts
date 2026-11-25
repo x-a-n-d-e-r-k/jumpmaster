@@ -1561,6 +1561,24 @@ describe('egress', () => {
     expect(d.order).toEqual([...VOLUME_START, 'trooper', ...VOLUME_END]);
   });
 
+  test('a payload whose egress lists a private host starts a proxy with JM_EGRESS_PRIVATE', async () => {
+    const d = fakeDriver([done]);
+    const client = fakeClient();
+    const egress = {
+      mode: 'enforce' as const,
+      allow: ['api.anthropic.com', 'github.com', 'gitlab.internal.example'],
+      private: ['gitlab.internal.example'],
+    };
+    await runDrop({ ...enforce, egress }, { ...deps(d, client), ceiling: null });
+    expect(client.result).toMatchObject({ status: 'completed' });
+    expect(d.proxy?.env).toEqual({
+      JM_EGRESS_MODE: 'enforce',
+      JM_EGRESS_ALLOW: 'api.anthropic.com,github.com,gitlab.internal.example',
+      JM_EGRESS_BIND: '172.30.0.18',
+      JM_EGRESS_PRIVATE: 'gitlab.internal.example',
+    });
+  });
+
   test('the proxy gets the static .2 address and JM_EGRESS_BIND equal to it', async () => {
     const d = fakeDriver([done]);
     const client = fakeClient();
