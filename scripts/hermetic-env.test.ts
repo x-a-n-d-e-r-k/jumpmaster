@@ -1,6 +1,6 @@
 import nock from 'nock';
 import { afterEach, expect, test } from 'vitest';
-import { CONTAINER_ENV, DROP_PROXY_ENV } from '../vitest.setup.js';
+import { AGENT_FOREGROUND_ENV, CONTAINER_ENV, DROP_PROXY_ENV } from '../vitest.setup.js';
 
 afterEach(() => nock.cleanAll());
 
@@ -10,6 +10,10 @@ test('unit tests run without the trooper container environment', () => {
 
 test("unit tests run without a drop's proxy settings", () => {
   for (const name of DROP_PROXY_ENV) expect(process.env[name], name).toBeUndefined();
+});
+
+test("unit tests run without a drop agent's foreground settings", () => {
+  for (const name of AGENT_FOREGROUND_ENV) expect(process.env[name], name).toBeUndefined();
 });
 
 test('fetch reaches an HTTP mock even when vitest was started behind a proxy', async () => {
