@@ -1109,6 +1109,16 @@ const dropVolume = (stick: string, drop: string, epoch: number) => ({
   },
 });
 
+const mirrorVolume = (stick: string, drop: string, epoch: number) => ({
+  name: `jm-mirror-${drop}-${epoch}-0123abcd`,
+  labels: {
+    'jumpmaster.stick': stick,
+    'jumpmaster.drop': drop,
+    'jumpmaster.epoch': String(epoch),
+    'jumpmaster.mirror': '1',
+  },
+});
+
 function salvager(replies: Record<string, 'ok' | 'refused' | Error>) {
   const asked: string[] = [];
   return {
@@ -1189,6 +1199,17 @@ describe('rediscovery', () => {
       'removeAndWait jumpmaster-push-d7-4',
     ]);
     expect(w.volumes.has('jm-drop-d7-4-0123abcd')).toBe(true);
+  });
+
+  test('rediscovery never salvages, keeps or removes a mirror volume', async () => {
+    const w = volumeWorld([mirrorVolume('s1', 'd7', 4), mirrorVolume('s1', 'd8', 2)]);
+    const client = salvager({ d7: 'ok' });
+    const pending = new PendingPushes();
+    await rediscoverPending(w.driver, client, 's1', pending, () => {});
+    expect(client.asked).toEqual([]);
+    expect(pending.size()).toBe(0);
+    expect(w.log).toEqual([]);
+    expect(w.volumes.size).toBe(2);
   });
 
   test('a refused rediscovery removes the volume', async () => {
@@ -1353,6 +1374,66 @@ describe('the sweep', () => {
     );
     expect(n).toBe(1);
     expect(nets.removedNetworks).toEqual(['jm-push-stray-2']);
+  });
+
+  test('the sweep removes dead mirror volumes and keeps live ones, with no salvage', async () => {
+    const w = volumeWorld([
+      mirrorVolume('s1', 'live', 1),
+      mirrorVolume('s1', 'dead', 2),
+      // The live drop's other epoch is dead.
+      mirrorVolume('s1', 'live', 0),
+      mirrorVolume('s2', 'theirs', 1),
+    ]);
+    const client = salvager({ dead: 'ok', live: 'ok' });
+    const pending = new PendingPushes();
+    await sweepVolumes(w.driver, client, 's1', pending, new Set(['live:1']), () => {});
+    expect([...w.volumes.keys()].sort()).toEqual([
+      'jm-mirror-live-1-0123abcd',
+      'jm-mirror-theirs-1-0123abcd',
+    ]);
+    expect(client.asked).toEqual([]);
+    expect(pending.size()).toBe(0);
+  });
+
+  test('a live drop keeps both its repo and its mirror volume', async () => {
+    const w = volumeWorld([dropVolume('s1', 'live', 1), mirrorVolume('s1', 'live', 1)]);
+    const client = salvager({});
+    await sweepVolumes(w.driver, client, 's1', new PendingPushes(), new Set(['live:1']), () => {});
+    expect(w.volumes.size).toBe(2);
+    expect(w.log).toEqual([]);
+    expect(client.asked).toEqual([]);
+  });
+
+  test("a pending push keeps its repo volume while the drop's dead mirror goes", async () => {
+    const w = volumeWorld([dropVolume('s1', 'queued', 3), mirrorVolume('s1', 'queued', 3)]);
+    const pending = new PendingPushes();
+    pending.add('queued', { epoch: 3, volume: 'jm-drop-queued-3-0123abcd' });
+    const client = salvager({});
+    await sweepVolumes(w.driver, client, 's1', pending, new Set(), () => {});
+    expect([...w.volumes.keys()]).toEqual(['jm-drop-queued-3-0123abcd']);
+    expect(client.asked).toEqual([]);
+    expect(pending.get('queued')?.volume).toBe('jm-drop-queued-3-0123abcd');
+  });
+
+  test('a failed mirror removal does not throw and is retried by the next sweep', async () => {
+    const w = volumeWorld([mirrorVolume('s1', 'dead', 2)]);
+    let fail = true;
+    const driver: ContainerDriver = {
+      ...w.driver,
+      async removeVolume(name) {
+        if (fail) throw new Error('volume is in use');
+        return w.driver.removeVolume(name);
+      },
+    };
+    const client = salvager({});
+    await expect(
+      sweepVolumes(driver, client, 's1', new PendingPushes(), new Set(), () => {}),
+    ).resolves.toBeUndefined();
+    expect(w.volumes.size).toBe(1);
+    fail = false;
+    await sweepVolumes(driver, client, 's1', new PendingPushes(), new Set(), () => {});
+    expect(w.volumes.size).toBe(0);
+    expect(client.asked).toEqual([]);
   });
 
   test('a stray volume the server salvages joins the pending pushes', async () => {

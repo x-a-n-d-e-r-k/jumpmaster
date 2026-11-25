@@ -21,6 +21,9 @@ export type ContainerHandle = {
 /** The per-drop repo volume, mounted at the one place the trooper uses it. */
 export type RepoMount = { volume: string; target: '/home/agent/repo' };
 
+/** The per-drop mirror volume, mounted read-only where the agent finds its clone. */
+export type MirrorMount = { volume: string; target: '/jm/mirror' };
+
 /** A volume this engine holds: its name and labels. */
 export type VolumeInfo = { name: string; labels: Record<string, string> };
 
@@ -70,8 +73,10 @@ export interface ContainerDriver {
     /** Egress on: the trooper joins only this drop network, at `.3`, with the dead DNS. */
     egress?: DropNet;
     limits?: ContainerLimits;
-    /** The drop's repo volume: the container's only mount (no binds). */
+    /** The drop's repo volume, read-write (no binds). */
     mount?: RepoMount;
+    /** The drop's mirror volume, a second mount, read-only (no binds). */
+    mirror?: MirrorMount;
     /**
      * Keep stdin open after the payload line, for `writeLine`/`endStdin`. Otherwise stdin ends
      * right after the payload.

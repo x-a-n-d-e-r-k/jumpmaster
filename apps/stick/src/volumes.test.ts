@@ -1,6 +1,17 @@
 import { expect, test } from 'vitest';
 import { DockerDriver } from './docker.js';
-import { prepareVolume, REPO_MOUNT, volumeLabels, volumeName } from './volumes.js';
+import type { ContainerDriver } from './driver.js';
+import {
+  createMirrorVolume,
+  MIRROR_LABEL,
+  MIRROR_MOUNT,
+  mirrorVolumeLabels,
+  mirrorVolumeName,
+  prepareVolume,
+  REPO_MOUNT,
+  volumeLabels,
+  volumeName,
+} from './volumes.js';
 
 test('volume names carry the drop, the epoch and an 8-hex nonce', () => {
   expect(volumeName('d1', 3, '0123abcd')).toBe('jm-drop-d1-3-0123abcd');
@@ -197,4 +208,84 @@ test('an init container that fails to start is removed, then its volume, with no
   } finally {
     process.off('unhandledRejection', onUnhandled);
   }
+});
+
+test('mirror volume names carry the drop, the epoch and an 8-hex nonce', () => {
+  expect(MIRROR_LABEL).toBe('jumpmaster.mirror');
+  expect(MIRROR_MOUNT).toBe('/jm/mirror');
+  expect(mirrorVolumeName('d1', 3, '0123abcd')).toBe('jm-mirror-d1-3-0123abcd');
+  expect(mirrorVolumeName('d1', 3)).toMatch(/^jm-mirror-d1-3-[0-9a-f]{8}$/);
+  expect(mirrorVolumeName('d1', 3)).not.toBe(mirrorVolumeName('d1', 3));
+  expect(() => mirrorVolumeName('d1', 3, 'xyz')).toThrow(/nonce/);
+  expect(() => mirrorVolumeName('d1', 3, '0123ABCD')).toThrow(/nonce/);
+});
+
+test('mirror volume labels mark a mirror, never a repo volume', () => {
+  const labels = mirrorVolumeLabels('s1', 'd1', 3);
+  expect(labels).toEqual({
+    'jumpmaster.stick': 's1',
+    'jumpmaster.drop': 'd1',
+    'jumpmaster.epoch': '3',
+    'jumpmaster.mirror': '1',
+  });
+  expect(labels['jumpmaster.volume']).toBeUndefined();
+});
+
+/** An in-memory engine of volumes: enough for the volume functions that run no container. */
+function volumeEngine(initial: { name: string; labels: Record<string, string> }[] = []) {
+  const volumes = new Map(initial.map((v) => [v.name, v.labels]));
+  const log: string[] = [];
+  const driver = {
+    async listVolumesByLabel(key: string, value: string) {
+      return [...volumes]
+        .filter(([, l]) => l[key] === value)
+        .map(([name, labels]) => ({ name, labels }));
+    },
+    async createVolume(name: string, labels: Record<string, string>) {
+      log.push(`createVolume ${name}`);
+      volumes.set(name, labels);
+    },
+    async removeVolume(name: string) {
+      log.push(`removeVolume ${name}`);
+      volumes.delete(name);
+    },
+    async initVolume(o: { name: string }) {
+      log.push(`initVolume ${o.name}`);
+      return 0;
+    },
+  } as unknown as ContainerDriver;
+  return { driver, volumes, log };
+}
+
+test('createMirrorVolume creates one labelled mirror volume with no init, and refuses a second', async () => {
+  const e = volumeEngine();
+  const name = await createMirrorVolume(e.driver, { dropId: 'd1', epoch: 3, stickId: 's1' });
+  expect(name).toMatch(/^jm-mirror-d1-3-[0-9a-f]{8}$/);
+  expect(e.log).toEqual([`createVolume ${name}`]);
+  expect(e.volumes.get(name)).toEqual(mirrorVolumeLabels('s1', 'd1', 3));
+  await expect(
+    createMirrorVolume(e.driver, { dropId: 'd1', epoch: 3, stickId: 's1' }),
+  ).rejects.toThrow('mirror volume exists for drop d1 epoch 3');
+  expect(e.log).toEqual([`createVolume ${name}`]);
+  expect(e.volumes.size).toBe(1);
+  // Another epoch, or the drop's repo volume, does not block a mirror.
+  await expect(
+    createMirrorVolume(e.driver, { dropId: 'd1', epoch: 4, stickId: 's1' }),
+  ).resolves.toMatch(/^jm-mirror-d1-4-/);
+  const r = volumeEngine([{ name: 'jm-drop-d2-1-0123abcd', labels: volumeLabels('s1', 'd2', 1) }]);
+  await expect(
+    createMirrorVolume(r.driver, { dropId: 'd2', epoch: 1, stickId: 's1' }),
+  ).resolves.toMatch(/^jm-mirror-d2-1-/);
+});
+
+test('prepareVolume is not refused by a mirror volume, and still refuses a repo volume', async () => {
+  const mirror = { name: 'jm-mirror-d1-3-0123abcd', labels: mirrorVolumeLabels('s1', 'd1', 3) };
+  const e = volumeEngine([mirror]);
+  const name = await prepareVolume(e.driver, drop);
+  expect(name).toMatch(/^jm-drop-d1-3-[0-9a-f]{8}$/);
+  expect(e.volumes.get(name)).toEqual(volumeLabels('s1', 'd1', 3));
+  // Now the repo volume exists too: a second one is refused, the mirror untouched.
+  await expect(prepareVolume(e.driver, drop)).rejects.toThrow('volume exists for drop d1 epoch 3');
+  expect(e.volumes.size).toBe(2);
+  expect(e.volumes.has(mirror.name)).toBe(true);
 });
