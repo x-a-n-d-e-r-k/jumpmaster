@@ -156,6 +156,113 @@ export function issueGateReasons(
   ];
 }
 
+/** How many consecutive words of a ruling note make a copy of it (#893). */
+export const NOTE_RUN = 6;
+/** A note shorter than `NOTE_RUN` words is matched whole only when it has at least this many. */
+export const NOTE_MIN_WORDS = 3;
+/** How many of the zone's latest non-empty ruling notes are checked. */
+export const NOTE_WINDOW = 50;
+
+/** Characters that render as nothing: zero-width spaces and joiners, the soft hyphen, the BOM. */
+const INVISIBLE = /[\u00AD\u034F\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\uFEFF]/g;
+
+/**
+ * A text's words as a note copy is judged: compatibility-normalised, invisible characters
+ * dropped, lower-cased, and split on anything that is not a letter, mark or digit, so case,
+ * punctuation, line breaks and Markdown emphasis between words change nothing.
+ */
+export function noteWords(text: string): string[] {
+  return text
+    .normalize('NFKC')
+    .replace(INVISIBLE, '')
+    .toLowerCase()
+    .split(/[^\p{L}\p{M}\p{N}]+/u)
+    .filter(Boolean);
+}
+
+/** Every run of `n` consecutive words, joined by single spaces. */
+function runsOf(words: readonly string[], n: number): Set<string> {
+  const out = new Set<string>();
+  for (let i = 0; i + n <= words.length; i++) out.add(words.slice(i, i + n).join(' '));
+  return out;
+}
+
+/** Why a crew text is refused as a copy of a ruling note, or null when it is not one. */
+export type NoteCopyCheck = (text: string) => string | null;
+
+/** The refusal when the zone's notes can't be read: fails closed, every text is refused. */
+export const NOTES_UNREADABLE = "Command's ruling notes could not be read";
+
+/**
+ * The check that keeps Command's private ruling notes out of crew-written public text (#893):
+ * issue titles and bodies, refute revisions, triage children and goal changes, from a drop or an
+ * MCP token. A text copies a note when, both compared as `noteWords`, it holds `NOTE_RUN`
+ * consecutive words of one of the zone's latest `NOTE_WINDOW` non-empty notes; a note of
+ * `NOTE_MIN_WORDS` to `NOTE_RUN - 1` words is matched whole, a shorter one never. A run that is
+ * also in one of `allowed` (texts already on the default branch, such as the goal file) is not a
+ * copy from the note. The refusal names the ruling and never repeats the note's words. Notes are
+ * read once, when the check is made; an error reading them refuses every text.
+ */
+export function noteCopyCheck(
+  db: Db,
+  zoneId: string,
+  allowed: readonly string[] = [],
+): NoteCopyCheck {
+  let notes: { id: number; words: string[] }[];
+  try {
+    const rows = db
+      .prepare(
+        `SELECT id, note FROM rulings WHERE zone_id = ? AND trim(note) <> ''
+           ORDER BY id DESC LIMIT ?`,
+      )
+      .all(zoneId, NOTE_WINDOW) as { id: number; note: string }[];
+    notes = rows
+      .map((r) => ({ id: r.id, words: noteWords(r.note) }))
+      .filter((n) => n.words.length >= NOTE_MIN_WORDS);
+  } catch {
+    return () => NOTES_UNREADABLE;
+  }
+  const allowedWords = allowed.map(noteWords);
+  const allowedRuns = new Map<number, Set<string>>();
+  const allowedAt = (n: number): Set<string> => {
+    let runs = allowedRuns.get(n);
+    if (!runs) {
+      runs = new Set(allowedWords.flatMap((w) => [...runsOf(w, n)]));
+      allowedRuns.set(n, runs);
+    }
+    return runs;
+  };
+  return (text) => {
+    if (notes.length === 0) return null;
+    const words = noteWords(text);
+    const textRuns = new Map<number, Set<string>>();
+    for (const note of notes) {
+      const n = Math.min(NOTE_RUN, note.words.length);
+      let runs = textRuns.get(n);
+      if (!runs) {
+        runs = runsOf(words, n);
+        textRuns.set(n, runs);
+      }
+      if (runs.size === 0) continue;
+      for (const run of runsOf(note.words, n)) {
+        if (runs.has(run) && !allowedAt(n).has(run)) {
+          return `copies Command's ruling note (ruling ${note.id})`;
+        }
+      }
+    }
+    return null;
+  };
+}
+
+/** The texts on the default branch a crew text may share words with: the zone's goal file. */
+export const mainTexts = (db: Db, zoneId: string): string[] => {
+  const raw = getGoals(db, zoneId)?.raw;
+  return raw ? [raw] : [];
+};
+
+/** A crew issue's title and body, as one text for `noteCopyCheck`. */
+export const issueText = (title: string, body: string): string => `${title}\n${body}`;
+
 /** Free crew-issue slots: `maxStaged` less the open crew issues, floored at 0. */
 export function crewIssueSlots(db: Db, zone: DropZoneConfig): number {
   const { n } = db
@@ -294,8 +401,11 @@ export function goalChangeBriefing(
   change: NonNullable<CrewActionInput['goalChange']>,
   source: CrewSource,
   now: Date,
+  copiesNote: NoteCopyCheck = noteCopyCheck(db, zone.id, mainTexts(db, zone.id)),
 ): number | { refused: string } {
   if (source.kind !== 'drop') return { refused: 'an MCP source cannot propose it' };
+  const copied = copiesNote(change.text);
+  if (copied !== null) return { refused: copied };
   const waiting = db
     .prepare(
       `SELECT g.id FROM goal_changes g JOIN briefings b
@@ -381,6 +491,7 @@ export function applyCrewActions(
     );
     const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
     let slots = crewIssueSlots(db, zone);
+    const copiesNote = noteCopyCheck(db, zone.id, mainTexts(db, zone.id));
     for (const [n, i] of issues.entries()) {
       const refuse = (why: string) => report.refused.push(`${i.key}: ${why}`);
       if (!ladder.has(i.objective)) {
@@ -412,6 +523,11 @@ export function applyCrewActions(
       const reasons = validateIssueSpec(i.title, i.body);
       if (reasons.length > 0) {
         refuse(reasons.join('; '));
+        continue;
+      }
+      const copied = copiesNote(issueText(i.title, i.body));
+      if (copied !== null) {
+        refuse(copied);
         continue;
       }
       const named = protectedPathsNamed(i.body, zone.protectedPaths);
@@ -501,7 +617,7 @@ export function applyCrewActions(
       else report.refused.push(`objectiveDone ${done.key}: ${id.refused}`);
     }
     if (goalChange) {
-      const id = goalChangeBriefing(db, zone, goalChange, source, now);
+      const id = goalChangeBriefing(db, zone, goalChange, source, now, copiesNote);
       if (typeof id === 'number') report.briefings.push(id);
       else report.refused.push(`goalChange: ${id.refused}`);
     }

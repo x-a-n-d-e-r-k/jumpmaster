@@ -35,6 +35,9 @@ import { retryParkedItem } from '../sync.js';
 import {
   applyCrewActions,
   isSecurityTouching,
+  issueText,
+  mainTexts,
+  noteCopyCheck,
   protectedPathsNamed,
   validateIssueSpec,
 } from './actions.js';
@@ -229,16 +232,31 @@ function applyRefute(
     const title = out.revisedTitle ?? issue.title;
     const body = out.revisedBody ?? issue.body;
     const revised = out.revisedTitle !== undefined || out.revisedBody !== undefined;
+    const copied = revised
+      ? noteCopyCheck(db, zone.id, mainTexts(db, zone.id))(issueText(title, body))
+      : null;
     if (
       revised &&
+      copied === null &&
       validateIssueSpec(title, body).length === 0 &&
       protectedPathsNamed(body, zone.protectedPaths).length === 0
     ) {
       setCrewIssue(db, issue.id, { ...base, state: 'revising', title, body }, now);
       return;
     }
-    // A revision that is missing, not in the drop-ready format or naming a protected path counts
-    // as a rejection.
+    // A revision that is missing, not in the drop-ready format, naming a protected path or
+    // copying a ruling note counts as a rejection. The note refusal joins the findings: it names
+    // the ruling, never the note's words.
+    if (copied !== null) {
+      const findings = [...out.findings, `revision refused: ${copied}`];
+      setCrewIssue(
+        db,
+        issue.id,
+        { ...base, findingsJson: JSON.stringify(findings), state: 'rejecting' },
+        now,
+      );
+      return;
+    }
   }
   setCrewIssue(db, issue.id, { ...base, state: 'rejecting' }, now);
 }
