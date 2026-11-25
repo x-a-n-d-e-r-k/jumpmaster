@@ -27,6 +27,7 @@ import {
 } from './db/repo.js';
 import { egressFor } from './egress-for.js';
 import { refundCharge } from './flow/budgets.js';
+import { forgeKind } from './forge/kind.js';
 import { CEILING_MISSING, CEILING_MODE } from './missing-words.js';
 import {
   DEFAULT_USAGE_CONFIG,
@@ -83,15 +84,18 @@ export type ZoneRequirements = {
 };
 
 /**
- * What a stick must have to run this zone's drops: `egress-v1` unless egress is off, and
+ * What a stick must have to run this zone's drops: `egress-v1` unless egress is off,
  * `image-verify-v1` under the `signed` policy when signed images are required (install-wide, or
- * by the zone itself). `egress` is what the drops are given, judged against a stick's ceiling.
+ * by the zone itself), and `clone-v1` for a GitLab zone, whose drops say `repo.mirror: provided`
+ * (ruling 121: the stick's clone container fills the mirror). `egress` is what the drops are
+ * given, judged against a stick's ceiling.
  */
 export function zoneRequirements(
-  zone: Pick<DropZoneConfig, 'egress' | 'requireSignedImages' | 'preset'>,
+  zone: Pick<DropZoneConfig, 'egress' | 'requireSignedImages' | 'preset' | 'forge'>,
   config: Pick<Config, 'requireSignedImages'>,
 ): ZoneRequirements {
   const caps = new Set<StickCapability>();
+  if (forgeKind(zone) === 'gitlab') caps.add('clone-v1');
   if ((zone.egress?.mode ?? 'off') !== 'off') caps.add('egress-v1');
   // Strengthen-only: the zone can add the requirement, never remove the install's.
   const signed = config.requireSignedImages === true || zone.requireSignedImages === true;

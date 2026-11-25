@@ -208,6 +208,39 @@ describe('global checks', () => {
     expect(c.fix).toContain('egress');
   });
 
+  describe('a GitLab zone needs clone-v1 (#862)', () => {
+    const gitlab = { forge: 'gitlab' as const, gitlab: { baseUrl: 'https://gitlab.example.com' } };
+    const stampCaps = (w: ReturnType<typeof world>, capabilities: string[]) =>
+      stampStick(
+        w.db,
+        's1',
+        { capabilities, imagePolicy: 'signed', version: '0.5.0', pinnedImages: [] },
+        ago(10_000),
+      );
+
+    test('stick.capabilities fails when the only live stick lacks clone-v1, and passes with it', async () => {
+      const w = world({ zone: gitlab });
+      stampCaps(w, ['egress-v1', 'image-verify-v1', 'push-v1']);
+      const c = one(await w.run(), 'stick.capabilities');
+      expect(c).toMatchObject({ status: 'fail', zoneId: 'main' });
+      expect(c.summary).toContain('clone-v1');
+      expect(c.summary).toContain('stick-1 lacks clone-v1');
+      expect(c.fix).toBe(
+        'clone-v1: run a stick from a release with the clone container: it advertises clone-v1 only once its volume self-check and base image pass, with 10 GiB free, and the stick log says why when it does not',
+      );
+      stampCaps(w, ['egress-v1', 'image-verify-v1', 'push-v1', 'clone-v1']);
+      expect(one(await w.run(), 'stick.capabilities').status).toBe('pass');
+    });
+
+    test("a GitHub zone's check is unchanged: clone-v1 is never asked for", async () => {
+      const w = world();
+      stampCaps(w, ['egress-v1', 'image-verify-v1', 'push-v1']);
+      const c = one(await w.run(), 'stick.capabilities');
+      expect(c.status).toBe('pass');
+      expect(c.summary).not.toContain('clone-v1');
+    });
+  });
+
   describe("a stick's egress ceiling (#780)", () => {
     // The world's zone runs the node preset under enforce; this ceiling covers its hosts.
     const NODE = [
