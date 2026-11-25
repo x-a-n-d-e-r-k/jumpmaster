@@ -603,3 +603,38 @@ describe('the merge ruleset section (two-app zones)', () => {
     expect(html).toContain(escapeHtml(hostile));
   });
 });
+
+describe("a GitHub zone's Setup section is pinned (#879)", () => {
+  const detection = {
+    defaultBranch: 'main',
+    ciJobs: [{ workflow: 'ci.yml', job: 'test' }],
+    ownerType: 'Organization' as const,
+    visibility: 'public' as const,
+  };
+  const logins = { author: 'jm-author', reviewer: 'jm-reviewer', codeowners: ['alice'] };
+  const checks = [
+    { id: 'forge.branch-rules', status: 'fail', summary: 'no ruleset <b>protects</b> main' },
+    { id: 'forge.ci', status: 'pass', summary: 'ci reports' },
+    { id: 'forge.author', status: 'pass', summary: 'author has write' },
+    { id: 'forge.codeowners', status: 'warn', summary: 'no CODEOWNERS file' },
+  ].map((c) => ({ zoneId: 'demo', ...c }) as DoctorCheck);
+
+  test('two-bot, starter and a refused read render exactly as before', async () => {
+    const two = makeZone({ id: 'demo', repo: 'octo-org/demo', identity: 'two-bot' });
+    const starter = makeZone({ id: 'demo', repo: 'octo-org/demo', identity: 'starter' });
+    const html = [
+      githubSection(
+        two,
+        { ok: true, guidance: zoneGuidance(two, detection, logins), reviewer: 'alice' },
+        checks,
+      ),
+      githubSection(
+        starter,
+        { ok: true, guidance: zoneGuidance(starter, detection, logins), reviewer: '' },
+        null,
+      ),
+      githubSection(two, { ok: false, error: 'GitHub rejected the author token (401)' }, checks),
+    ].join('\n<!-- next -->\n');
+    await expect(html).toMatchFileSnapshot('./__snapshots__/github-section.html');
+  });
+});
