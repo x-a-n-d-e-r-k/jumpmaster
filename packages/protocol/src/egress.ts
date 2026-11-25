@@ -238,3 +238,29 @@ export function isPublicAddress(ip: string): boolean {
     words.push((((bytes[i] as number) << 8) | (bytes[i + 1] as number)).toString(16));
   return !v6Refused.check(words.join(':'), 'ipv6');
 }
+
+const V4_PRIVATE: [string, number][] = [
+  ['10.0.0.0', 8],
+  ['100.64.0.0', 10],
+  ['172.16.0.0', 12],
+  ['192.168.0.0', 16],
+];
+const v4Private = new BlockList();
+for (const [net, prefix] of V4_PRIVATE) v4Private.addSubnet(net, prefix, 'ipv4');
+const ULA = v6Bytes('fc00::');
+
+/**
+ * Whether `ip` is on a private network: 10/8, 172.16/12, 192.168/16, 100.64/10 (shared address
+ * space), fc00::/7, and the IPv4-mapped (`::ffff:0:0/96`, any spelling) forms of the IPv4 ranges.
+ * Nothing else: NAT64 forms, loopback, link-local, unspecified, multicast and every other refused
+ * range are false, as is anything that isn't an IP address. A proxy opens only these ranges, and
+ * only for the hosts `JM_EGRESS_PRIVATE` lists.
+ */
+export function isPrivateNetworkAddress(ip: string): boolean {
+  const family = isIP(ip);
+  if (family === 4) return v4Private.check(ip, 'ipv4');
+  if (family !== 6) return false;
+  const bytes = v6Bytes(ip);
+  if (startsWith(bytes, MAPPED, 96)) return v4Private.check(bytes.slice(12).join('.'), 'ipv4');
+  return startsWith(bytes, ULA, 7);
+}

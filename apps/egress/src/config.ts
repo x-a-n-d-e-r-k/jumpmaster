@@ -1,10 +1,12 @@
 import { isIP } from 'node:net';
 import { EGRESS_PROXY_PORT } from '@jumpmaster/protocol/egress';
-import { validAllowEntry } from './allow.js';
+import { hostAllowed, normalizeHost, validAllowEntry } from './allow.js';
 
 export type EgressConfig = {
   mode: 'monitor' | 'enforce';
   allow: string[];
+  /** Hosts (from `allow`) that may resolve to private-network addresses; canonical names. */
+  private: string[];
   ports: number[];
   bind: string;
   port: number;
@@ -23,6 +25,33 @@ function limitFrom(env: NodeJS.ProcessEnv, name: string): number | undefined {
 }
 
 const WILDCARDS = new Set(['0.0.0.0', '::', '::0', '0:0:0:0:0:0:0:0']);
+
+/** Operator text shown in a message: printable ASCII only, cut short. */
+const shown = (s: string): string => s.replace(/[^\x20-\x7e]/g, '?').slice(0, 100);
+
+/**
+ * `JM_EGRESS_PRIVATE`: comma-separated host names that may resolve to private-network addresses.
+ * Each must be a plain host name (no `*.` wildcard, no IP literal) that `allow` already allows.
+ * Errors name only this variable and the offending entry, never another variable's value.
+ */
+function privateFrom(raw: string | undefined, allow: string[]): string[] {
+  const entries = (raw ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s !== '');
+  return entries.map((entry) => {
+    const host = entry.startsWith('*.') ? null : normalizeHost(entry);
+    if (host === null)
+      throw new Error(
+        `JM_EGRESS_PRIVATE entry "${shown(entry)}" is not a plain host name (no wildcards or IPs)`,
+      );
+    if (!hostAllowed(host, allow))
+      throw new Error(
+        `JM_EGRESS_PRIVATE entry "${shown(entry)}" is not allowed by JM_EGRESS_ALLOW`,
+      );
+    return host;
+  });
+}
 
 /**
  * The proxy's settings from its environment. `JM_EGRESS_BIND` is required and must be one
@@ -43,6 +72,7 @@ export function configFromEnv(env: NodeJS.ProcessEnv): EgressConfig {
     .filter((s) => s !== '');
   const bad = allow.find((a) => !validAllowEntry(a));
   if (bad !== undefined) throw new Error(`JM_EGRESS_ALLOW has an invalid entry: ${bad}`);
+  const priv = privateFrom(env.JM_EGRESS_PRIVATE, allow);
   const ports = (env.JM_EGRESS_PORTS ?? '443')
     .split(',')
     .map((s) => s.trim())
@@ -62,5 +92,6 @@ export function configFromEnv(env: NodeJS.ProcessEnv): EgressConfig {
       ...(maxTunnels !== undefined ? { maxTunnels } : {}),
       ...(maxConnections !== undefined ? { maxConnections } : {}),
     },
+    private: priv,
   };
 }
