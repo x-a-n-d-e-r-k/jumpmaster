@@ -43,6 +43,11 @@ export function fakeDriver(
     listContainersError?: Error;
     /** A remove of this reference throws the error given. */
     removeImageError?: (ref: string) => Error | undefined;
+    /**
+     * A clone container's script (a start with `clone`; without it such a start is an agent's): lines before the grant, lines after it
+     * (written on its stdin), and whether it then hangs until it is stopped or killed.
+     */
+    clone?: { before: string[]; after?: string[]; hang?: boolean };
   } = {},
 ) {
   const order: string[] = [];
@@ -50,6 +55,9 @@ export function fakeDriver(
   const d = {
     order,
     started: undefined as Parameters<ContainerDriver['start']>[0] | undefined,
+    /** The clone container's start, and what was written on its stdin. */
+    cloneStarted: undefined as Parameters<ContainerDriver['start']>[0] | undefined,
+    cloneWrites: [] as string[],
     stopped: false,
     killed: false,
     services: undefined as unknown,
@@ -65,6 +73,49 @@ export function fakeDriver(
     images: [] as string[],
     /** The sweep's engine calls, in order. */
     gc,
+  };
+  const startClone = async (
+    o: Parameters<ContainerDriver['start']>[0],
+    script: NonNullable<typeof opts.clone>,
+  ) => {
+    order.push('clone');
+    d.cloneStarted = o;
+    let release: () => void = () => {};
+    const stopped = new Promise<void>((r) => {
+      release = r;
+    });
+    let granted: () => void = () => {};
+    const grantIn = new Promise<void>((r) => {
+      granted = r;
+    });
+    return {
+      async *logs() {
+        for (const l of script.before) yield l;
+        if (script.after) {
+          const go = await Promise.race([grantIn.then(() => true), stopped.then(() => false)]);
+          if (!go) return;
+          for (const l of script.after) yield l;
+        }
+        if (script.hang) await stopped;
+      },
+      async wait() {
+        return { exitCode: 0 };
+      },
+      stderrTail: () => '',
+      async stop() {
+        release();
+      },
+      async kill() {
+        order.push('clone-kill');
+        release();
+      },
+      async writeLine(line: string) {
+        order.push('grant');
+        d.cloneWrites.push(line);
+        granted();
+      },
+      endStdin() {},
+    };
   };
   const driver = {
     async imageId(ref: string): Promise<string | undefined> {
@@ -149,6 +200,7 @@ export function fakeDriver(
       };
     },
     async start(o) {
+      if (o.clone && opts.clone) return startClone(o, opts.clone);
       order.push('trooper');
       d.started = o;
       let release: () => void = () => {};

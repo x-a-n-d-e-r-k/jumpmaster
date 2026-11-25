@@ -5,15 +5,19 @@ import { join } from 'node:path';
 import {
   ARTIFACT_PREFIX,
   type ArtifactUpload,
+  type CloneGrant,
   type DropPayload,
   DropPayloadSchema,
   type DropResult,
+  gitlabBasicAuth,
+  gitlabBasicAuthAs,
+  READY_LINE,
   type TrooperEvent,
 } from '@jumpmaster/protocol';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 // The real trooper's output, fed through the stick: the two ends of the event protocol.
 import { eventLines } from '../../trooper/src/events.js';
-import type { DropClient } from './client.js';
+import type { CloneClient, CloneGrantReply, ClonePlanReply, DropClient } from './client.js';
 import type { ContainerDriver, DropNet } from './driver.js';
 import type { ServerImageDeps, ServerImages } from './fetch-image.js';
 import { IMAGES_FILE, StickImages } from './image-gc.js';
@@ -56,6 +60,19 @@ const payload: DropPayload = DropPayloadSchema.parse({
   credentials: { claudeToken: TOKEN, forgeToken: 'ghs_forge' },
 });
 
+const CLONE_TOKEN = 'planted-clone-token-0123456789';
+const CLONE_FORGE = {
+  kind: 'gitlab',
+  host: 'gitlab.example.com',
+  project: 'group/proj',
+} as unknown as CloneGrant['forge'];
+const CLONE_GRANT: CloneGrant = {
+  token: CLONE_TOKEN,
+  forge: CLONE_FORGE,
+  secrets: [],
+  username: 'bot',
+};
+
 function fakeClient(heartbeatReply: 'ok' | 'cancel' | 'hard_cancel' | 'stale' = 'ok') {
   return {
     features: new Set(['push-v1']) as ReadonlySet<string>,
@@ -83,10 +100,24 @@ function fakeClient(heartbeatReply: 'ok' | 'cancel' | 'hard_cancel' | 'stale' = 
       return 'ok' as const;
     },
     async postResult(_d: string, _e: number, r: DropResult) {
+      this.results.push(r);
       this.result = r;
       return 'ok' as const;
     },
-  } satisfies DropClient & Record<string, unknown>;
+    results: [] as DropResult[],
+    /** The clone routes: a plan with no egress and a grant, unless a test says otherwise. */
+    planReply: { forge: CLONE_FORGE, maxBytes: 1_000_000 } as ClonePlanReply,
+    grantReply: { grant: CLONE_GRANT } as CloneGrantReply,
+    cloneCalls: [] as string[],
+    async clonePlan(_d: string, _e: number) {
+      this.cloneCalls.push('plan');
+      return this.planReply;
+    },
+    async cloneGrant(_d: string, _e: number) {
+      this.cloneCalls.push('grant');
+      return this.grantReply;
+    },
+  } satisfies DropClient & CloneClient & Record<string, unknown>;
 }
 
 /** What a pushing drop's agent run adds around its container (the volume, then its removal). */
@@ -1138,6 +1169,7 @@ describe('volume self-check', () => {
     expect(await volumeSelfCheck(w.driver, 'trooper@x', 's1')).toEqual({
       selfCheck: true,
       freeBytes: 42 * 2 ** 30,
+      clone: false,
     });
     expect(w.log).toEqual([
       'createVolume jm-selfcheck-s1',
@@ -1165,6 +1197,7 @@ describe('volume self-check', () => {
     expect(await volumeSelfCheck(broken.driver, 'trooper@x', 's1')).toEqual({
       selfCheck: false,
       freeBytes: null,
+      clone: false,
     });
     const dead: ContainerDriver = {
       ...broken.driver,
@@ -1175,6 +1208,7 @@ describe('volume self-check', () => {
     expect(await volumeSelfCheck(dead, 'trooper@x', 's1')).toEqual({
       selfCheck: false,
       freeBytes: null,
+      clone: false,
     });
   });
 });
@@ -1269,6 +1303,7 @@ describe('startup recovery and health', () => {
     expect(refused).toEqual({
       selfCheck: false,
       freeBytes: null,
+      clone: false,
       base: {
         ok: false,
         reason: 'base image jumpmaster-trooper:dev: image not allowed: jumpmaster-trooper:dev',
@@ -1283,7 +1318,55 @@ describe('startup recovery and health', () => {
       trust: { policy: 'allowlist', allowed: new Set(['jumpmaster-trooper:dev']) },
       log: () => {},
     });
-    expect(fixed).toEqual({ selfCheck: true, freeBytes: 100 * 2 ** 30, base: { ok: true } });
+    expect(fixed).toEqual({
+      selfCheck: true,
+      freeBytes: 100 * 2 ** 30,
+      clone: false,
+      base: { ok: true },
+    });
+  });
+
+  test('the health records the clone label from the base image, and none from a refused one', async () => {
+    const CURRENT = {
+      'org.jumpmaster.trooper.push': '1',
+      'org.jumpmaster.trooper.clone': '1',
+    };
+    const trusted = { policy: 'allowlist' as const, allowed: new Set(['jumpmaster-trooper:dev']) };
+    const o = { image: 'jumpmaster-trooper:dev', stickId: 's1', log: () => {} };
+    const w = volumeWorld([], { labels: CURRENT });
+    expect(await stickHealth(w.driver, { ...o, trust: trusted })).toEqual({
+      selfCheck: true,
+      freeBytes: 100 * 2 ** 30,
+      clone: true,
+      base: { ok: true },
+    });
+    // The same inspection as the push label: the image is read once.
+    const inspected: string[] = [];
+    const counting: ContainerDriver = {
+      ...w.driver,
+      async imageLabels(i) {
+        inspected.push(i);
+        return CURRENT;
+      },
+    };
+    await volumeSelfCheck(counting, 'trooper@x', 's1');
+    expect(inspected).toEqual(['trooper@x']);
+    // A wrong value is no label.
+    const old = volumeWorld([], { labels: { ...CURRENT, 'org.jumpmaster.trooper.clone': '2' } });
+    expect((await stickHealth(old.driver, { ...o, trust: trusted })).clone).toBe(false);
+    // A refused base image reads as not carrying it, and nothing is inspected.
+    const refusedWorld = volumeWorld([], { labels: CURRENT });
+    const refused = await stickHealth(refusedWorld.driver, {
+      ...o,
+      trust: { policy: 'allowlist', allowed: new Set(['other:1']) },
+    });
+    expect(refused.clone).toBe(false);
+    expect(refused.base.ok).toBe(false);
+    // Before the first check: no clone label.
+    const monitor = new HealthMonitor(w.driver, { ...o, trust: trusted });
+    expect(monitor.latest().clone).toBe(false);
+    await monitor.check();
+    expect(monitor.latest().clone).toBe(true);
   });
 
   test('a sweep never removes the volume of a self-check in flight', async () => {
@@ -2798,5 +2881,404 @@ describe('the heartbeat while images are prepared (issue #239)', () => {
     const beats = client.beats;
     await vi.advanceTimersByTimeAsync(5 * HB);
     expect(client.beats).toBe(beats);
+  });
+});
+
+describe('a provided mirror: the clone container before the agent (issue #860)', () => {
+  const DONE = 'JM_RESULT {"status":"completed","gates":[]}';
+  const SHA = 'c'.repeat(40);
+  const PUSH_RESULT = `JM_RESULT ${JSON.stringify({
+    status: 'completed',
+    headSha: SHA,
+    push: { kind: 'final', expectSha: SHA },
+    gates: [],
+  })}`;
+  const CLONED = 'JM_RESULT {"status":"cloned","bytes":4242}';
+  const CLONE_OK = { before: [READY_LINE], after: [CLONED] };
+  const MIRROR_LABELS = {
+    'org.jumpmaster.trooper.egress': '1',
+    'org.jumpmaster.trooper.push': '1',
+    'org.jumpmaster.trooper.mirror': '1',
+  };
+  const AGENT = 'jumpmaster-drop-d1-3';
+  const MIRROR_VOL = 'jm-mirror-d1-3';
+  const mirrored = (p: DropPayload): DropPayload =>
+    DropPayloadSchema.parse({ ...p, repo: { ...p.repo, mirror: 'provided' } });
+  const implement = mirrored(payload);
+  const review = mirrored(
+    DropPayloadSchema.parse({
+      ...payload,
+      role: 'review',
+      pr: { number: 2, branch: 'agent/issue-1', headSha: 'a'.repeat(40) },
+    }),
+  );
+  const enforce = (p: DropPayload): DropPayload => ({
+    ...p,
+    egress: { mode: 'enforce', allow: ['api.anthropic.com'] },
+    services: [{ name: 'db', image: 'postgres:16', port: 5432, readyTimeoutSeconds: 60 }],
+  });
+
+  function world(
+    lines: string[],
+    opts: Parameters<typeof fakeDriver>[1] = {},
+    client = fakeClient(),
+  ) {
+    const d = fakeDriver(lines, { imageLabels: MIRROR_LABELS, clone: CLONE_OK, ...opts });
+    // The client's clone calls and posted results, in the driver's order.
+    const plan = client.clonePlan.bind(client);
+    client.clonePlan = async (dropId, epoch) => {
+      d.order.push('plan');
+      return plan(dropId, epoch);
+    };
+    const post = client.postResult.bind(client);
+    client.postResult = async (dropId, epoch, r) => {
+      d.order.push('result');
+      return post(dropId, epoch, r);
+    };
+    const pending = new PendingPushes();
+    const lines_: string[] = [];
+    const deps = {
+      client,
+      driver: d.driver,
+      heartbeatMs: 5,
+      stickId: 's1',
+      trooperImage: 'trooper:base',
+      pending,
+      resultRetryMs: 1,
+      baseImage: () => ({ ok: true }) as const,
+      allowedImages: new Set(['jumpmaster-trooper:test', 'postgres:16']),
+      egressImage: 'jumpmaster-egress:test',
+      egressReadyMs: 50,
+      subnetPool: '172.30.0.0/16',
+      log: (l: string) => lines_.push(l),
+    };
+    return { d, client, pending, deps, lines: lines_ };
+  }
+
+  test('plan, clone container, grant, clone result, then the agent with the mirror read-only', async () => {
+    const w = world([DONE]);
+    await runDrop(review, w.deps);
+    expect(w.d.order).toEqual([
+      `volume ${MIRROR_VOL}`,
+      'plan',
+      'clone',
+      'grant',
+      'removeAndWait jumpmaster-clone-d1-3',
+      'trooper',
+      'result',
+      `removeAndWait ${AGENT}`,
+      `removeVolume ${MIRROR_VOL}`,
+    ]);
+    expect(w.client.cloneCalls).toEqual(['plan', 'grant']);
+    expect(w.d.started?.mirror?.volume).toMatch(/^jm-mirror-d1-3-[0-9a-f]{8}$/);
+    expect(w.d.started?.mirror?.target).toBe('/jm/mirror');
+    expect(w.d.started?.clone).toBeUndefined();
+    expect(w.d.started?.mount).toBeUndefined();
+    expect(w.d.cloneStarted?.mirror).toEqual(w.d.started?.mirror);
+    expect(w.client.results).toHaveLength(1);
+    expect(w.client.result?.status).toBe('completed');
+  });
+
+  test('the clone container runs the stick’s own trooper image, never the payload’s', async () => {
+    const w = world([DONE]);
+    await runDrop(review, w.deps);
+    expect(w.d.cloneStarted?.image).toBe('trooper:base');
+    expect(w.d.cloneStarted?.clone).toBe(true);
+    expect(w.d.started?.image).toBe('jumpmaster-trooper:test');
+  });
+
+  test('a refused base image refuses a non-pushing provided-mirror drop before anything exists', async () => {
+    const w = world([DONE]);
+    await runDrop(review, {
+      ...w.deps,
+      baseImage: () => ({ ok: false, reason: 'base image trooper:base: image not allowed' }),
+    });
+    expect(w.d.order).toEqual(['result']);
+    expect(w.client.cloneCalls).toEqual([]);
+    expect(w.client.result).toMatchObject({
+      status: 'failed',
+      reason: 'base image trooper:base: image not allowed',
+    });
+  });
+
+  test('a drop image without the mirror label is refused before any container or volume', async () => {
+    const w = world([DONE], {
+      imageLabels: { 'org.jumpmaster.trooper.egress': '1', 'org.jumpmaster.trooper.push': '1' },
+    });
+    await runDrop(implement, w.deps);
+    expect(w.d.order).toEqual(['result']);
+    expect(w.client.cloneCalls).toEqual([]);
+    expect(w.client.result?.status).toBe('failed');
+    expect(w.client.result?.reason).toContain('jumpmaster-trooper:test');
+  });
+
+  for (const retryable of [true, false]) {
+    test(`a failed clone (retryable: ${retryable}) posts one failed result and starts nothing else`, async () => {
+      const failed = `JM_RESULT ${JSON.stringify({ status: 'failed', reason: 'project not found', retryable })}`;
+      const w = world([DONE], { clone: { before: [READY_LINE], after: [failed] } });
+      await runDrop(enforce(implement), w.deps);
+      expect(w.client.results).toHaveLength(1);
+      expect(w.client.result).toMatchObject({ status: 'failed', reason: 'project not found' });
+      expect(w.d.order).toEqual([
+        `volume ${MIRROR_VOL}`,
+        'plan',
+        'clone',
+        'grant',
+        'removeAndWait jumpmaster-clone-d1-3',
+        `removeVolume ${MIRROR_VOL}`,
+        'result',
+      ]);
+      expect(w.d.started).toBeUndefined();
+      expect(w.d.net).toBeUndefined();
+      expect(w.pending.size()).toBe(0);
+    });
+  }
+
+  test('a failed clone fails the doctor role too', async () => {
+    const doctor = mirrored(
+      DropPayloadSchema.parse({
+        protocol: 1,
+        dropId: 'd1',
+        epoch: 3,
+        role: 'doctor',
+        repo: { owner: 'o', name: 'r', defaultBranch: 'main' },
+        model: 'm',
+        image: 'jumpmaster-trooper:test',
+        gates: [],
+        credentials: { claudeToken: TOKEN, readToken: 'glpat-read' },
+      }),
+    );
+    const w = world([DONE], {
+      clone: { before: ['JM_RESULT {"status":"failed","reason":"nope","retryable":true}'] },
+    });
+    await runDrop(doctor, w.deps);
+    expect(w.client.results).toHaveLength(1);
+    expect(w.client.result).toMatchObject({ status: 'failed', reason: 'nope' });
+    expect(w.d.started).toBeUndefined();
+  });
+
+  test('a stale clone plan posts no result and starts nothing', async () => {
+    const client = fakeClient();
+    client.planReply = 'stale';
+    const w = world([DONE], {}, client);
+    await runDrop(review, w.deps);
+    expect(w.client.results).toEqual([]);
+    expect(w.d.started).toBeUndefined();
+    expect(w.d.order).toContain(`removeVolume ${MIRROR_VOL}`);
+  });
+
+  test('a halt mid-clone posts no result and leaves no mirror volume', async () => {
+    const client = fakeClient();
+    const w = world([DONE], { clone: { before: [READY_LINE], hang: true } }, client);
+    client.grantReply = { grant: CLONE_GRANT };
+    // Cancelled once the clone container runs.
+    const start = w.d.driver.start;
+    w.d.driver.start = async (o) => {
+      const h = await start(o);
+      if (o.clone) client.heartbeatReply = 'cancel';
+      return h;
+    };
+    await runDrop(review, w.deps);
+    expect(w.client.results).toEqual([]);
+    expect(w.d.started).toBeUndefined();
+    expect(w.d.order).toContain(`removeVolume ${MIRROR_VOL}`);
+    expect(w.d.order.indexOf(`removeVolume ${MIRROR_VOL}`)).toBeGreaterThan(
+      w.d.order.indexOf('removeAndWait jumpmaster-clone-d1-3'),
+    );
+  });
+
+  test('a non-pushing role: the mirror volume goes once the agent container is confirmed gone', async () => {
+    const w = world([DONE]);
+    await runDrop(review, w.deps);
+    const gone = w.d.order.indexOf(`removeAndWait ${AGENT}`);
+    expect(gone).toBeGreaterThan(w.d.order.indexOf('trooper'));
+    expect(w.d.order.indexOf(`removeVolume ${MIRROR_VOL}`)).toBeGreaterThan(gone);
+    expect(w.d.order.filter((x) => x === `removeVolume ${MIRROR_VOL}`)).toHaveLength(1);
+  });
+
+  test('a pushing role queues its repo volume and removes the mirror after the agent is gone', async () => {
+    const w = world([PUSH_RESULT]);
+    const add = w.pending.add.bind(w.pending);
+    w.pending.add = (dropId, o, now) => {
+      w.d.order.push(`add ${o.volume.replace(/-[0-9a-f]{8}$/, '')}`);
+      add(dropId, o, now);
+    };
+    await runDrop(implement, w.deps);
+    expect(w.d.order).toEqual([
+      `volume ${MIRROR_VOL}`,
+      'plan',
+      'clone',
+      'grant',
+      'removeAndWait jumpmaster-clone-d1-3',
+      'volume jm-drop-d1-3',
+      'init trooper:base',
+      'trooper',
+      'result',
+      `removeAndWait ${AGENT}`,
+      'add jm-drop-d1-3',
+      `removeVolume ${MIRROR_VOL}`,
+    ]);
+    expect(w.d.started?.mount?.volume).toMatch(/^jm-drop-d1-3-[0-9a-f]{8}$/);
+    expect(w.d.started?.mirror?.volume).toMatch(/^jm-mirror-d1-3-[0-9a-f]{8}$/);
+    expect(w.pending.get('d1')?.volume).toMatch(/^jm-drop-d1-3-/);
+  });
+
+  test('an agent container not confirmed gone keeps the mirror volume (the sweep’s)', async () => {
+    const w = world([DONE], { removeError: true });
+    await runDrop(review, w.deps);
+    expect(w.d.order).not.toContain(`removeVolume ${MIRROR_VOL}`);
+  });
+
+  test('the drop network is created only after the clone returned, sharing one active set', async () => {
+    const client = fakeClient();
+    client.planReply = {
+      forge: CLONE_FORGE,
+      maxBytes: 1_000_000,
+      egress: { mode: 'enforce', allow: ['gitlab.example.com'] },
+    } as ClonePlanReply;
+    const w = world([DONE], {}, client);
+    const active = new Set<string>();
+    const seen: string[][] = [];
+    const create = w.d.driver.createDropNetwork;
+    w.d.driver.createDropNetwork = async (name, labels, pool) => {
+      seen.push([...active]);
+      return create(name, labels, pool);
+    };
+    await runDrop(enforce(review), { ...w.deps, active });
+    expect(w.d.net?.name).toBe('jm-drop-d1-3');
+    expect(seen).toEqual([['jm-clone-d1-3'], ['jm-drop-d1-3']]);
+    const order = w.d.order;
+    expect(order.indexOf('clone')).toBeLessThan(order.lastIndexOf('network'));
+    expect(order.indexOf('removeAndWait jumpmaster-clone-d1-3')).toBeLessThan(
+      order.lastIndexOf('network'),
+    );
+    expect(active.size).toBe(0);
+  });
+
+  test('after a clone, a proxy that fails to start still removes the mirror volume', async () => {
+    const w = world([DONE], { proxyError: 'no proxy' });
+    await runDrop(enforce(review), w.deps);
+    expect(w.client.result?.reason).toContain('egress proxy failed to start');
+    expect(w.d.started).toBeUndefined();
+    expect(w.d.order.slice(-2)).toEqual([`removeAndWait ${AGENT}`, `removeVolume ${MIRROR_VOL}`]);
+  });
+
+  test('after a clone, services that fail still remove the mirror volume', async () => {
+    const w = world([DONE], { serviceError: 'db down' });
+    await runDrop(enforce(review), w.deps);
+    expect(w.client.result?.reason).toContain('services failed');
+    expect(w.d.started).toBeUndefined();
+    expect(w.d.order.slice(-2)).toEqual([`removeAndWait ${AGENT}`, `removeVolume ${MIRROR_VOL}`]);
+  });
+
+  test('after a clone, a repo volume that fails still removes the mirror volume', async () => {
+    const w = world([PUSH_RESULT]);
+    w.d.driver.initVolume = async () => 1;
+    await runDrop(implement, w.deps);
+    expect(w.client.result?.reason).toContain('repo volume failed');
+    expect(w.d.started).toBeUndefined();
+    expect(w.d.order.filter((x) => x === `removeVolume ${MIRROR_VOL}`)).toHaveLength(1);
+    expect(w.d.order.slice(-2)).toEqual([`removeAndWait ${AGENT}`, `removeVolume ${MIRROR_VOL}`]);
+  });
+
+  test('the egress proxy image the clone may need is pulled with the drop’s images', async () => {
+    const proxy = `jumpmaster-egress@sha256:${'e'.repeat(64)}`;
+    const w = world([DONE], { present: (ref) => ref !== proxy });
+    await runDrop(review, { ...w.deps, egressImage: proxy });
+    expect(w.d.order[0]).toBe(`pull ${proxy}`);
+    expect(w.client.result?.status).toBe('completed');
+  });
+
+  test('a planted grant token, plain or as basic auth, reaches no log line or result', async () => {
+    const leak = `JM_RESULT ${JSON.stringify({
+      status: 'failed',
+      reason: `auth ${CLONE_TOKEN} ${gitlabBasicAuth(CLONE_TOKEN)} ${gitlabBasicAuthAs('bot', CLONE_TOKEN)}`,
+      retryable: false,
+    })}`;
+    const w = world([DONE], { clone: { before: [READY_LINE], after: [leak] } });
+    await runDrop(review, w.deps);
+    // The grant went to the clone container's stdin, and only there.
+    expect(w.d.cloneWrites.join('')).toContain(CLONE_TOKEN);
+    const seen = JSON.stringify([w.lines, w.client.results, w.client.events]);
+    for (const secret of [
+      CLONE_TOKEN,
+      gitlabBasicAuth(CLONE_TOKEN),
+      gitlabBasicAuthAs('bot', CLONE_TOKEN),
+    ]) {
+      expect(seen).not.toContain(secret);
+    }
+    expect(w.client.results).toHaveLength(1);
+    expect(w.client.events).toEqual([]);
+  });
+});
+
+describe('a payload without repo.mirror runs as before (pinned)', () => {
+  const DONE = 'JM_RESULT {"status":"completed","gates":[]}';
+  const deps = (d: ReturnType<typeof fakeDriver>, client: ReturnType<typeof fakeClient>) => ({
+    client,
+    driver: d.driver,
+    heartbeatMs: 5,
+    stickId: 's1',
+    trooperImage: 'trooper:base',
+    allowedImages: new Set(['jumpmaster-trooper:test', 'postgres:16']),
+    egressImage: 'jumpmaster-egress:test',
+    egressReadyMs: 50,
+    subnetPool: '172.30.0.0/16',
+    log: () => {},
+  });
+  const full: DropPayload = {
+    ...payload,
+    egress: { mode: 'enforce', allow: ['api.anthropic.com'] },
+    services: [{ name: 'db', image: 'postgres:16', port: 5432, readyTimeoutSeconds: 60 }],
+  };
+
+  test('a pushing drop with egress and services', async () => {
+    const d = fakeDriver([DONE]);
+    const client = fakeClient();
+    let asked = 0;
+    await runDrop(full, {
+      ...deps(d, client),
+      baseImage: () => {
+        asked++;
+        return { ok: true };
+      },
+    });
+    expect(asked).toBe(1);
+    expect(client.cloneCalls).toEqual([]);
+    expect(d.started?.mirror).toBeUndefined();
+    expect(d.order).toEqual([
+      'volume jm-drop-d1-3',
+      'init trooper:base',
+      'network',
+      'proxy',
+      'services',
+      'trooper',
+      'proxy-stop',
+      'teardown',
+      'removeAndWait jumpmaster-drop-d1-3',
+      'removeVolume jm-drop-d1-3',
+    ]);
+  });
+
+  test('a non-pushing drop reads no base verdict and makes no volume', async () => {
+    const review = DropPayloadSchema.parse({
+      ...full,
+      role: 'review',
+      pr: { number: 2, branch: 'agent/issue-1', headSha: 'a'.repeat(40) },
+    });
+    const d = fakeDriver([DONE]);
+    const client = fakeClient();
+    let asked = 0;
+    await runDrop(review, {
+      ...deps(d, client),
+      baseImage: () => {
+        asked++;
+        return { ok: false, reason: 'refused' };
+      },
+    });
+    expect(asked).toBe(0);
+    expect(client.cloneCalls).toEqual([]);
+    expect(client.result?.status).toBe('completed');
+    expect(d.order).toEqual(['network', 'proxy', 'services', 'trooper', 'proxy-stop', 'teardown']);
   });
 });

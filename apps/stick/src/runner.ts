@@ -19,7 +19,8 @@ import {
   type TrooperEvent,
   TrooperEventSchema,
 } from '@jumpmaster/protocol';
-import type { Ack, DropClient } from './client.js';
+import type { Ack, CloneClient, DropClient } from './client.js';
+import { runClone, TROOPER_CLONE_LABEL, TROOPER_CLONE_VERSION } from './clone.js';
 import type { ContainerDriver, DropNet, VolumeInfo } from './driver.js';
 import {
   type EgressSession,
@@ -36,13 +37,17 @@ import {
   type PendingPushes,
   PUSH_BACKOFF_MAX_MS,
   pushContainer,
+  TROOPER_MIRROR_LABEL,
+  TROOPER_MIRROR_VERSION,
   TROOPER_PUSH_LABEL,
   TROOPER_PUSH_VERSION,
 } from './push.js';
 import { dropSubnetPool } from './subnets.js';
 import { digestOf, type ImageTrust, verifyBaseImage, verifyImage } from './verify.js';
 import {
+  createMirrorVolume,
   MIRROR_LABEL,
+  MIRROR_MOUNT,
   prepareVolume,
   REMOVE_TIMEOUT_MS,
   REPO_MOUNT,
@@ -118,9 +123,10 @@ export const SELFCHECK_LABEL = 'jumpmaster.selfcheck';
 
 /**
  * The latest volume self-check. `freeBytes` is null when it couldn't be measured, which counts as
- * below the floor.
+ * below the floor. `clone`: the base trooper image carries the clone label (read in the same
+ * inspection as the push label), so it can run a drop's clone container.
  */
-export type VolumeHealth = { selfCheck: boolean; freeBytes: number | null };
+export type VolumeHealth = { selfCheck: boolean; freeBytes: number | null; clone: boolean };
 
 /** The latest verdict on the stick's own trooper image (Ruling 17). */
 export type BaseVerdict = { ok: true } | { ok: false; reason: string };
@@ -141,11 +147,11 @@ export async function volumeSelfCheck(
 ): Promise<VolumeHealth> {
   const name = `jm-selfcheck-${stickId}-${randomBytes(4).toString('hex')}`;
   const labels = { [STICK_LABEL]: stickId, [SELFCHECK_LABEL]: '1' };
+  let clone = false;
   try {
-    const pushLabel = await driver
-      .imageLabels(image)
-      .then((l) => l[TROOPER_PUSH_LABEL] === TROOPER_PUSH_VERSION)
-      .catch(() => false);
+    const imageLabels = await driver.imageLabels(image).catch(() => ({}) as Record<string, string>);
+    const pushLabel = imageLabels[TROOPER_PUSH_LABEL] === TROOPER_PUSH_VERSION;
+    clone = imageLabels[TROOPER_CLONE_LABEL] === TROOPER_CLONE_VERSION;
     await driver.createVolume(name, labels);
     try {
       const init = await driver
@@ -157,13 +163,14 @@ export async function volumeSelfCheck(
       return {
         selfCheck: pushLabel && init === 0 && probe?.writable === true,
         freeBytes: probe?.freeBytes ?? null,
+        clone,
       };
     } finally {
       // A leaked self-check volume is the sweep's to remove.
       await driver.removeVolume(name).catch(() => {});
     }
   } catch {
-    return { selfCheck: false, freeBytes: null };
+    return { selfCheck: false, freeBytes: null, clone };
   }
 }
 
@@ -177,7 +184,7 @@ export async function stickHealth(
   o: { image: string; stickId: string; trust: ImageTrust; log: (line: string) => void },
 ): Promise<StickHealth> {
   const base = await verifyBaseImage(o.image, { trust: o.trust, driver, log: o.log });
-  if (!base.ok) return { selfCheck: false, freeBytes: null, base };
+  if (!base.ok) return { selfCheck: false, freeBytes: null, clone: false, base };
   return { ...(await volumeSelfCheck(driver, o.image, o.stickId)), base };
 }
 
@@ -190,6 +197,7 @@ export class HealthMonitor {
   private current: StickHealth = {
     selfCheck: false,
     freeBytes: null,
+    clone: false,
     base: { ok: false, reason: 'base image not checked yet' },
   };
   private inFlight: Promise<StickHealth> | undefined;
@@ -427,7 +435,8 @@ function safeJson(text: string): unknown {
 }
 
 type RunDeps = {
-  client: DropClient;
+  /** The clone routes are used only for a drop whose payload asks for a provided mirror. */
+  client: DropClient & CloneClient;
   driver: ContainerDriver;
   stickId: string;
   heartbeatMs?: number;
@@ -451,15 +460,21 @@ type RunDeps = {
   egressReadyMs?: number;
   /** Defaults to `JM_DROP_SUBNET_POOL`. */
   subnetPool?: string;
-  /** Drop networks in use, so the periodic sweep leaves them alone. */
+  /**
+   * Drop networks in use, so the periodic sweep leaves them alone; a drop's clone network joins
+   * it too. Unset: a set of the drop's own.
+   */
   active?: Set<string>;
-  /** `TROOPER_IMAGE`: runs the volume's init container (never a drop's image). */
+  /**
+   * `TROOPER_IMAGE`: runs the volume's init container and a provided-mirror drop's clone
+   * container (never a drop's image).
+   */
   trooperImage?: string;
   /** Where a pushing drop's volume goes once its agent container is gone. */
   pending?: PendingPushes;
   /**
-   * The latest verdict on `trooperImage`. Refused: a pushing drop fails before its volume's init
-   * container (or anything else) starts.
+   * The latest verdict on `trooperImage`. Refused: a pushing or provided-mirror drop fails before
+   * its volume's init container or its clone container (or anything else) starts.
    */
   baseImage?: () => BaseVerdict;
   /** First wait before re-sending a held result (doubling, capped). */
@@ -653,13 +668,17 @@ async function prepareAndRun(
     log(JSON.stringify({ event: 'drop-halted', dropId, epoch, ...haltReason(beat) }));
     return true;
   };
-  const base = pushes ? deps.baseImage?.() : undefined;
+  // A provided mirror is cloned by the stick's own trooper image, whatever the drop's role.
+  const provided = payload.repo.mirror === 'provided';
+  const base = pushes || provided ? deps.baseImage?.() : undefined;
   if (base && !base.ok) {
     log(JSON.stringify({ event: 'drop-refused', dropId, epoch, reason: base.reason }));
     await fail(base.reason);
     return;
   }
-  const proxyImage = egress ? (deps.egressImage ?? egressImage(process.env)) : undefined;
+  // A provided mirror's clone may run under egress (its plan says), so its proxy is verified too.
+  const proxyImage =
+    egress || provided ? (deps.egressImage ?? egressImage(process.env)) : undefined;
   // Every image this drop would create a container from: the trooper, its proxy, its services.
   const images: { ref: string; proxy?: true }[] = [
     { ref: image },
@@ -759,7 +778,6 @@ async function prepareAndRun(
       return;
     }
   }
-  let volume: string | undefined;
   if (pushes) {
     // The push container stages from this image's agent home: one without the label can't.
     let labels: Record<string, string>;
@@ -773,80 +791,181 @@ async function prepareAndRun(
       await fail(OLD_IMAGE);
       return;
     }
-    if (halted()) return;
+  }
+  if (provided) {
+    // An agent image that can't read a provided mirror would clone with a token it never gets.
+    let labels: Record<string, string>;
     try {
-      volume = await prepareVolume(driver, {
-        dropId,
-        epoch,
-        stickId: deps.stickId,
-        image: deps.trooperImage ?? TROOPER_IMAGE,
-      });
+      labels = await trooperLabels();
     } catch (e) {
-      await fail(`repo volume failed: ${message(e)}`);
+      await fail(`cannot inspect image ${image} for mirror support: ${message(e)}`);
+      return;
+    }
+    if (labels[TROOPER_MIRROR_LABEL] !== TROOPER_MIRROR_VERSION) {
+      await fail(`trooper image ${image} cannot read a provided mirror`);
       return;
     }
   }
-  // Until the agent's run says otherwise, the volume goes once its container is gone.
-  const fate: VolumeFate = { decide: async () => 'remove' };
-  const labels = {
-    'jumpmaster.drop': dropId,
-    'jumpmaster.epoch': String(epoch),
-    [STICK_LABEL]: deps.stickId,
-  };
-  const network = services.length > 0 || egress ? `jm-drop-${dropId}-${epoch}` : undefined;
-  let net: DropNet | undefined;
-  let session: EgressSession | undefined;
-  if (network) deps.active?.add(network);
-  try {
+  // The drop network and its clone network share one active set.
+  const active = deps.active ?? new Set<string>();
+  let mirror: string | undefined;
+  if (provided) {
     if (halted()) return;
-    if (egress && network) {
-      // Fail closed: no network, no proxy or no ready line means no trooper.
-      try {
-        const pool = deps.subnetPool ?? dropSubnetPool(process.env);
-        net = await driver.createDropNetwork(network, labels, pool);
-        const proxy = proxyImage ?? egressImage(process.env);
-        const dropNet = net;
-        session = await starting(deps, [proxy], () =>
-          startEgress(
-            driver,
-            {
-              dropId,
-              epoch,
-              egress,
-              net: dropNet,
-              image: proxy,
-              labels,
-              ...(deps.egressReadyMs !== undefined ? { readyMs: deps.egressReadyMs } : {}),
-            },
-            ceiling,
-          ),
-        );
-      } catch (e) {
-        await fail(`egress proxy failed to start: ${e instanceof Error ? e.message : String(e)}`);
-        return;
-      }
-      console.log(JSON.stringify({ event: 'egress', dropId, mode: egress.mode, proxy: 'ready' }));
+    let created: string;
+    try {
+      created = await createMirrorVolume(driver, { dropId, epoch, stickId: deps.stickId });
+    } catch (e) {
+      await fail(`mirror volume failed: ${message(e)}`);
+      return;
     }
-    if (services.length > 0) {
+    // runClone removes the volume on every outcome but success. Its output is never posted.
+    const outcome = await runClone(
+      { dropId, epoch, volume: created },
+      {
+        client,
+        driver,
+        stickId: deps.stickId,
+        image: deps.trooperImage ?? TROOPER_IMAGE,
+        ...(proxyImage !== undefined ? { egressImage: proxyImage } : {}),
+        ...(deps.egressReadyMs !== undefined ? { egressReadyMs: deps.egressReadyMs } : {}),
+        ...(deps.subnetPool !== undefined ? { subnetPool: deps.subnetPool } : {}),
+        ceiling,
+        active,
+        log,
+        halted: beat.halted,
+      },
+    );
+    if (outcome === 'stale') {
+      beat.stale = true;
+      halted();
+      return;
+    }
+    if (!outcome.ok) {
+      // Retry semantics for a failed clone come with the server's side (spec step 6).
+      if (halted()) return;
+      await fail(outcome.reason);
+      return;
+    }
+    mirror = created;
+  }
+  // Each later path removes the mirror volume once the agent container is confirmed gone; the
+  // repo volume's settling asks the engine the same question, so it is asked once.
+  let agentRemoval: Promise<void> | undefined;
+  const agentGone = () => {
+    agentRemoval ??= driver.removeAndWait(agentName(dropId, epoch), REMOVE_TIMEOUT_MS);
+    return agentRemoval;
+  };
+  try {
+    await runAgent();
+  } finally {
+    if (mirror) await settleMirror(mirror);
+  }
+
+  async function settleMirror(volume: string): Promise<void> {
+    const say = (what: string, extra: Record<string, unknown> = {}) =>
+      log(JSON.stringify({ event: 'mirror', dropId, epoch, what, volume, ...extra }));
+    try {
+      await agentGone();
+    } catch (e) {
+      // Still possibly mounted by a running agent: the sweep removes it later.
+      say('agent container not removed: mirror volume kept', { error: message(e) });
+      return;
+    }
+    await driver.removeVolume(volume).catch((e: unknown) => {
+      say('mirror volume not removed', { error: message(e) });
+    });
+  }
+
+  async function runAgent(): Promise<void> {
+    let volume: string | undefined;
+    if (pushes) {
       if (halted()) return;
       try {
-        await starting(
-          deps,
-          services.map((s) => s.image),
-          () => driver.startServices(dropId, epoch, services, labels, net),
-        );
+        volume = await prepareVolume(driver, {
+          dropId,
+          epoch,
+          stickId: deps.stickId,
+          image: deps.trooperImage ?? TROOPER_IMAGE,
+        });
       } catch (e) {
-        await fail(`services failed: ${e instanceof Error ? e.message : String(e)}`);
+        await fail(`repo volume failed: ${message(e)}`);
         return;
       }
     }
-    if (halted()) return;
-    await runContainer(payload, deps, beat, image, labels, network, net, session, volume, fate);
-  } finally {
-    if (session) await session.stop();
-    if (network) await driver.removeServices(network, labels).catch(() => {});
-    if (network) deps.active?.delete(network);
-    if (volume) await settleVolume(payload, deps, volume, fate, log);
+    // Until the agent's run says otherwise, the volume goes once its container is gone.
+    const fate: VolumeFate = { decide: async () => 'remove' };
+    const labels = {
+      'jumpmaster.drop': dropId,
+      'jumpmaster.epoch': String(epoch),
+      [STICK_LABEL]: deps.stickId,
+    };
+    const network = services.length > 0 || egress ? `jm-drop-${dropId}-${epoch}` : undefined;
+    let net: DropNet | undefined;
+    let session: EgressSession | undefined;
+    if (network) active.add(network);
+    try {
+      if (halted()) return;
+      if (egress && network) {
+        // Fail closed: no network, no proxy or no ready line means no trooper.
+        try {
+          const pool = deps.subnetPool ?? dropSubnetPool(process.env);
+          net = await driver.createDropNetwork(network, labels, pool);
+          const proxy = proxyImage ?? egressImage(process.env);
+          const dropNet = net;
+          session = await starting(deps, [proxy], () =>
+            startEgress(
+              driver,
+              {
+                dropId,
+                epoch,
+                egress,
+                net: dropNet,
+                image: proxy,
+                labels,
+                ...(deps.egressReadyMs !== undefined ? { readyMs: deps.egressReadyMs } : {}),
+              },
+              ceiling,
+            ),
+          );
+        } catch (e) {
+          await fail(`egress proxy failed to start: ${e instanceof Error ? e.message : String(e)}`);
+          return;
+        }
+        console.log(JSON.stringify({ event: 'egress', dropId, mode: egress.mode, proxy: 'ready' }));
+      }
+      if (services.length > 0) {
+        if (halted()) return;
+        try {
+          await starting(
+            deps,
+            services.map((s) => s.image),
+            () => driver.startServices(dropId, epoch, services, labels, net),
+          );
+        } catch (e) {
+          await fail(`services failed: ${e instanceof Error ? e.message : String(e)}`);
+          return;
+        }
+      }
+      if (halted()) return;
+      await runContainer(
+        payload,
+        deps,
+        beat,
+        image,
+        labels,
+        network,
+        net,
+        session,
+        volume,
+        fate,
+        mirror,
+      );
+    } finally {
+      if (session) await session.stop();
+      if (network) await driver.removeServices(network, labels).catch(() => {});
+      if (network) active.delete(network);
+      if (volume) await settleVolume(payload, deps, volume, fate, log, agentGone);
+    }
   }
 }
 
@@ -861,13 +980,15 @@ async function settleVolume(
   volume: string,
   fate: VolumeFate,
   log: (line: string) => void,
+  /** `removeAndWait` on the agent container, asked once per drop. */
+  agentGone: () => Promise<void>,
 ): Promise<void> {
   const { driver } = deps;
   const { dropId, epoch } = payload;
   const say = (what: string, extra: Record<string, unknown> = {}) =>
     log(JSON.stringify({ event: 'volume', dropId, epoch, what, ...extra }));
   try {
-    await driver.removeAndWait(agentName(dropId, epoch), REMOVE_TIMEOUT_MS);
+    await agentGone();
   } catch (e) {
     say('agent container not removed: volume kept, no push', { error: message(e) });
     return;
@@ -905,6 +1026,8 @@ async function runContainer(
   session: EgressSession | undefined,
   volume: string | undefined,
   fate: VolumeFate,
+  /** The provided mirror, mounted read-only beside the repo volume. */
+  mirror: string | undefined,
 ): Promise<void> {
   const { client, driver } = deps;
   const { dropId, epoch } = payload;
@@ -918,6 +1041,7 @@ async function runContainer(
       ...(net ? { egress: net } : {}),
       ...(payload.limits ? { limits: payload.limits } : {}),
       ...(volume ? { mount: { volume, target: REPO_MOUNT } } : {}),
+      ...(mirror ? { mirror: { volume: mirror, target: MIRROR_MOUNT } } : {}),
     }),
   );
 
