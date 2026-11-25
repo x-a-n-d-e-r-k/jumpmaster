@@ -2,7 +2,7 @@ import { generateKeyPairSync, randomBytes } from 'node:crypto';
 import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gitlabBasicAuthAs } from '@jumpmaster/protocol';
+import { gitlabBasicAuth, gitlabBasicAuthAs } from '@jumpmaster/protocol';
 import { describe, expect, test, vi } from 'vitest';
 import { openDb } from '../db/open.js';
 import { ScrubSet } from '../forge/scrub-set.js';
@@ -464,6 +464,27 @@ describe('resolveGitlabPatEntries (§9, issue #719)', () => {
     expect(scrub(`a ${AUTHOR} r ${REVIEWER}`, undefined, [], set)).toBe(
       'a [redacted] r [redacted]',
     );
+  });
+
+  test('the git basic-auth form of each present value is pinned and scrubbed', () => {
+    const { vault } = setup();
+    putBoth(vault, 'web');
+    const set = new ScrubSet(2, () => {});
+    resolveGitlabPatEntries([gitlab('web')], { vault, scrubSet: set });
+    for (let i = 0; i < 5; i += 1) set.add(`minted-token-value-${i}-0000000000`);
+    const forms = [gitlabBasicAuth(AUTHOR), gitlabBasicAuth(REVIEWER)];
+    expect(set.values()).toEqual(expect.arrayContaining(forms));
+    expect(scrub(`AUTHORIZATION: basic ${forms[0]} / ${forms[1]}`, undefined, [], set)).toBe(
+      'AUTHORIZATION: basic [redacted] / [redacted]',
+    );
+  });
+
+  test("a starter GitLab zone pins the author's two forms only, nothing for the reviewer", () => {
+    const { vault } = setup();
+    putBoth(vault, 'web');
+    const set = new ScrubSet(0, () => {});
+    resolveGitlabPatEntries([gitlab('web', 'starter')], { vault, scrubSet: set });
+    expect(set.values()).toEqual([AUTHOR, gitlabBasicAuth(AUTHOR)]);
   });
 
   describe('the read deploy token (issue #831)', () => {
