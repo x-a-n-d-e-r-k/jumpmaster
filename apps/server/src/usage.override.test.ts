@@ -396,6 +396,106 @@ describe('an override ends early (#728)', () => {
     expect(getUsageState(db).overrideUntil).toBeNull();
   });
 
+  test('a report with another account-wide window at the ceiling clears it for good (#738)', () => {
+    warned();
+    grant();
+    ingestRateLimit(
+      db,
+      report({
+        unifiedWindows: {
+          seven_day: { utilization: 0.5, resetsAt: iso(36 * H) },
+          seven_day_oauth_apps: { utilization: 0.96, resetsAt: iso(36 * H) },
+        },
+      }),
+      src,
+      cfg,
+      t0,
+    );
+    expect(getUsageState(db).overrideUntil).toBeNull();
+    // A later report that no longer carries the window must not bring the override back.
+    ingestRateLimit(
+      db,
+      report({ unifiedWindows: { seven_day: { utilization: 0.5, resetsAt: iso(36 * H) } } }),
+      src,
+      cfg,
+      t0,
+    );
+    expect(usageOverride(db, t0)).toBeNull();
+  });
+
+  test('another account-wide window under the ceiling leaves it in force (#738)', () => {
+    warned();
+    grant();
+    ingestRateLimit(
+      db,
+      report({
+        unifiedWindows: {
+          seven_day: { utilization: 0.5, resetsAt: iso(36 * H) },
+          seven_day_oauth_apps: { utilization: 0.94, resetsAt: iso(36 * H) },
+        },
+      }),
+      src,
+      cfg,
+      t0,
+    );
+    expect(getUsageState(db).overrideUntil).not.toBeNull();
+    expect(inForce()).toBe(true);
+  });
+
+  test('a per-model window at the ceiling in a report does not clear it (#738)', () => {
+    for (const key of [
+      'seven_day_fable',
+      'seven_day_opus',
+      'seven_day_sonnet',
+      'seven_day_overage_included',
+    ]) {
+      grant();
+      ingestRateLimit(
+        db,
+        report({ unifiedWindows: { [key]: { utilization: 0.99, resetsAt: iso(36 * H) } } }),
+        src,
+        cfg,
+        t0,
+      );
+      expect(getUsageState(db).overrideUntil, key).not.toBeNull();
+    }
+  });
+
+  test('another account-wide window already reset does not clear it; one with no reset does (#738)', () => {
+    grant();
+    const over = (resetsAt?: string) =>
+      ingestRateLimit(
+        db,
+        report({
+          unifiedWindows: {
+            seven_day_oauth_apps: { utilization: 0.96, ...(resetsAt ? { resetsAt } : {}) },
+          },
+        }),
+        src,
+        cfg,
+        t0,
+      );
+    over(iso(-60_000));
+    expect(getUsageState(db).overrideUntil).not.toBeNull();
+    over();
+    expect(getUsageState(db).overrideUntil).toBeNull();
+  });
+
+  test("a Fable-typed report's other account-wide windows count toward the ceiling (#738)", () => {
+    grant();
+    ingestRateLimit(
+      db,
+      report({
+        rateLimitType: 'seven_day_fable',
+        unifiedWindows: { seven_day_oauth_apps: { utilization: 0.99, resetsAt: iso(H) } },
+      }),
+      src,
+      cfg,
+      t0,
+    );
+    expect(getUsageState(db).overrideUntil).toBeNull();
+  });
+
   test('a refusal clears it, from a live report too', () => {
     grant();
     ingestRateLimit(db, report({ status: 'rejected' }), src, cfg, t0);
