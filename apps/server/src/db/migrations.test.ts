@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { expect, test } from 'vitest';
 import { syncParkBriefings } from '../briefings.js';
+import { getCrewIssueByKey } from '../crew/store.js';
 import { syncDropZone } from '../sync.js';
 import { fakeForge } from '../test/fakes.js';
 import { makeZone } from '../test/fixtures.js';
@@ -1916,8 +1917,23 @@ test('v65 adds fable_reason to drops: existing rows read as null (#836)', () => 
   db.close();
 });
 
-test('v66 adds clone_grants, empty, and leaves every other row untouched (#840)', () => {
+test('v66 adds after_json to crew_issues: existing rows read as absent (#843)', () => {
   const f = dbAt(65, (raw) =>
+    raw.exec(
+      `INSERT INTO crew_issues (zone_id, key, source, objective, title, title_norm, body, state,
+         created_at, updated_at)
+       VALUES ('main', 'k', 'crew-lead', 'obj', 't', 't', 'b', 'promoted', 'a', 'a');`,
+    ),
+  );
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(db.prepare('SELECT after_json AS a FROM crew_issues').get()).toEqual({ a: null });
+  expect(getCrewIssueByKey(db, 'main', 'k')?.after).toBeNull();
+  db.close();
+});
+
+test('v67 adds clone_grants, empty, and leaves every other row untouched (#840)', () => {
+  const f = dbAt(66, (raw) =>
     raw.exec(
       `INSERT INTO drop_zones (id, repo, default_branch, config_json) VALUES ('main', 'o/r', 'main', '{}');
        INSERT INTO drops (id, drop_zone_id, work_item_id, role, state, created_at)

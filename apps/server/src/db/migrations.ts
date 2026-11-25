@@ -1682,11 +1682,20 @@ ALTER TABLE drops ADD COLUMN fable_reason TEXT;
 `;
 
 /**
- * v66: a GitLab drop's clone container grants (#840, the clone container spec), modelled on
+ * v66 (#843): the crew issue keys of its objective that must merge before a crew issue is
+ * promoted, a JSON array, or null: absent, after every earlier unmerged issue of the objective,
+ * as for every crew issue filed before it.
+ */
+const V66_SQL = `
+ALTER TABLE crew_issues ADD COLUMN after_json TEXT;
+`;
+
+/**
+ * v67: a GitLab drop's clone container grants (#840, the clone container spec), modelled on
  * `push_tokens`: one row per reservation, ids and times only, never a token. A GitLab token stays
  * valid after its grant is revoked: the revocation is bookkeeping, and frees the next reservation.
  */
-const V66_SQL = `
+const V67_SQL = `
 CREATE TABLE clone_grants (
   drop_id      TEXT NOT NULL,
   epoch        INTEGER NOT NULL,
@@ -1765,6 +1774,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 64, sql: V64_SQL },
   { version: 65, sql: V65_SQL },
   { version: 66, sql: V66_SQL },
+  { version: 67, sql: V67_SQL },
 ];
 
 /**

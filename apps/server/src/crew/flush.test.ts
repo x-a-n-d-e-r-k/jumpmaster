@@ -10,11 +10,14 @@ import {
 } from '../briefings.js';
 import {
   getOutbox,
+  getWorkItem,
   listWorkItems,
   setKilled,
+  setWorkItemPrFiles,
   setWorkItemState,
   setZoneMode,
   updateDrop,
+  upsertPullRequest,
   upsertWorkItem,
 } from '../db/repo.js';
 import { reconcileZone } from '../flow/reconcile.js';
@@ -22,17 +25,25 @@ import { zonePass } from '../flow/snapshot.js';
 import { isJmIssueBody, opMarker, resolveUnknown, sanitizeCrewText } from '../outbox.js';
 import { promptVersions } from '../payloads.js';
 import { applyResult } from '../results.js';
+import { enqueueNext } from '../scheduler.js';
 import { syncDropZone } from '../sync.js';
 import { crewWorld, ISSUE_BODY, parsedCrew } from '../test/crew.js';
 import { makeZone, usageCfg, type ZoneWorld, zoneWorld } from '../test/fixtures.js';
 import { plus, t0 } from '../test/helpers.js';
-import { flushCrewOps, PROMOTE_OPTIONS } from './flush.js';
+import {
+  flushCrewOps,
+  OBJECTIVE_IN_FLIGHT,
+  PROMOTE_OPTIONS,
+  promotionWait,
+  waitsFor,
+} from './flush.js';
 import { enqueueCrew } from './schedule.js';
 import {
   type CrewIssueState,
   getCrewIssue,
   insertCrewIssue,
   listCrewIssues,
+  parseAfter,
   setCrewIssue,
 } from './store.js';
 
@@ -906,5 +917,274 @@ describe('a passing refute, by default (#318)', () => {
     expect(listBriefings(w.db, { zoneId: 'main', state: 'open' })).toMatchObject([
       { kind: 'promote', subject: `issue:${id}` },
     ]);
+  });
+});
+
+describe('an objective’s independent issues build at once (#843)', () => {
+  const zoneOf = (max: number) =>
+    makeZone({ crew: { ...crewOn, enabled: true }, maxConcurrentImplement: max });
+  const two = zoneOf(2);
+  let tick = 0;
+  const flushAt = (z = two) => flushCrewOps(w.db, w.forges, z, [SECRET], plus(t0, ++tick * MIN));
+  const placed = (path: string) => `Write it.\n\n## Placement\n\n- \`${path}\`\n`;
+
+  /** Crew issues of one objective, filed (staged); `null` leaves `after` absent. */
+  async function filed(
+    spec: { key: string; after: string[] | null; path?: string }[],
+    z = two,
+  ): Promise<number[]> {
+    const ids = spec.map((s) =>
+      insertCrewIssue(w.db, {
+        zoneId: 'main',
+        key: s.key,
+        source: 'crew-lead',
+        sourceRef: 'drop-1',
+        objective: 'clone-container',
+        title: `Issue ${s.key}`,
+        body: placed(s.path ?? `src/${s.key}.ts`),
+        priority: 'high',
+        after: s.after,
+        createdAt: t0.toISOString(),
+      }),
+    );
+    await flushAt(z);
+    for (const id of ids) expect(getCrewIssue(w.db, id)?.state).toBe('staged');
+    return ids;
+  }
+  const promoting = (...ids: number[]) => {
+    for (const id of ids) setCrewIssue(w.db, id, { state: 'promoting' }, t0);
+  };
+  const states = (ids: number[]) => ids.map((id) => getCrewIssue(w.db, id)?.state);
+  const numberOf = (id: number) => getCrewIssue(w.db, id)?.number ?? -1;
+  /** The work item of a crew issue, as sync would make it, set to `state`. */
+  const work = (id: number, state: 'ready' | 'parked' | 'done', reason?: string, priority = 1) => {
+    const row = getCrewIssue(w.db, id);
+    const item = upsertWorkItem(w.db, {
+      dropZoneId: 'main',
+      issueNumber: row?.number ?? -1,
+      title: row?.title ?? '',
+      body: row?.body ?? '',
+      author: 'author-bot',
+      priority,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    setWorkItemState(w.db, item.id, state, reason);
+    return item.id;
+  };
+  const merge = (id: number) => work(id, 'done', 'merged');
+  const waitOf = (id: number, z = two) => {
+    const row = getCrewIssue(w.db, id);
+    return row ? promotionWait(w.db, z, row) : 'gone';
+  };
+
+  test('A, B and C with after [] and two slots: two are promoted, the third when one merges', async () => {
+    const ids = await filed([
+      { key: 'a', after: [] },
+      { key: 'b', after: [] },
+      { key: 'c', after: [] },
+    ]);
+    promoting(...ids);
+    await flushAt();
+    expect(states(ids)).toEqual(['promoted', 'promoted', 'promoting']);
+    expect(waitOf(ids[2] ?? -1)).toBe(OBJECTIVE_IN_FLIGHT);
+    await flushAt();
+    expect(states(ids)).toEqual(['promoted', 'promoted', 'promoting']);
+    merge(ids[1] ?? -1);
+    await flushAt();
+    expect(states(ids)).toEqual(['promoted', 'promoted', 'promoted']);
+  });
+
+  test('B with after [a] waits until A merges, and says so', async () => {
+    const [a = -1, b = -1] = await filed([
+      { key: 'a', after: [] },
+      { key: 'b', after: ['a'] },
+    ]);
+    promoting(a, b);
+    await flushAt();
+    expect(states([a, b])).toEqual(['promoted', 'promoting']);
+    expect(waitOf(b)).toBe(waitsFor('a', numberOf(a)));
+    expect(waitOf(b)).toBe(`waiting: after a (#${numberOf(a)}), not merged yet`);
+    work(a, 'ready');
+    await flushAt();
+    expect(states([a, b])).toEqual(['promoted', 'promoting']);
+    merge(a);
+    await flushAt();
+    expect(states([a, b])).toEqual(['promoted', 'promoted']);
+  });
+
+  test('A parks: B with after [] goes on, C with after [a] waits', async () => {
+    const [a = -1, b = -1, c = -1] = await filed([
+      { key: 'a', after: [] },
+      { key: 'b', after: [] },
+      { key: 'c', after: ['a'] },
+    ]);
+    promoting(a);
+    await flushAt();
+    work(a, 'parked', 'gate failed');
+    promoting(b, c);
+    await flushAt();
+    expect(states([a, b, c])).toEqual(['promoted', 'promoted', 'promoting']);
+    expect(waitOf(c)).toBe(waitsFor('a', numberOf(a)));
+  });
+
+  test('A and B with after [] and the same file: both promoted; B builds after A’s PR merges', async () => {
+    const [a = -1, b = -1] = await filed([
+      { key: 'a', after: [], path: 'apps/server/src/vault/gitlab.ts' },
+      { key: 'b', after: [], path: 'apps/server/src/vault/gitlab.ts' },
+    ]);
+    promoting(a, b);
+    await flushAt();
+    expect(states([a, b])).toEqual(['promoted', 'promoted']);
+    const ia = work(a, 'ready', undefined, 0);
+    const ib = work(b, 'ready', undefined, 1);
+    const drop = enqueueNext(w.db, two, 'v1', usageCfg, t0);
+    expect(drop).not.toBeNull();
+    expect(getWorkItem(w.db, ia)?.state).toBe('in_flight');
+    expect(enqueueNext(w.db, two, 'v1', usageCfg, t0)).toBeNull();
+    expect(getWorkItem(w.db, ib)?.reason).toBe(
+      `waiting: overlaps #${numberOf(a)} on apps/server/src/vault/gitlab.ts`,
+    );
+    // A's build opens its PR: B now waits for the PR.
+    updateDrop(w.db, drop ?? '', { state: 'succeeded' });
+    setWorkItemState(w.db, ia, 'pr_open');
+    upsertPullRequest(
+      w.db,
+      { workItemId: ia, number: 901, headRef: 'agent/issue-a', headSha: 's', state: 'open' },
+      t0,
+    );
+    setWorkItemPrFiles(w.db, ia, ['apps/server/src/vault/gitlab.ts']);
+    expect(enqueueNext(w.db, two, 'v1', usageCfg, t0)).toBeNull();
+    expect(getWorkItem(w.db, ib)?.reason).toBe(
+      'waiting: overlaps #901 on apps/server/src/vault/gitlab.ts',
+    );
+    setWorkItemState(w.db, ia, 'done', 'merged');
+    expect(enqueueNext(w.db, two, 'v1', usageCfg, t0)).not.toBeNull();
+    expect(getWorkItem(w.db, ib)).toMatchObject({ state: 'in_flight', reason: null });
+  });
+
+  test('issues without after land one at a time, as before', async () => {
+    const [a = -1, b = -1] = await filed([
+      { key: 'a', after: null },
+      { key: 'b', after: null },
+    ]);
+    promoting(a, b);
+    await flushAt();
+    expect(states([a, b])).toEqual(['promoted', 'promoting']);
+    expect(waitOf(b)).toBe(OBJECTIVE_IN_FLIGHT);
+    merge(a);
+    await flushAt();
+    expect(states([a, b])).toEqual(['promoted', 'promoted']);
+  });
+
+  test('an after target that was rejected, or closed unmerged, still holds', async () => {
+    const [a = -1, b = -1, c = -1, d = -1] = await filed([
+      { key: 'a', after: [] },
+      { key: 'b', after: [] },
+      { key: 'c', after: ['a'] },
+      { key: 'd', after: ['b'] },
+    ]);
+    setCrewIssue(w.db, a, { state: 'rejected' }, t0);
+    promoting(b);
+    await flushAt();
+    work(b, 'done', 'closed');
+    promoting(c, d);
+    await flushAt();
+    await flushAt();
+    expect(states([c, d])).toEqual(['promoting', 'promoting']);
+    expect(waitOf(c)).toBe(waitsFor('a', numberOf(a)));
+    expect(waitOf(d)).toBe(waitsFor('b', numberOf(b)));
+  });
+
+  test('a promoted old-style issue holds a new issue with after []', async () => {
+    const [a = -1, b = -1] = await filed([
+      { key: 'a', after: null },
+      { key: 'b', after: [] },
+    ]);
+    promoting(a);
+    await flushAt();
+    promoting(b);
+    await flushAt();
+    expect(states([a, b])).toEqual(['promoted', 'promoting']);
+    expect(waitOf(b)).toBe(OBJECTIVE_IN_FLIGHT);
+  });
+
+  test('with one slot, three issues with after [] are promoted one at a time', async () => {
+    const one = zoneOf(1);
+    const ids = await filed(
+      [
+        { key: 'a', after: [] },
+        { key: 'b', after: [] },
+        { key: 'c', after: [] },
+      ],
+      one,
+    );
+    promoting(...ids);
+    await flushAt(one);
+    expect(states(ids)).toEqual(['promoted', 'promoting', 'promoting']);
+    merge(ids[0] ?? -1);
+    await flushAt(one);
+    expect(states(ids)).toEqual(['promoted', 'promoted', 'promoting']);
+    merge(ids[1] ?? -1);
+    await flushAt(one);
+    expect(states(ids)).toEqual(['promoted', 'promoted', 'promoted']);
+  });
+
+  test('two passes at once never promote more than the limit (D3)', async () => {
+    const [a = -1, b = -1, c = -1] = await filed([
+      { key: 'a', after: [] },
+      { key: 'b', after: [] },
+      { key: 'c', after: [] },
+    ]);
+    promoting(a);
+    await flushAt();
+    // Pass 1 sees only C promoting, passes the first check (one slot of two taken), and is held
+    // in its forge read while pass 2 promotes B into the last slot.
+    promoting(c);
+    let release = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const slowAuthor = new Proxy(w.f.author, {
+      get: (t, k) =>
+        k === 'getIssue'
+          ? async (n: number) => {
+              await gate;
+              return t.getIssue(n);
+            }
+          : Reflect.get(t, k),
+    });
+    const at = plus(t0, 50 * MIN);
+    const first = flushCrewOps(w.db, { ...w.forges, author: slowAuthor }, two, [SECRET], at);
+    await new Promise((r) => setImmediate(r));
+    setCrewIssue(w.db, c, { state: 'staged' }, t0); // pass 2 sees B, not C
+    promoting(b);
+    await flushCrewOps(w.db, w.forges, two, [SECRET], at);
+    expect(states([a, b])).toEqual(['promoted', 'promoted']);
+    setCrewIssue(w.db, c, { state: 'promoting' }, t0);
+    release();
+    await first;
+    await Promise.all([flushAt(), flushAt()]);
+    expect(states([a, b, c])).toEqual(['promoted', 'promoted', 'promoting']);
+    expect(getOutbox(w.db, `labels:${c}:promote`)).toBeUndefined();
+  });
+
+  test('an unreadable after_json reads as absent, the stricter rule (D2)', async () => {
+    const [a = -1, b = -1] = await filed([
+      { key: 'a', after: [] },
+      { key: 'b', after: [] },
+    ]);
+    promoting(a);
+    await flushAt();
+    w.db.prepare(`UPDATE crew_issues SET after_json = '{"not":"a list"' WHERE id = ?`).run(b);
+    expect(getCrewIssue(w.db, b)?.after).toBeNull();
+    promoting(b);
+    await flushAt();
+    expect(states([a, b])).toEqual(['promoted', 'promoting']);
+    expect(waitOf(b)).toBe(OBJECTIVE_IN_FLIGHT);
+    expect(parseAfter('[1, 2]')).toBeNull();
+    expect(parseAfter('{"a":1}')).toBeNull();
+    expect(parseAfter('["a"]')).toEqual(['a']);
+    expect(parseAfter(null)).toBeNull();
   });
 });

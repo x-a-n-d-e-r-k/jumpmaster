@@ -359,3 +359,46 @@ describe('enqueueNext holds back overlap and caps open PRs (issue #291)', () => 
     expect(started(enqueueNext(db, zone, 'v1', DEFAULT_USAGE_CONFIG, t0))).toBe(top.id);
   });
 });
+
+describe('enqueueNext holds back an item overlapping one building now (#843)', () => {
+  const two = { ...zone, maxConcurrentImplement: 2 };
+  const started = (id: string | null) => (id === null ? null : getDrop(db, id)?.workItemId);
+
+  test("an in-flight item's directory Placement holds an item naming a file in it, until it leaves in_flight", () => {
+    const building = add(840, 0, placement('apps/server/src/vault/'));
+    const drop = enqueueNext(db, two, 'v1', DEFAULT_USAGE_CONFIG, t0);
+    expect(started(drop)).toBe(building.id);
+    const held = add(841, 0, placement('apps/server/src/vault/gitlab.ts'));
+    const free = add(842, 1, placement('apps/server/src/clone/'));
+    expect(started(enqueueNext(db, two, 'v1', DEFAULT_USAGE_CONFIG, t0))).toBe(free.id);
+    expect(getWorkItem(db, held.id)).toMatchObject({
+      state: 'ready',
+      reason: 'waiting: overlaps #840 on apps/server/src/vault/gitlab.ts',
+    });
+    // The building item opens a PR touching other files only: no PR overlaps, the hold clears.
+    updateDrop(db, drop ?? '', { state: 'succeeded' });
+    setWorkItemState(db, building.id, 'pr_open', undefined, t0);
+    upsertPullRequest(
+      db,
+      {
+        workItemId: building.id,
+        number: 900,
+        headRef: 'agent/issue-840',
+        headSha: 's',
+        state: 'open',
+      },
+      t0,
+    );
+    setWorkItemPrFiles(db, building.id, ['docs/x.md']);
+    setWorkItemState(db, free.id, 'done', 'merged', t0);
+    expect(started(enqueueNext(db, two, 'v1', DEFAULT_USAGE_CONFIG, t0))).toBe(held.id);
+    expect(getWorkItem(db, held.id)).toMatchObject({ state: 'in_flight', reason: null });
+  });
+
+  test('an in-flight item that names no path overlaps nothing', () => {
+    const building = add(1, 0, '## Placement\n\nTests beside each.\n');
+    expect(started(enqueueNext(db, two, 'v1', DEFAULT_USAGE_CONFIG, t0))).toBe(building.id);
+    const next = add(2, 0, placement('src/a.ts'));
+    expect(started(enqueueNext(db, two, 'v1', DEFAULT_USAGE_CONFIG, t0))).toBe(next.id);
+  });
+});

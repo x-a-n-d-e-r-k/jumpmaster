@@ -253,6 +253,37 @@ describe('UI routes', () => {
     expect(res.body).toContain('#12');
   });
 
+  test('/projects/:id/goals says what a held crew promotion waits for (#843)', async () => {
+    const h = await crewHarness();
+    const row = (
+      key: string,
+      state: 'promoted' | 'promoting',
+      number: number,
+      after: string[] | null,
+    ) =>
+      insertCrewIssue(h.db, {
+        zoneId: 'main',
+        key,
+        source: 'drop',
+        objective: 'document-every-endpoint',
+        title: `Issue ${key}`,
+        body: 'b',
+        priority: null,
+        state,
+        number,
+        after,
+        createdAt: h.now().toISOString(),
+      });
+    row('a', 'promoted', 30, []);
+    row('b', 'promoting', 31, ['a']);
+    row('c', 'promoting', 32, null);
+    const body = (await get(h, '/projects/main/goals')).body;
+    expect(body).toContain('promoting<br><small>waiting: after a (#30), not merged yet</small>');
+    expect(body).toContain(
+      'promoting<br><small>waiting: another issue of the objective is in flight</small>',
+    );
+  });
+
   const THREE_GOALS = `# Goals
 
 ## Lighthouse

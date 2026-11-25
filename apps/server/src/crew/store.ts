@@ -41,6 +41,12 @@ export type CrewIssue = {
   holdUntil: string | null;
   /** The key of the rejected crew issue this one replaces (#784), or null. */
   replaces: string | null;
+  /**
+   * The keys of its objective's crew issues that must merge before it is promoted (#843): `[]`
+   * when independent; null when absent (after every earlier unmerged issue of the objective), as
+   * is a stored value that does not read as a list of keys, the stricter rule.
+   */
+  after: string[] | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -49,7 +55,7 @@ export type NewCrewIssue = Pick<
   CrewIssue,
   'zoneId' | 'key' | 'source' | 'objective' | 'title' | 'body' | 'priority' | 'createdAt'
 > &
-  Partial<Pick<CrewIssue, 'sourceRef' | 'state' | 'number' | 'bodySha' | 'replaces'>>;
+  Partial<Pick<CrewIssue, 'sourceRef' | 'state' | 'number' | 'bodySha' | 'replaces' | 'after'>>;
 
 export type CrewIssuePatch = Partial<
   Pick<
@@ -77,7 +83,31 @@ export const normTitle = (title: string): string =>
 const COLS = `id, zone_id AS zoneId, key, source, source_ref AS sourceRef, objective, title,
   title_norm AS titleNorm, body, body_sha AS bodySha, priority, number, state,
   refute_count AS refuteCount, refuted_sha AS refutedSha, findings_json AS findingsJson,
-  hold_until AS holdUntil, replaces, created_at AS createdAt, updated_at AS updatedAt`;
+  hold_until AS holdUntil, replaces, after_json AS afterJson, created_at AS createdAt,
+  updated_at AS updatedAt`;
+
+type CrewIssueRow = Omit<CrewIssue, 'after'> & { afterJson: string | null };
+
+/**
+ * A stored `after_json` as its keys, or null when absent. A value that is not a JSON array of
+ * strings reads as absent too (D2): one at a time, after every earlier issue, the stricter rule.
+ */
+export function parseAfter(json: string | null): string[] | null {
+  if (json === null) return null;
+  try {
+    const v: unknown = JSON.parse(json);
+    return Array.isArray(v) && v.every((k) => typeof k === 'string') ? (v as string[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+const crewFromRow = ({ afterJson, ...r }: CrewIssueRow): CrewIssue => ({
+  ...r,
+  after: parseAfter(afterJson),
+});
+const crewFromRowMaybe = (r: unknown): CrewIssue | undefined =>
+  r === undefined ? undefined : crewFromRow(r as CrewIssueRow);
 
 const COLUMN: Record<keyof CrewIssuePatch, string> = {
   state: 'state',
@@ -96,9 +126,9 @@ export function insertCrewIssue(db: Db, row: NewCrewIssue): number {
   const r = db
     .prepare(
       `INSERT INTO crew_issues (zone_id, key, source, source_ref, objective, title, title_norm, body,
-         body_sha, priority, number, state, replaces, created_at, updated_at)
+         body_sha, priority, number, state, replaces, after_json, created_at, updated_at)
        VALUES (@zoneId, @key, @source, @sourceRef, @objective, @title, @titleNorm, @body, @bodySha,
-         @priority, @number, @state, @replaces, @createdAt, @createdAt)`,
+         @priority, @number, @state, @replaces, @afterJson, @createdAt, @createdAt)`,
     )
     .run({
       sourceRef: null,
@@ -106,16 +136,17 @@ export function insertCrewIssue(db: Db, row: NewCrewIssue): number {
       bodySha: null,
       replaces: null,
       state: 'filing',
-      ...row,
+      ...(({ after: _after, ...rest }) => rest)(row),
+      afterJson: row.after == null ? null : JSON.stringify(row.after),
       titleNorm: normTitle(row.title),
     });
   return Number(r.lastInsertRowid);
 }
 
 export function getCrewIssueByKey(db: Db, zoneId: string, key: string): CrewIssue | undefined {
-  return db
-    .prepare(`SELECT ${COLS} FROM crew_issues WHERE zone_id = ? AND key = ?`)
-    .get(zoneId, key) as CrewIssue | undefined;
+  return crewFromRowMaybe(
+    db.prepare(`SELECT ${COLS} FROM crew_issues WHERE zone_id = ? AND key = ?`).get(zoneId, key),
+  );
 }
 
 /**
@@ -143,22 +174,24 @@ export function commandRejection(
 }
 
 export function getCrewIssue(db: Db, id: number): CrewIssue | undefined {
-  return db.prepare(`SELECT ${COLS} FROM crew_issues WHERE id = ?`).get(id) as
-    | CrewIssue
-    | undefined;
+  return crewFromRowMaybe(db.prepare(`SELECT ${COLS} FROM crew_issues WHERE id = ?`).get(id));
 }
 
 export function getCrewIssueByNumber(db: Db, zoneId: string, n: number): CrewIssue | undefined {
-  return db
-    .prepare(`SELECT ${COLS} FROM crew_issues WHERE zone_id = ? AND number = ? ORDER BY id DESC`)
-    .get(zoneId, n) as CrewIssue | undefined;
+  return crewFromRowMaybe(
+    db
+      .prepare(`SELECT ${COLS} FROM crew_issues WHERE zone_id = ? AND number = ? ORDER BY id DESC`)
+      .get(zoneId, n),
+  );
 }
 
 export function listCrewIssues(db: Db, zoneId: string, states?: CrewIssueState[]): CrewIssue[] {
   const filter = states?.length ? ` AND state IN (${states.map(() => '?').join(', ')})` : '';
-  return db
-    .prepare(`SELECT ${COLS} FROM crew_issues WHERE zone_id = ?${filter} ORDER BY id`)
-    .all(zoneId, ...(states ?? [])) as CrewIssue[];
+  return (
+    db
+      .prepare(`SELECT ${COLS} FROM crew_issues WHERE zone_id = ?${filter} ORDER BY id`)
+      .all(zoneId, ...(states ?? [])) as CrewIssueRow[]
+  ).map(crewFromRow);
 }
 
 export function setCrewIssue(db: Db, id: number, patch: CrewIssuePatch, now: Date): void {
