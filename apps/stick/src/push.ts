@@ -35,9 +35,11 @@ export const TROOPER_PUSH_LABEL = 'org.jumpmaster.trooper.push';
 export const TROOPER_PUSH_VERSION = '1';
 /**
  * Every trooper image from the provided-mirror release carries it: its agent roles read a drop's
- * read-only mirror at `/jm/mirror` and make no remote call. Nothing reads it yet.
+ * read-only mirror at `/jm/mirror` and make no remote call. The runner refuses a provided-mirror
+ * drop whose image lacks it.
  */
 export const TROOPER_MIRROR_LABEL = 'org.jumpmaster.trooper.mirror';
+export const TROOPER_MIRROR_VERSION = '1';
 const STOP_GRACE_MS = 30_000;
 const NO_RESULT_REASON = 'push container exited without a result';
 
