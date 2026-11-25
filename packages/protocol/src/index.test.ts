@@ -10,6 +10,7 @@ import {
   DoctorResultSchema,
   DropPayloadSchema,
   DropResultSchema,
+  EgressPayloadSchema,
   EVENT_PREFIX,
   FEATURES_HEADER,
   ForgeRemoteSchema,
@@ -1160,5 +1161,76 @@ describe('clone container protocol (#830)', () => {
     expect(DropPayloadSchema.parse(crew)).toEqual(crew);
     const crewMirrored = { ...crew, repo: { ...crew.repo, mirror: 'provided' } };
     expect(DropPayloadSchema.parse(crewMirrored)).toEqual(crewMirrored);
+  });
+});
+
+describe('EgressPayloadSchema private (#888)', () => {
+  const allow = ['api.anthropic.com', 'gitlab.internal.example', '*.example.net'];
+
+  test('private is accepted when every entry is on allow (after normalizeHost)', () => {
+    const p = { mode: 'enforce', allow, private: ['GitLab.Internal.Example.'] };
+    expect(EgressPayloadSchema.parse(p)).toEqual(p);
+    expect(EgressPayloadSchema.parse({ mode: 'enforce', allow, private: [] })).toEqual({
+      mode: 'enforce',
+      allow,
+      private: [],
+    });
+  });
+
+  test('omitting private keeps the parse result of today', () => {
+    const p = { mode: 'monitor', allow: ['github.com'] };
+    const parsed = EgressPayloadSchema.parse(p);
+    expect(parsed).toEqual(p);
+    expect(parsed).not.toHaveProperty('private');
+  });
+
+  const refused = (priv: string[], list = allow) => {
+    const r = EgressPayloadSchema.safeParse({ mode: 'enforce', allow: list, private: priv });
+    expect(r.success).toBe(false);
+    if (r.success) return;
+    for (const issue of r.error.issues) {
+      expect(issue.path[0]).toBe('private');
+      expect(issue.message).toMatch(/private/);
+      for (const v of priv) if (v.length > 0) expect(issue.message).not.toContain(v);
+    }
+  };
+
+  test('a wildcard entry is refused, even when the same wildcard is on allow', () => {
+    refused(['*.example.net']);
+  });
+
+  test('an IP literal is refused', () => {
+    refused(['10.0.0.5'], [...allow, '10.0.0.5']);
+    refused(['[::1]']);
+  });
+
+  test('an entry missing from allow is refused', () => {
+    refused(['other.internal.example']);
+    // A wildcard on allow doesn't make a subdomain private-listable.
+    refused(['git.example.net']);
+  });
+
+  test('more than 16 entries are refused', () => {
+    const hosts = Array.from({ length: 17 }, (_, i) => `h${i}.internal.example`);
+    refused(hosts, hosts);
+    const ok = hosts.slice(0, 16);
+    expect(EgressPayloadSchema.safeParse({ mode: 'enforce', allow: ok, private: ok }).success).toBe(
+      true,
+    );
+  });
+
+  test('drop, push and clone payloads carry private through', () => {
+    const egress = { mode: 'enforce', allow, private: ['gitlab.internal.example'] };
+    const push = { branch: 'agent/issue-1', salvage: false, egress };
+    expect(PushPlanSchema.parse(push)).toEqual(push);
+    const clone = {
+      forge: { kind: 'gitlab', origin: 'https://gitlab.internal.example', projectPath: 'g/p' },
+      maxBytes: 1024,
+      egress,
+    };
+    expect(ClonePlanSchema.parse(clone).egress).toEqual(egress);
+    const bad = { ...egress, private: ['elsewhere.example'] };
+    expect(PushPlanSchema.safeParse({ ...push, egress: bad }).success).toBe(false);
+    expect(ClonePlanSchema.safeParse({ ...clone, egress: bad }).success).toBe(false);
   });
 });
