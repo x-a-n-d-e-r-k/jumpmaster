@@ -11,6 +11,7 @@ import {
   opKeys,
   recordFiledNumber,
   runOp,
+  runOpIf,
   type SetLabelsPayload,
   sanitizeCrewText,
   type UpdateIssuePayload,
@@ -23,6 +24,7 @@ import {
   getCrewIssue,
   INTAKE_SOURCE,
   listCrewIssues,
+  parseAfter,
   setCrewIssue,
 } from './store.js';
 
@@ -49,22 +51,63 @@ const PENDING: CrewIssueState[] = ['filing', 'promote_held', 'promoting', 'revis
 
 type Step = { result: OpResult; done: CrewIssuePatch };
 
+/** The waiting reason of a promotion held for an in-flight issue it does not name (#843). */
+export const OBJECTIVE_IN_FLIGHT = 'waiting: another issue of the objective is in flight';
+
+/** The waiting reason of a promotion held until a crew issue it names in `after` merges. */
+export const waitsFor = (key: string, number: number | null): string =>
+  `waiting: after ${key}${number === null ? '' : ` (#${number})`}, not merged yet`;
+
+/** Whether a crew issue's work is merged: its work item is done as merged. Nothing else counts. */
+const MERGED_SQL = `EXISTS (SELECT 1 FROM work_items w
+  WHERE w.drop_zone_id = c.zone_id AND w.issue_number = c.number
+    AND w.state = 'done' AND w.reason = 'merged')`;
+
 /**
- * Whether another crew issue of the same objective is promoted and its work is not merged yet.
- * Without blocker links this keeps an objective's issues landing one at a time.
+ * The other crew issues of `row`'s objective in flight, each holding one of its slots: promoted
+ * and not merged, or promoting with its label swap already recorded in the outbox (the claim
+ * `promote` takes in the transaction that checks the limit, so two passes never both take one).
  */
-function objectiveBusy(db: Db, row: CrewIssue): boolean {
-  return (
-    db
-      .prepare(
-        `SELECT 1 FROM crew_issues c
-           LEFT JOIN work_items w ON w.drop_zone_id = c.zone_id AND w.issue_number = c.number
-         WHERE c.zone_id = ? AND c.objective = ? AND c.id <> ? AND c.state = 'promoted'
-           AND NOT (COALESCE(w.state, '') = 'done' AND COALESCE(w.reason, '') = 'merged')
-         LIMIT 1`,
-      )
-      .get(row.zoneId, row.objective, row.id) !== undefined
+function inFlight(db: Db, row: CrewIssue): { after: string[] | null }[] {
+  const rows = db
+    .prepare(
+      `SELECT c.after_json AS afterJson FROM crew_issues c
+         WHERE c.zone_id = ? AND c.objective = ? AND c.id <> ?
+           AND (c.state = 'promoted' OR (c.state = 'promoting' AND EXISTS (
+             SELECT 1 FROM outbox o WHERE o.op_key = 'labels:' || c.id || ':promote'
+               AND o.state <> 'failed')))
+           AND NOT ${MERGED_SQL}`,
+    )
+    .all(row.zoneId, row.objective, row.id) as { afterJson: string | null }[];
+  return rows.map((r) => ({ after: parseAfter(r.afterJson) }));
+}
+
+/**
+ * Why `row`'s promotion waits (#843), or null when it may go now. Without `after` it waits while
+ * any other issue of its objective is in flight, so its issues land one at a time as before. With
+ * `after` it waits until every issue it names has merged (a rejected, failed or closed one never
+ * has), while its objective has `maxConcurrentImplement` issues in flight, and while an in-flight
+ * issue has no `after`, which still lands alone.
+ */
+export function promotionWait(
+  db: Db,
+  zone: Pick<DropZoneConfig, 'maxConcurrentImplement'>,
+  row: CrewIssue,
+): string | null {
+  const flying = inFlight(db, row);
+  if (row.after === null) return flying.length > 0 ? OBJECTIVE_IN_FLIGHT : null;
+  const merged = db.prepare(
+    `SELECT c.number, ${MERGED_SQL} AS merged FROM crew_issues c WHERE c.zone_id = ? AND c.key = ?`,
   );
+  for (const key of row.after) {
+    const dep = merged.get(row.zoneId, key) as
+      | { number: number | null; merged: number }
+      | undefined;
+    if (dep?.merged !== 1) return waitsFor(key, dep?.number ?? null);
+  }
+  if (flying.length >= (zone.maxConcurrentImplement ?? 1)) return OBJECTIVE_IN_FLIGHT;
+  if (flying.some((f) => f.after === null)) return OBJECTIVE_IN_FLIGHT;
+  return null;
 }
 
 async function file(
@@ -110,7 +153,9 @@ async function promote(
   now: Date,
 ): Promise<Step | 'wait' | 'changed' | 'closed'> {
   if (row.number === null) return 'wait';
-  if (objectiveBusy(db, row)) return 'wait';
+  // A label swap already recorded has its slot: it goes on without the check.
+  const claimed = getOutbox(db, opKeys.promote(row.id)) !== undefined;
+  if (!claimed && promotionWait(db, zone, row) !== null) return 'wait';
   const live = await forges.author.getIssue(row.number);
   if (!live) return 'wait';
   // Closed on the forge since Command ruled: a label swap would "promote" an issue no sync lists.
@@ -124,12 +169,16 @@ async function promote(
     add: [zone.readyLabel],
     remove: [zone.crew.stagedLabel],
   };
-  const result = await runOp(
+  // The limit is checked again in the transaction that records the write (D3): another pass may
+  // have taken the last slot while this one read the forge.
+  const result = await runOpIf(
     db,
     forges,
     { kind: 'set_labels', opKey: opKeys.promote(row.id), zoneId: zone.id, itemId: null, payload },
     now,
+    () => promotionWait(db, zone, row) === null,
   );
+  if (result === null) return 'wait';
   return { result, done: { state: 'promoted' } };
 }
 

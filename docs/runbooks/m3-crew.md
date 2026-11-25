@@ -194,9 +194,24 @@ node apps/server/dist/ctl.js rule <briefing> promote "why"
 **Pass:** the issue loses the staged label, gains the ready label, and goes through the normal
 implement, review and merge loop.
 
-- One promoted issue per objective is in flight at a time. The next one waits in `promoting` until
-  the earlier one's PR merges. If the earlier one parks or closes, the later ones wait: fix or
-  merge it, or reject them.
+- The lead gives each issue an `after` list: the keys of its objective's crew issues that must
+  merge first, or `[]` when it is independent. An issue with `after` must have a `## Placement`
+  section naming at least one path, or it is refused. A promotion waits in `promoting` while:
+  - it has no `after` (an issue filed before #843, or a lead that left it out) and another issue of
+    its objective is promoted and not merged: these still land one at a time;
+  - an issue its `after` names has not merged. A rejected, failed or closed-unmerged issue never
+    counts as merged, so it holds the ones after it: reject them, or file a replacement;
+  - its objective already has `maxConcurrentImplement` (default 1) promoted, unmerged issues, or
+    one of them has no `after`.
+
+  So independent issues of one objective build at once, up to `maxConcurrentImplement`, and one
+  that parks holds only the issues that name it. With `maxConcurrentImplement: 1` they still land
+  one at a time, in `after` order. The goals page's **Crew issues** table says what a waiting
+  issue waits for: `waiting: after <key> (#<n>), not merged yet`, or `waiting: another issue of
+  the objective is in flight`.
+- Two builds that name the same file never run together: a ready item whose Placement overlaps
+  the Placement of an item in `in_flight`, or a file of an open PR, waits with
+  `waiting: overlaps #<n> on <path>` until that build's PR merges or closes.
 - Don't edit a crew issue on the forge before promoting it. A changed body stops the promotion and
   raises a briefing with **Re-stage** (take your edit and refute again) or **Reject**.
 - A crew issue never starts work until it is promoted, even if someone adds the ready label by

@@ -6,6 +6,7 @@ import { getZoneMode, isKilled } from '../db/repo.js';
 import { GOAL_CHANGE_PREFIX, proposeGoalChange } from '../goal-change.js';
 import { getGoals, zoneObjective } from '../goals.js';
 import { sanitizeCrewText } from '../outbox.js';
+import { placementPaths } from '../scheduler.js';
 import { crewBodySha } from './flush.js';
 import {
   type CrewIssue,
@@ -212,6 +213,39 @@ function replacementRefusal(
   return null;
 }
 
+/** The most keys an issue's `after` may name (#843). */
+export const MAX_AFTER = 5;
+
+/** Why an issue with an `after` list needs a Placement section (#843). */
+export const AFTER_NEEDS_PLACEMENT = 'an issue with after needs a Placement section';
+
+/**
+ * Why `issue`'s `after` list is refused (#843), or null when it holds: at most `MAX_AFTER` keys,
+ * each an existing crew issue of the zone and the same objective (an earlier item of the same
+ * result is one by now), never the issue's own key nor a later item; and the issue's Placement
+ * names at least one path, so the scheduler can keep two builds off the same files.
+ */
+function afterRefusal(
+  db: Db,
+  zoneId: string,
+  issue: { key: string; objective: string; body: string; after: readonly string[] },
+  later: ReadonlySet<string>,
+): string | null {
+  if (issue.after.length > MAX_AFTER) return `after names more than ${MAX_AFTER} issues`;
+  for (const key of issue.after) {
+    if (key === issue.key) return `after ${key}: its own key`;
+    const target = getCrewIssueByKey(db, zoneId, key);
+    if (!target) {
+      return later.has(key)
+        ? `after ${key}: a later item of this result`
+        : `after ${key}: no such crew issue`;
+    }
+    if (target.objective !== issue.objective) return `after ${key}: another objective's issue`;
+  }
+  if (placementPaths(issue.body).length === 0) return AFTER_NEEDS_PLACEMENT;
+  return null;
+}
+
 const sourceRefOf = (s: CrewSource): string => (s.kind === 'drop' ? s.dropId : String(s.tokenId));
 
 /**
@@ -348,7 +382,7 @@ export function applyCrewActions(
     );
     const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
     let slots = crewIssueSlots(db, zone);
-    for (const i of issues) {
+    for (const [n, i] of issues.entries()) {
       const refuse = (why: string) => report.refused.push(`${i.key}: ${why}`);
       if (!ladder.has(i.objective)) {
         refuse(`objective "${i.objective.slice(0, 60)}" is not on the ladder`);
@@ -386,6 +420,14 @@ export function applyCrewActions(
         refuse(named.map((g) => `names protected path ${g}`).join('; '));
         continue;
       }
+      if (i.after !== undefined) {
+        const later = new Set(issues.slice(n + 1).map((x) => x.key));
+        const why = afterRefusal(db, zone.id, { ...i, after: i.after }, later);
+        if (why !== null) {
+          refuse(why);
+          continue;
+        }
+      }
       if (slots <= 0) {
         refuse('no free slot');
         continue;
@@ -402,6 +444,7 @@ export function applyCrewActions(
           body: i.body,
           priority: i.priority ?? null,
           replaces: i.replaces ?? null,
+          after: i.after ?? null,
           createdAt: now.toISOString(),
         }),
       );

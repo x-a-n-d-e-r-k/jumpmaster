@@ -116,7 +116,10 @@ export function placementPaths(body: string): string[] {
 const pathsOverlap = (a: string, b: string): boolean =>
   a === b || (a.endsWith('/') && b.startsWith(a)) || (b.endsWith('/') && a.startsWith(b));
 
-/** The reason a ready item carries while an open PR changes a file its Placement names. */
+/**
+ * The reason a ready item carries while an open PR changes a file its Placement names, or an item
+ * building now names one in its own Placement (`#` the PR's or the building issue's number).
+ */
 export const OVERLAP_PREFIX = 'waiting: overlaps #';
 export const overlapReason = (pr: number, path: string): string =>
   `${OVERLAP_PREFIX}${pr} on ${path}`;
@@ -125,20 +128,45 @@ export const isOverlapReason = (reason: string | null): boolean =>
 
 type OpenTouches = ReturnType<typeof listOpenPrTouches>;
 
+/** An item building now (`in_flight`), with the paths its Placement names (#843). */
+type InFlightPlacement = { itemId: number; issue: number; paths: string[] };
+
+/** The zone's `in_flight` items, each with its Placement paths. */
+function inFlightPlacements(db: Db, zoneId: string): InFlightPlacement[] {
+  return listWorkItems(db, zoneId, 'in_flight').map((i) => ({
+    itemId: i.id,
+    issue: i.issueNumber,
+    paths: placementPaths(i.body),
+  }));
+}
+
 /**
- * The first overlap of a ready item with the zone's open PRs, in sorted order (by path, then PR
- * number), as its waiting reason; null when none. An open PR with an unknown file list and an
- * item whose Placement names no path overlap nothing. A directory match names the PR's file.
+ * The first overlap of a ready item with the zone's open PRs (#291) and with the Placement of the
+ * items building now (#843), in sorted order (by path, then PR or issue number), as its waiting
+ * reason; null when none. An open PR with an unknown file list and an item whose Placement names
+ * no path overlap nothing. A directory match names the more specific path.
  */
-export function overlapOf(item: Pick<WorkItem, 'id' | 'body'>, open: OpenTouches): string | null {
+export function overlapOf(
+  item: Pick<WorkItem, 'id' | 'body'>,
+  open: OpenTouches,
+  building: readonly InFlightPlacement[] = [],
+): string | null {
   const mine = placementPaths(item.body);
   if (mine.length === 0) return null;
   const hits: { path: string; pr: number }[] = [];
-  for (const o of open) {
-    if (o.itemId === item.id || o.files === null || o.prNumber === null) continue;
+  const touches = [
+    ...open.flatMap((o) =>
+      o.files === null || o.prNumber === null
+        ? []
+        : [{ itemId: o.itemId, n: o.prNumber, files: o.files }],
+    ),
+    ...building.map((b) => ({ itemId: b.itemId, n: b.issue, files: b.paths })),
+  ];
+  for (const o of touches) {
+    if (o.itemId === item.id) continue;
     for (const p of mine)
       for (const f of o.files)
-        if (pathsOverlap(p, f)) hits.push({ path: p.length >= f.length ? p : f, pr: o.prNumber });
+        if (pathsOverlap(p, f)) hits.push({ path: p.length >= f.length ? p : f, pr: o.n });
   }
   hits.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.pr - b.pr));
   const first = hits[0];
@@ -158,7 +186,8 @@ export function openPrCap(
 
 /**
  * The ready items a new implement drop may start, ranked, each with the overlap that holds it
- * back (#291) or null. `skip` items and blocked items are left out.
+ * back or null: an open PR changing a file its Placement names (#291), or an item building now
+ * whose Placement overlaps its own (#843). `skip` items and blocked items are left out.
  */
 export function readyCandidates(
   db: Db,
@@ -166,9 +195,10 @@ export function readyCandidates(
   skip: ReadonlySet<number> = new Set(),
 ): { item: WorkItem; overlap: string | null }[] {
   const open = listOpenPrTouches(db, zoneId);
+  const building = inFlightPlacements(db, zoneId);
   return rankItems(
     listWorkItems(db, zoneId, 'ready').filter((i) => !skip.has(i.id) && !isBlocked(i)),
-  ).map((item) => ({ item, overlap: overlapOf(item, open) }));
+  ).map((item) => ({ item, overlap: overlapOf(item, open, building) }));
 }
 
 /**

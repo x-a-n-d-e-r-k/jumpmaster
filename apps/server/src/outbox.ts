@@ -940,6 +940,24 @@ export async function runOp(
    */
   opts: { allowInObserve?: boolean } = {},
 ): Promise<OpResult> {
+  const result = await runOpIf(db, forges, op, now, () => true, opts);
+  if (result === null) throw new Error(`outbox row ${op.opKey} refused by an open check`);
+  return result;
+}
+
+/**
+ * `runOp`, with a check that must hold for a write not yet recorded: `may` runs in the same
+ * transaction that records the write, so two passes cannot both pass it (#843). Null when it does
+ * not hold, and nothing is recorded. A write already recorded goes on without the check.
+ */
+export async function runOpIf(
+  db: Db,
+  forges: ForgePair,
+  op: Op,
+  now: Date,
+  may: () => boolean,
+  opts: { allowInObserve?: boolean } = {},
+): Promise<OpResult | null> {
   if (isKilled(db)) throw new Error(`kill switch engaged: forge write ${op.kind} refused`);
   // Before any insert: a row left behind would later become `unknown` and park the item.
   const exempt = opts.allowInObserve === true && op.kind === 'create_labels';
@@ -949,16 +967,20 @@ export async function runOp(
   if (op.kind === 'comment_issue') checkCommentPayload(op.payload as CommentIssuePayload);
   const existing = getOutbox(db, op.opKey);
   if (existing) return fromExisting(db, forges, op, existing, now);
-  const inserted = insertOutbox(db, {
-    id: randomUUID(),
-    opKey: op.opKey,
-    kind: op.kind,
-    workItemId: op.itemId,
-    zoneId: op.zoneId,
-    payloadJson: JSON.stringify(op.payload),
-    state: 'pending',
-    createdAt: now.toISOString(),
-  });
+  const inserted = db.transaction((): boolean | null => {
+    if (!may()) return null;
+    return insertOutbox(db, {
+      id: randomUUID(),
+      opKey: op.opKey,
+      kind: op.kind,
+      workItemId: op.itemId,
+      zoneId: op.zoneId,
+      payloadJson: JSON.stringify(op.payload),
+      state: 'pending',
+      createdAt: now.toISOString(),
+    });
+  })();
+  if (inserted === null) return null;
   if (!inserted) {
     const raced = getOutbox(db, op.opKey);
     if (!raced) throw new Error(`outbox row ${op.opKey} vanished`);

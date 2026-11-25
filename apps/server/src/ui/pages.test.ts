@@ -1132,6 +1132,8 @@ const crewIssue = (o: Partial<CrewIssue> = {}): CrewIssue => ({
   refutedSha: 's',
   findingsJson: null,
   holdUntil: null,
+  replaces: null,
+  after: null,
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
   ...o,
@@ -1181,6 +1183,31 @@ describe('goal ladder', () => {
     expect(html).toMatch(/Ship the CLI[^<]*<\/td><td>open/);
     expect(html).toMatch(/Add docs<\/td><td>promoted<\/td><td>#7<\/td><td>pr_open/);
     expect(html).toMatch(/Second<\/td><td>staged<\/td><td>#8<\/td><td>-/);
+  });
+
+  test('a held promotion says what it waits for: the key and number, or another issue in flight (#843)', () => {
+    const html = renderGoals({
+      zone: z,
+      zones: [z],
+      goals: undefined,
+      crewIssues: [
+        crewIssue({ id: 4, key: 'b', title: 'Second', state: 'promoting', number: 8 }),
+        crewIssue({ id: 5, key: 'c', title: 'Third', state: 'promoting', number: 9 }),
+      ],
+      crewWaits: new Map([
+        [4, 'waiting: after a (#7), not merged yet'],
+        [5, 'waiting: another issue of the objective is in flight'],
+      ]),
+      items: [],
+      skippedCrewUnpromoted: [],
+      doneByRuling: new Map(),
+    });
+    expect(html).toContain(
+      'Second</td><td>promoting<br><small>waiting: after a (#7), not merged yet</small></td><td>#8',
+    );
+    expect(html).toContain(
+      'Third</td><td>promoting<br><small>waiting: another issue of the objective is in flight</small>',
+    );
   });
 
   test('#645 #754 a crew-proposed change waits for its ruling only while its briefing is open', () => {
