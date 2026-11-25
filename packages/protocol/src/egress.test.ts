@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'vitest';
-import { BASE_EGRESS, ceilingRefusal, egressCeiling, entryCovered } from './egress.js';
+import {
+  BASE_EGRESS,
+  ceilingRefusal,
+  egressCeiling,
+  entryCovered,
+  isPrivateNetworkAddress,
+} from './egress.js';
 
 describe('egressCeiling', () => {
   test('unset, empty and blank mean no ceiling', () => {
@@ -118,5 +124,59 @@ describe('ceilingRefusal', () => {
     ) as string;
     expect(odd).not.toMatch(/[^\x20-\x7e]/);
     expect(odd).not.toContain('a'.repeat(100));
+  });
+});
+
+describe('isPrivateNetworkAddress', () => {
+  test.each([
+    '10.0.0.0',
+    '10.1.2.3',
+    '10.255.255.255',
+    '172.16.0.1',
+    '172.31.255.254',
+    '192.168.0.1',
+    '192.168.255.255',
+    '100.64.0.1',
+    '100.127.255.254',
+    'fc00::1',
+    'fd12:3456:789a::1',
+    '::ffff:10.1.2.3',
+    '::ffff:a01:203',
+    '0:0:0:0:0:ffff:172.16.0.1',
+    '::FFFF:192.168.1.1',
+    '::ffff:100.64.0.1',
+  ])('%s is a private-network address', (ip) => {
+    expect(isPrivateNetworkAddress(ip)).toBe(true);
+  });
+
+  test.each([
+    '127.0.0.1',
+    '::1',
+    '169.254.169.254',
+    '::ffff:169.254.169.254',
+    'fe80::1',
+    '0.0.0.0',
+    '::',
+    '224.0.0.1',
+    'ff02::1',
+    '255.255.255.255',
+    '192.0.2.1',
+    '2001:db8::1',
+    '198.18.0.1',
+    '2002:a01:203::1',
+    'fec0::1',
+    '8.8.8.8',
+    '2606:4700:4700::1111',
+    '172.32.0.1',
+    '100.128.0.1',
+    '64:ff9b::a01:203',
+    '64:ff9b::10.1.2.3',
+    '::ffff:0:10.1.2.3',
+    '::10.1.2.3',
+    'gitlab.internal',
+    '',
+    '10.1.2.3/8',
+  ])('%s is not a private-network address', (ip) => {
+    expect(isPrivateNetworkAddress(ip)).toBe(false);
   });
 });

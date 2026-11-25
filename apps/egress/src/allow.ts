@@ -3,6 +3,7 @@
 export {
   type EgressLogLine,
   hostAllowed,
+  isPrivateNetworkAddress,
   isPublicAddress,
   normalizeHost,
   validAllowEntry,

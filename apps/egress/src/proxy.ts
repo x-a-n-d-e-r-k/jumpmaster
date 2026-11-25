@@ -1,17 +1,38 @@
 // The per-drop egress proxy: CONNECT only, to listed public hosts, on the allowed ports. It
 // resolves names itself, refuses the host if any answer isn't public, and connects only to the
 // addresses it checked, in order, never resolving again (no DNS rebinding between check and use).
+//
+// JM_EGRESS_PRIVATE (the `private` option, default empty) lists hosts that may also resolve to
+// private-network addresses, such as a self-managed GitLab on an internal network. It is kept as
+// narrow as possible: only exact host names (no `*.` wildcards, no IP literals), each one also
+// allowed by JM_EGRESS_ALLOW, or the proxy refuses to start. For a listed host only the
+// private-network ranges open (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7 and the
+// IPv4-mapped forms of the IPv4 ones). Loopback, link-local (169.254.169.254 included),
+// unspecified, multicast, documentation, reserved and transition ranges, NAT64 forms of private
+// addresses among them, stay refused for every host. Every other host is judged as before, in
+// both modes: monitor mode never opens a private address for an unlisted host.
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { connect, type Socket } from 'node:net';
 import type { Duplex } from 'node:stream';
-import { type EgressLogLine, hostAllowed, isPublicAddress, normalizeHost } from './allow.js';
+import {
+  type EgressLogLine,
+  hostAllowed,
+  isPrivateNetworkAddress,
+  isPublicAddress,
+  normalizeHost,
+} from './allow.js';
 
 export type Resolved = { address: string; family: number };
 
 export type ProxyOptions = {
   mode: 'monitor' | 'enforce';
   allow: string[];
+  /**
+   * Host names (exact, no wildcards) that may also resolve to private-network addresses
+   * (`JM_EGRESS_PRIVATE`); each must also be allowed by `allow`. Default `[]`.
+   */
+  private?: string[];
   /** Ports a CONNECT may name; default `[443]`. */
   ports?: number[];
   /** The only address it listens on (the drop-network address). */
@@ -120,6 +141,9 @@ export async function startProxy(o: ProxyOptions): Promise<Proxy> {
   const limits = { ...DEFAULT_LIMITS, ...o.limits };
   const lookup = o.lookup ?? defaultLookup;
   const dial = o.dial ?? defaultDial;
+  const privateHosts = new Set(
+    (o.private ?? []).map((h) => normalizeHost(h)).filter((h): h is string => h !== null),
+  );
   let tunnels = 0;
   /** Every socket, from accept to close, so close() can end them all. */
   const sockets = new Set<Duplex>();
@@ -208,7 +232,12 @@ export async function startProxy(o: ProxyOptions): Promise<Proxy> {
         addresses = [];
       }
       if (addresses.length === 0) return refuse(client, 502, host, port, 'resolve failed');
-      if (!addresses.every((a) => isPublicAddress(a.address)))
+      // A host on `private` (and allowed) may also reach private-network addresses; nothing else.
+      const reachable =
+        listed && privateHosts.has(host)
+          ? (ip: string) => isPublicAddress(ip) || isPrivateNetworkAddress(ip)
+          : isPublicAddress;
+      if (!addresses.every((a) => reachable(a.address)))
         return refuse(client, 403, host, port, 'private address');
       if (client.destroyed) return refuse(client, 502, host, port, 'client gone');
       const upstream = await dialFirst(addresses, port, dial, limits.connectTimeoutMs);

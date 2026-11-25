@@ -84,6 +84,7 @@ async function world(
         return connect(to, '127.0.0.1');
       }),
     ...(o.ports ? { ports: o.ports } : {}),
+    ...(o.private ? { private: o.private } : {}),
     ...(o.limits ? { limits: o.limits } : {}),
   });
   cleanups.push(() => proxy.close());
@@ -285,6 +286,103 @@ describe('the allow-list', () => {
   });
 });
 
+describe('private hosts (JM_EGRESS_PRIVATE)', () => {
+  const allow = ['allowed.test', '*.wild.test', 'gitlab.corp.test'];
+
+  test('a listed host resolving to a private-network address tunnels, logged as usual', async () => {
+    const echo = await echoServer();
+    const w = await world({
+      allow,
+      private: ['gitlab.corp.test'],
+      answers: { 'gitlab.corp.test': ['10.1.2.3'] },
+      routes: { '10.1.2.3': echo.port },
+    });
+    const { status, socket } = await connectTo(w.proxy.port, 'GitLab.Corp.Test.:443');
+    expect(status).toBe(200);
+    socket.write('ping');
+    expect(await readSome(socket)).toBe('ping');
+    socket.end();
+    await until(() => w.logs.length === 1);
+    expect(w.dialed).toEqual(['10.1.2.3']);
+    expect(w.logs).toEqual([
+      {
+        at: expect.any(String),
+        host: 'gitlab.corp.test',
+        port: 443,
+        decision: 'allow',
+        bytesUp: 4,
+        bytesDown: 4,
+        ms: expect.any(Number),
+      },
+    ]);
+  });
+
+  test('a listed host resolving to private and public addresses tunnels', async () => {
+    const echo = await echoServer();
+    const w = await world({
+      allow,
+      private: ['gitlab.corp.test'],
+      answers: { 'gitlab.corp.test': ['10.1.2.3', '8.8.8.8'] },
+      routes: { '10.1.2.3': echo.port, '8.8.8.8': echo.port },
+    });
+    const { status, socket } = await connectTo(w.proxy.port, 'gitlab.corp.test:443');
+    expect(status).toBe(200);
+    socket.end();
+    await until(() => w.logs.length === 1);
+    expect(w.logs[0]).toMatchObject({ host: 'gitlab.corp.test', decision: 'allow' });
+    expect(w.logs[0]?.reason).toBeUndefined();
+  });
+
+  test.each([
+    [['127.0.0.1']],
+    [['169.254.169.254']],
+    [['64:ff9b::a01:203']],
+    [['10.1.2.3', '127.0.0.1']],
+  ])('a listed host resolving to %j is refused', async (addresses) => {
+    const echo = await echoServer();
+    const w = await world({
+      allow,
+      private: ['gitlab.corp.test'],
+      answers: { 'gitlab.corp.test': addresses },
+      routes: { '10.1.2.3': echo.port },
+    });
+    expect((await connectTo(w.proxy.port, 'gitlab.corp.test:443')).status).toBe(403);
+    expect(w.dialed).toEqual([]);
+    expect(w.logs.map((l) => [l.host, l.decision, l.reason])).toEqual([
+      ['gitlab.corp.test', 'deny', 'private address'],
+    ]);
+  });
+
+  test('an allowed host not on the private list resolving to 10.1.2.3 is refused', async () => {
+    const echo = await echoServer();
+    const w = await world({
+      allow,
+      private: ['gitlab.corp.test'],
+      answers: { 'allowed.test': ['10.1.2.3'] },
+      routes: { '10.1.2.3': echo.port },
+    });
+    expect((await connectTo(w.proxy.port, 'allowed.test:443')).status).toBe(403);
+    expect(w.dialed).toEqual([]);
+    expect(w.logs.map((l) => l.reason)).toEqual(['private address']);
+  });
+
+  test('in monitor mode an unlisted host resolving to 10.1.2.3 is refused', async () => {
+    const echo = await echoServer();
+    const w = await world({
+      mode: 'monitor',
+      allow,
+      private: ['gitlab.corp.test'],
+      answers: { 'other.test': ['10.1.2.3'] },
+      routes: { '10.1.2.3': echo.port },
+    });
+    expect((await connectTo(w.proxy.port, 'other.test:443')).status).toBe(403);
+    expect(w.dialed).toEqual([]);
+    expect(w.logs.map((l) => [l.host, l.decision, l.reason])).toEqual([
+      ['other.test', 'deny', 'private address'],
+    ]);
+  });
+});
+
 describe('request shapes', () => {
   test('GET and absolute-URI requests are 405; CONNECT to port 22 is 403', async () => {
     const w = await world({ answers: { 'allowed.test': ['8.8.8.8'] } });
@@ -408,6 +506,7 @@ describe('main', () => {
       bind: '172.30.0.2',
       port: 3128,
       limits: {},
+      private: [],
     });
     expect(() =>
       configFromEnv({ ...base, JM_EGRESS_BIND: '172.30.0.2', JM_EGRESS_MODE: 'off' }),
@@ -437,6 +536,31 @@ describe('main', () => {
       expect(() =>
         configFromEnv({ ...base, JM_EGRESS_BIND: '172.30.0.2', JM_EGRESS_MAX_TUNNELS: bad }),
       ).toThrow(/JM_EGRESS_MAX_TUNNELS/);
+  });
+
+  test('JM_EGRESS_PRIVATE lists plain host names the allow list covers', () => {
+    const base = {
+      JM_EGRESS_MODE: 'enforce',
+      JM_EGRESS_BIND: '172.30.0.2',
+      JM_EGRESS_ALLOW: 'github.com,gitlab.corp.test,*.internal.test',
+    };
+    expect(configFromEnv(base).private).toEqual([]);
+    expect(configFromEnv({ ...base, JM_EGRESS_PRIVATE: '  ' }).private).toEqual([]);
+    expect(
+      configFromEnv({ ...base, JM_EGRESS_PRIVATE: ' GitLab.Corp.Test. ,, git.internal.test ' })
+        .private,
+    ).toEqual(['gitlab.corp.test', 'git.internal.test']);
+    for (const bad of ['*.internal.test', '10.1.2.3', '::1', 'gitlab.other.test', 'internal.test'])
+      expect(() => configFromEnv({ ...base, JM_EGRESS_PRIVATE: bad }), bad).toThrow(
+        /JM_EGRESS_PRIVATE/,
+      );
+    // The error never echoes another variable's value.
+    try {
+      configFromEnv({ ...base, JM_EGRESS_PRIVATE: 'gitlab.other.test' });
+    } catch (e) {
+      expect((e as Error).message).not.toContain('172.30.0.2');
+      expect((e as Error).message).not.toContain('github.com');
+    }
   });
 
   test('the built entry exits non-zero naming JM_EGRESS_BIND, and prints no ready line', () => {
