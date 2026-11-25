@@ -5,6 +5,7 @@ import { zonePass } from './flow/snapshot.js';
 import { gitBlobSha } from './forge/github.js';
 import {
   advanceGoalChanges,
+  checksPass,
   confirmGoalChange,
   GOAL_CHANGE_BRANCH,
   GOAL_TEXT_MAX,
@@ -20,7 +21,8 @@ import { opMarker } from './outbox.js';
 import { promptVersions } from './payloads.js';
 import { crewWorld, GOAL } from './test/crew.js';
 import { FORGE_WRITES } from './test/fakes.js';
-import { usageCfg } from './test/fixtures.js';
+import { makeZone, usageCfg } from './test/fixtures.js';
+import { gitlabPipelineReads } from './test/gitlab-pipeline-reads.js';
 import { t0 } from './test/helpers.js';
 
 const NEW_GOAL = GOAL.replace('### Ship the CLI', '### Ship the CLI\n\n### Write the user guide');
@@ -461,4 +463,22 @@ describe('approving and merging a goal change (#363)', () => {
     await w.pass();
     expect(getGoalChange(w.db, w.id)?.state).toBe('open');
   });
+});
+
+describe('checksPass on GitLab reads (#885)', () => {
+  const zone = makeZone({ ciRequired: true });
+
+  test('a green GitLab pipeline passes the required pipeline', async () => {
+    const r = await gitlabPipelineReads('green');
+    expect(r.requiredChecks).toEqual(['pipeline']);
+    expect(checksPass(zone, r.requiredChecks, r.checks)).toBe(true);
+  });
+
+  test.each(['none', 'running', 'failed', 'jobless-failed'] as const)(
+    'a GitLab head with pipeline %s does not pass',
+    async (c) => {
+      const r = await gitlabPipelineReads(c);
+      expect(checksPass(zone, r.requiredChecks, r.checks)).toBe(false);
+    },
+  );
 });

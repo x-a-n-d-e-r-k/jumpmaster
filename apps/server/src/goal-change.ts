@@ -385,7 +385,7 @@ export const goalChangeReviewBody = (goalPath: string, id: number): string =>
  * Whether the zone's required checks pass on `sha`, as the flow judges an agent PR (with CI
  * required, only the named required checks count).
  */
-function checksPass(zone: DropZoneConfig, required: string[], c: ChecksFacts): boolean {
+export function checksPass(zone: DropZoneConfig, required: string[], c: ChecksFacts): boolean {
   if (zone.ciRequired && required.length === 0) return false;
   if (c.state === 'success') return required.every((n) => c.names.includes(n));
   return c.state === 'none' && !zone.ciRequired && required.length === 0;
