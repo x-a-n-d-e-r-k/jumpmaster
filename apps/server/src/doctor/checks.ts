@@ -793,6 +793,8 @@ const LACK_FIX: Record<string, string> = {
     "run a stick from a release with egress control: it advertises egress-v1 only once its egress self-check passes, and the stick log says why when it doesn't; or set the project's egress.mode to off",
   'clone-v1':
     'run a stick from a release with the clone container: it advertises clone-v1 only once its volume self-check and base image pass, with 10 GiB free, and the stick log says why when it does not',
+  'egress-private-v1':
+    "run a stick from a release with private egress hosts, or remove the host from the project's egress.private",
   'image-verify-v1': 'run a stick from a release that verifies image signatures (M4 or later)',
   'image-policy:signed':
     'set JM_IMAGE_POLICY=signed on the stick (the published stick image sets it), or drop requireSignedImages from the config',

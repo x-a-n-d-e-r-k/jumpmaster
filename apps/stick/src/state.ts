@@ -100,7 +100,8 @@ const DIGEST_REF = /@sha256:[0-9a-f]{64}$/;
 
 /**
  * The capabilities a stick advertises from what its checks proved: `egress-v1` when the egress
- * check passed, `image-verify-v1` only under the signed policy (a stick that doesn't verify
+ * check passed, with `egress-private-v1` beside it (its proxy honours `JM_EGRESS_PRIVATE` since
+ * #888), `image-verify-v1` only under the signed policy (a stick that doesn't verify
  * signatures must never lease a drop from a zone that requires signed images), and `push-v1`
  * while the latest volume self-check passed above the free floor. `clone-v1` when `clone` (see
  * `leaseTerms`). `upgrade-v1` when `upgrade` (see `canUpgrade`) and the policy is signed.
@@ -113,7 +114,7 @@ export function advertisedCapabilities(o: {
   upgrade?: boolean;
 }): StickCapability[] {
   return [
-    ...(o.egress ? (['egress-v1'] as const) : []),
+    ...(o.egress ? (['egress-v1', 'egress-private-v1'] as const) : []),
     ...(o.policy === 'signed' ? (['image-verify-v1'] as const) : []),
     ...(o.push ? (['push-v1'] as const) : []),
     ...(o.clone ? (['clone-v1'] as const) : []),

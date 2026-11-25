@@ -521,7 +521,7 @@ describe('the sticks page from invite to live', () => {
     page = await w.page();
     expect(row()).toContain('<span class="stage">Live</span>');
     expect(row()).toContain(
-      'Docker 27.3.1, egress-v1 yes, image-verify-v1 yes, clone-v1 no, 50.0 GB free',
+      'Docker 27.3.1, egress-v1 yes, image-verify-v1 yes, clone-v1 no, egress-private-v1 no, 50.0 GB free',
     );
     expect(row()).not.toContain('data-poll');
     expect(row()).toContain('vps-1');

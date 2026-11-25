@@ -243,6 +243,40 @@ describe('global checks', () => {
     });
   });
 
+  describe('a zone with egress.private needs egress-private-v1 (#897)', () => {
+    const zone = {
+      forge: 'gitlab' as const,
+      gitlab: { baseUrl: 'https://gitlab.example.com' },
+      egress: {
+        mode: 'enforce' as const,
+        allow: ['gitlab.example.com'],
+        private: ['gitlab.example.com'],
+      },
+    };
+    const stampCaps = (w: ReturnType<typeof world>, capabilities: string[]) =>
+      stampStick(
+        w.db,
+        's1',
+        { capabilities, imagePolicy: 'signed', version: '0.5.0', pinnedImages: [] },
+        ago(10_000),
+      );
+
+    test('stick.capabilities fails when the only live stick lacks egress-private-v1, with its fix', async () => {
+      const w = world({ zone });
+      stampCaps(w, ['egress-v1', 'image-verify-v1', 'push-v1', 'clone-v1']);
+      const c = one(await w.run(), 'stick.capabilities');
+      expect(c).toMatchObject({ status: 'fail', zoneId: 'main' });
+      expect(c.summary).toContain(
+        "stick-1 lacks egress-private-v1 (reaching the project's GitLab host on a private network)",
+      );
+      expect(c.fix).toBe(
+        "egress-private-v1: run a stick from a release with private egress hosts, or remove the host from the project's egress.private",
+      );
+      stampCaps(w, ['egress-v1', 'egress-private-v1', 'image-verify-v1', 'push-v1', 'clone-v1']);
+      expect(one(await w.run(), 'stick.capabilities').status).toBe('pass');
+    });
+  });
+
   describe("a stick's egress ceiling (#780)", () => {
     // The world's zone runs the node preset under enforce; this ceiling covers its hosts.
     const NODE = [
