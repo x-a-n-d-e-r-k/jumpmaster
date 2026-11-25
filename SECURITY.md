@@ -191,16 +191,16 @@ An agent reads whatever is in its container, so Jumpmaster keeps the credential 
 of every container an agent runs in.
 
 - **The agent's container never pushes.** An implement, heal or resolve drop clones with a read
-  credential, runs the agent and its gates, and ends with a push request: the gated commit, or a
+  credential (on a GitLab zone, from a local mirror with none), runs the agent and its gates, and ends with a push request: the gated commit, or a
   checkpoint of an interrupted run. Its working copy is on a per-drop Docker volume, the
-  container's only mount, and nothing secret is written there: the payload's credentials arrive on
-  stdin.
+  container's only mount (a GitLab drop's container also mounts a read-only mirror, below), and
+  nothing secret is written there: the payload's credentials arrive on stdin.
 - **The push container is agent-free.** The stick posts the result first (the server records
   `push_pending`), confirms the agent's container is removed, and then starts a push container on
   the volume. It runs the stick's own trooper image, verified under the stick's image policy (never
   the zone's image, so no project tooling), starts no agent, and keeps the trooper's dropped
   capabilities, `no-new-privileges` and limits. Under egress it gets its own proxy that allows only
-  `github.com`.
+  `github.com`, or a GitLab zone's own host.
 - **The token arrives last.** The push container's payload carries no credential. It copies the
   branch out of the agent's working copy into a root-owned bare repository through `upload-pack`,
   run as the agent's uid and hardened (`core.fsmonitor=false`, `core.hooksPath=/dev/null`,
@@ -217,6 +217,20 @@ of every container an agent runs in.
 - **The pre-push check** in the push container refuses protected paths, secrets in added lines or
   messages, unexpected commit identities, and a head that isn't the gated commit. It pushes with
   `--force-with-lease`, so a branch someone else moved is never overwritten.
+
+**On a GitLab zone**, no GitLab token is ever in a container an agent runs in:
+
+- **A clone container fetches the project.** Before the drop starts, the stick runs its own trooper
+  image in a clone container on its own network. No agent runs there, and under egress it reaches
+  only the zone's GitLab host. The stick writes the token to its stdin only after it prints a ready
+  line.
+- **The token** is the zone's read deploy token (`gitlab-pat/<zone>/read`, `read_repository` only)
+  when one is set, else the author token. With the deploy token set, the author token leaves the
+  server only for pushes. A GitLab token can't be revoked when the clone ends.
+- **The mirror.** The clone container fetches into a mirror volume, refuses every redirect,
+  checks that the token is in no file it wrote, and exits. The stick confirms that it is gone
+  before the agent's container starts. That container mounts the mirror read-only at `/jm/mirror`
+  and makes no call to GitLab.
 
 **In GitHub App mode** (two-bot zones whose roles resolve to their owner's apps), no write token
 is ever in a container an agent ran in:
