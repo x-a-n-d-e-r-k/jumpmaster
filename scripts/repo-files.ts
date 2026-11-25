@@ -20,6 +20,10 @@ export const LOCAL_IMAGE_FILES: Record<string, { images: string[]; reason: strin
     images: ['jumpmaster-trooper:dev'],
     reason: 'test layer over the trooper image that push.sh builds locally just before',
   },
+  'images/trooper/e2e/clone.Dockerfile': {
+    images: ['jumpmaster-trooper:dev'],
+    reason: 'test layer over the trooper image that clone.sh builds locally just before',
+  },
   'images/trooper/examples/Dockerfile.pnpm': {
     images: ['jumpmaster-trooper:dev'],
     reason: 'example zone image built by the operator on top of their locally built trooper',

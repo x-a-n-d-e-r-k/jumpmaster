@@ -1,0 +1,22 @@
+#!/usr/bin/env node
+// Stand-in for the Claude CLI in the clone e2e. It runs as the agent in the working copy that was
+// cloned from the provided mirror, and makes no commit and no network call. It marks that it is
+// running (/tmp/jm-e2e-waiting), then waits until the driver, having searched the container,
+// releases it (/tmp/jm-e2e-release; ten minutes at most), and answers COMPLETE.
+const fs = require('node:fs');
+
+const sleep = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+fs.writeFileSync('/tmp/jm-e2e-waiting', `${process.pid}\n`);
+const until = Date.now() + 10 * 60_000;
+while (!fs.existsSync('/tmp/jm-e2e-release') && Date.now() < until) sleep(250);
+
+const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
+out({ type: 'system', subtype: 'init', session_id: 'e2e' });
+out({
+  type: 'result',
+  is_error: false,
+  terminal_reason: 'completed',
+  session_id: 'e2e',
+  num_turns: 1,
+  structured_output: { status: 'COMPLETE', summary: 'e2e: no change' },
+});

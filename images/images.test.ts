@@ -388,6 +388,46 @@ describe('stack presets', () => {
     expect(read('.github/workflows/images.yml')).toContain('images/trooper/e2e/push.sh');
   });
 
+  test('the clone e2e drives the real runDrop, runClone and DockerDriver against a local HTTPS remote, hermetic', () => {
+    const sh = read('images/trooper/e2e/clone.sh');
+    const drop = read('images/trooper/e2e/clone-drop.mjs');
+    const remote = read('images/trooper/e2e/clone-remote.mjs');
+    const image = read('images/trooper/e2e/clone.Dockerfile');
+    // The stick's own code, with a fake server client, against a local smart-HTTPS remote.
+    expect(drop).toContain("import('/app/apps/stick/dist/runner.js')");
+    expect(drop).toContain("import('/app/apps/stick/dist/clone.js')");
+    expect(drop).toContain('class E2EDriver extends DockerDriver');
+    expect(drop).toMatch(/await runDrop\(/);
+    expect(drop).toContain("mirror: 'provided'");
+    // The clone plan carries no egress: the proxy refuses private addresses.
+    expect(drop).not.toMatch(/egress:\s*\{/);
+    expect(remote).toContain("'http-backend'");
+    expect(remote).toContain('WWW-Authenticate');
+    // Hermetic: no gitlab.com outside comments, and the test CA is made at run time.
+    expect(sh.split('\n').filter((l) => !l.startsWith('#') && /gitlab\.com/.test(l))).toEqual([]);
+    expect(sh).toContain('openssl req');
+    expect(sh).not.toContain('-----BEGIN');
+    expect(image).toMatch(/^FROM jumpmaster-trooper:dev$/m);
+    expect(image).toContain('update-ca-certificates');
+    // What it proves.
+    for (const s of [
+      'the clone container printed ready before the grant was written to its stdin',
+      'is read-only in the agent container',
+      "holds the remote's commit",
+      'the planted token is absent from',
+      'control: the same search finds the planted token in the clone container',
+      'the clone container is gone before the agent container is created',
+      'no jm-clone- network or egress proxy exists for the drop',
+      'the agent container made no call to the remote',
+      'the mirror volume is removed at drop end',
+      'hostile: the clone failed cleanly',
+      "hostile: the other host's log shows no request carrying an Authorization header or the token",
+      'clone e2e: ok',
+    ])
+      expect(drop, s).toContain(s);
+    expect(sh).toContain('control: a clone attempt without the token is refused by the remote');
+  });
+
   test('the python preset ships 3.11 and a uv-installed 3.12 every user can find', () => {
     const final = finalStage(instructions(read(PRESET_FILES.python)));
     const env = final
@@ -595,6 +635,7 @@ test('every e2e script records the engine architecture it ran on', () => {
     'images/trooper/e2e/verify.sh',
     'images/trooper/e2e/presets.sh',
     'images/trooper/e2e/push.sh',
+    'images/trooper/e2e/clone.sh',
   ])
     expect(read(f), f).toContain('{{.Server.Os}}/{{.Server.Arch}}');
 });
