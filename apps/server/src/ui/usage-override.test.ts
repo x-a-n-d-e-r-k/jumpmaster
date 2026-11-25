@@ -1,10 +1,10 @@
 import vm from 'node:vm';
 import { describe, expect, test } from 'vitest';
-import { getUsageState, setUsageState } from '../db/repo.js';
+import { getUsageState, recordUsageWindows, setUsageState } from '../db/repo.js';
 import { harness } from '../test/flowHarness.js';
 import { operatorSession } from '../test/helpers.js';
 import { setUsageOverride } from '../usage.js';
-import { USAGE_OVERRIDE_SCRIPT } from './usage-override.js';
+import { USAGE_OVERRIDE_SCRIPT, usageOverrideControl } from './usage-override.js';
 
 const H = 3_600_000;
 const HOST = 'localhost:80';
@@ -31,7 +31,15 @@ function scriptBody(script: string): string {
 }
 
 /** A real app and session; `throttle` puts weekly usage over the throttle, resetting in 36 h. */
-async function world(o: { throttle?: boolean; override?: boolean } = {}) {
+async function world(
+  o: {
+    throttle?: boolean;
+    override?: boolean;
+    windows?: (
+      at: (ms: number) => string,
+    ) => Record<string, { utilization: number; resetsAt?: string }>;
+  } = {},
+) {
   const h = await harness();
   const now = h.now();
   const at = (ms: number) => new Date(now.getTime() + ms).toISOString();
@@ -47,13 +55,16 @@ async function world(o: { throttle?: boolean; override?: boolean } = {}) {
       },
       now,
     );
+  if (o.windows) recordUsageWindows(h.db, o.windows(at), now, null);
   if (o.override) setUsageOverride(h.db, { starts: 5, hours: 3, by: 'session' }, now);
   const home = async () => {
     const r = await h.view('/', { host: HOST });
     expect(r.statusCode, r.body).toBe(200);
     return r.body;
   };
-  return { h, now, at, home };
+  const what = async () =>
+    textOf(/<p id="usage-override-what">([\s\S]*?)<\/p>/.exec(await home())?.[1] ?? '');
+  return { h, now, at, home, what };
 }
 
 describe('Home: Run the next cycle anyway (#729)', () => {
@@ -67,9 +78,63 @@ describe('Home: Run the next cycle anyway (#729)', () => {
     const text = /<p id="usage-override-what">([\s\S]*?)<\/p>/.exec(html)?.[1] ?? '';
     const plain = textOf(text);
     expect(plain).toBe(
-      "Jumpmaster will start up to 5 new drops in the next 3 hours despite Claude's usage warning. It stops early if usage reaches 95% or Claude refuses a request. Weekly usage is 81%, resetting at 2 Jan 12:30 UTC.",
+      "Work is held because Claude's warning holds work: Claude warned of 5-hour usage and reported no figure for it. Jumpmaster will start up to 5 new drops in the next 3 hours anyway. It stops early if usage reaches 95% or Claude refuses a request.",
     );
+    expect(plain).not.toContain('81%');
+    expect(plain).not.toContain('Weekly');
     expect(html).toContain(USAGE_OVERRIDE_SCRIPT);
+  });
+
+  test('a 5-hour window over the threshold: the dialog names it, not a warning or the weekly figure', async () => {
+    const { what } = await world({
+      throttle: false,
+      windows: (at) => ({
+        five_hour: { utilization: 0.92, resetsAt: at(2 * H) },
+        seven_day: { utilization: 0.2, resetsAt: at(36 * H) },
+      }),
+    });
+    const text = await what();
+    expect(text).toContain('5-hour');
+    expect(text).toContain('92%');
+    expect(text).toContain('90%');
+    expect(text).toContain('resetting at 02:00 UTC');
+    expect(text).not.toContain("Claude's usage warning");
+    expect(text).not.toContain('warn');
+    expect(text).not.toContain('Weekly usage is 20%');
+    expect(text).not.toContain('20%');
+  });
+
+  test('the 7-day window over the threshold: the dialog names it, its figure and its reset', async () => {
+    const { what } = await world({
+      throttle: false,
+      windows: (at) => ({
+        five_hour: { utilization: 0.3, resetsAt: at(2 * H) },
+        seven_day: { utilization: 0.92, resetsAt: at(36 * H + 30 * 60_000) },
+      }),
+    });
+    const text = await what();
+    expect(text).toContain('7-day');
+    expect(text).toContain('92%');
+    expect(text).toContain('resetting at 2 Jan 12:30 UTC');
+    expect(text).not.toContain('5-hour');
+    expect(text).not.toContain('warn');
+  });
+
+  test('no reason given: neutral wording that names no warning and no window', () => {
+    const html = usageOverrideControl(
+      {
+        gate: 'finishing_only',
+        state: { overrideStartsLeft: null, overrideStarts: null, overrideUntil: null },
+      },
+      new Date('2026-01-01T00:00:00Z'),
+    );
+    const text = textOf(/<p id="usage-override-what">([\s\S]*?)<\/p>/.exec(html)?.[1] ?? '');
+    expect(text).not.toMatch(/warn/i);
+    for (const w of ['5-hour', '7-day', 'Weekly']) expect(text).not.toContain(w);
+    expect(text).toContain('up to 5 new drops');
+    expect(text).toContain('next 3 hours');
+    expect(text).toContain('95%');
+    expect(html).toContain('id="usage-override-open"');
   });
 
   test('an override in force: the starts left and the stop button, and no run button', async () => {

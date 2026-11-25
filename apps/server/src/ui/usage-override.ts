@@ -1,5 +1,5 @@
-import type { Gate } from '../usage.js';
-import { OVERRIDE_CEILING, OVERRIDE_DEFAULTS } from '../usage.js';
+import type { Gate, GateReason } from '../usage.js';
+import { gateReasonText, OVERRIDE_CEILING, OVERRIDE_DEFAULTS } from '../usage.js';
 import { escapeHtml } from './pages.js';
 
 /** The override's control route (#728): POST sets it (no body: the defaults), DELETE clears it. */
@@ -8,9 +8,9 @@ const ROUTE = '/api/control/usage/override';
 /** What the control reads of the usage state. */
 export type OverrideUsage = {
   gate: Gate;
+  /** What holds the gate (#753), from `gateReason`; the dialog names it (#905). */
+  reason?: GateReason | undefined;
   state: {
-    sevenDayUtil: number | null;
-    sevenDayResetsAt: string | null;
     overrideStartsLeft: number | null;
     overrideStarts: number | null;
     overrideUntil: string | null;
@@ -49,6 +49,17 @@ if(s&&se){let busy=false;s.addEventListener('click',async()=>{if(busy)return;bus
 const pct = (v: number): string => `${Math.round(v * 100)}%`;
 
 /**
+ * What holds work, for the dialog (#905): the window at the threshold with its reset, or Claude's
+ * warning; else neutral words that claim neither.
+ */
+function heldWords(r: GateReason | undefined, now: Date): string {
+  if (r?.kind !== 'threshold' && r?.kind !== 'warning') return 'usage is near its limit';
+  const reset = r.resetsAt ? `, resetting at ${clockTime(r.resetsAt, now)}` : '';
+  const why = escapeHtml(gateReasonText(r));
+  return r.kind === 'warning' ? `Claude's warning holds work: ${why}${reset}` : `${why}${reset}`;
+}
+
+/**
  * Home's control for Command's usage override (#729), beside the gate's words: while the throttle
  * holds work and no override is in force, "Run the next cycle anyway" and its confirmation; while
  * one is in force, its starts left and "Stop the override". Else nothing.
@@ -66,11 +77,7 @@ export function usageOverrideControl(u: OverrideUsage, now: Date): string {
   }
   if (u.gate !== 'finishing_only') return '';
   const { starts, hours } = OVERRIDE_DEFAULTS;
-  const weekly =
-    s.sevenDayUtil === null
-      ? 'Weekly usage is not reported yet.'
-      : `Weekly usage is ${pct(s.sevenDayUtil)}${s.sevenDayResetsAt ? `, resetting at ${clockTime(s.sevenDayResetsAt, now)}` : ''}.`;
-  const what = `Jumpmaster will start up to ${starts} new drops in the next ${hours} hours despite Claude's usage warning. It stops early if usage reaches ${pct(OVERRIDE_CEILING)} or Claude refuses a request. ${weekly}`;
+  const what = `Work is held because ${heldWords(u.reason, now)}. Jumpmaster will start up to ${starts} new drops in the next ${hours} hours anyway. It stops early if usage reaches ${pct(OVERRIDE_CEILING)} or Claude refuses a request.`;
   return (
     `<div class="usage-override"><button type="button" id="usage-override-open" class="primary" aria-haspopup="dialog" aria-controls="usage-override-dialog">Run the next cycle anyway</button>` +
     `<dialog id="usage-override-dialog" class="kill-dialog" aria-labelledby="usage-override-title"><h2 id="usage-override-title">Run the next cycle anyway?</h2><p id="usage-override-what">${what}</p>` +
