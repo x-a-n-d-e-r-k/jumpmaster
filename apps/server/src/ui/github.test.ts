@@ -21,7 +21,9 @@ import { MATRIX_AND_REUSABLE_NOTE } from '../github/workflows.js';
 import { APP_ENTRIES, APP_SECRETS, guidanceAppsOf } from '../test/app-guidance-fixture.js';
 import { makeZone } from '../test/fixtures.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
-import { githubSection, mergeRulesetSection, stepStatus } from './github.js';
+import { visibleText } from '../test/visible-text.js';
+import { fingerprintOf, openVault } from '../vault/vault.js';
+import { githubSection, gitlabSection, mergeRulesetSection, stepStatus } from './github.js';
 import { escapeHtml, FAVICON_HREF } from './pages.js';
 
 const TOKEN = 'o'.repeat(32);
@@ -636,5 +638,193 @@ describe("a GitHub zone's Setup section is pinned (#879)", () => {
       githubSection(two, { ok: false, error: 'GitHub rejected the author token (401)' }, checks),
     ].join('\n<!-- next -->\n');
     await expect(html).toMatchFileSnapshot('./__snapshots__/github-section.html');
+  });
+});
+
+describe("a GitLab zone's Setup section (#879)", () => {
+  const gl = (o: Partial<DropZoneConfig> = {}) =>
+    makeZone({
+      id: 'lab',
+      repo: 'acme/<sub>/widgets',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.test' },
+      identity: 'two-bot',
+      ...o,
+    } as Partial<DropZoneConfig>);
+  const run = (rows: [string, DoctorCheck['status'], string][]) =>
+    rows.map(([id, status, summary]) => ({ id, status, summary, zoneId: 'lab' }) as DoctorCheck);
+
+  /** The step's whole list item, from its label to its chip's end. */
+  const stepOf = (html: string, step: string): string => {
+    const at = html.indexOf(`<li data-gitlab-step="${step}">`);
+    expect(at, step).toBeGreaterThan(-1);
+    const next = html.indexOf('<li data-gitlab-step=', at + 1);
+    return html.slice(at, next > -1 ? next : html.indexOf('</ol>', at));
+  };
+
+  /** Asserts no GitHub wording in a section's visible text or markup. */
+  const gitlabWordsOnly = (html: string) => {
+    const text = visibleText(html);
+    expect(text).not.toMatch(/GitHub step/i);
+    expect(text).not.toMatch(/ruleset/i);
+    expect(text).not.toMatch(/not supported yet/i);
+    expect(text).not.toMatch(/GitHub/);
+    expect(text).not.toMatch(/(^|\s)gh /);
+    expect(html).not.toContain('<code>gh');
+    expect(html).not.toContain('/setup/forge');
+  };
+
+  test('a two-bot zone: the GitLab heading, the project on its instance, four steps with their doctor status, the entry names and the links', () => {
+    const html = gitlabSection(
+      gl(),
+      run([
+        ['forge.author', 'pass', 'author is Developer'],
+        ['forge.reviewer', 'fail', 'the reviewer user <rev> is Maintainer'],
+        ['forge.private-clone', 'pass', 'public'],
+        ['forge.branch-rules', 'pass', 'protected'],
+        ['forge.ci', 'pass', 'pipelines'],
+        ['forge.codeowners', 'warn', 'no CODEOWNERS file'],
+        ['forge.labels', 'pass', 'labels exist'],
+      ]),
+    );
+    expect(html).toContain('<section id="github" class="setup-section"><h3>GitLab</h3>');
+    expect(html).not.toContain('<h3>GitHub</h3>');
+    // The project by its path on its instance, escaped.
+    expect(html).toContain('<code>acme/&lt;sub&gt;/widgets</code>');
+    expect(html).toContain('<code>https://gitlab.example.test</code>');
+    expect(html).not.toContain('<sub>');
+    // The four steps, in order, each with its chip.
+    const order = ['access', 'ruleset', 'codeowners', 'labels'].map((s) =>
+      html.indexOf(`data-gitlab-step="${s}"`),
+    );
+    expect(order.every((n) => n > -1)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    const access = stepOf(html, 'access');
+    expect(access).toContain('Bot tokens and access');
+    expect(access).toContain('data-status="missing">missing</span>');
+    expect(access).toContain('the reviewer user &lt;rev&gt; is Maintainer');
+    expect(access).not.toContain('author is Developer');
+    expect(stepOf(html, 'ruleset')).toContain('Protected branch, approvals and pipelines');
+    expect(stepOf(html, 'ruleset')).toContain('data-status="done">done</span>');
+    expect(stepOf(html, 'codeowners')).toContain('Code owners');
+    expect(stepOf(html, 'codeowners')).toContain('data-status="check">check</span>');
+    expect(stepOf(html, 'codeowners')).toContain('no CODEOWNERS file');
+    expect(stepOf(html, 'labels')).toContain('data-status="done">done</span>');
+    // The entry names, and where they are set.
+    for (const role of ['author', 'reviewer', 'read'])
+      expect(access).toContain(`<code>gitlab-pat/lab/${role}</code>`);
+    expect(access).toContain('href="/system/credentials"');
+    expect(visibleText(access)).toMatch(/optional/i);
+    // The roles: Developer or Maintainer, nothing above, no sudo or admin_mode.
+    const text = visibleText(html);
+    expect(text).toContain('Developer');
+    expect(text).toContain('never above Maintainer');
+    expect(html).toContain('<code>sudo</code>');
+    expect(html).toContain('<code>admin_mode</code>');
+    // The doctor's fixes.
+    expect(html).toContain('href="/system"');
+    gitlabWordsOnly(html);
+  });
+
+  test('a starter zone is not judged on the reviewer and has no reviewer entry', () => {
+    const zone = gl({ identity: 'starter' });
+    const html = gitlabSection(
+      zone,
+      run([
+        ['forge.author', 'pass', 'author ok'],
+        ['forge.reviewer', 'fail', 'no reviewer token'],
+        ['forge.private-clone', 'pass', 'public'],
+      ]),
+    );
+    const access = stepOf(html, 'access');
+    expect(access).toContain('data-status="done">done</span>');
+    expect(access).not.toContain('no reviewer token');
+    expect(access).toContain('<code>gitlab-pat/lab/author</code>');
+    expect(access).toContain('<code>gitlab-pat/lab/read</code>');
+    expect(access).not.toContain('gitlab-pat/lab/reviewer');
+    gitlabWordsOnly(html);
+  });
+
+  test('with no doctor run every chip is not checked', () => {
+    const html = gitlabSection(gl(), null);
+    for (const step of ['access', 'ruleset', 'codeowners', 'labels'])
+      expect(stepOf(html, step)).toContain('data-status="not-checked">not checked</span>');
+    expect(html).not.toContain('data-status="done"');
+    expect(html.split('data-status=').length - 1).toBe(4);
+  });
+
+  test('the Setup page shows it with no guidance read, and never a token or its fingerprint', async () => {
+    const db = openDb(tmpDbFile());
+    const dir = mkdtempSync(join(tmpdir(), 'jm-glpage-'));
+    const keyFile = join(dir, 'vault_key');
+    const { writeFileSync } = await import('node:fs');
+    const { randomBytes } = await import('node:crypto');
+    writeFileSync(keyFile, randomBytes(32).toString('base64url'), { mode: 0o600 });
+    const vault = openVault(keyFile, db);
+    if (vault === 'disabled' || !vault) throw new Error('no vault');
+    const store = ConfigStore.open({
+      db,
+      boot: loadBoot({}, undefined),
+      env: { JM_JOIN_TOKEN: 'join-secret-value-7', JM_OPERATOR_TOKEN: TOKEN, JM_DEV_IMAGES: '1' },
+      vault,
+      now: () => t0,
+      imageLockPath: join(dir, 'no-lock.json'),
+    });
+    const applied = store.apply(
+      {
+        dropZones: [
+          {
+            id: 'lab',
+            repo: 'acme/widgets',
+            forge: 'gitlab',
+            gitlab: { baseUrl: 'https://gitlab.example.test' },
+            gates: [{ name: 'test', run: 'npm test' }],
+            image: 'jm-trooper:dev',
+          },
+        ],
+      },
+      { via: 'ctl', principal: { kind: 'operator', via: 'token', sudo: true } },
+    );
+    if (!applied.ok) throw new Error(JSON.stringify(applied));
+    const glpat = (c: string) => ['glpat', c.repeat(20)].join('-');
+    const planted = {
+      'gitlab-pat/lab/author': glpat('A'),
+      'gitlab-pat/lab/reviewer': glpat('R'),
+      'gitlab-pat/lab/read': `gitlab+deploy-token-9:${['gldt', 'D'.repeat(20)].join('-')}`,
+    };
+    for (const [name, value] of Object.entries(planted)) vault.put(name, value, { now: t0 });
+    const calls: string[] = [];
+    const a = createApp({
+      db,
+      config: store,
+      forgesFor: () => {
+        throw new Error('no zone forge in this test');
+      },
+      now: () => t0,
+      leaseWaitMs: 0,
+      leasePollMs: 0,
+      guidanceForge: (repo) => {
+        calls.push(repo);
+        return forgeFor()(repo, '');
+      },
+    });
+    app = a;
+    await setOperatorPassphrase(db, 'a long operator passphrase', t0);
+    const s = operatorSession(db);
+    doctorRun(db, [{ id: 'forge.author', status: 'pass', zoneId: 'lab', summary: 'author ok' }]);
+    const r = await a.inject({
+      method: 'GET',
+      url: '/projects/lab/setup',
+      headers: { host: HOST, cookie: s.cookie },
+    });
+    expect(r.statusCode).toBe(200);
+    expect(r.body).toContain('<h3>GitLab</h3>');
+    expect(r.body).toContain('<code>gitlab-pat/lab/author</code>');
+    expect(calls).toEqual([]);
+    for (const value of Object.values(planted)) {
+      expect(r.body).not.toContain(value);
+      expect(r.body).not.toContain(escapeHtml(value));
+      expect(r.body).not.toContain(fingerprintOf(value));
+    }
   });
 });

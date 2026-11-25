@@ -9,7 +9,7 @@ import type { ConfigStore } from '../config/store.js';
 import type { Config, DropZoneConfig } from '../config.js';
 import type { DoctorCheck } from '../doctor/checks.js';
 import type { AppTokenSource } from '../forge/app-tokens.js';
-import { GITLAB_UNSUPPORTED } from '../forge/kind.js';
+import { forgeKind } from '../forge/kind.js';
 import {
   CODEOWNERS_PLACEHOLDER,
   EXPIRATION_NOTE,
@@ -22,7 +22,7 @@ import {
 } from '../github/guidance.js';
 import { MATRIX_AND_REUSABLE_NOTE } from '../github/workflows.js';
 import type { AppRole } from '../vault/github-app-entries.js';
-import { githubSetupHref, linkTarget, SYSTEM_CREDENTIALS_HREF } from './links.js';
+import { githubSetupHref, linkTarget, SYSTEM_CREDENTIALS_HREF, SYSTEM_HREF } from './links.js';
 import { escapeHtml } from './pages.js';
 
 /**
@@ -361,9 +361,6 @@ const labelsSection = (zone: Pick<DropZoneConfig, 'readyLabel'>, status: string)
 /** The id of the code owners form, drawn outside Setup's form (a form can't hold a form). */
 export const GITHUB_REVIEWER_FORM = 'github-reviewer-form';
 
-/** The API's GitLab refusal as a page says it: project, not zone (issue #629). */
-const GITLAB_UNSUPPORTED_PAGE = 'GitLab projects are not supported yet';
-
 /**
  * The GitHub section of a project's Setup (#618): the guide (accounts, tokens or apps, access, the
  * ruleset, code owners), each checked step with its doctor status, then labels. Without guidance
@@ -380,7 +377,7 @@ export function githubSection(
 <p>What Jumpmaster needs on GitHub, as links and files: nothing here changes GitHub; the clicks and the commit are yours. The doctor checks each part; its last run's result is beside each step.</p>`;
   if (!guidance.ok)
     return `${head}
-<p class="warn">${escapeHtml(guidance.error === GITLAB_UNSUPPORTED ? GITLAB_UNSUPPORTED_PAGE : guidance.error)}</p><p>Set or replace the tokens in the <a href="/setup/forge">GitHub step</a>, then come back.</p>
+<p class="warn">${escapeHtml(guidance.error)}</p><p>Set or replace the tokens in the <a href="/setup/forge">GitHub step</a>, then come back.</p>
 <ul id="github-steps">${(Object.keys(STEP_CHECKS) as GithubStep[]).map((s) => `<li>${escapeHtml(STEP_LABELS[s])} ${chip(s)}</li>`).join('')}</ul>
 </section>`;
   const g = guidance.guidance;
@@ -392,6 +389,58 @@ ${checklistSection(g.checklist, chip('access'))}
 ${rulesetSection(g.ruleset, g.rulesUrl, zone.identity, chip('ruleset'))}
 ${g.mergeRuleset ? `${mergeRulesetSection(g.mergeRuleset, g.rulesUrl)}\n` : ''}${codeownersSection(g.codeowners, { action: githubSetupHref(zone.id), reviewer: guidance.reviewer, formId: GITHUB_REVIEWER_FORM }, zone.identity, chip('codeowners'))}
 ${labelsSection(zone, chip('labels'))}
+</section>`;
+}
+
+/** Each GitLab step's label, by the internal step key its chip carries. */
+const GITLAB_STEP_LABELS: Record<GithubStep, string> = {
+  access: 'Bot tokens and access',
+  ruleset: 'Protected branch, approvals and pipelines',
+  codeowners: 'Code owners',
+  labels: 'Labels',
+};
+
+/**
+ * The GitLab section of a project's Setup (#879): the project on its instance, then each step the
+ * doctor checks with its last run's status. Built from the zone and `checks` only: it reads
+ * nothing from GitLab (or GitHub), and names vault entries, never a value. The doctor on the
+ * System page holds each check's GitLab fix, so the section points there rather than repeating it.
+ */
+export function gitlabSection(zone: DropZoneConfig, checks: readonly DoctorCheck[] | null): string {
+  const starter = zone.identity === 'starter';
+  const chip = (step: GithubStep) => stepChip(step, stepStatus(checks, zone.id, step, starter));
+  const entry = (role: 'author' | 'reviewer' | 'read') =>
+    `<code>${escapeHtml(`gitlab-pat/${zone.id}/${role}`)}</code>`;
+  const doctor = `<a href="${SYSTEM_HREF}">doctor on the System page</a>`;
+  const tokens = [
+    `<li>${entry('author')}: the author bot user's personal access token, with the <code>api</code> scope.</li>`,
+    ...(starter
+      ? []
+      : [
+          `<li>${entry('reviewer')}: the reviewer bot user's personal access token, with the <code>api</code> scope.</li>`,
+        ]),
+    `<li>${entry('read')} (optional): a deploy token that clones a private project for review, crew and doctor drops.</li>`,
+  ].join('');
+  const bodies: Record<GithubStep, string> = {
+    access: `<ul>${tokens}</ul>
+<p>Each bot user is a member of the project as a Developer or a Maintainer, never above Maintainer${starter ? '' : ', and the reviewer a Developer: a Maintainer can edit the approval rules its own approval is checked against'}. No token carries the <code>sudo</code> or <code>admin_mode</code> scope. Set, test or replace the tokens in <a href="${SYSTEM_CREDENTIALS_HREF}">System, Credentials</a>.</p>`,
+    ruleset:
+      '<p>The default branch is protected: changes reach it only through merge requests, with the approvals the project needs, and only after its pipeline passes.</p>',
+    codeowners:
+      "<p>Changes to the protected paths need a person's approval: name yourself (and anyone else who may approve them) as code owners in the project's <code>CODEOWNERS</code> file.</p>",
+    labels: `<p>The labels Jumpmaster works with, the ready label <code>${escapeHtml(zone.readyLabel)}</code> among them, must exist on the project. The doctor can create the missing ones.</p>`,
+  };
+  const steps = (Object.keys(STEP_CHECKS) as GithubStep[])
+    .map(
+      (s) =>
+        `<li data-gitlab-step="${s}"><strong>${escapeHtml(GITLAB_STEP_LABELS[s])}</strong> ${chip(s)}${bodies[s]}</li>`,
+    )
+    .join('\n');
+  return `<section id="github" class="setup-section"><h3>GitLab</h3>${STEP_STYLE}
+<p>What Jumpmaster needs on the GitLab project <code>${escapeHtml(zone.repo)}</code> on <code>${escapeHtml(zone.gitlab?.baseUrl ?? '')}</code>. Nothing here changes GitLab. The doctor checks each step; its last run's result is beside each one, and the ${doctor} says how to fix each finding.</p>
+<ol id="gitlab-steps">
+${steps}
+</ol>
 </section>`;
 }
 
@@ -436,6 +485,8 @@ export function githubSectionRenderer(
 ) => Promise<string> {
   const forgeOf = deps.guidanceForge ?? githubGuidanceForge;
   return async (config, zone, query, checks) => {
+    // A GitLab project's section is built from its config and the doctor's checks: no read.
+    if (forgeKind(zone) === 'gitlab') return gitlabSection(zone, checks);
     const q = Query.safeParse(query ?? {});
     const reviewers = q.success ? reviewersOf(q.data.reviewer) : null;
     let r: Awaited<ReturnType<typeof guidanceFor>> | { ok: false; error: string };

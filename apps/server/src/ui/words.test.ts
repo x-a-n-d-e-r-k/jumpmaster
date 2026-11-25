@@ -10,7 +10,6 @@ import { ZONE_HISTORY_ISSUE } from '../config/store.js';
 import { type ConfigIssue, parseEditable } from '../config.js';
 import { type Drop, insertDrop, setZoneMode, stampStick, type WorkItem } from '../db/repo.js';
 import { type DoctorCheck, SHADOWED_TOKEN_FIX } from '../doctor/checks.js';
-import { GITLAB_UNSUPPORTED } from '../forge/kind.js';
 import { INTAKE_LIMIT_ERROR } from '../intake.js';
 import { modeCardSummary, refusedCardSummary } from '../mcp/chat-actions.js';
 import { applyRefusal, DISCOVER_PATH, INSTALLED_PATH } from '../setup/github-app-installed.js';
@@ -19,9 +18,10 @@ import { ago, world } from '../test/doctorWorld.js';
 import { makeZone } from '../test/fixtures.js';
 import { harness } from '../test/flowHarness.js';
 import { operatorSession, plus, t0 } from '../test/helpers.js';
+import { visibleText } from '../test/visible-text.js';
 import { FORM_SCRIPT } from '../zones/form.js';
 import { FLAGS_SCRIPT } from './flags.js';
-import { githubSection } from './github.js';
+import { gitlabSection } from './github.js';
 import { codeHtml, ISSUE_SCRIPT } from './pages.js';
 import { CONFIG_ANSWER_FN } from './setting-controls.js';
 import { CREDENTIALS_SCRIPT, HISTORY_SCRIPT, OTHER_MACHINES_SCRIPT } from './settings.js';
@@ -29,23 +29,7 @@ import { fixHtml, projectBody } from './setup.js';
 import { projectWords } from './zone-name.js';
 import { ISSUES_SCRIPT } from './zones.js';
 
-/**
- * What a reader sees of a page: no `<script>`, `<style>`, `<code>` or `<pre>` content, no tags
- * (so no attribute values), no comments, entities decoded.
- */
-export function visibleText(html: string): string {
-  return html
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<(script|style|code|pre)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;|&#x27;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/\s+/g, ' ');
-}
+export { visibleText };
 
 const ZONE_WORD = /\bzones?\b/i;
 const FLOOR_WORD = /\bFloor\b/;
@@ -644,10 +628,16 @@ describe('chat card words', () => {
 });
 
 describe('GitLab project words', () => {
-  test("a GitLab project's Setup section says GitLab projects are not supported yet", () => {
-    const zone = makeZone({ id: 'lab', repo: 'octo/lab' });
-    const text = visibleText(githubSection(zone, { ok: false, error: GITLAB_UNSUPPORTED }, null));
-    expect(text).toContain('GitLab projects are not supported yet');
+  test("a GitLab project's Setup section says GitLab, in project words", () => {
+    const zone = makeZone({
+      id: 'lab',
+      repo: 'octo/lab',
+      forge: 'gitlab',
+      gitlab: { baseUrl: 'https://gitlab.example.test' },
+    });
+    const text = visibleText(gitlabSection(zone, null));
+    expect(text).toContain('GitLab');
+    expect(text).not.toContain('not supported yet');
     expect(offenders(text)).toEqual([]);
   });
 });

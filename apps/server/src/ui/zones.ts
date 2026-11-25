@@ -8,6 +8,7 @@ import type { Db } from '../db/open.js';
 import { getZoneMode, type ZoneWaits, zoneStopping, zoneWaits } from '../db/repo.js';
 import { type DoctorCheck, egressSeen } from '../doctor/checks.js';
 import { latestDoctorRun } from '../doctor/run.js';
+import { forgeKind } from '../forge/kind.js';
 import { getGoals, objectivesDone } from '../goals.js';
 import { BASE_EGRESS } from '../payloads.js';
 import { PRESET_EGRESS } from '../presets.js';
@@ -716,8 +717,14 @@ ${field('overrideApprovers', 'Override approvers (logins)', textarea(f, 'overrid
         ? '<p>In file mode, stop managing this project by removing it from the config file and running <code>jumpmaster ctl config reload</code>.</p>'
         : `<h4>Stop managing this project</h4><p>${confirmText}</p><p><label>Type <code>${escapeHtml(repo)}</code> to confirm <input id="stop-confirm" autocomplete="off" spellcheck="false" size="30"></label></p><p><button type="button" class="stop danger" id="stop-managing" disabled>Stop managing this project</button> <span id="stop-out" role="status"></span></p>`
   }</section>`;
-  const nav = `<nav class="setup-nav" aria-label="Setup sections"><ul>${SETUP_SECTIONS.map(([s, label]) => `<li><a href="#${s}">${label}</a></li>`).join('')}</ul></nav>`;
-  const jump = `<select id="setup-jump" class="setup-jump" aria-label="Go to a section">${SETUP_SECTIONS.map(([s, label]) => `<option value="${s}">${label}</option>`).join('')}</select>`;
+  // A GitLab project's forge section keeps its `#github` anchor, so links to it still land.
+  const sections = SETUP_SECTIONS.map(([s, label]) =>
+    s === 'github' && forgeKind(resolved) === 'gitlab'
+      ? ([s, 'GitLab'] as const)
+      : ([s, label] as const),
+  );
+  const nav = `<nav class="setup-nav" aria-label="Setup sections"><ul>${sections.map(([s, label]) => `<li><a href="#${s}">${label}</a></li>`).join('')}</ul></nav>`;
+  const jump = `<select id="setup-jump" class="setup-jump" aria-label="Go to a section">${sections.map(([s, label]) => `<option value="${s}">${label}</option>`).join('')}</select>`;
   const saveBar = readOnly
     ? ''
     : '<div class="save-bar" id="save-bar"><span id="save-count">0 unsaved changes</span> <span id="save-out" role="status"></span> <button type="button" id="discard" disabled>Discard</button> <button id="save" class="primary" disabled>Save</button></div>';
