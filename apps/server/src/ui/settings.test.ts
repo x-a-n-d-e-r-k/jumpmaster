@@ -1613,7 +1613,9 @@ describe('the advanced settings page for the install, /settings/flags (issue #32
       'Changed under Other machines, on System, Server. <a href="/system/server#other-machines">',
     );
     const jitter = flagRow(r.body, 'usage.probeJitterSeconds');
-    expect(jitter).toContain('Changed with jumpmaster ctl settings set or in the config file.');
+    expect(jitter).toContain(
+      'Changed with <code>jumpmaster ctl settings set</code> or in the config file.',
+    );
     expect(jitter).not.toContain('<a ');
     // D1: as the other settings pages, no session gets no page.
     const anon = await w.anon('/system/advanced');

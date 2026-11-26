@@ -289,6 +289,13 @@ const WORDS: Words[] = [
     'text',
   ),
   z_(
+    'gitlab.caCert',
+    'GitLab private certificate authority',
+    "The PEM certificates of a private certificate authority your GitLab host's certificate is issued by, such as a company CA. Adding one asks for confirmation.",
+    'elsewhere',
+    'Changed with jumpmaster ctl zones set or in the config file.',
+  ),
+  z_(
     'mode',
     'Starting mode',
     'Whether a new project starts active, paused or observing. It is used only until an operator stores a mode.',

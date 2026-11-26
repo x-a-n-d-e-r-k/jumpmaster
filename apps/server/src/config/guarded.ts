@@ -1,5 +1,11 @@
 import type { z } from 'zod';
-import { DropZoneObject, EditableSchema, STARTER_WARNING } from '../config.js';
+import {
+  type CaCertInfo,
+  DropZoneObject,
+  EditableSchema,
+  parseCaBundle,
+  STARTER_WARNING,
+} from '../config.js';
 import { PRESET_EGRESS } from '../presets.js';
 import { canonicalJson } from './revisions.js';
 
@@ -154,6 +160,23 @@ function appId(path: string, minted: string, preposition: string): GuardedPath {
         ? `${minted} for project ${zoneOf(ctx)} will no longer be minted ${preposition} ${String(from)}: it is removed`
         : `${minted} for project ${zoneOf(ctx)} will be minted ${preposition} ${String(to)}`,
   };
+}
+
+/**
+ * The certificates of `to`'s CA bundle whose SHA-256 fingerprint `from`'s lacks (issue #918). The
+ * documents are validated, so a bundle that does not parse is only a defensive case: it adds one
+ * unnamed entry, so the change still asks, and nothing of its text is shown.
+ */
+function caCertsAdded(from: unknown, to: unknown): (CaCertInfo | null)[] {
+  const certs = (v: unknown): (CaCertInfo | null)[] => {
+    if (typeof v !== 'string') return [];
+    const r = parseCaBundle(v);
+    return r.ok ? r.certs : [null];
+  };
+  const had = new Set(certs(from).map((c) => c?.fingerprint256));
+  const out = new Map<string, CaCertInfo | null>();
+  for (const c of certs(to)) if (!had.has(c?.fingerprint256)) out.set(c?.fingerprint256 ?? '', c);
+  return [...out.values()];
 }
 
 export const GUARDED_PATHS: GuardedPath[] = [
@@ -333,6 +356,19 @@ export const GUARDED_PATHS: GuardedPath[] = [
     'additions',
     (l, ctx) => `PRs by ${l} on agent branches in ${zoneOf(ctx)} will be adopted as the author's`,
   ),
+  {
+    // Issue #918: a private CA the zone's GitLab host is trusted under. Each certificate it did not
+    // already hold asks, named by subject and fingerprint, never by its PEM; removing one is free.
+    path: 'dropZones[].gitlab.caCert',
+    kind: 'set',
+    weakens: (from, to) => caCertsAdded(from, to).length > 0,
+    consequence: (from, to, ctx) =>
+      caCertsAdded(from, to).map((c) =>
+        c === null
+          ? `Project ${zoneOf(ctx)} will trust a private certificate authority Jumpmaster can't read for its GitLab host`
+          : `Project ${zoneOf(ctx)} will trust certificates issued by ${c.subject} (SHA-256 ${c.fingerprint256}) for its GitLab host`,
+      ),
+  },
   appId('dropZones[].githubApp.repositoryId', 'Tokens', 'for repository id'),
   appId('dropZones[].githubApp.installations.author', 'Author tokens', 'from installation id'),
   appId('dropZones[].githubApp.installations.reviewer', 'Reviewer tokens', 'from installation id'),
@@ -530,13 +566,15 @@ export function ADD_BASELINE(zone: {
   gitlab?: unknown;
 }): ZoneDoc {
   // The zone's own forge and instance: its repo is read by their rule. Both are guarded on the add
-  // by REFUSED_PATHS' `onAdd`, so the baseline carrying them hides nothing.
+  // by REFUSED_PATHS' `onAdd`, so the baseline carrying them hides nothing. Only `gitlab.baseUrl`
+  // is carried: a `gitlab.caCert` on the added zone is judged by its own rule (issue #918).
+  const gitlab = isPlain(zone.gitlab) ? { baseUrl: zone.gitlab.baseUrl } : zone.gitlab;
   const base = DropZoneObject.parse({
     id: zone.id,
     repo: zone.repo,
     gates: [],
     ...(zone.forge === undefined ? {} : { forge: zone.forge }),
-    ...(zone.gitlab === undefined ? {} : { gitlab: zone.gitlab }),
+    ...(gitlab === undefined ? {} : { gitlab }),
     ...(zone.preset === undefined ? {} : { preset: zone.preset }),
   });
   return { ...base, egress: { mode: 'monitor', allow: [] } };
