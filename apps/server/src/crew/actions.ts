@@ -315,6 +315,20 @@ function replacementRefusal(
   return null;
 }
 
+/**
+ * The keys of the chain behind a valid replacement of `key` (#927): `key` and every key reached by
+ * following `replaces` back from it, with the loop bound `replacementRefusal` uses.
+ */
+function replacedChain(db: Db, zoneId: string, key: string): Set<string> {
+  const chain = new Set<string>([key]);
+  let at = getCrewIssueByKey(db, zoneId, key);
+  for (let steps = 0; at?.replaces != null && steps <= MAX_REPLACEMENTS; steps++) {
+    chain.add(at.replaces);
+    at = getCrewIssueByKey(db, zoneId, at.replaces);
+  }
+  return chain;
+}
+
 /** The most keys an issue's `after` may name (#843). */
 export const MAX_AFTER = 5;
 
@@ -486,8 +500,8 @@ export function applyCrewActions(
          AND state NOT IN ('rejected', 'failed') LIMIT 1`,
     );
     const recentlyRejected = db.prepare(
-      `SELECT 1 FROM crew_issues WHERE zone_id = ? AND objective = ? AND title_norm = ?
-         AND state = 'rejected' AND updated_at > ? LIMIT 1`,
+      `SELECT key FROM crew_issues WHERE zone_id = ? AND objective = ? AND title_norm = ?
+         AND state = 'rejected' AND updated_at > ?`,
     );
     const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString();
     let slots = crewIssueSlots(db, zone);
@@ -506,17 +520,27 @@ export function applyCrewActions(
         refuse('duplicate of an open crew issue');
         continue;
       }
-      // A named replacement must hold (#784); only then is the 7-day refusal lifted.
+      // A named replacement must hold (#784); only then is the 7-day refusal lifted, and only for
+      // the replaced issue's own chain, never for an issue Command rejected (#927).
       const replacing =
         i.replaces === undefined ? null : replacementRefusal(db, zone.id, i, i.replaces);
       if (replacing !== null) {
         refuse(replacing);
         continue;
       }
-      if (
-        i.replaces === undefined &&
-        recentlyRejected.get(zone.id, i.objective, normaliseTitle(i.title), weekAgo)
-      ) {
+      const chain =
+        i.replaces === undefined ? new Set<string>() : replacedChain(db, zone.id, i.replaces);
+      const rejectedKeys = (
+        recentlyRejected.all(zone.id, i.objective, normaliseTitle(i.title), weekAgo) as {
+          key: string;
+        }[]
+      ).map((row) => row.key);
+      const rejectedElsewhere = rejectedKeys.some((key) => {
+        if (!chain.has(key)) return true;
+        const row = getCrewIssueByKey(db, zone.id, key);
+        return row !== undefined && commandRejection(db, row) !== undefined;
+      });
+      if (rejectedElsewhere) {
         refuse('duplicate of a crew issue rejected in the last 7 days');
         continue;
       }
