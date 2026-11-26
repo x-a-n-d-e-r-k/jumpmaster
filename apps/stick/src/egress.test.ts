@@ -279,6 +279,56 @@ describe('the egress capability', () => {
     expect(await run({ mode: 'enforce', allow, private: [] })).toEqual(today);
   });
 
+  test('startEgress passes a port list as JM_EGRESS_PORTS, and nothing without one (#914)', async () => {
+    const run = async (egress: Parameters<typeof startEgress>[1]['egress']) => {
+      const d = probeDriver();
+      let env: Record<string, string> = {};
+      (d.driver as unknown as { startEgressProxy: unknown }).startEgressProxy = async (p: {
+        env: Record<string, string>;
+      }) => {
+        env = { ...p.env };
+        return {
+          async *logs() {
+            yield '{"ready":true}';
+          },
+          async stop() {},
+        };
+      };
+      const s = await startEgress(
+        d.driver,
+        {
+          dropId: 'd',
+          epoch: 1,
+          egress,
+          net: { proxy: '172.30.0.2' } as never,
+          image: 'i',
+          labels: {},
+          readyMs: 50,
+          env: {},
+        },
+        null,
+      );
+      await s.stop();
+      return env;
+    };
+    const allow = ['gitlab.example.com'];
+    const today = {
+      JM_EGRESS_MODE: 'enforce',
+      JM_EGRESS_ALLOW: 'gitlab.example.com',
+      JM_EGRESS_BIND: '172.30.0.2',
+    };
+    expect(await run({ mode: 'enforce', allow, ports: [8443] })).toEqual({
+      ...today,
+      JM_EGRESS_PORTS: '8443',
+    });
+    expect(await run({ mode: 'enforce', allow, ports: [443, 8443] })).toMatchObject({
+      JM_EGRESS_PORTS: '443,8443',
+    });
+    const without = await run({ mode: 'enforce', allow });
+    expect(without).toEqual(today);
+    expect(without).not.toHaveProperty('JM_EGRESS_PORTS');
+  });
+
   test('a session reports the hosts its proxy refused as private address, after finish', async () => {
     const d = probeDriver();
     (d.driver as unknown as { startEgressProxy: unknown }).startEgressProxy = async () => {

@@ -181,11 +181,13 @@ test('a stick advertises image-verify-v1 only under the signed policy', () => {
   expect(advertisedCapabilities({ egress: true, policy: 'allowlist' })).toEqual([
     'egress-v1',
     'egress-private-v1',
+    'egress-ports-v1',
   ]);
   expect(advertisedCapabilities({ egress: false, policy: 'signed' })).toEqual(['image-verify-v1']);
   expect(advertisedCapabilities({ egress: true, policy: 'signed' })).toEqual([
     'egress-v1',
     'egress-private-v1',
+    'egress-ports-v1',
     'image-verify-v1',
   ]);
 });

@@ -69,6 +69,7 @@ export const PresetSchema = z.enum(PRESETS);
  */
 export const STICK_CAPABILITIES = [
   'clone-v1',
+  'egress-ports-v1',
   'egress-private-v1',
   'egress-v1',
   'image-verify-v1',
@@ -254,11 +255,16 @@ export type ContainerLimits = z.infer<typeof ContainerLimitsSchema>;
 /** Most hosts `EgressPayload.private` may list. */
 export const MAX_EGRESS_PRIVATE = 16;
 
+/** Most ports `EgressPayload.ports` may list. */
+export const MAX_EGRESS_PORTS = 8;
+
 /**
  * Egress control for a drop. Absent when the zone's mode is `off`. The trooper derives its proxy
  * (the fixed `EGRESS_PROXY_URL`) from its presence; the stick runs the proxy with `allow`.
  * `private` lists plain host names (never `*.`, never an IP), each also on `allow`, that the proxy
- * lets resolve to private-network addresses (`JM_EGRESS_PRIVATE`). Errors name the field, never a
+ * lets resolve to private-network addresses (`JM_EGRESS_PRIVATE`). `ports`, when present, lists the
+ * TCP ports (unique, 1 to 65535, at most `MAX_EGRESS_PORTS`) the proxy lets a tunnel reach
+ * (`JM_EGRESS_PORTS`); absent, the proxy keeps its default of 443. Errors name the field, never a
  * value.
  */
 export const EgressPayloadSchema = z
@@ -274,6 +280,19 @@ export const EgressPayloadSchema = z
       .max(MAX_EGRESS_PRIVATE, {
         message: `private lists more than ${MAX_EGRESS_PRIVATE} hosts`,
       })
+      .optional(),
+    ports: z
+      .array(
+        z
+          .number({ message: 'ports entry is not a port number' })
+          .int({ message: 'ports entry is not a port number' })
+          .min(1, { message: 'ports entry is not a port number' })
+          .max(65535, { message: 'ports entry is not a port number' }),
+        { message: 'ports is not a list of port numbers' },
+      )
+      .min(1, { message: 'ports is empty' })
+      .max(MAX_EGRESS_PORTS, { message: `ports lists more than ${MAX_EGRESS_PORTS} ports` })
+      .refine((ps) => new Set(ps).size === ps.length, { message: 'ports lists a port twice' })
       .optional(),
   })
   .superRefine((e, ctx) => {

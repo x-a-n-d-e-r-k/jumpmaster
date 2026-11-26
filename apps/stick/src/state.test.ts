@@ -18,6 +18,7 @@ test('push-v1 is advertised only after a passing self-check above the floor', ()
   expect(advertisedCapabilities({ egress: true, policy: 'signed', push: true })).toEqual([
     'egress-v1',
     'egress-private-v1',
+    'egress-ports-v1',
     'image-verify-v1',
     'push-v1',
   ]);
@@ -36,10 +37,16 @@ test('below the floor the stick does not lease', () => {
   expect(terms(0)).toBeNull();
   // Unmeasured is not below the floor: the stick leases non-pushing roles, without push-v1.
   expect(terms(null)).toEqual({
-    capabilities: ['egress-v1', 'egress-private-v1', 'image-verify-v1'],
+    capabilities: ['egress-v1', 'egress-private-v1', 'egress-ports-v1', 'image-verify-v1'],
   });
   expect(terms(VOLUME_FREE_FLOOR_BYTES)).toEqual({
-    capabilities: ['egress-v1', 'egress-private-v1', 'image-verify-v1', 'push-v1'],
+    capabilities: [
+      'egress-v1',
+      'egress-private-v1',
+      'egress-ports-v1',
+      'image-verify-v1',
+      'push-v1',
+    ],
   });
 });
 
@@ -145,7 +152,14 @@ describe('clone-v1 (issue #860)', () => {
 
   test('advertised when the base verdict is ok, the clone label is present and the self-check passed above the floor', () => {
     expect(terms({})).toEqual({
-      capabilities: ['egress-v1', 'egress-private-v1', 'image-verify-v1', 'push-v1', 'clone-v1'],
+      capabilities: [
+        'egress-v1',
+        'egress-private-v1',
+        'egress-ports-v1',
+        'image-verify-v1',
+        'push-v1',
+        'clone-v1',
+      ],
     });
     expect(advertisedCapabilities({ egress: false, policy: 'allowlist', clone: true })).toEqual([
       'clone-v1',
@@ -177,7 +191,14 @@ describe('clone-v1 (issue #860)', () => {
 
   test('at the push cap clone-v1 still goes with noPush', () => {
     expect(terms({}, MAX_PENDING_PUSHES)).toEqual({
-      capabilities: ['egress-v1', 'egress-private-v1', 'image-verify-v1', 'push-v1', 'clone-v1'],
+      capabilities: [
+        'egress-v1',
+        'egress-private-v1',
+        'egress-ports-v1',
+        'image-verify-v1',
+        'push-v1',
+        'clone-v1',
+      ],
       noPush: true,
     });
   });
@@ -188,6 +209,7 @@ describe('egress-private-v1 (issue #897)', () => {
     expect(advertisedCapabilities({ egress: true, policy: 'allowlist' })).toEqual([
       'egress-v1',
       'egress-private-v1',
+      'egress-ports-v1',
     ]);
   });
 
@@ -200,5 +222,26 @@ describe('egress-private-v1 (issue #897)', () => {
     });
     expect(caps).not.toContain('egress-v1');
     expect(caps).not.toContain('egress-private-v1');
+  });
+});
+
+describe('egress-ports-v1 (issue #914)', () => {
+  test('advertised with egress-v1, right after egress-private-v1', () => {
+    expect(advertisedCapabilities({ egress: true, policy: 'allowlist' })).toEqual([
+      'egress-v1',
+      'egress-private-v1',
+      'egress-ports-v1',
+    ]);
+  });
+
+  test('absent when the egress check failed', () => {
+    const caps = advertisedCapabilities({
+      egress: false,
+      policy: 'signed',
+      push: true,
+      clone: true,
+    });
+    expect(caps).not.toContain('egress-v1');
+    expect(caps).not.toContain('egress-ports-v1');
   });
 });
