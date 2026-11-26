@@ -32,6 +32,7 @@ import { zonePass } from '../flow/snapshot.js';
 import { refreshGoals } from '../goals.js';
 import { leaseNextDrop } from '../leases.js';
 import { buildPayload, promptVersions } from '../payloads.js';
+import { syncDropZone } from '../sync.js';
 import { crewOn, crewWorld, GOAL, ISSUE_BODY, parsedCrew } from '../test/crew.js';
 import { makeZone, usageCfg, type ZoneWorld } from '../test/fixtures.js';
 import {
@@ -47,6 +48,7 @@ import {
 } from '../test/flowHarness.js';
 import { plus, t0 } from '../test/helpers.js';
 import { applyCrewActions, OPEN_STATES } from './actions.js';
+import { flushCrewOps } from './flush.js';
 import {
   type CrewInputJson,
   crewDropsToday,
@@ -501,6 +503,129 @@ describe('early lead cycle when the queue empties (#757)', () => {
     const p = otherItem('main', 2, 'ready');
     setWorkItemState(w.db, p, 'parked', 'heal budget exhausted', t0);
     expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('waits: a crew issue promoted with no work item yet', async () => {
+    await emptied(5);
+    const issue = stagedIssue(); // crew issue number 40, no work item for it
+    setCrewIssue(w.db, issue, { state: 'promoted', refutedSha: 'sha-1' }, plus(t0, 6 * MIN));
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toBeNull();
+  });
+
+  test('promoted: its ready work item waits, and once done the cycle starts', async () => {
+    await emptied(5);
+    const issue = stagedIssue();
+    setCrewIssue(w.db, issue, { state: 'promoted', refutedSha: 'sha-1' }, plus(t0, 6 * MIN));
+    const item = otherItem('main', 40, 'ready', plus(t0, 7 * MIN));
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toBeNull();
+    setWorkItemState(w.db, item, 'done', 'merged', plus(t0, 20 * MIN));
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('promoted: its parked work item does not prevent it', async () => {
+    await emptied(5);
+    const issue = stagedIssue();
+    setCrewIssue(w.db, issue, { state: 'promoted', refutedSha: 'sha-1' }, plus(t0, 6 * MIN));
+    const item = otherItem('main', 40, 'ready', plus(t0, 7 * MIN));
+    setWorkItemState(w.db, item, 'parked', 'heal budget exhausted', plus(t0, 8 * MIN));
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('stale orphan: promoted before the last cycle with no work item does not hold it', async () => {
+    const issue = stagedIssue();
+    setCrewIssue(w.db, issue, { state: 'promoted', refutedSha: 'sha-1' }, plus(t0, -MIN));
+    await emptied(5);
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toEqual({ role: 'crew-lead' });
+  });
+
+  test('promoted with no number yet waits too', async () => {
+    await emptied(5);
+    const issue = stagedIssue();
+    w.db.prepare('UPDATE crew_issues SET number = NULL WHERE id = ?').run(issue);
+    setCrewIssue(w.db, issue, { state: 'promoted', refutedSha: 'sha-1' }, plus(t0, 6 * MIN));
+    expect(nextCrewWork(w.db, noAudit(), plus(t0, 30 * MIN))).toBeNull();
+  });
+
+  test('chain: promoting the next issue after a merge starts no early cycle until it is done', async () => {
+    // Only the crew's issues on the forge: the fixture's ready issues 1-5 would be queued work.
+    for (const n of [1, 2, 3, 4, 5]) w.f.state.issues.delete(n);
+    const zone = noAudit();
+    finish((await enqueue(t0, zone)) ?? '');
+    const filed = applyCrewActions(
+      w.db,
+      w.zone,
+      {
+        fileIssues: [
+          { key: 'a', objective: 'document-every-endpoint', title: 'Do a', body: ISSUE_BODY },
+          { key: 'b', objective: 'document-every-endpoint', title: 'Do b', body: ISSUE_BODY },
+        ],
+      },
+      { kind: 'drop', dropId: 'd0' },
+      t0,
+    ).filed;
+    const [a, b] = filed as [number, number];
+    await flushCrewOps(w.db, w.forges, zone, [], t0);
+    for (const id of [a, b]) {
+      const row = getCrewIssue(w.db, id);
+      expect(row?.state).toBe('staged');
+      setCrewIssue(w.db, id, { state: 'promoting', refutedSha: row?.bodySha ?? '' }, t0);
+    }
+    /** One server pass: sync, then reconcile. */
+    const pass = async (at: Date) => {
+      await syncDropZone(w.db, w.forges, zone, at);
+      await reconcileZone(
+        w.db,
+        w.forges,
+        zone,
+        await zonePass(w.forges, zone, 'main'),
+        promptVersions(),
+        usageCfg,
+        [],
+        at,
+      );
+    };
+    const itemOf = (id: number) => {
+      const n = getCrewIssue(w.db, id)?.number ?? -1;
+      const row = w.db
+        .prepare(`SELECT id FROM work_items WHERE drop_zone_id = 'main' AND issue_number = ?`)
+        .get(n) as { id: number } | undefined;
+      if (!row) throw new Error(`no work item for #${n}`);
+      return row.id;
+    };
+    const leadDrops = () =>
+      (
+        w.db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM drops WHERE drop_zone_id = 'main' AND role = 'crew-lead'`,
+          )
+          .get() as { n: number }
+      ).n;
+
+    // A is promoted; B waits for it to merge.
+    await pass(plus(t0, MIN));
+    expect([getCrewIssue(w.db, a)?.state, getCrewIssue(w.db, b)?.state]).toEqual([
+      'promoted',
+      'promoting',
+    ]);
+    // Sync admits A; it merges 20 minutes after the cycle.
+    await syncDropZone(w.db, w.forges, zone, plus(t0, 2 * MIN));
+    setWorkItemState(w.db, itemOf(a), 'done', 'merged', plus(t0, 20 * MIN));
+
+    // The pass that promotes B starts no early cycle, though over 10 minutes have passed.
+    await pass(plus(t0, 21 * MIN));
+    expect(getCrewIssue(w.db, b)?.state).toBe('promoted');
+    expect(leadDrops()).toBe(1);
+
+    // Sync admits B; nothing starts while it is queued, and once it is done one early cycle does.
+    await syncDropZone(w.db, w.forges, zone, plus(t0, 22 * MIN));
+    expect(nextCrewWork(w.db, zone, plus(t0, 23 * MIN))).toBeNull();
+    setWorkItemState(w.db, itemOf(b), 'done', 'merged', plus(t0, 30 * MIN));
+    await pass(plus(t0, 31 * MIN));
+    expect(leadDrops()).toBe(2);
+    const last = w.db
+      .prepare(`SELECT id FROM drops WHERE role = 'crew-lead' ORDER BY rowid DESC LIMIT 1`)
+      .get() as { id: string };
+    expect(work(last.id)).toEqual({ role: 'crew-lead' });
   });
 
   test("other zone: another zone's finished or open items don't count", async () => {
