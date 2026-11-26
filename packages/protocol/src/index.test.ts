@@ -1241,3 +1241,51 @@ describe('egress-private-v1 (#897)', () => {
     expect([...STICK_CAPABILITIES]).toEqual([...STICK_CAPABILITIES].sort());
   });
 });
+
+describe('EgressPayloadSchema ports (#914)', () => {
+  const allow = ['gitlab.example.com'];
+
+  test('ports is accepted as unique integers 1..65535, at most 8', () => {
+    for (const ports of [[8443], [443, 8443], [1, 65535], [1, 2, 3, 4, 5, 6, 7, 8]]) {
+      const p = { mode: 'enforce', allow, ports };
+      expect(EgressPayloadSchema.parse(p)).toEqual(p);
+    }
+  });
+
+  test('a payload without ports is unchanged by parsing', () => {
+    const p = { mode: 'monitor', allow: ['github.com'] };
+    const parsed = EgressPayloadSchema.parse(p);
+    expect(parsed).toEqual(p);
+    expect(parsed).not.toHaveProperty('ports');
+  });
+
+  const refused = (ports: unknown) => {
+    const r = EgressPayloadSchema.safeParse({ mode: 'enforce', allow, ports });
+    expect(r.success).toBe(false);
+    if (r.success) return;
+    expect(r.error.issues.length).toBeGreaterThan(0);
+    for (const issue of r.error.issues) {
+      expect(issue.path[0]).toBe('ports');
+      expect(issue.message).toMatch(/ports/);
+      for (const v of ['65536', '8443.5', '9999']) expect(issue.message).not.toContain(v);
+    }
+  };
+
+  test('0, 65536, a non-integer, a duplicate, an empty list and more than 8 are refused', () => {
+    refused([0]);
+    refused([65536]);
+    refused([8443.5]);
+    refused([9999, 9999]);
+    refused([]);
+    refused([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    refused(['8443']);
+    refused(8443);
+  });
+});
+
+describe('egress-ports-v1 (#914)', () => {
+  test('STICK_CAPABILITIES names egress-ports-v1 and stays sorted', () => {
+    expect(STICK_CAPABILITIES).toContain('egress-ports-v1');
+    expect([...STICK_CAPABILITIES]).toEqual([...STICK_CAPABILITIES].sort());
+  });
+});

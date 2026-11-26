@@ -221,6 +221,7 @@ export async function startEgress(
       JM_EGRESS_BIND: o.net.proxy,
       // Hosts (each also on allow) the proxy lets resolve to private addresses; absent unless set.
       ...(o.egress.private?.length ? { JM_EGRESS_PRIVATE: o.egress.private.join(',') } : {}),
+      ...(o.egress.ports?.length ? { JM_EGRESS_PORTS: o.egress.ports.join(',') } : {}),
       ...limits,
     },
     labels: o.labels,
