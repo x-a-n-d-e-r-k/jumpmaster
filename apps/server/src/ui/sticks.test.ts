@@ -518,12 +518,12 @@ describe("a stick's egress ceiling on /sticks (#780)", () => {
   test('the health line says clone-v1 yes or no, after image-verify-v1 (#871)', () => {
     const health = { dockerVersion: '27.3.1', freeBytes: 50_000_000_000 };
     expect(healthLine({ ...row, ...health, capabilities: ['egress-v1', 'image-verify-v1'] })).toBe(
-      'Docker 27.3.1, egress-v1 yes, image-verify-v1 yes, clone-v1 no, egress-private-v1 no, 50.0 GB free',
+      'Docker 27.3.1, egress-v1 yes, image-verify-v1 yes, clone-v1 no, egress-private-v1 no, egress-ports-v1 no, 50.0 GB free',
     );
     expect(
       healthLine({ ...row, ...health, capabilities: ['egress-v1', 'image-verify-v1', 'clone-v1'] }),
     ).toBe(
-      'Docker 27.3.1, egress-v1 yes, image-verify-v1 yes, clone-v1 yes, egress-private-v1 no, 50.0 GB free',
+      'Docker 27.3.1, egress-v1 yes, image-verify-v1 yes, clone-v1 yes, egress-private-v1 no, egress-ports-v1 no, 50.0 GB free',
     );
   });
 
@@ -532,7 +532,25 @@ describe("a stick's egress ceiling on /sticks (#780)", () => {
     expect(
       healthLine({ ...row, ...health, capabilities: ['egress-v1', 'egress-private-v1'] }),
     ).toBe(
-      'Docker 27.3.1, egress-v1 yes, image-verify-v1 no, clone-v1 no, egress-private-v1 yes, 50.0 GB free',
+      'Docker 27.3.1, egress-v1 yes, image-verify-v1 no, clone-v1 no, egress-private-v1 yes, egress-ports-v1 no, 50.0 GB free',
+    );
+  });
+
+  test('the health line says egress-ports-v1 yes or no (#915)', () => {
+    const health = { dockerVersion: '27.3.1', freeBytes: 50_000_000_000 };
+    expect(healthLine({ ...row, ...health, capabilities: ['egress-v1', 'egress-ports-v1'] })).toBe(
+      'Docker 27.3.1, egress-v1 yes, image-verify-v1 no, clone-v1 no, egress-private-v1 no, egress-ports-v1 yes, 50.0 GB free',
+    );
+  });
+
+  test('what a zone on another GitLab port needs of egress-ports-v1, in words (#915)', () => {
+    const html = renderSticks({
+      sticks: [{ ...row, cannotRun: [{ zoneId: 'gl', missing: ['egress-ports-v1'] }] }],
+      zones: [],
+      now: t0,
+    });
+    expect(html).toContain(
+      'lacks egress-ports-v1 (reaching the project&#39;s GitLab host on a port other than 443)',
     );
   });
 

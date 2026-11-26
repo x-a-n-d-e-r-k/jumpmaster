@@ -741,6 +741,106 @@ describe('a zone forge (issue #667)', () => {
     });
   });
 
+  describe('gitlab.caCert (issue #918)', () => {
+    // Two self-signed EC CA certificates (valid to 2126), as in config.test.ts.
+    const ROOT_CA = `-----BEGIN CERTIFICATE-----
+MIIBwzCCAWmgAwIBAgIUILMx4bVcG+WvdctPjeXv0Eu/YNowCgYIKoZIzj0EAwIw
+NjEdMBsGA1UEAwwURXhhbXBsZSBDb3JwIFJvb3QgQ0ExFTATBgNVBAoMDEV4YW1w
+bGUgQ29ycDAgFw0yNjExMjYwMjU4NDFaGA8yMTI2MTEwMjAyNTg0MVowNjEdMBsG
+A1UEAwwURXhhbXBsZSBDb3JwIFJvb3QgQ0ExFTATBgNVBAoMDEV4YW1wbGUgQ29y
+cDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABMD6pEjaSigANOJXH2RyquEdbgMv
+peHIVW4M9Zv7iJZlZ/iYPDt19M4jh35B98KBtjlIwvS4nvte3YlPNvn60H+jUzBR
+MB0GA1UdDgQWBBQbCzyPB/LpJ5XDnLfHkQ2OMHkHujAfBgNVHSMEGDAWgBQbCzyP
+B/LpJ5XDnLfHkQ2OMHkHujAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gA
+MEUCID860/NNCLvX0Z9lTyo95NzC1PxzWtxQrHpGa+0uaKQHAiEA1Se40cae7n4e
+xiaS8DF4pg0jHIDpfqMNJ1+nX9Qrk7s=
+-----END CERTIFICATE-----
+`;
+    const ISSUING_CA = `-----BEGIN CERTIFICATE-----
+MIIByTCCAW+gAwIBAgIUV0hkn9d2AFVF+vKWxqtkv8dJq4EwCgYIKoZIzj0EAwIw
+OTEgMB4GA1UEAwwXRXhhbXBsZSBDb3JwIElzc3VpbmcgQ0ExFTATBgNVBAoMDEV4
+YW1wbGUgQ29ycDAgFw0yNjExMjYwMjU4NDFaGA8yMTI2MTEwMjAyNTg0MVowOTEg
+MB4GA1UEAwwXRXhhbXBsZSBDb3JwIElzc3VpbmcgQ0ExFTATBgNVBAoMDEV4YW1w
+bGUgQ29ycDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABDQO/FDjSvPQopqSCBEV
+UBYYJ70At8T5FnQRWDo8BLp5rHnEB9fu8EXZwm3fvKAtJlIPcJbtT2AX8wT//EdR
+pzKjUzBRMB0GA1UdDgQWBBQTzvggIrxJS0RFdEd4T+WyS7aIqzAfBgNVHSMEGDAW
+gBQTzvggIrxJS0RFdEd4T+WyS7aIqzAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49
+BAMCA0gAMEUCIQCnb6fEh/Shu7GUf+IrUztrfQVh41hgXEKN7ZIOaHSmcAIgGKja
+h3hpG0eKKHYPr8jCPm51VKtVgFNDsRZvBe3SBBY=
+-----END CERTIFICATE-----
+`;
+    const ROOT_FP =
+      'D0:7D:6E:C4:94:B6:F2:7F:4E:F6:DE:6C:BF:BC:8B:81:22:97:2C:AB:F2:CA:B2:BD:89:D5:21:F7:1E:29:F9:6D';
+    const ISSUING_FP =
+      '7E:36:29:93:00:95:95:84:ED:0A:C7:56:6E:F1:E9:54:5E:DC:A2:67:15:29:35:B9:A3:1C:C2:4E:25:F0:31:01';
+    const trusts = (zoneId: string, subject: string, fp: string) => ({
+      path: `dropZones[${zoneId}].gitlab.caCert`,
+      consequence: `Project ${zoneId} will trust certificates issued by ${subject} (SHA-256 ${fp}) for its GitLab host`,
+    });
+    const ROOT = 'CN=Example Corp Root CA, O=Example Corp';
+    const ISSUING = 'CN=Example Corp Issuing CA, O=Example Corp';
+    const withCa = (caCert?: string) => ({
+      ...gitlab(),
+      gitlab: { baseUrl: 'https://gitlab.example.com', ...(caCert ? { caCert } : {}) },
+    });
+    const noPem = (c: ReturnType<typeof classify>) => {
+      for (const g of c.guarded) expect(g.consequence).not.toContain('BEGIN CERTIFICATE');
+    };
+
+    test('setting it on an existing zone is guarded, naming the subject and fingerprint', () => {
+      const c = edit(withCa(), withCa(ROOT_CA));
+      expect(c.refused).toEqual([]);
+      expect(c.guarded).toEqual([trusts('web', ROOT, ROOT_FP)]);
+      noPem(c);
+    });
+
+    test('adding a second certificate is guarded for it alone', () => {
+      const c = edit(withCa(ROOT_CA), withCa(`${ROOT_CA}${ISSUING_CA}`));
+      expect(c.guarded).toEqual([trusts('web', ISSUING, ISSUING_FP)]);
+      noPem(c);
+      // Reordering or reformatting the same certificates adds none.
+      expect(
+        edit(withCa(`${ROOT_CA}${ISSUING_CA}`), withCa(`${ISSUING_CA}\n${ROOT_CA}`)).guarded,
+      ).toEqual([]);
+    });
+
+    test('removing certificates is not a weakening', () => {
+      expect(edit(withCa(`${ROOT_CA}${ISSUING_CA}`), withCa(ROOT_CA)).guarded).toEqual([]);
+      expect(edit(withCa(ROOT_CA), withCa()).guarded).toEqual([]);
+    });
+
+    test('replacing one certificate with another is guarded for the new one', () => {
+      expect(edit(withCa(ROOT_CA), withCa(ISSUING_CA)).guarded).toEqual([
+        trusts('web', ISSUING, ISSUING_FP),
+      ]);
+    });
+
+    test('adding a zone with caCert is guarded: the baseline carries only gitlab.baseUrl', () => {
+      const added = zone('new', {
+        egress: { mode: 'monitor', allow: [] },
+        ...withCa(`${ROOT_CA}${ISSUING_CA}`),
+      });
+      expect(ADD_BASELINE(added).gitlab).toEqual({ baseUrl: 'https://gitlab.example.com' });
+      const c = classify(doc([]), doc([added]));
+      expect(c.guarded).toEqual([
+        newProject('new', 'group/sub/web'),
+        {
+          path: 'dropZones[new].forge',
+          consequence:
+            'Project new lives on GitLab (forge: gitlab): Jumpmaster will act on its issues and merge requests there',
+        },
+        {
+          path: 'dropZones[new].gitlab.baseUrl',
+          consequence:
+            'Project new will use the GitLab instance at https://gitlab.example.com (gitlab.baseUrl): the forge tokens will be sent there',
+        },
+        trusts('new', ROOT, ROOT_FP),
+        trusts('new', ISSUING, ISSUING_FP),
+      ]);
+      noPem(c);
+    });
+  });
+
   test('the add baseline refuses a nested path on a GitHub zone', () => {
     expect(() => ADD_BASELINE(zone('new', { repo: 'group/sub/web' }))).toThrow();
     expect(() => ADD_BASELINE(zone('new', { repo: 'group/sub/web', forge: 'github' }))).toThrow();

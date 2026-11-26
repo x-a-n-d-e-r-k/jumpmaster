@@ -250,6 +250,10 @@ describe('the advanced settings page, /projects/:id/flags', () => {
     expect(rowHtml(html, 'id')).toContain(
       'Fixed once the project exists: remove the project and add it again to change it.',
     );
+    // A ctl command in the sentence is set as code, its words kept (issue #918).
+    expect(rowHtml(html, 'gitlab.caCert')).toContain(
+      'Changed with <code>jumpmaster ctl zones set</code> or in the config file.',
+    );
     for (const k of ['id', 'repo', 'gates']) expect(rowHtml(html, k)).not.toContain('Reset');
     // Locked: repo refused; image and requireSignedImages browser-forbidden.
     const repo = rowHtml(html, 'repo');

@@ -102,10 +102,10 @@ describe('completeness', () => {
 describe('kinds, options and bounds from the schema', () => {
   const leaves = schemaLeaves();
 
-  test("every entry's kind is the schema's; only id and server.publicUrl choose elsewhere", () => {
+  test("every entry's kind is the schema's; only id, server.publicUrl and gitlab.caCert choose elsewhere", () => {
     for (const e of FLAGS) {
       const derived = derivedKind(leaves.get(e.path) as z.ZodType);
-      if (['dropZones[].id', 'server.publicUrl'].includes(e.path)) {
+      if (['dropZones[].id', 'server.publicUrl', 'dropZones[].gitlab.caCert'].includes(e.path)) {
         expect(e.kind, e.path).toBe('elsewhere');
         expect(derived, e.path).not.toBe('elsewhere');
       } else expect(e.kind, e.path).toBe(derived);
@@ -117,6 +117,9 @@ describe('kinds, options and bounds from the schema', () => {
     );
     expect(FLAGS.find((f) => f.path === 'server.publicUrl')?.elsewhere).toBe(
       'Changed under Other machines, on System, Server.',
+    );
+    expect(FLAGS.find((f) => f.path === 'dropZones[].gitlab.caCert')?.elsewhere).toBe(
+      'Changed with jumpmaster ctl zones set or in the config file.',
     );
     expect(FLAGS.find((f) => f.path === 'usage.probeJitterSeconds')?.elsewhere).toBe(
       'Changed with jumpmaster ctl settings set or in the config file.',
@@ -328,6 +331,8 @@ describe('no setting is stranded (#672)', () => {
       const excused =
         SETUP_SECTIONS.includes(section) ||
         e.path === 'dropZones[].id' ||
+        // A multi-line PEM bundle has no Setup input: ctl zones set or the file (issue #918).
+        e.path === 'dropZones[].gitlab.caCert' ||
         ['refused', 'browser-forbidden'].includes(rowOf(e).guard);
       expect(excused, e.path).toBe(true);
     }
@@ -409,6 +414,18 @@ describe('a GitLab zone (issue #667)', () => {
     });
     expect(row(rows, 'forge').entry.kind).toBe('select');
     expect(row(rows, 'gitlab.baseUrl').entry.kind).toBe('text');
+  });
+
+  test('gitlab.caCert is a guarded zone entry changed with ctl zones set (issue #918)', () => {
+    const r = row(zoneRows(gitlabZone), 'gitlab.caCert');
+    expect(r).toMatchObject({ value: undefined, explicit: false, guard: 'guarded' });
+    expect(r.entry).toMatchObject({
+      label: 'GitLab private certificate authority',
+      kind: 'elsewhere',
+      group: 'safety',
+      elsewhere: 'Changed with jumpmaster ctl zones set or in the config file.',
+    });
+    expect(r.entry.help).toMatch(/PEM certificates of a private certificate authority/);
   });
 
   test('a GitHub zone has forge and gitlab.baseUrl unset, and a nested path is refused', () => {

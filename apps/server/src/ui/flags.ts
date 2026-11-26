@@ -103,13 +103,17 @@ function recordControl(r: FlagRow, locked: boolean): string {
     .join('<br>');
 }
 
+/** An `elsewhere` sentence, escaped, with its ctl command (`jumpmaster ctl zones set`) as code. */
+const elsewhereHtml = (sentence: string): string =>
+  escapeHtml(sentence).replace(/\bjumpmaster ctl [a-z-]+ [a-z-]+/g, '<code>$&</code>');
+
 function row(f: FlagsForm, r: FlagRow): string {
   const { entry, key, guard } = r;
   const forbidden = forbiddenLocked(f, r);
   const locked = f.readOnly || forbidden || guard === 'refused';
   const control =
     entry.kind === 'elsewhere'
-      ? `${escapeHtml(entry.elsewhere ?? '')}${elsewhereLink(f, r)}`
+      ? `${elsewhereHtml(entry.elsewhere ?? '')}${elsewhereLink(f, r)}`
       : entry.kind === 'record'
         ? recordControl(r, locked)
         : settingControl({

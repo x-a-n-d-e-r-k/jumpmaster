@@ -1,6 +1,6 @@
 // What a stick lacks for a zone, in words (#780): the `missing` items `missingFor` gives, as the
-// status, the doctor and the pages show them. Every item but an `egress-ceiling:` one, `clone-v1` and
-// `egress-private-v1` stays as it is.
+// status, the doctor and the pages show them. Every item but an `egress-ceiling:` one, `clone-v1`,
+// `egress-private-v1` and `egress-ports-v1` stays as it is.
 
 /** The prefix of the `missing` item a stick's egress ceiling adds. */
 export const CEILING_MISSING = 'egress-ceiling:';
@@ -31,10 +31,15 @@ const CLONE_WORDS = `${CLONE_CAP} (the clone container a GitLab project's drops 
 export const EGRESS_PRIVATE_CAP = 'egress-private-v1';
 const EGRESS_PRIVATE_WORDS = `${EGRESS_PRIVATE_CAP} (reaching the project's GitLab host on a private network)`;
 
+/** The capability a GitLab zone on a port other than 443 needs under egress (#915), and what for. */
+export const EGRESS_PORTS_CAP = 'egress-ports-v1';
+const EGRESS_PORTS_WORDS = `${EGRESS_PORTS_CAP} (reaching the project's GitLab host on a port other than 443)`;
+
 /** One `missing` item in words. */
 export function missingWords(item: string): string {
   if (item === CLONE_CAP) return CLONE_WORDS;
   if (item === EGRESS_PRIVATE_CAP) return EGRESS_PRIVATE_WORDS;
+  if (item === EGRESS_PORTS_CAP) return EGRESS_PORTS_WORDS;
   if (item === CEILING_MODE)
     return "egress set to enforce (the stick's JM_EGRESS_CEILING requires it)";
   const hosts = ceilingHosts(item);
