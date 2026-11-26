@@ -36,6 +36,7 @@ import {
   rateLimitFromEvent,
   releaseProbe,
   setUsageOverride,
+  throttleSince,
   usageWarning,
 } from './usage.js';
 
@@ -1156,6 +1157,74 @@ describe('allowed_warning holds only an unreported window, until its reset (#748
       expect(dispatchGate(db, cfg, when)).toBe('open');
       expect(getUsageState(db).observedAt).toBe(observed);
     }
+  });
+
+  test('a no-reset warning does not start holding when the warned window resets', () => {
+    ingest({
+      status: 'allowed',
+      unifiedWindows: { five_hour: { utilization: 0.4, resetsAt: '2026-10-20T12:00:00Z' } },
+    });
+    ingest({ status: 'allowed_warning', rateLimitType: 'five_hour' }, plus(t0, 10 * MIN));
+    expect(dispatchGate(db, cfg, at('11:59:59'))).toBe('open');
+    expect(dispatchGate(db, cfg, at('12:00:00'))).toBe('open');
+    expect(dispatchGate(db, cfg, at('13:00:00'))).toBe('open');
+    expect(gateReason(db, cfg, at('12:00:00'))).toEqual({ kind: 'open' });
+    expect(usageWarning(db, at('12:00:00'))).toBeNull();
+    expect(throttleSince(db, cfg, at('12:00:00'))).toBeNull();
+  });
+
+  test('a no-reset seven_day warning does not hold after the stored weekly reset', () => {
+    ingest({
+      status: 'allowed',
+      unifiedWindows: { seven_day: { utilization: 0.5, resetsAt: '2026-10-21T00:00:00Z' } },
+    });
+    ingest({ status: 'allowed_warning', rateLimitType: 'seven_day' }, plus(t0, 10 * MIN));
+    expect(dispatchGate(db, cfg, plus(t0, 10 * MIN))).toBe('open');
+    const after = new Date('2026-10-21T00:00:00Z');
+    expect(dispatchGate(db, cfg, after)).toBe('open');
+    expect(dispatchGate(db, cfg, plus(after, 3 * DAY))).toBe('open');
+    expect(gateReason(db, cfg, after)).toEqual({ kind: 'open' });
+  });
+
+  test('repeated no-reset chat warnings do not extend a hold', () => {
+    ingest({ status: 'allowed_warning', rateLimitType: 'five_hour' });
+    for (let m = 10; m <= 5 * 60; m += 10) {
+      ingest(
+        { status: 'allowed_warning', rateLimitType: 'five_hour' },
+        plus(t0, m * MIN),
+        src('chat-turn-no-drop', null, null, 0),
+      );
+    }
+    expect(dispatchGate(db, cfg, plus(t0, 5 * H - 1))).toBe('finishing_only');
+    expect(throttleSince(db, cfg, plus(t0, 5 * H - 1))).toBe(t0.toISOString());
+    expect(dispatchGate(db, cfg, plus(t0, 5 * H))).toBe('open');
+    expect(gateReason(db, cfg, plus(t0, 5 * H))).toEqual({ kind: 'open' });
+  });
+
+  test('a no-reset warning with no stored row holds for the fallback from the first warning', () => {
+    ingest({ status: 'allowed_warning', rateLimitType: 'five_hour' });
+    ingest({ status: 'allowed_warning', rateLimitType: 'five_hour' }, plus(t0, H));
+    expect(dispatchGate(db, cfg, plus(t0, 5 * H - 1))).toBe('finishing_only');
+    expect(gateReason(db, cfg, plus(t0, 5 * H - 1)).kind).toBe('warning');
+    expect(dispatchGate(db, cfg, plus(t0, 5 * H))).toBe('open');
+  });
+
+  test('a later warning with a reset replaces the stored one; an allowed clears it', () => {
+    ingest({ status: 'allowed_warning', rateLimitType: 'five_hour' });
+    ingest(
+      { status: 'allowed_warning', rateLimitType: 'five_hour', resetsAt: '2026-10-20T18:00:00Z' },
+      plus(t0, H),
+    );
+    expect(usageWarning(db, plus(t0, H))).toEqual({
+      window: 'five_hour',
+      at: plus(t0, H).toISOString(),
+      resetsAt: '2026-10-20T18:00:00.000Z',
+    });
+    expect(dispatchGate(db, cfg, at('17:59:59'))).toBe('finishing_only');
+    ingest({ status: 'allowed', rateLimitType: 'five_hour' }, plus(t0, 2 * H));
+    expect(usageWarning(db, plus(t0, 2 * H))).toBeNull();
+    ingest({ status: 'allowed_warning', rateLimitType: 'five_hour' }, plus(t0, 3 * H));
+    expect(usageWarning(db, plus(t0, 3 * H))?.at).toBe(plus(t0, 3 * H).toISOString());
   });
 
   test('utilization at or above the threshold holds with or without a warning', () => {

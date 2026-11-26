@@ -188,7 +188,7 @@ export function ingestRateLimit(
       patch.sevenDayResetsAt = normalizeResetsAt(sd.resetsAt) ?? null;
     }
     if (fh || sd) patch.observedAt = now.toISOString();
-    Object.assign(patch, warningPatch(data, u, now));
+    Object.assign(patch, warningPatch(db, data, u, now));
     // Command's override ends at once on a refusal (#728), whoever reports it.
     if (data.status === 'rejected') Object.assign(patch, NO_OVERRIDE);
 
@@ -262,8 +262,14 @@ const NO_WARNING = {
 /**
  * How a report changes the stored warning (#739): an `allowed_warning` replaces it, whatever the
  * pause; an `allowed` for its window, or naming none, clears it; anything else leaves it.
+ *
+ * A warning with no reset of its own takes the warned window's stored reset when that is still to
+ * come (#912), so its hold never outlasts the window. While a warning on the same window is current,
+ * such a warning does not restart it: the hold keeps its first warning's time, and its end moves
+ * only earlier, to a stored reset before it. A warning that carries a reset replaces the stored one.
  */
 function warningPatch(
+  db: Db,
   data: RateLimitEventData,
   u: UsageStateRow,
   now: Date,
@@ -272,16 +278,39 @@ function warningPatch(
   const window = named !== undefined && USAGE_WINDOW_KEY.test(named) ? named : null;
   if (data.status === 'allowed_warning') {
     const own = window !== null ? data.unifiedWindows?.[window]?.resetsAt : undefined;
-    return {
-      warningWindow: window,
-      warningAt: now.toISOString(),
-      warningResetsAt: normalizeResetsAt(data.resetsAt) ?? normalizeResetsAt(own) ?? null,
-    };
+    const given = normalizeResetsAt(data.resetsAt) ?? normalizeResetsAt(own) ?? null;
+    if (given !== null) {
+      return { warningWindow: window, warningAt: now.toISOString(), warningResetsAt: given };
+    }
+    const stored = window !== null ? storedReset(db, window, now) : null;
+    const end = warningEnd(u);
+    if (end !== null && now.getTime() <= end && u.warningWindow === window) {
+      const next = ms(stored);
+      return next !== null && next < end ? { warningResetsAt: stored } : {};
+    }
+    return { warningWindow: window, warningAt: now.toISOString(), warningResetsAt: stored };
   }
   if (data.status === 'allowed' && u.warningAt !== null) {
     if (window === null || window === u.warningWindow) return NO_WARNING;
   }
   return {};
+}
+
+/** The reset stored in `usage_windows` for `key`, normalized, when it is still to come. */
+function storedReset(db: Db, key: string, now: Date): string | null {
+  const row = listUsageWindows(db).find((w) => w.key === key);
+  const reset = normalizeResetsAt(row?.resetsAt) ?? null;
+  const t = ms(reset);
+  return t !== null && t > now.getTime() ? reset : null;
+}
+
+/** When the stored warning stops being current: its reset, else its fallback span; null if none. */
+function warningEnd(u: UsageStateRow): number | null {
+  const at = ms(u.warningAt);
+  if (at === null) return null;
+  const span =
+    u.warningWindow === null || u.warningWindow.startsWith('five_hour') ? FIVE_HOURS : SEVEN_DAYS;
+  return ms(u.warningResetsAt) ?? at + span;
 }
 
 /** Claude's last `allowed_warning` while current: the window it named, when, and its reset. */
@@ -290,12 +319,8 @@ export type UsageWarning = { window: string | null; at: string; resetsAt: string
 /** Claude's last `allowed_warning`, while it is current: until its reset, else its fallback span. */
 export function usageWarning(db: Db, now: Date): UsageWarning | null {
   const u = getUsageState(db);
-  const at = ms(u.warningAt);
-  if (u.warningAt === null || at === null) return null;
-  const span =
-    u.warningWindow === null || u.warningWindow.startsWith('five_hour') ? FIVE_HOURS : SEVEN_DAYS;
-  const end = ms(u.warningResetsAt) ?? at + span;
-  if (now.getTime() >= end) return null;
+  const end = warningEnd(u);
+  if (u.warningAt === null || end === null || now.getTime() >= end) return null;
   return { window: u.warningWindow, at: u.warningAt, resetsAt: u.warningResetsAt };
 }
 
