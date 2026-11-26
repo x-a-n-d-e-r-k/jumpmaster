@@ -248,6 +248,36 @@ describe('clone-plan (#840)', () => {
     expect(res.json().egress).not.toHaveProperty('private');
   });
 
+  test('a GitLab zone on port 8443 under egress plans ports: [8443] (#915)', async () => {
+    const w = await setup({
+      zone: gitlabZone({
+        gitlab: { baseUrl: 'https://gitlab.example.com:8443' },
+        egress: { mode: 'enforce', allow: ['gitlab.example.com'] },
+      }),
+    });
+    const res = await plan(w.stickToken);
+    expect(res.statusCode).toBe(200);
+    const p = ClonePlanSchema.parse(res.json());
+    expect(p.egress).toEqual({ mode: 'enforce', allow: ['gitlab.example.com'], ports: [8443] });
+    expect(p.forge.origin).toBe('https://gitlab.example.com:8443');
+  });
+
+  test.each(['https://gitlab.example.com', 'https://gitlab.example.com:443'])(
+    'a GitLab zone at %s under egress plans no ports key (#915)',
+    async (baseUrl) => {
+      const w = await setup({
+        zone: gitlabZone({
+          gitlab: { baseUrl },
+          egress: { mode: 'enforce', allow: ['gitlab.example.com'] },
+        }),
+      });
+      const res = await plan(w.stickToken);
+      expect(res.statusCode).toBe(200);
+      expect(res.json().egress).toEqual({ mode: 'enforce', allow: ['gitlab.example.com'] });
+      expect(res.json().egress).not.toHaveProperty('ports');
+    },
+  );
+
   test('a GitLab host outside egress is refused as egress, retryable, revoking nothing', async () => {
     const w = await setup({
       zone: gitlabZone({ egress: { mode: 'enforce', allow: ['other.example.org'] } }),

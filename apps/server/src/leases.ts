@@ -88,11 +88,12 @@ export type ZoneRequirements = {
  * `image-verify-v1` under the `signed` policy when signed images are required (install-wide, or
  * by the zone itself), and `clone-v1` for a GitLab zone, whose drops say `repo.mirror: provided`
  * (ruling 121: the stick's clone container fills the mirror), and `egress-private-v1` when egress is
- * on and the zone lists `egress.private` hosts (#897). `egress` is what the drops are
- * given, judged against a stick's ceiling.
+ * on and the zone lists `egress.private` hosts (#897), and `egress-ports-v1` when egress is on and
+ * the zone's GitLab host (`gitlab.baseUrl`) is on a port other than 443 (#915). `egress` is what
+ * the drops are given, judged against a stick's ceiling.
  */
 export function zoneRequirements(
-  zone: Pick<DropZoneConfig, 'egress' | 'requireSignedImages' | 'preset' | 'forge'>,
+  zone: Pick<DropZoneConfig, 'egress' | 'requireSignedImages' | 'preset' | 'forge' | 'gitlab'>,
   config: Pick<Config, 'requireSignedImages'>,
 ): ZoneRequirements {
   const caps = new Set<StickCapability>();
@@ -101,11 +102,29 @@ export function zoneRequirements(
     caps.add('egress-v1');
     // An older stick strips the payload's `private`, and its proxy refuses the host (#897).
     if ((zone.egress?.private?.length ?? 0) > 0) caps.add('egress-private-v1');
+    // An older stick strips the push and clone plans' `ports`, and its proxy allows 443 only (#915).
+    const port = forgeKind(zone) === 'gitlab' ? gitlabPort(zone.gitlab?.baseUrl) : null;
+    if (port !== null && port !== 443) caps.add('egress-ports-v1');
   }
   // Strengthen-only: the zone can add the requirement, never remove the install's.
   const signed = config.requireSignedImages === true || zone.requireSignedImages === true;
   if (signed) caps.add('image-verify-v1');
   return { caps, signed, egress: egressFor(zone) };
+}
+
+/**
+ * The port of a GitLab zone's https `gitlab.baseUrl` (443 when it names none), or null when it is
+ * not one: such a zone's pushes and clones are refused, so it needs no port.
+ */
+function gitlabPort(baseUrl: string | undefined): number | null {
+  if (baseUrl === undefined) return null;
+  try {
+    const url = new URL(baseUrl);
+    if (url.protocol !== 'https:') return null;
+    return url.port === '' ? 443 : Number(url.port);
+  } catch {
+    return null;
+  }
 }
 
 /** Hosts an `egress-ceiling:` item names before `+N`, and the characters kept of each. */
