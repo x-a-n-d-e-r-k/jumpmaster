@@ -1996,17 +1996,38 @@ describe('push container routes', () => {
       expect(res.json()).toEqual(REFUSED);
     });
 
-    test('a port other than 443 is refused with egress on, the log naming it; planned with egress off', async () => {
-      const logs: string[] = [];
+    test('a port other than 443 is planned with egress on, carrying ports: [port] (#915)', async () => {
       const url = 'https://gitlab.example.com:8443';
-      const { res } = await planFor(glZone(url, ['gitlab.example.com']), logs);
-      expect(res.statusCode).toBe(403);
-      expect(res.json()).toEqual(REFUSED);
-      expect(logs.join('\n')).toMatch(/8443/);
+      const { res } = await planFor(glZone(url, ['gitlab.example.com']));
+      expect(res.statusCode).toBe(200);
+      expect(PushPlanSchema.parse(res.json()).egress).toEqual({
+        mode: 'enforce',
+        allow: ['gitlab.example.com'],
+        ports: [8443],
+      });
       const off = await planFor(glZone(url, ['gitlab.example.com'], 'off'));
       expect(off.res.statusCode).toBe(200);
       expect(off.res.json()).not.toHaveProperty('egress');
     });
+
+    test('a port other than 443 the list does not allow is refused, the log naming the host', async () => {
+      const logs: string[] = [];
+      const url = 'https://gitlab.example.com:8443';
+      const { res } = await planFor(glZone(url, ['other.example.org']), logs);
+      expect(res.statusCode).toBe(403);
+      expect(res.json()).toEqual(REFUSED);
+      expect(logs.join('\n')).toMatch(/gitlab\.example\.com/);
+    });
+
+    test.each(['https://gitlab.example.com', 'https://gitlab.example.com:443'])(
+      '%s plans no ports key (#915)',
+      async (url) => {
+        const { res } = await planFor(glZone(url, ['gitlab.example.com']));
+        expect(res.statusCode).toBe(200);
+        expect(res.json().egress).toEqual({ mode: 'enforce', allow: ['gitlab.example.com'] });
+        expect(res.json().egress).not.toHaveProperty('ports');
+      },
+    );
 
     test('an explicit :443 is the default port and planned', async () => {
       const { res } = await planFor(

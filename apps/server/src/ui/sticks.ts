@@ -94,8 +94,8 @@ const gb = (bytes: number): string => `${(bytes / 1_000_000_000).toFixed(1)} GB 
 
 /**
  * Its health from its advert: the Docker version, egress-v1, image-verify-v1, clone-v1 (which a
- * GitLab project's drops need), egress-private-v1 (which a zone's egress.private needs) and free
- * disk.
+ * GitLab project's drops need), egress-private-v1 (which a zone's egress.private needs),
+ * egress-ports-v1 (which a GitLab host on a port other than 443 needs) and free disk.
  */
 export function healthLine(st: StickRow): string {
   const has = (c: string) => `${c} ${st.capabilities.includes(c) ? 'yes' : 'no'}`;
@@ -105,6 +105,7 @@ export function healthLine(st: StickRow): string {
     has('image-verify-v1'),
     has('clone-v1'),
     has('egress-private-v1'),
+    has('egress-ports-v1'),
     st.freeBytes === null || st.freeBytes === undefined ? 'free disk unmeasured' : gb(st.freeBytes),
   ].join(', ');
 }

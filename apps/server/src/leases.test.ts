@@ -714,6 +714,45 @@ describe('stick capabilities, per zone', () => {
     });
   });
 
+  describe('a GitLab zone on a port other than 443 needs egress-ports-v1 (#915)', () => {
+    const at = (baseUrl: string, mode: 'off' | 'monitor' | 'enforce') =>
+      makeZone({
+        forge: 'gitlab',
+        gitlab: { baseUrl },
+        egress: { mode, allow: ['gitlab.example.com'] },
+      });
+
+    test.each(['monitor', 'enforce'] as const)('required for an 8443 zone under %s', (mode) => {
+      expect(
+        [...zoneRequirements(at('https://gitlab.example.com:8443', mode), {}).caps].sort(),
+      ).toEqual(['clone-v1', 'egress-ports-v1', 'egress-v1']);
+    });
+
+    test('not required on port 443, for a GitHub zone, or with egress off', () => {
+      for (const url of ['https://gitlab.example.com', 'https://gitlab.example.com:443']) {
+        expect([...zoneRequirements(at(url, 'enforce'), {}).caps].sort()).toEqual([
+          'clone-v1',
+          'egress-v1',
+        ]);
+      }
+      expect([
+        ...zoneRequirements(makeZone({ egress: { mode: 'enforce', allow: [] } }), {}).caps,
+      ]).toEqual(['egress-v1']);
+      expect([...zoneRequirements(at('https://gitlab.example.com:8443', 'off'), {}).caps]).toEqual([
+        'clone-v1',
+      ]);
+    });
+
+    test('a stick without egress-ports-v1 is passed over', () => {
+      const need = zoneRequirements(at('https://gitlab.example.com:8443', 'enforce'), {});
+      const older = { capabilities: ['egress-v1', 'clone-v1'], imagePolicy: 'allowlist' as const };
+      expect(missingFor(older, need)).toEqual(['egress-ports-v1']);
+      expect(
+        missingFor({ ...older, capabilities: ['egress-v1', 'egress-ports-v1', 'clone-v1'] }, need),
+      ).toEqual([]);
+    });
+  });
+
   function secondZone() {
     upsertDropZone(db, {
       id: 'locked',
