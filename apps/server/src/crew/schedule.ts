@@ -76,7 +76,10 @@ export const EARLY_CYCLE_MS = 10 * 60_000;
 /**
  * Whether the zone's queue emptied since the lead cycle created at `lastAt`, so the lead may file
  * what just became possible: at least `EARLY_CYCLE_MS` since that cycle, no work item `ready`,
- * `in_flight` or `pr_open`, no crew issue in an open state, and an item `done` after that cycle.
+ * `in_flight` or `pr_open`, no crew issue in an open state, no crew issue `promoted` after that
+ * cycle whose work item does not exist yet (no number, or no work item of that number in the
+ * zone), and an item `done` after that cycle. A promoted issue last updated at or before that
+ * cycle holds nothing, so an orphan that never gets a work item holds no early cycle for ever.
  * The early cycle's own drop makes the last condition false again: at most one per emptying.
  */
 function queueEmptied(db: Db, zoneId: string, lastAt: string, now: Date): boolean {
@@ -95,6 +98,20 @@ function queueEmptied(db: Db, zoneId: string, lastAt: string, now: Date): boolea
     )
     .get(zoneId, ...OPEN_STATES);
   if (filing) return false;
+  // A crew issue promoted since that cycle whose work item sync has not admitted yet: it is about
+  // to enter the queue. Only since that cycle, so one closed or relabelled before sync admitted
+  // it holds no early cycle past the next timed or requested one.
+  const promoting = db
+    .prepare(
+      `SELECT 1 FROM crew_issues c WHERE c.zone_id = ? AND c.state = 'promoted'
+         AND c.updated_at > ?
+         AND (c.number IS NULL OR NOT EXISTS (
+           SELECT 1 FROM work_items wi WHERE wi.drop_zone_id = c.zone_id
+             AND wi.issue_number = c.number))
+       LIMIT 1`,
+    )
+    .get(zoneId, lastAt);
+  if (promoting) return false;
   const finished = db
     .prepare(
       `SELECT 1 FROM work_items WHERE drop_zone_id = ? AND state = 'done' AND updated_at > ?

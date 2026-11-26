@@ -162,6 +162,10 @@ is running, the daily cap allows, `GOAL.md` parses, and pending refute or diagno
 A cycle also starts early, once per emptying, when the zone's queue empties: at least 10 minutes
 after the last cycle, a work item became `done` since it, and no item is `ready`, `in_flight` or
 `pr_open` and no crew issue is still being filed, refuted or promoted (parked items don't count).
+A crew issue promoted since the last cycle whose work item sync hasn't admitted yet also holds it,
+so the next issue of an objective's chain enters the queue first. Only issues promoted since the
+last cycle hold it: one closed or relabelled before sync admitted it stops holding once a timed or
+requested cycle has run.
 
 **Pass:**
 - New issues carry the staged label and end with the Jumpmaster marker; each has an outbox row.
