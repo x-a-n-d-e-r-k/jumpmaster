@@ -5,11 +5,18 @@ import nock from 'nock';
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
 import { GitHubForge } from './forge/github.js';
 import { GitLabForge } from './forge/gitlab.js';
+import { gitlabFetchFor } from './forge/gitlab-ca.js';
 import { GITLAB_UNSUPPORTED } from './forge/kind.js';
 import { ForgePairs, type PairOptions, pairFor, pairKey, pairOptionsFor } from './outbox.js';
 import { ACCESS, type FakeGitLab, fakeGitLab } from './test/fake-gitlab.js';
 import type { Resolved } from './vault/credentials.js';
 import type { ResolvedGitlabPats } from './vault/resolution.js';
+
+// gitlab-ca.ts as it is, but spied on, so a test can hand a CA zone's forges a fetch of its own.
+vi.mock('./forge/gitlab-ca.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('./forge/gitlab-ca.js')>();
+  return { ...real, gitlabFetchFor: vi.fn(real.gitlabFetchFor) };
+});
 
 const GITLAB = 'https://gitlab.example.com';
 const OTHER_GITLAB = 'https://gitlab.other.example.com';
@@ -304,5 +311,82 @@ describe('pairOptionsFor for a GitLab zone (issue #764)', () => {
     expect(pairs.for(twoBot, github, of(twoBot, patsOf({ ...tokens, author: ROTATED })))).not.toBe(
       first,
     );
+  });
+});
+
+// Issue #919: a zone's gitlab.caCert. Two fake certificate blocks: nothing here parses them.
+const pemBlock = (body: string) =>
+  `-----BEGIN CERTIFICATE-----\n${body}\n-----END CERTIFICATE-----\n`;
+const CA_ONE = pemBlock('Q0FPTkVDQU9ORUNBT05FQ0FPTkVDQU9ORQ');
+const CA_TWO = pemBlock('Q0FUV09DQVRXT0NBVFdPQ0FUV09DQVRXTw');
+
+describe('pairFor for a GitLab zone with gitlab.caCert (issue #919)', () => {
+  const withCa = (caCert: string) => ({ ...twoBot, gitlab: { baseUrl: GITLAB, caCert } });
+
+  test('both forges send through the CA fetch for the zone', async () => {
+    const caFetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const token = new Headers(init?.headers).get('PRIVATE-TOKEN');
+      const username = token === AUTHOR ? 'author-bot' : 'reviewer-bot';
+      return Response.json({ id: 1, username });
+    });
+    vi.mocked(gitlabFetchFor).mockClear();
+    vi.mocked(gitlabFetchFor).mockReturnValueOnce(caFetch as unknown as typeof fetch);
+    const pair = pairFor(withCa(CA_ONE), github, { gitlabTokens: tokens });
+    expect(vi.mocked(gitlabFetchFor).mock.calls).toEqual([[CA_ONE]]);
+    expect(await pair.author.viewerLogin()).toBe('author-bot');
+    expect(await pair.reviewer?.viewerLogin()).toBe('reviewer-bot');
+    expect(caFetch.mock.calls.map(([url]) => String(url))).toEqual([
+      `${GITLAB}/api/v4/user`,
+      `${GITLAB}/api/v4/user`,
+    ]);
+  });
+
+  test('a zone without a CA keeps the global fetch', async () => {
+    const gl = setup();
+    vi.mocked(gitlabFetchFor).mockClear();
+    const pair = pairFor(twoBot, github, { gitlabTokens: tokens });
+    expect(vi.mocked(gitlabFetchFor).mock.calls).toEqual([[undefined]]);
+    expect(vi.mocked(gitlabFetchFor).mock.results[0]?.value).toBe(globalThis.fetch);
+    expect(await pair.author.viewerLogin()).toBe('author-bot');
+    expect(await pair.reviewer?.viewerLogin()).toBe('reviewer-bot');
+    expect(gl.requests).toHaveLength(2);
+  });
+
+  test('pairKey changes when the CA is added, changed or removed, and never holds PEM text', () => {
+    const none = pairKey(twoBot, github, { gitlabTokens: tokens });
+    const one = pairKey(withCa(CA_ONE), github, { gitlabTokens: tokens });
+    const two = pairKey(withCa(CA_TWO), github, { gitlabTokens: tokens });
+    expect(one).not.toBe(none);
+    expect(two).not.toBe(one);
+    expect(two).not.toBe(none);
+    expect(pairKey(withCa(CA_ONE), github, { gitlabTokens: tokens })).toBe(one);
+    for (const k of [one, two]) {
+      expect(k).not.toContain('BEGIN');
+      expect(k).not.toContain('CERTIFICATE');
+      expect(k).not.toContain('Q0FPTkVD');
+      expect(k).not.toContain('Q0FUV09D');
+    }
+  });
+
+  test('a zone with no CA keeps the key it had before', () => {
+    const k = JSON.parse(pairKey(twoBot, github, { gitlabTokens: tokens })) as unknown[];
+    const tail = k.at(-1) as unknown[];
+    expect(tail).toHaveLength(3);
+    expect(tail.slice(0, 2)).toEqual(['forge:gitlab', GITLAB]);
+    expect(tail[2]).toMatch(/^[0-9a-f]{16}$/);
+    // An empty caCert is no CA.
+    expect(pairKey(withCa(''), github, { gitlabTokens: tokens })).toBe(JSON.stringify(k));
+  });
+
+  test('ForgePairs rebuilds the pair when the CA is added, changed or removed', () => {
+    const pairs = new ForgePairs();
+    const opts = { gitlabTokens: tokens };
+    const p0 = pairs.for(twoBot, github, opts);
+    const p1 = pairs.for(withCa(CA_ONE), github, opts);
+    expect(p1).not.toBe(p0);
+    expect(pairs.for(withCa(CA_ONE), github, opts)).toBe(p1);
+    const p2 = pairs.for(withCa(CA_TWO), github, opts);
+    expect(p2).not.toBe(p1);
+    expect(pairs.for(twoBot, github, opts)).not.toBe(p2);
   });
 });

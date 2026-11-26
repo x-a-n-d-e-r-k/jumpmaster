@@ -1,6 +1,7 @@
 import { gitlabBasicAuthAs, isGitLabProjectPath, stripTrailingSlashes } from '@jumpmaster/protocol';
 import { ZONE_ID } from '../config.js';
 import { GitLabForge, GitLabForgeError } from '../forge/gitlab.js';
+import { gitlabFetchFor } from '../forge/gitlab-ca.js';
 import { type ForgeKind, forgeKind, isHttpsOrigin } from '../forge/kind.js';
 import { type ScrubSet, serverScrubSet } from '../forge/scrub-set.js';
 import type { TestResult } from './credentials.js';
@@ -58,12 +59,14 @@ export type GitLabPatZone = {
   id: string;
   repo: string;
   forge?: ForgeKind | undefined;
-  gitlab?: { baseUrl: string } | undefined;
+  /** `caCert`: the zone's private CA, trusted besides the system roots (issue #919). */
+  gitlab?: { baseUrl: string; caCert?: string | undefined } | undefined;
 };
 
 /**
  * Tests a GitLab zone's personal access token: `GET /user` on the zone's instance. The token is
- * registered with `scrub` before any request. A result holds a status and fixed words only: never
+ * registered with `scrub` before any request. It sends with `deps.fetch`, or else the zone's CA
+ * fetch (`gitlabFetchFor`). A result holds a status and fixed words only: never
  * GitLab's body, the error's message, the base URL, the project path or the token. Never throws.
  */
 export async function testGitlabPatEntry(
@@ -76,12 +79,9 @@ export async function testGitlabPatEntry(
   (deps.scrub ?? serverScrubSet).add(value);
   let forge: GitLabForge;
   try {
-    forge = new GitLabForge(
-      zone.gitlab?.baseUrl as string,
-      zone.repo,
-      value,
-      deps.fetch ? { fetch: deps.fetch } : {},
-    );
+    forge = new GitLabForge(zone.gitlab?.baseUrl as string, zone.repo, value, {
+      fetch: deps.fetch ?? gitlabFetchFor(zone.gitlab?.caCert),
+    });
   } catch {
     return { ok: false, status: null, problem: GITLAB_PAT_BAD_ZONE };
   }
@@ -196,7 +196,7 @@ export async function testGitlabReadEntry(
   const url = `${stripTrailingSlashes(baseUrl)}/${zone.repo}.git/info/refs?service=git-upload-pack`;
   let res: Response;
   try {
-    res = await (deps.fetch ?? fetch)(url, {
+    res = await (deps.fetch ?? gitlabFetchFor(zone.gitlab?.caCert))(url, {
       method: 'GET',
       redirect: 'manual',
       headers: { authorization: `Basic ${gitlabBasicAuthAs(read.username, read.token)}` },

@@ -1,6 +1,7 @@
 import { gitlabBasicAuthAs } from '@jumpmaster/protocol';
 import nock from 'nock';
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from 'vitest';
+import { gitlabFetchFor } from '../forge/gitlab-ca.js';
 import { ScrubSet } from '../forge/scrub-set.js';
 import { fakeGitLab } from '../test/fake-gitlab.js';
 import {
@@ -20,6 +21,12 @@ import {
   testGitlabReadEntry,
 } from './gitlab-pat-entries.js';
 import { fingerprintOf } from './vault.js';
+
+// gitlab-ca.ts as it is, but spied on, so a test can hand a CA zone a fetch of its own.
+vi.mock('../forge/gitlab-ca.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../forge/gitlab-ca.js')>();
+  return { ...real, gitlabFetchFor: vi.fn(real.gitlabFetchFor) };
+});
 
 const BASE = 'https://gitlab.example.test';
 const PROJECT = 'acme/widgets';
@@ -439,5 +446,90 @@ describe('testGitlabReadEntry (issue #831)', () => {
       expect(r).toEqual({ ok: false, status: null, problem: GITLAB_READ_BAD_VALUE });
       clean(r);
     }
+  });
+});
+
+describe('a zone with gitlab.caCert (issue #919)', () => {
+  const CA = `-----BEGIN CERTIFICATE-----\nQ0FDQUNBQ0FDQUNBQ0FDQUNBQ0FDQUNB\n-----END CERTIFICATE-----\n`;
+  const caZone = () => zone({ gitlab: { baseUrl: BASE, caCert: CA } });
+  const READ_VALUE = `gitlab+deploy-token-1:${['gldt', 'C'.repeat(20)].join('-')}`;
+  const ADVERT = { 'content-type': 'application/x-git-upload-pack-advertisement' };
+  const noPem = (r: unknown) => {
+    const text = JSON.stringify(r);
+    expect(text).not.toContain('BEGIN');
+    expect(text).not.toContain('Q0FDQUNB');
+  };
+
+  /** Hands the next gitlabFetchFor call `caFetch`, and records what it was asked for. */
+  function withCaFetch(caFetch: typeof fetch) {
+    vi.mocked(gitlabFetchFor).mockClear();
+    vi.mocked(gitlabFetchFor).mockReturnValueOnce(caFetch);
+    return () => vi.mocked(gitlabFetchFor).mock.calls;
+  }
+
+  test('testGitlabPatEntry sends through the CA fetch', async () => {
+    const caFetch = vi.fn(async () => Response.json({ id: 1, username: 'ca-bot' }));
+    const calls = withCaFetch(caFetch as unknown as typeof fetch);
+    const r = await testGitlabPatEntry(GOOD, caZone(), { scrub: new ScrubSet() });
+    expect(r).toEqual({ ok: true, result: 'ok', login: 'ca-bot', live: true });
+    expect(calls()).toEqual([[CA]]);
+    expect(caFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('testGitlabReadEntry sends through the CA fetch', async () => {
+    const caFetch = vi.fn(async () => new Response('', { status: 200, headers: ADVERT }));
+    const calls = withCaFetch(caFetch as unknown as typeof fetch);
+    const r = await testGitlabReadEntry(READ_VALUE, caZone(), { scrub: new ScrubSet() });
+    expect(r).toEqual({ ok: true, result: 'ok', live: true });
+    expect(calls()).toEqual([[CA]]);
+    expect(caFetch).toHaveBeenCalledTimes(1);
+  });
+
+  test('a zone without a CA gets the global fetch', async () => {
+    setup();
+    vi.mocked(gitlabFetchFor).mockClear();
+    const r = await testGitlabPatEntry(GOOD, zone(), { scrub: new ScrubSet() });
+    expect(r).toMatchObject({ ok: true, login: 'gl-author-bot' });
+    expect(vi.mocked(gitlabFetchFor).mock.results[0]?.value).toBe(globalThis.fetch);
+  });
+
+  test('an injected deps.fetch still wins', async () => {
+    vi.mocked(gitlabFetchFor).mockClear();
+    const injected = vi.fn(async () => Response.json({ id: 2, username: 'injected-bot' }));
+    const r = await testGitlabPatEntry(GOOD, caZone(), {
+      scrub: new ScrubSet(),
+      fetch: injected as unknown as typeof fetch,
+    });
+    expect(r).toMatchObject({ ok: true, login: 'injected-bot' });
+    const readFetch = vi.fn(async () => new Response('', { status: 200, headers: ADVERT }));
+    const r2 = await testGitlabReadEntry(READ_VALUE, caZone(), {
+      scrub: new ScrubSet(),
+      fetch: readFetch as unknown as typeof fetch,
+    });
+    expect(r2).toEqual({ ok: true, result: 'ok', live: true });
+    expect(injected).toHaveBeenCalledTimes(1);
+    expect(readFetch).toHaveBeenCalledTimes(1);
+    expect(gitlabFetchFor).not.toHaveBeenCalled();
+  });
+
+  test('a failing CA fetch gives the unreachable result with no PEM text', async () => {
+    const real =
+      await vi.importActual<typeof import('../forge/gitlab-ca.js')>('../forge/gitlab-ca.js');
+    // The real CA fetch over a failing transport whose error quotes the bundle.
+    const failing = () =>
+      real.gitlabFetchFor(CA, {
+        agentFactory: () => ({}) as never,
+        fetch: async () => {
+          throw new TypeError(`fetch failed: ${CA}`, { cause: new Error(CA) });
+        },
+      });
+    withCaFetch(failing());
+    const r = await testGitlabPatEntry(GOOD, caZone(), { scrub: new ScrubSet() });
+    expect(r).toEqual({ ok: false, status: null, problem: GITLAB_PAT_UNREACHABLE });
+    noPem(r);
+    withCaFetch(failing());
+    const r2 = await testGitlabReadEntry(READ_VALUE, caZone(), { scrub: new ScrubSet() });
+    expect(r2).toEqual({ ok: false, status: null, problem: GITLAB_PAT_UNREACHABLE });
+    noPem(r2);
   });
 });

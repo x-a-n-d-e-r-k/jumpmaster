@@ -28,6 +28,7 @@ import {
   type TokenProvider,
 } from './forge/github.js';
 import { GitLabForge } from './forge/gitlab.js';
+import { gitlabCaDigest, gitlabFetchFor } from './forge/gitlab-ca.js';
 import { type ForgeKind, forgeKind, GITLAB_UNSUPPORTED } from './forge/kind.js';
 import { log } from './log.js';
 import { credentialFingerprint, type Resolved } from './vault/credentials.js';
@@ -137,12 +138,17 @@ const patPusher = (forge: Forge) => async (): Promise<PushForge> => ({
  */
 function gitlabPair(
   zone: { repo: string; authorMayBeAdmin: boolean; identity?: 'two-bot' | 'starter' },
-  baseUrl: string | undefined,
+  gitlab: { baseUrl: string; caCert?: string | undefined } | undefined,
   tokens: GitLabTokens,
   requestTimeoutMs: number | undefined,
 ): ForgePair {
+  const baseUrl = gitlab?.baseUrl;
   if (!baseUrl) throw new Error(GITLAB_NO_BASE_URL);
-  const forgeOpts = requestTimeoutMs === undefined ? {} : { requestTimeoutMs };
+  // Both forges trust the zone's private CA, if it has one, besides the system roots (issue #919).
+  const forgeOpts = {
+    fetch: gitlabFetchFor(gitlab?.caCert),
+    ...(requestTimeoutMs === undefined ? {} : { requestTimeoutMs }),
+  };
   if (zone.identity !== 'starter' && !tokens.reviewer) throw new Error(GITLAB_NO_REVIEWER);
   const author = new GitLabForge(baseUrl, zone.repo, tokens.author, forgeOpts);
   const pusher = patPusher(author);
@@ -164,7 +170,7 @@ export function pairFor(
     authorMayBeAdmin: boolean;
     identity?: 'two-bot' | 'starter';
     forge?: ForgeKind | undefined;
-    gitlab?: { baseUrl: string } | undefined;
+    gitlab?: { baseUrl: string; caCert?: string | undefined } | undefined;
   },
   secrets: { githubAuthorToken: string; githubReviewerToken?: string },
   opts: PairOptions = {},
@@ -174,7 +180,7 @@ export function pairFor(
   // fixed: never a token, the base URL or the project path.
   if (forgeKind(zone) === 'gitlab') {
     if (!opts.gitlabTokens) throw new Error(GITLAB_UNSUPPORTED);
-    return gitlabPair(zone, zone.gitlab?.baseUrl, opts.gitlabTokens, opts.requestTimeoutMs);
+    return gitlabPair(zone, zone.gitlab, opts.gitlabTokens, opts.requestTimeoutMs);
   }
   const [owner = '', name = ''] = zone.repo.split('/');
   const forgeOpts =
@@ -414,7 +420,8 @@ export function pairKey(zone: PairZone, secrets: PairTokens, opts: PairOptions =
 /**
  * A GitLab zone's key (issue #718): a GitHub zone's head, then a marker no GitHub key has, the
  * zone's instance and a fingerprint over its GitLab tokens, so a rotated token or a zone moved to
- * another instance gets a new pair. App refs are ignored, as `pairFor` ignores them.
+ * another instance gets a new pair. A zone with `gitlab.caCert` adds a digest of it, so adding,
+ * changing or removing the CA does too. App refs are ignored, as `pairFor` ignores them.
  */
 function gitlabPairKey(zone: PairZone, secrets: PairTokens, opts: PairOptions): string {
   const tokens = opts.gitlabTokens;
@@ -424,12 +431,15 @@ function gitlabPairKey(zone: PairZone, secrets: PairTokens, opts: PairOptions): 
         .digest('hex')
         .slice(0, 16)
     : null;
+  // A digest of the zone's CA bundle, never its PEM (issue #919); a zone without one keeps its key.
+  const ca = gitlabCaDigest(zone.gitlab?.caCert);
+  const caKey = ca === null ? [] : [`ca:${ca}`];
   return JSON.stringify([
     zone.repo,
     zone.identity ?? 'two-bot',
     zone.authorMayBeAdmin,
     forgeTokenFingerprint(secrets),
-    ['forge:gitlab', zone.gitlab?.baseUrl ?? null, fingerprint],
+    ['forge:gitlab', zone.gitlab?.baseUrl ?? null, fingerprint, ...caKey],
   ]);
 }
 
