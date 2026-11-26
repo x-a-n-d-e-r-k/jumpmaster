@@ -47,6 +47,7 @@ import {
   opKeys,
   type PostReviewPayload,
   resolveUnknown,
+  runDecidedOp,
   runOp,
   type UpdateBranchPayload,
   type UpdateBranchResult,
@@ -438,7 +439,8 @@ async function merge(
     title: s.pr.title,
     message: `Closes #${s.item.issueNumber}`,
   };
-  const r = await runOp(
+  // A merge row left `unknown` is sent again only here, on this fresh decision (#932).
+  const r = await runDecidedOp(
     db,
     forges,
     {

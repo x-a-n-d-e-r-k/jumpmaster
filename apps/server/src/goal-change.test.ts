@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { setKilled, setZoneMode } from './db/repo.js';
+import { getOutbox, setKilled, setZoneMode } from './db/repo.js';
 import { reconcileZone } from './flow/reconcile.js';
 import { zonePass } from './flow/snapshot.js';
 import { gitBlobSha } from './forge/github.js';
@@ -17,7 +17,7 @@ import {
   openGoalChange,
   proposeGoalChange,
 } from './goal-change.js';
-import { opMarker } from './outbox.js';
+import { opKeys, opMarker, resolveUnknown } from './outbox.js';
 import { promptVersions } from './payloads.js';
 import { crewWorld, GOAL } from './test/crew.js';
 import { FORGE_WRITES } from './test/fakes.js';
@@ -462,6 +462,102 @@ describe('approving and merging a goal change (#363)', () => {
     for (let i = 0; i < 10; i++) w.f.author.failNext('getPull', '5xx');
     await w.pass();
     expect(getGoalChange(w.db, w.id)?.state).toBe('open');
+  });
+});
+
+describe('a dropped goal-change merge is sent again only when its checks pass again (#932)', () => {
+  const at = (minutes: number) => new Date(t0.getTime() + minutes * 60_000);
+
+  /** A confirmed change, approved, whose merge connection drops: the row is `unknown`. */
+  async function dropped() {
+    const w = await world();
+    const id = w.propose();
+    expect(await w.open(id)).toBe('open');
+    const c = getGoalChange(w.db, id);
+    const pr = c?.prNumber as number;
+    const head = c?.headSha as string;
+    w.f.state.checks.set(head, { state: 'success', names: ['ci'] });
+    expect(confirmGoalChange(w.db, id, head, t0)).toBe(true);
+    w.f.author.failNext('merge', 'throw');
+    await w.pass();
+    const key = opKeys.goalMerge(id, head);
+    expect(w.calls('merge')).toHaveLength(1);
+    expect(getOutbox(w.db, key)).toMatchObject({ state: 'unknown', resends: 0 });
+    expect(getGoalChange(w.db, id)?.state).toBe('confirmed');
+    return { ...w, id, pr, head, key };
+  }
+
+  test('nothing changed: sent again 2 minutes later, and the change is merged', async () => {
+    const w = await dropped();
+    await w.pass(at(1));
+    expect(w.calls('merge')).toHaveLength(1);
+    await w.pass(at(2));
+    expect(w.calls('merge')).toHaveLength(2);
+    expect(getOutbox(w.db, w.key)).toMatchObject({ state: 'done', resends: 1 });
+    expect(w.f.state.merges).toHaveLength(1);
+    expect(getGoalChange(w.db, w.id)).toMatchObject({ state: 'merged', error: null });
+  });
+
+  test('its checks fail on the confirmed SHA: not sent again', async () => {
+    const w = await dropped();
+    w.f.state.checks.set(w.head, {
+      state: 'failure',
+      names: ['ci'],
+      failed: [{ name: 'ci', conclusion: 'failure' }],
+    });
+    await w.pass(at(2));
+    await w.pass(at(4));
+    expect(w.calls('merge')).toHaveLength(1);
+    expect(w.f.state.merges).toEqual([]);
+    expect(getOutbox(w.db, w.key)).toMatchObject({ state: 'unknown', resends: 0 });
+    expect(getGoalChange(w.db, w.id)).toMatchObject({
+      state: 'confirmed',
+      error: expect.stringMatching(/checks failed/),
+    });
+  });
+
+  test('a change refused since: not sent again', async () => {
+    const w = await dropped();
+    w.db.prepare(`UPDATE goal_changes SET state = 'refused' WHERE id = ?`).run(w.id);
+    await w.pass(at(2));
+    expect(w.calls('merge')).toHaveLength(1);
+    expect(getOutbox(w.db, w.key)).toMatchObject({ state: 'unknown', resends: 0 });
+    expect(getGoalChange(w.db, w.id)?.state).toBe('refused');
+  });
+
+  test('its pull request closed since: the change is closed, and not sent again', async () => {
+    const w = await dropped();
+    w.f.state.close(w.pr);
+    await w.pass(at(2));
+    await w.pass(at(4));
+    expect(w.calls('merge')).toHaveLength(1);
+    expect(getOutbox(w.db, w.key)).toMatchObject({ state: 'unknown', resends: 0 });
+    expect(getGoalChange(w.db, w.id)?.state).toBe('closed');
+  });
+
+  test('the goal file moved on the default branch since: refused, and not sent again', async () => {
+    const w = await dropped();
+    w.f.state.files.set('main:GOAL.md', `${GOAL}\n### Someone else's objective\n`);
+    await w.pass(at(2));
+    expect(w.calls('merge')).toHaveLength(1);
+    expect(getOutbox(w.db, w.key)).toMatchObject({ state: 'unknown', resends: 0 });
+    expect(getGoalChange(w.db, w.id)?.state).toBe('refused');
+  });
+
+  test('a read that fails while checking again: no send, resends unchanged', async () => {
+    const w = await dropped();
+    w.f.author.failNext('checksFor', 'throw');
+    await w.pass(at(2));
+    expect(w.calls('merge')).toHaveLength(1);
+    expect(getOutbox(w.db, w.key)).toMatchObject({ state: 'unknown', resends: 0 });
+    expect(getGoalChange(w.db, w.id)?.state).toBe('confirmed');
+  });
+
+  test('resolveUnknown alone never sends it again', async () => {
+    const w = await dropped();
+    for (let m = 2; m <= 10; m += 2) await resolveUnknown(w.db, w.forges, 'main', at(m), 45);
+    expect(w.calls('merge')).toHaveLength(1);
+    expect(getOutbox(w.db, w.key)).toMatchObject({ state: 'unknown', resends: 0 });
   });
 });
 

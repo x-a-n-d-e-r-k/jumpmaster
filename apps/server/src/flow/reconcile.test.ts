@@ -172,6 +172,134 @@ describe('reconcileZone — pr_open items', () => {
   });
 });
 
+describe('a dropped merge is sent again only on a fresh merge decision (#932)', () => {
+  const at = (minutes: number) => new Date(t.getTime() + minutes * 60_000);
+  const key = (id: number) => opKeys.merge(id, 'sha1');
+
+  /** An approved, green item whose merge connection drops: the row is `unknown`, PR not merged. */
+  async function dropped(): Promise<number> {
+    const id = w.prItem(1, 'sha1');
+    approve(id, 'sha1');
+    w.f.author.failNext('merge', 'throw');
+    await pass();
+    expect(calls('merge')).toHaveLength(1);
+    expect(getOutbox(w.db, key(id))).toMatchObject({ state: 'unknown', resends: 0 });
+    expect(item(id).state).toBe('pr_open');
+    return id;
+  }
+
+  test('nothing changed: sent again 2 minutes later, and the item is done', async () => {
+    const id = await dropped();
+    await pass(at(1));
+    expect(calls('merge')).toHaveLength(1);
+    await pass(at(2));
+    expect(calls('merge')).toHaveLength(2);
+    expect(getOutbox(w.db, key(id))).toMatchObject({ state: 'done', resends: 1 });
+    expect(w.f.state.merges).toHaveLength(1);
+    expect(item(id)).toMatchObject({ state: 'done', reason: 'merged' });
+  });
+
+  test.each<[string, () => void, (id: number) => void]>([
+    [
+      'a trusted CHANGES_REQUESTED review on the head',
+      () => {
+        w.f.state.review({ id: 5, author: 'human', state: 'CHANGES_REQUESTED', commitId: 'sha1' });
+      },
+      (id) => expect(activeDropFor(w.db, id)).toMatchObject({ role: 'heal', headSha: 'sha1' }),
+    ],
+    [
+      'a failed check on the head',
+      () => {
+        w.f.state.checks.set('sha1', {
+          state: 'failure',
+          names: ['ci'],
+          failed: [{ name: 'ci', conclusion: 'failure' }],
+        });
+      },
+      (id) => expect(activeDropFor(w.db, id)).toMatchObject({ role: 'heal', headSha: 'sha1' }),
+    ],
+    [
+      'the issue closed',
+      () => w.f.state.closeIssue(1),
+      (id) => expect(item(id)).toMatchObject({ state: 'parked', reason: 'issue closed' }),
+    ],
+    [
+      'a standing human block',
+      () => {
+        w.f.state.review({ id: 6, author: 'human', state: 'CHANGES_REQUESTED', commitId: 'sha0' });
+      },
+      (id) => expect(item(id)).toMatchObject({ state: 'parked', reason: 'human block stands' }),
+    ],
+  ])('%s: not sent again, resends stay 0', async (_name, change, then) => {
+    const id = await dropped();
+    change();
+    await pass(at(2));
+    await pass(at(4));
+    expect(calls('merge')).toHaveLength(1);
+    expect(w.f.state.merges).toEqual([]);
+    expect(getOutbox(w.db, key(id))).toMatchObject({ state: 'unknown', resends: 0 });
+    then(id);
+  });
+
+  test('the merge reservation held by another item: not sent again, resends stay 0', async () => {
+    w.zone = { ...w.zone, mergeReservationMinutes: 30 };
+    const id = await dropped();
+    // Item 2, approved before item 1 and waiting on its CI, holds the reservation now.
+    const other = w.prItem(2, 'sha2');
+    w.f.state.checks.set('sha2', { state: 'pending', names: [] });
+    insertVerdict(w.db, {
+      id: 'rev-older',
+      workItemId: other,
+      headSha: 'sha2',
+      decision: 'approve',
+      forced: false,
+      summary: 'ok',
+      findingsJson: '[]',
+      gatesJson: '[]',
+      createdAt: at(-1).toISOString(),
+    });
+    await pass(at(2));
+    expect(calls('merge')).toHaveLength(1);
+    expect(getOutbox(w.db, key(id))).toMatchObject({ state: 'unknown', resends: 0 });
+    expect(item(id)).toMatchObject({ state: 'pr_open', reason: 'waiting to merge after #2' });
+  });
+
+  test('a forge read that fails while deciding again: no send, resends unchanged', async () => {
+    const id = await dropped();
+    w.f.author.failNext('listReviews', 'throw');
+    await pass(at(2));
+    expect(calls('merge')).toHaveLength(1);
+    expect(getOutbox(w.db, key(id))).toMatchObject({ state: 'unknown', resends: 0 });
+    expect(item(id).state).toBe('pr_open');
+    // The read comes back: the decision is merge again, and it is sent.
+    await pass(at(3));
+    expect(calls('merge')).toHaveLength(2);
+    expect(item(id)).toMatchObject({ state: 'done', reason: 'merged' });
+  });
+
+  test('the cap of 3 resends and the 2-minute gap apply, then the row fails at its deadline', async () => {
+    const id = await dropped();
+    for (let i = 0; i < 10; i++) w.f.author.failNext('merge', 'throw');
+    await pass(at(1));
+    expect(calls('merge')).toHaveLength(1);
+    await pass(at(2));
+    expect(calls('merge')).toHaveLength(2);
+    await pass(at(3));
+    expect(calls('merge')).toHaveLength(2);
+    for (let m = 4; m <= 44; m++) await pass(at(m));
+    expect(calls('merge')).toHaveLength(4);
+    expect(getOutbox(w.db, key(id))).toMatchObject({ state: 'unknown', resends: 3 });
+    expect(item(id).state).toBe('pr_open');
+    await pass(at(46));
+    expect(calls('merge')).toHaveLength(4);
+    expect(getOutbox(w.db, key(id))?.state).toBe('failed');
+    expect(item(id)).toMatchObject({
+      state: 'parked',
+      reason: expect.stringMatching(/^merge rejected/),
+    });
+  });
+});
+
 describe('reconcileZone — starter identity', () => {
   beforeEach(() => {
     w = zoneWorld({ identity: 'starter' });
