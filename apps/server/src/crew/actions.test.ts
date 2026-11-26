@@ -804,6 +804,76 @@ describe('refiling a rejected issue with `replaces` (#784)', () => {
     expect(third.filed).toEqual([]);
     expect(third.refused).toEqual(['v4: replaced twice already: raise a briefing']);
   });
+
+  test('a replacement of one issue cannot carry the title of another recently rejected issue', async () => {
+    fileRejected({ key: 'refuted', title: 'Refuted work', body: CORRECTED });
+    const vetoed = fileRejected({ key: 'vetoed', title: 'Vetoed work' });
+    await commandRejects(vetoed);
+    const r = apply(
+      {
+        fileIssues: [
+          // Command's rejected title and body, smuggled in as a replacement of another issue.
+          issue({ key: 'vetoed-2', title: 'Vetoed work', replaces: 'refuted' }),
+        ],
+      },
+      soon,
+    );
+    expect(r.filed).toEqual([]);
+    expect(r.refused).toEqual(['vetoed-2: duplicate of a crew issue rejected in the last 7 days']);
+  });
+
+  test('a replacement cannot carry the title of another refute-rejected issue outside its chain', () => {
+    fileRejected({ key: 'first', title: 'First work', body: CORRECTED });
+    fileRejected({ key: 'second', title: 'Second work' });
+    const r = apply(
+      { fileIssues: [issue({ key: 'second-2', title: 'Second work', replaces: 'first' })] },
+      soon,
+    );
+    expect(r.filed).toEqual([]);
+    expect(r.refused).toEqual(['second-2: duplicate of a crew issue rejected in the last 7 days']);
+  });
+
+  test('a chain sharing one title files each refiling', () => {
+    fileRejected({ key: 'c1', title: 'Chain work' });
+    let at = soon;
+    for (const [key, prev] of [
+      ['c2', 'c1'],
+      ['c3', 'c2'],
+    ] as const) {
+      const r = apply(
+        {
+          fileIssues: [
+            issue({ key, title: 'Chain work', body: `${CORRECTED}${key}\n`, replaces: prev }),
+          ],
+        },
+        at,
+      );
+      expect(r.refused).toEqual([]);
+      expect(r.filed).toHaveLength(1);
+      expect(getCrewIssue(w.db, r.filed[0] ?? -1)).toMatchObject({ key, replaces: prev });
+      setCrewIssue(w.db, r.filed[0] ?? -1, { state: 'rejected' }, at);
+      at = plus(at, 3600_000);
+    }
+  });
+
+  test('a replacement with a new title that no other rejected issue has is filed', () => {
+    fileRejected({ key: 'old', title: 'Old work' });
+    fileRejected({ key: 'other', title: 'Other work' });
+    const r = apply(
+      {
+        fileIssues: [
+          issue({ key: 'renamed', title: 'Renamed work', body: CORRECTED, replaces: 'old' }),
+        ],
+      },
+      soon,
+    );
+    expect(r.refused).toEqual([]);
+    expect(r.filed).toHaveLength(1);
+    expect(getCrewIssue(w.db, r.filed[0] ?? -1)).toMatchObject({
+      key: 'renamed',
+      replaces: 'old',
+    });
+  });
 });
 
 describe('the order of an objective’s issues: `after` (#843)', () => {
