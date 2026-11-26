@@ -1687,6 +1687,140 @@ describe('zone forge kind (issue #667)', () => {
   });
 });
 
+// Two self-signed EC CA certificates (issue #918's fixtures; valid to 2126).
+const ROOT_CA = `-----BEGIN CERTIFICATE-----
+MIIBwzCCAWmgAwIBAgIUILMx4bVcG+WvdctPjeXv0Eu/YNowCgYIKoZIzj0EAwIw
+NjEdMBsGA1UEAwwURXhhbXBsZSBDb3JwIFJvb3QgQ0ExFTATBgNVBAoMDEV4YW1w
+bGUgQ29ycDAgFw0yNjExMjYwMjU4NDFaGA8yMTI2MTEwMjAyNTg0MVowNjEdMBsG
+A1UEAwwURXhhbXBsZSBDb3JwIFJvb3QgQ0ExFTATBgNVBAoMDEV4YW1wbGUgQ29y
+cDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABMD6pEjaSigANOJXH2RyquEdbgMv
+peHIVW4M9Zv7iJZlZ/iYPDt19M4jh35B98KBtjlIwvS4nvte3YlPNvn60H+jUzBR
+MB0GA1UdDgQWBBQbCzyPB/LpJ5XDnLfHkQ2OMHkHujAfBgNVHSMEGDAWgBQbCzyP
+B/LpJ5XDnLfHkQ2OMHkHujAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49BAMCA0gA
+MEUCID860/NNCLvX0Z9lTyo95NzC1PxzWtxQrHpGa+0uaKQHAiEA1Se40cae7n4e
+xiaS8DF4pg0jHIDpfqMNJ1+nX9Qrk7s=
+-----END CERTIFICATE-----
+`;
+const ISSUING_CA = `-----BEGIN CERTIFICATE-----
+MIIByTCCAW+gAwIBAgIUV0hkn9d2AFVF+vKWxqtkv8dJq4EwCgYIKoZIzj0EAwIw
+OTEgMB4GA1UEAwwXRXhhbXBsZSBDb3JwIElzc3VpbmcgQ0ExFTATBgNVBAoMDEV4
+YW1wbGUgQ29ycDAgFw0yNjExMjYwMjU4NDFaGA8yMTI2MTEwMjAyNTg0MVowOTEg
+MB4GA1UEAwwXRXhhbXBsZSBDb3JwIElzc3VpbmcgQ0ExFTATBgNVBAoMDEV4YW1w
+bGUgQ29ycDBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABDQO/FDjSvPQopqSCBEV
+UBYYJ70At8T5FnQRWDo8BLp5rHnEB9fu8EXZwm3fvKAtJlIPcJbtT2AX8wT//EdR
+pzKjUzBRMB0GA1UdDgQWBBQTzvggIrxJS0RFdEd4T+WyS7aIqzAfBgNVHSMEGDAW
+gBQTzvggIrxJS0RFdEd4T+WyS7aIqzAPBgNVHRMBAf8EBTADAQH/MAoGCCqGSM49
+BAMCA0gAMEUCIQCnb6fEh/Shu7GUf+IrUztrfQVh41hgXEKN7ZIOaHSmcAIgGKja
+h3hpG0eKKHYPr8jCPm51VKtVgFNDsRZvBe3SBBY=
+-----END CERTIFICATE-----
+`;
+
+describe('zone gitlab.caCert (issue #918)', () => {
+  const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json'), strict: true };
+  const gitlabZone = {
+    ...baseZone,
+    repo: 'group/project',
+    forge: 'gitlab',
+    gitlab: { baseUrl: 'https://gitlab.example.com' },
+  };
+  const withCa = (caCert: unknown) => ({
+    ...gitlabZone,
+    gitlab: { baseUrl: 'https://gitlab.example.com', caCert },
+  });
+  const both = (zone: Record<string, unknown>) => {
+    const full = parseEditable({ dropZones: [zone] }, noLock);
+    const object = DropZoneObject.safeParse(zone);
+    return {
+      full,
+      fullIssues: full.ok ? [] : full.issues,
+      objectIssues: object.success
+        ? []
+        : object.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+    };
+  };
+  /** Every 12-character piece of a PEM's text, so no fragment of it may reach a message. */
+  const pieces = (pem: string): string[] => {
+    const text = pem.replace(/\s+/g, '');
+    const out = ['BEGIN', 'END', 'CERTIFICATE', 'PRIVATE'];
+    for (let i = 0; i + 12 <= text.length; i += 6) out.push(text.slice(i, i + 12));
+    return out;
+  };
+  // Built at runtime so no key-shaped literal sits in the tracked file.
+  const KEY_BLOCK = [
+    ['-----BEGIN', 'PRIVATE KEY-----'].join(' '),
+    Buffer.from('not a real key, only its shape').toString('base64'),
+    ['-----END', 'PRIVATE KEY-----'].join(' '),
+    '',
+  ].join('\n');
+  const CORRUPT = ROOT_CA.replace('MB0GA1UdDgQWBBQbCzyP', 'A'.repeat(20));
+
+  test('one and two certificates parse through both schemas and keep the text', () => {
+    for (const caCert of [ROOT_CA, `${ROOT_CA}\n${ISSUING_CA}`, `\n  ${ROOT_CA.trim()}\r\n`]) {
+      const r = both(withCa(caCert));
+      expect(r.fullIssues).toEqual([]);
+      expect(r.objectIssues).toEqual([]);
+      if (r.full.ok) expect(r.full.config.dropZones[0]?.gitlab?.caCert).toBe(caCert);
+    }
+  });
+
+  test('a GitLab zone without caCert parses exactly as before, with no caCert key', () => {
+    const r = both(gitlabZone);
+    expect(r.fullIssues).toEqual([]);
+    if (r.full.ok)
+      expect(r.full.config.dropZones[0]?.gitlab).toEqual({ baseUrl: gitlabZone.gitlab.baseUrl });
+  });
+
+  const refused: [string, unknown, RegExp][] = [
+    ['17 blocks', ROOT_CA.repeat(17), /1 to 16 certificates/],
+    ['no block', '   \n', /1 to 16 certificates/],
+    ['over 64 KiB', `${ROOT_CA}${' '.repeat(64 * 1024)}`, /64 KiB/],
+    ['a private key block', `${ROOT_CA}${KEY_BLOCK}`, /only certificate blocks/],
+    ['a corrupt block', CORRUPT, /does not parse/],
+    ['text outside the blocks', `${ROOT_CA}trailing words\n`, /only whitespace outside/],
+    [
+      'an unterminated block',
+      `${ROOT_CA}-----BEGIN CERTIFICATE-----\nMIIB\n`,
+      /only whitespace outside/,
+    ],
+    ['a number', 7, /gitlab\.caCert|string/],
+  ];
+
+  test.each(refused)(
+    '%s is refused on gitlab.caCert through both schemas, naming the field and never the PEM',
+    (_n, caCert, reason) => {
+      const r = both(withCa(caCert));
+      expect(r.full.ok).toBe(false);
+      expect(r.objectIssues.map((i) => i.path)).toEqual(['gitlab.caCert']);
+      expect(r.fullIssues.map((i) => i.path)).toEqual(['dropZones.0.gitlab.caCert']);
+      const [issue] = r.objectIssues;
+      if (typeof caCert === 'string') expect(issue?.message).toMatch(/^gitlab\.caCert /);
+      expect(issue?.message).toMatch(reason);
+      const text = JSON.stringify([r.fullIssues, r.objectIssues]);
+      if (typeof caCert === 'string') for (const p of pieces(caCert)) expect(text).not.toContain(p);
+    },
+  );
+
+  test('a GitHub zone refuses gitlab as a whole, caCert included', () => {
+    for (const zone of [
+      { ...baseZone, gitlab: { baseUrl: 'https://gitlab.example.com', caCert: ROOT_CA } },
+      {
+        ...baseZone,
+        forge: 'github',
+        gitlab: { baseUrl: 'https://gitlab.example.com', caCert: ROOT_CA },
+      },
+    ]) {
+      const r = both(zone);
+      expect(r.full.ok).toBe(false);
+      expect(r.objectIssues).toContainEqual({
+        path: 'gitlab',
+        message: 'gitlab applies only to a zone with forge: gitlab',
+      });
+      const text = JSON.stringify([r.fullIssues, r.objectIssues]);
+      for (const p of pieces(ROOT_CA)) expect(text).not.toContain(p);
+    }
+  });
+});
+
 describe('zone egress.private (issue #890)', () => {
   const noLock = { imageLockPath: join(tmpdir(), 'jm-no-such-lock.json'), strict: true };
   const gitlabZone = {

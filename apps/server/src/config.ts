@@ -1,3 +1,4 @@
+import { X509Certificate } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import {
   ContainerLimitsSchema,
@@ -333,6 +334,56 @@ function zoneForgeRules() {
   ];
 }
 
+/** A GitLab zone's `gitlab.caCert` bounds (issue #918). */
+export const CA_CERT_MAX_BYTES = 64 * 1024;
+export const CA_CERT_MAX_BLOCKS = 16;
+
+/** One certificate of a CA bundle, as the guard names it: never its PEM text. */
+export type CaCertInfo = { subject: string; fingerprint256: string };
+
+const PEM_BLOCK = /-----BEGIN ([^-\r\n]*)-----([\s\S]*?)-----END \1-----/g;
+
+/**
+ * Reads a PEM bundle of 1 to `CA_CERT_MAX_BLOCKS` certificates, `CA_CERT_MAX_BYTES` at most, with
+ * only whitespace outside its blocks and no block of another type (a private key). The reason
+ * names the fault, never any of the text.
+ */
+export function parseCaBundle(
+  pem: string,
+): { ok: true; certs: CaCertInfo[] } | { ok: false; reason: string } {
+  if (Buffer.byteLength(pem, 'utf8') > CA_CERT_MAX_BYTES)
+    return { ok: false, reason: 'must be at most 64 KiB' };
+  const certs: CaCertInfo[] = [];
+  let outside = '';
+  let last = 0;
+  let foreign = false;
+  for (const m of pem.matchAll(PEM_BLOCK)) {
+    outside += pem.slice(last, m.index);
+    last = m.index + m[0].length;
+    if (m[1] !== 'CERTIFICATE') {
+      foreign = true;
+      continue;
+    }
+    try {
+      const x = new X509Certificate(m[0]);
+      certs.push({ subject: x.subject.split('\n').join(', '), fingerprint256: x.fingerprint256 });
+    } catch {
+      return { ok: false, reason: 'has a certificate block that does not parse' };
+    }
+  }
+  outside += pem.slice(last);
+  if (foreign)
+    return {
+      ok: false,
+      reason: 'may hold only certificate blocks, never a private key or another PEM block',
+    };
+  if (outside.trim() !== '')
+    return { ok: false, reason: 'may hold only whitespace outside its certificate blocks' };
+  if (certs.length < 1 || certs.length > CA_CERT_MAX_BLOCKS)
+    return { ok: false, reason: `must hold 1 to ${CA_CERT_MAX_BLOCKS} certificates` };
+  return { ok: true, certs };
+}
+
 /**
  * A zone's fields with their defaults and its forge rules (`zoneForgeRules`), without the other
  * cross-field rules (the add baseline parses with it).
@@ -358,6 +409,17 @@ export const DropZoneObject = z
           message:
             'gitlab.baseUrl must be an https:// origin, with no credentials, path, query or fragment',
         }),
+        /**
+         * The PEM certificates of a private CA the GitLab host's certificate is issued by (issue
+         * #918). Nothing reads it yet; adding a certificate is guarded (`GUARDED_PATHS`).
+         */
+        caCert: z
+          .string()
+          .superRefine((pem, ctx) => {
+            const r = parseCaBundle(pem);
+            if (!r.ok) ctx.addIssue({ code: 'custom', message: `gitlab.caCert ${r.reason}` });
+          })
+          .optional(),
       })
       .optional(),
     readyLabel: z.string().default(DEFAULT_READY_LABEL),
