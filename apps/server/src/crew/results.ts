@@ -703,9 +703,9 @@ export const RERUN_WAIT_MS = 60 * 60_000;
 /**
  * Re-runs a rerun row's failed checks on the PR's current head (#420). Only names the forge reads
  * as failed on the head the server records are re-run; anything else, a refusal or an error
- * settles the row `skipped` with why. Returns `retry` once re-run (or re-run by an earlier pass),
- * `wait` when a read failed or the workflow run is still in progress (the claim is released for
- * the next pass, #772), or `skipped`. A row that would still wait RERUN_WAIT_MS after it was
+ * settles the row `skipped` with why. Returns `retry` once any run is re-run (or re-run by an
+ * earlier pass), `wait` when a read failed or the workflow run is still in progress with nothing
+ * re-run (the claim is released for the next pass, #772), or `skipped`. A row that would still wait RERUN_WAIT_MS after it was
  * recorded is `skipped` instead.
  */
 async function rerunChecks(
@@ -746,7 +746,9 @@ async function rerunChecks(
       stored.headSha,
       row.checks,
     );
-    if (running) {
+    // A run already re-run is recorded even when a later one was found running (#925): a later
+    // pass must never re-run it again.
+    if (running && runIds.length === 0) {
       if (now.getTime() - Date.parse(row.createdAt) > RERUN_WAIT_MS) {
         return skip('the workflow run is still in progress');
       }
