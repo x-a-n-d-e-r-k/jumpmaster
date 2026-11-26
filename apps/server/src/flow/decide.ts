@@ -59,6 +59,11 @@ export interface Snapshot {
   reviewOp: OpResult | null;
   /** Row merge:<itemId>:<pr.headSha>. */
   mergeOp: OpResult | null;
+  /**
+   * The `unknown` merge row is due to be sent again (`decidedResendDue`, #932): the item is decided
+   * afresh instead of waiting on the outbox, and only a decision still `merge` sends it again.
+   */
+  mergeResendDue: boolean;
   /** Trusted non-bot authors whose latest review is CHANGES_REQUESTED on pr.headSha. */
   trustedChangeRequests: ForgeReview[];
   /** A trusted non-bot author's latest review is CHANGES_REQUESTED on another commit. */
@@ -350,8 +355,8 @@ export function decide(s: Snapshot): Action {
   // 5: GitHub lag, not an orphan.
   if (pr.headSha === null) return waitForge(s, 'head');
   const head = pr.headSha;
-  // 6, 7
-  if (s.mergeOp?.state === 'pending' || s.mergeOp?.state === 'unknown') {
+  // 6, 7. An `unknown` merge due to be sent again goes on through every rule below (#932).
+  if (s.mergeOp?.state === 'pending' || (s.mergeOp?.state === 'unknown' && !s.mergeResendDue)) {
     return { kind: 'wait', on: 'outbox' };
   }
   if (s.mergeOp?.state === 'failed') {

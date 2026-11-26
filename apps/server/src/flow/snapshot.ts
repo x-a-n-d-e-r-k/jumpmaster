@@ -35,7 +35,7 @@ import {
   type PullFiles,
 } from '../forge/github.js';
 import { log } from '../log.js';
-import { type ForgePair, type OpResult, opKeys } from '../outbox.js';
+import { decidedResendDue, type ForgePair, type OpResult, opKeys } from '../outbox.js';
 import {
   type CarryFacts,
   type CodeScanning,
@@ -826,7 +826,9 @@ export async function buildSnapshot(
     latest && headSha
       ? toOpResult(getOutbox(db, opKeys.review(item.id, headSha, latest.id)))
       : null;
-  const mergeOp = headSha ? toOpResult(getOutbox(db, opKeys.merge(item.id, headSha))) : null;
+  const mergeRow = headSha ? getOutbox(db, opKeys.merge(item.id, headSha)) : undefined;
+  const mergeOp = toOpResult(mergeRow);
+  const mergeResendDue = decidedResendDue(db, mergeRow, now);
   // A lost drop its stick may still salvage holds the item like an active one (Ruling 10).
   const activeDrop = holdingDropFor(db, item.id, now) ?? null;
   // Read only where rule 19 could use it: nothing else holds the item and the head is not behind.
@@ -862,6 +864,7 @@ export async function buildSnapshot(
     verdictsOnHead,
     reviewOp,
     mergeOp,
+    mergeResendDue,
     trustedChangeRequests,
     humanBlockStanding,
     held: pr !== null && isHeld(pr),
