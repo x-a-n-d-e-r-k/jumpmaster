@@ -14,6 +14,12 @@ describe('missingWords (#871)', () => {
     );
   });
 
+  test('egress-ports-v1 names the capability and says what it is for (#915)', () => {
+    expect(missingWords('egress-ports-v1')).toBe(
+      "egress-ports-v1 (reaching the project's GitLab host on a port other than 443)",
+    );
+  });
+
   test('every other item reads as before', () => {
     expect(missingWords('egress-v1')).toBe('egress-v1');
     expect(missingWords('image-verify-v1')).toBe('image-verify-v1');

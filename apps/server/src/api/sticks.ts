@@ -249,6 +249,12 @@ const PUSH_EGRESS = ['github.com'];
  */
 const privateFor = (egress: { private?: string[] }, host: string): { private?: string[] } =>
   egress.private?.includes(host) ? { private: [host] } : {};
+/**
+ * The `ports` key a GitLab push or clone plan carries (#915): `[port]` when the zone's GitLab host
+ * is on a port other than 443, else nothing, so a port-443 plan is as it was. A stick with
+ * egress-ports-v1 passes it to its proxy.
+ */
+const portsFor = (port: number): { ports?: number[] } => (port === 443 ? {} : { ports: [port] });
 
 const LIVE: readonly DropState[] = ['leased', 'running'];
 
@@ -902,6 +908,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const egress = egressFor(zone);
       let pushAllow = PUSH_EGRESS;
       let pushPrivate: { private?: string[] } = {};
+      let pushPorts: { ports?: number[] } = {};
       if (egress && forgeKind(zone) === 'gitlab') {
         // Refused before anything is revoked: the branch waits in its volume while the operator
         // fixes the zone's list, and the push is retried as a held one is.
@@ -912,6 +919,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         }
         pushAllow = [target.host];
         pushPrivate = privateFor(egress, target.host);
+        pushPorts = portsFor(target.port);
       }
       // A new attempt: a reservation left by one that died is no longer held against it.
       revokeGrants(db, drop.id, now());
@@ -920,7 +928,9 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         branch: agentBranch(item.issueNumber),
         salvage: drop.pushKind === 'salvage',
         limits: zone.limits,
-        ...(egress ? { egress: { mode: egress.mode, allow: pushAllow, ...pushPrivate } } : {}),
+        ...(egress
+          ? { egress: { mode: egress.mode, allow: pushAllow, ...pushPrivate, ...pushPorts } }
+          : {}),
       };
       return plan;
     });
@@ -1090,6 +1100,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
       const egress = egressFor(zone);
       let allow: string[] = [];
       let priv: { private?: string[] } = {};
+      let ports: { ports?: number[] } = {};
       if (egress) {
         // The push plan's rule: the one GitLab host the zone's own list allows. Refused before
         // anything is revoked, so the operator can fix the list and the stick retry.
@@ -1100,13 +1111,14 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         }
         allow = [target.host];
         priv = privateFor(egress, target.host);
+        ports = portsFor(target.port);
       }
       // A new attempt: a grant whose reply was lost no longer blocks the next clone-token.
       revokeCloneGrants(db, drop.id, now());
       const plan: ClonePlan = {
         forge: gitlabRemote(zone),
         limits: zone.limits,
-        ...(egress ? { egress: { mode: egress.mode, allow, ...priv } } : {}),
+        ...(egress ? { egress: { mode: egress.mode, allow, ...priv, ...ports } } : {}),
         maxBytes: CLONE_MAX_BYTES,
       };
       return plan;

@@ -277,6 +277,36 @@ describe('global checks', () => {
     });
   });
 
+  describe('a GitLab zone on another port needs egress-ports-v1 (#915)', () => {
+    const zone = {
+      forge: 'gitlab' as const,
+      gitlab: { baseUrl: 'https://gitlab.example.com:8443' },
+      egress: { mode: 'enforce' as const, allow: ['gitlab.example.com'] },
+    };
+    const stampCaps = (w: ReturnType<typeof world>, capabilities: string[]) =>
+      stampStick(
+        w.db,
+        's1',
+        { capabilities, imagePolicy: 'signed', version: '0.5.0', pinnedImages: [] },
+        ago(10_000),
+      );
+
+    test('stick.capabilities fails when the only live stick lacks egress-ports-v1, with its fix', async () => {
+      const w = world({ zone });
+      stampCaps(w, ['egress-v1', 'image-verify-v1', 'push-v1', 'clone-v1']);
+      const c = one(await w.run(), 'stick.capabilities');
+      expect(c).toMatchObject({ status: 'fail', zoneId: 'main' });
+      expect(c.summary).toContain(
+        "stick-1 lacks egress-ports-v1 (reaching the project's GitLab host on a port other than 443)",
+      );
+      expect(c.fix).toBe(
+        "egress-ports-v1: run a stick from a release whose egress proxy allows other ports, or move the project's GitLab host to port 443",
+      );
+      stampCaps(w, ['egress-v1', 'egress-ports-v1', 'image-verify-v1', 'push-v1', 'clone-v1']);
+      expect(one(await w.run(), 'stick.capabilities').status).toBe('pass');
+    });
+  });
+
   describe("a stick's egress ceiling (#780)", () => {
     // The world's zone runs the node preset under enforce; this ceiling covers its hosts.
     const NODE = [
@@ -1730,7 +1760,7 @@ describe('zone.egress on a GitLab zone checks its GitLab host (issue #820)', () 
     },
   );
 
-  test('a GitLab host on port 8443 fails with the port reason', async () => {
+  test('an allowed GitLab host on port 8443 passes, with no port-443 fix (#915)', async () => {
     const c = one(
       await gitlabZone(
         { mode: 'enforce', allow: ['gitlab.example.com'] },
@@ -1738,11 +1768,22 @@ describe('zone.egress on a GitLab zone checks its GitLab host (issue #820)', () 
       ).run(),
       'zone.egress',
     );
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('egress is enforced');
+    expect(`${c.summary} ${c.fix ?? ''}`).not.toContain('port 443');
+  });
+
+  test('a GitLab host on port 8443 the list lacks fails for the list, not its port (#915)', async () => {
+    const c = one(
+      await gitlabZone({ mode: 'enforce', allow: [] }, 'https://gitlab.example.com:8443').run(),
+      'zone.egress',
+    );
     expect(c.status).toBe('fail');
-    expect(c.summary).toContain('port 443 only, and its GitLab host is on port 8443');
-    expect(c.fix).toContain('a DNS name on port 443');
-    expect(c.fix).toContain('gitlab.baseUrl');
-    expect(c.fix).toContain('"off"');
+    expect(c.summary).toContain(
+      "its GitLab host is not allowed: add gitlab.example.com to the zone's egress.allow",
+    );
+    expect(c.fix).toContain("Add gitlab.example.com to the zone's egress.allow");
+    expect(`${c.summary} ${c.fix}`).not.toContain('port 443');
   });
 
   test('a GitLab host on an IP address fails with the IP reason', async () => {
@@ -1752,7 +1793,8 @@ describe('zone.egress on a GitLab zone checks its GitLab host (issue #820)', () 
     );
     expect(c.status).toBe('fail');
     expect(c.summary).toContain('its GitLab host 10.0.0.5 is not a DNS name');
-    expect(c.fix).toContain('a DNS name on port 443');
+    expect(c.fix).toContain('Egress allows only a DNS name');
+    expect(c.fix).not.toContain('port 443');
     expect(c.fix).toContain('"off"');
   });
 

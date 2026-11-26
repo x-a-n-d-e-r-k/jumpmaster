@@ -1106,9 +1106,12 @@ serves both the clone container's fetch
 ([GitLab drops: the clone container](#gitlab-drops-the-clone-container)) and the push container.
 With egress on, a
 GitLab zone's push container reaches that one host and nothing else (not `github.com`), and only
-when the zone's `egress.allow` lists it, by name or by a `*.` entry. The egress proxy allows port
-443 only, so a `gitlab.baseUrl` on another port, or on an IP address, cannot push while egress is
-on. Until the host is allowed, each push is refused (`egress`) and retried; the work waits on the
+when the zone's `egress.allow` lists it, by name or by a `*.` entry. A `gitlab.baseUrl` on a port
+other than 443 (for example `https://gitlab.example.com:8443`) works under egress for the push and
+the clone: the server reads the port from `gitlab.baseUrl` and lets the push and clone containers'
+proxy reach that one host on that port (nothing new to set; agent containers make no remote call
+and stay on 443). Such a zone's drops need a stick with `egress-ports-v1`; an older stick is passed
+over. A `gitlab.baseUrl` on an IP address cannot push or clone while egress is on. Until the host is allowed, each push is refused (`egress`) and retried; the work waits on the
 stick, and the server log names the host to add. A stick's ceiling must list the host too (below).
 
 A self-managed GitLab host on a private-network address is refused by the proxy unless the

@@ -809,6 +809,8 @@ const LACK_FIX: Record<string, string> = {
     'run a stick from a release with the clone container: it advertises clone-v1 only once its volume self-check and base image pass, with 10 GiB free, and the stick log says why when it does not',
   'egress-private-v1':
     "run a stick from a release with private egress hosts, or remove the host from the project's egress.private",
+  'egress-ports-v1':
+    "run a stick from a release whose egress proxy allows other ports, or move the project's GitLab host to port 443",
   'image-verify-v1': 'run a stick from a release that verifies image signatures (M4 or later)',
   'image-policy:signed':
     'set JM_IMAGE_POLICY=signed on the stick (the published stick image sets it), or drop requireSignedImages from the config',
@@ -3447,7 +3449,7 @@ function gitlabEgressHeld(
     };
   return {
     summary,
-    fix: 'Egress allows only a DNS name on port 443: change gitlab.baseUrl to the GitLab host\'s https://<name> URL on port 443, or set egress.mode to "off".',
+    fix: 'Egress allows only a DNS name: change gitlab.baseUrl to the GitLab host\'s https://<name> URL, or set egress.mode to "off".',
   };
 }
 

@@ -1592,6 +1592,20 @@ describe('GitLab zone payloads (#765)', () => {
     }
   });
 
+  test('an 8443 GitLab zone drop payload carries no ports (#915)', () => {
+    const z = {
+      ...gitlabZone(),
+      gitlab: { baseUrl: 'https://gitlab.example.com:8443' },
+      egress: { mode: 'enforce', allow: ['gitlab.example.com'] },
+    } as DropZoneConfig;
+    for (const d of [impl, review, heal, resolve, doctorDrop]) {
+      const p = buildPayload(db, z, d, secrets);
+      expect(p.egress?.allow).toContain('gitlab.example.com');
+      expect(p.egress).not.toHaveProperty('ports');
+      expect(JSON.stringify(p)).not.toContain('"ports"');
+    }
+  });
+
   test('a GitHub zone payload carries no egress.private (#899)', () => {
     const z = { ...zone, egress: { mode: 'enforce', allow: ['pypi.org'] } } as DropZoneConfig;
     const p = buildPayload(db, z, impl, secrets);
