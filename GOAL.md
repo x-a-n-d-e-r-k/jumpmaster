@@ -4,7 +4,8 @@
 
 Jumpmaster is a self-hosted software factory that takes a repository's agent-ready issues to
 merged pull requests with no person in the loop, safely, and is easy for a first-time operator to
-install and run.
+install and run, and that keeps a released repository healthy, acting on security and
+supply-chain signals as they arrive.
 
 ## Objectives
 
@@ -14,6 +15,9 @@ task of the spec's §13, except "Usage gate decides on reported utilization", wh
 dispatch gate reads Claude's usage signals, "GitLab forge adapter", which is the GitLab adapter
 that spec §9 and the design spec's §5.5 (`docs/superpowers/specs/2026-10-19-jumpmaster-design.md`)
 assume and Task 12 builds on, and "Crew chat enhancements", which improves the owner's crew chat.
+"Operations mode" and "Maintenance" also stand apart from the M5 spec: the first builds
+Jumpmaster's operations and maintenance (O&M) mode, the second is this repository's own upkeep and
+is never marked done.
 Read the named sections of the spec before planning; the spec, the spike
 results in `docs/spikes/2026-11-14-github-app.md`, and the push container already on `main`
 (spec Task 4) are the ground truth. File issues small enough for one drop each, in dependency
@@ -146,6 +150,43 @@ easier to live with day to day. It stands apart from the M5 spec; the design of 
 
 Every route keeps the chat's existing viewer scoping and CSRF protection, and no change weakens
 how chat actions are confirmed or undone.
+
+### Operations mode
+
+Jumpmaster keeps working on a zone after release: it watches what other systems add to the
+repository and acts on it, so a zone moves from development to operations and maintenance without
+a person in the loop. The first issue is a design spec,
+`docs/superpowers/specs/<date>-operations-mode.md`; implementation issues follow once Command
+accepts it. The spec covers:
+
+- **Inputs**, polled (webhooks stay a non-goal): Dependabot alerts and pull requests, code
+  scanning alerts, secret scanning alerts, and issues and pull requests opened by other bots and
+  people, with the GitLab counterparts of each.
+- **Triage of every input**: what it changes, what depends on it, and the blast radius in this
+  zone, recorded on the item. Jumpmaster acts on it itself (verify and merge a bump, write the fix
+  a bump or alert needs, close a false positive with the reason) and briefs Command only when the
+  work is large-scale or touches a protected path.
+- **A security assessment on every dependency upgrade**: release age against the 14-day rule,
+  provenance and integrity (lockfile hashes, digests, checksums, signatures where published),
+  maintainer or ownership changes, install scripts and new transitive dependencies, and known
+  advisories for the new version. A failed assessment never merges.
+- **Pull requests Jumpmaster did not write**: how it reviews, verdicts and merges them, given that
+  today it verdicts only its own work.
+- **Permissions**: the read access each input needs from the GitHub App and the GitLab tokens,
+  within the Constraints.
+- **A zone mode** switching between development and operations, and what intake picks up in each.
+- **An operations floor**: while a zone works through goal-driven objectives, at least 10% of its
+  work (measure defined by the spec) goes to operations and maintenance whenever such work is
+  waiting, without starving the current objective.
+
+### Maintenance
+
+A standing objective: never marked done, always last on the ladder. It holds this repository's own
+upkeep that belongs to no milestone: dependency and base-image bumps and follow-ups to Dependabot
+PRs, CI and tooling configuration, stale comments and docs, and test hygiene. Each issue is one
+concern, small enough for one drop, with acceptance criteria and tests. Changes to protected paths
+go to Command as a briefing. Until Operations mode's floor ships, Command promotes Maintenance
+issues alongside the current objective so they take at least a tenth of the work.
 
 ## Constraints
 
