@@ -1166,7 +1166,11 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
         return reply.code(403).send({ refused: 'gitlab token', retryable: false });
       }
       const credential: 'read' | 'author' = read ? 'read' : 'author';
-      const secrets = [
+      // The grant carries only the token the clone uses: with the read token set, the token that
+      // can push is handed out only for pushes (the clone container spec), and the reviewer token
+      // is never used by a clone (#945). The server's own redaction still covers all of them.
+      const secrets = [...new Set(read ? gitlabReadSecretForms(read) : [token])];
+      const redact = [
         ...new Set(
           [pats?.author, pats?.reviewer, ...(read ? gitlabReadSecretForms(read) : [])].filter(
             (v): v is string => !!v,
@@ -1190,7 +1194,7 @@ export function registerStickRoutes(app: FastifyInstance, deps: StickRouteDeps):
           detail: { drop: drop.id, epoch: drop.epoch, credential },
         },
         at,
-        [...secretList(config.secrets), ...secrets],
+        [...secretList(config.secrets), ...redact],
       );
       return { grant };
     });
