@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { expect, test } from 'vitest';
+import { describe, expect, test } from 'vitest';
 import { syncParkBriefings } from '../briefings.js';
 import { getCrewIssueByKey } from '../crew/store.js';
 import { syncDropZone } from '../sync.js';
@@ -2017,4 +2017,127 @@ test('v67 adds clone_grants, empty, and leaves every other row untouched (#840)'
   expect(db.prepare('SELECT * FROM push_tokens').all()).toEqual(pushRows);
   expect(db.prepare('SELECT * FROM drops').all()).toEqual(dropRows);
   db.close();
+});
+
+describe('v70 (#943): chat ids are never reused', () => {
+  /** A v69 database with threads 1 and 2, messages 1 to 3 and cards 1 and 2, and `orphan` run. */
+  const v69Db = (orphan?: (raw: Database.Database) => void) =>
+    dbAt(69, (raw) => {
+      raw.exec(`
+        INSERT INTO chat_threads (id, title, focus_kind, focus_zone_id, created_at, updated_at,
+          owner_session) VALUES (1, 'a', 'zone', 'main', 'c', 'u', NULL),
+          (2, 'b', 'drop', 'main', 'c', 'u', 'o');
+        INSERT INTO chat_messages (id, thread_id, seq, role, text, state, created_at, tool_name,
+          result_truncated, result_pruned_at)
+          VALUES (1, 1, 1, 'owner', 'hi', 'done', 'c', NULL, NULL, NULL),
+                 (2, 1, 2, 'tool', 'step', 'done', 'c', 'gh', 1, 'p'),
+                 (3, 2, 1, 'owner', 'yo', 'queued', 'c', NULL, NULL, NULL);
+        INSERT INTO chat_cards (id, thread_id, message_id, kind, zone_id, target, state, summary,
+          undo_json, created_at, undone_at)
+          VALUES (1, 1, 1, 'queue', 'main', 'issue:1', 'undone', 's1',
+                  '{"op":"labels","number":1,"label":"x"}', 'c', 'd'),
+                 (2, 2, 3, 'close', 'main', 'issue:2', 'done', 's2', NULL, 'c', NULL);
+      `);
+      orphan?.(raw);
+    });
+  const next = (db: Db) => {
+    const th = db
+      .prepare(
+        `INSERT INTO chat_threads (title, created_at, updated_at) VALUES ('n', 'c', 'u') RETURNING id`,
+      )
+      .get() as { id: number };
+    const m = db
+      .prepare(
+        `INSERT INTO chat_messages (thread_id, seq, role, text, state, created_at)
+         VALUES (?, 1, 'owner', 'n', 'done', 'c') RETURNING id`,
+      )
+      .get(th.id) as { id: number };
+    const c = db
+      .prepare(
+        `INSERT INTO chat_cards (thread_id, message_id, kind, state, summary, created_at)
+         VALUES (?, ?, 'queue', 'done', 'n', 'c') RETURNING id`,
+      )
+      .get(th.id, m.id) as { id: number };
+    return { thread: th.id, message: m.id, card: c.id };
+  };
+
+  test('keeps every thread, message and card with its id and columns', () => {
+    const dump = (db: { prepare: Db['prepare'] }) =>
+      ['chat_threads', 'chat_messages', 'chat_cards'].map((t) =>
+        db.prepare(`SELECT * FROM ${t} ORDER BY id`).all(),
+      );
+    const f = v69Db();
+    const before = new Database(f);
+    const was = dump(before);
+    before.close();
+    const db = openDb(f);
+    expect(maxVersion(db)).toBe(MIGRATIONS.length);
+    expect(dump(db)).toEqual(was);
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+    for (const name of ['chat_threads_updated', 'chat_cards_by_thread'])
+      expect(db.prepare('SELECT 1 FROM sqlite_master WHERE name = ?').all(name)).toHaveLength(1);
+    expect(() =>
+      db
+        .prepare(
+          `INSERT INTO chat_messages (thread_id, seq, role, text, state, created_at)
+           VALUES (1, 1, 'owner', 'dup', 'done', 'c')`,
+        )
+        .run(),
+    ).toThrow(/UNIQUE/);
+    // With nothing deleted, ids continue after the surviving rows.
+    expect(next(db)).toEqual({ thread: 3, message: 4, card: 3 });
+    db.close();
+  });
+
+  test.each<[string, (raw: Database.Database) => void, Partial<Record<string, number>>]>([
+    [
+      'an orphaned reopen Undo outbox row',
+      (raw) =>
+        raw.exec(`INSERT INTO outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state,
+          created_at, updated_at) VALUES ('o1', 'reopen:main:9', 'update_issue', NULL, 'main', '{}',
+          'done', 't', 't')`),
+      { card: 9 },
+    ],
+    [
+      'an orphaned labels Undo outbox row',
+      (raw) =>
+        raw.exec(`INSERT INTO outbox (id, op_key, kind, work_item_id, zone_id, payload_json, state,
+          created_at, updated_at) VALUES ('o1', 'labels:main:undo:11', 'set_labels', NULL, 'main',
+          '{}', 'done', 't', 't')`),
+      { card: 11 },
+    ],
+    [
+      'a chat token of a deleted thread and message',
+      (raw) =>
+        raw.exec(`INSERT INTO mcp_tokens (token_hash, zone_id, scope, created_at, expires_at,
+          chat_thread_id, chat_message_id) VALUES ('h', 'main', 'chat', 'a', 'b', 8, 20)`),
+      { thread: 8, message: 20 },
+    ],
+    [
+      "a goal change's chat sourceRef",
+      (raw) =>
+        raw.exec(`INSERT INTO goal_changes (zone_id, source, source_ref, text, text_sha256, state,
+          created_at, updated_at) VALUES ('main', 'chat', 'chat:12:30', 't', 's', 'proposed',
+          'c', 'u')`),
+      { thread: 12, message: 30 },
+    ],
+    [
+      "the chat audit's card, thread and message",
+      (raw) =>
+        raw.exec(`INSERT INTO control_audit (at, via, action, target, detail_json) VALUES
+          ('t', 'session', 'chat.undo', 'card:15',
+           '{"opKey":"reopen:main:15","thread":14,"message":40}')`),
+      { thread: 14, message: 40, card: 15 },
+    ],
+  ])('the next ids pass the ids still named by %s', (_name, orphan, held) => {
+    const db = openDb(v69Db(orphan));
+    const got = next(db);
+    const floor = { thread: 2, message: 3, card: 2, ...held };
+    expect(got).toEqual({
+      thread: floor.thread + 1,
+      message: floor.message + 1,
+      card: floor.card + 1,
+    });
+    db.close();
+  });
 });

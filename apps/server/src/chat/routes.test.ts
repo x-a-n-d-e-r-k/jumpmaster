@@ -357,6 +357,7 @@ function undoWorld() {
   return {
     ...z,
     th,
+    app: a,
     card,
     undo,
     setLabelWrites,
@@ -488,6 +489,77 @@ describe('POST /api/chat/cards/:id/undo', () => {
     expect(w.db.prepare('SELECT COUNT(*) AS n FROM outbox').get()).toEqual({ n: 0 });
     expect(w.setLabelWrites()).toBe(0);
     expect(listCards(w.db, w.th.id)[0]?.state).toBe('done');
+  });
+});
+
+describe('Undo on a card made after a thread delete (#943)', () => {
+  type W = ReturnType<typeof undoWorld>;
+  const del = (w: W, id: number) =>
+    w.app.inject({
+      method: 'DELETE',
+      url: `/api/chat/threads/${id}`,
+      headers: w.session,
+      payload: {},
+    });
+  const cardIn = (w: W, undo: { op: 'labels'; label: string } | { op: 'reopen' }, n: number) => {
+    const th = createThread(w.db, { title: `t${n}` }, t0);
+    const card = recordCard(
+      w.db,
+      {
+        threadId: th.id,
+        messageId: 1,
+        kind: undo.op === 'labels' ? 'queue' : 'close',
+        zoneId: 'main',
+        target: `issue:${n}`,
+        state: 'done',
+        summary: `card on issue #${n}`,
+        undo: { ...undo, number: n },
+      },
+      t0,
+    );
+    return { th, card };
+  };
+  const writes = (w: W, method: string) =>
+    w.f.author.calls.filter((c) => c.method === method).length;
+
+  test('a labels Undo writes again and marks only the new card undone', async () => {
+    const w = undoWorld();
+    expect((await w.undo(w.session)).statusCode).toBe(200);
+    expect(w.setLabelWrites()).toBe(1);
+    expect((await del(w, w.th.id)).statusCode).toBe(200);
+    const issue = w.f.state.issues.get(1);
+    if (!issue) throw new Error('no issue 1');
+    issue.labels = ['agent-ready'];
+    const next = cardIn(w, { op: 'labels', label: 'agent-ready' }, 1);
+    expect(next.card.id).not.toBe(w.card.id);
+    const res = await w.undo(w.session, next.card.id);
+    expect(res.statusCode).toBe(200);
+    expect(w.setLabelWrites()).toBe(2);
+    expect(w.f.state.issues.get(1)?.labels).toEqual([]);
+    expect(listCards(w.db, next.th.id)[0]?.state).toBe('undone');
+  });
+
+  test('a reopen Undo writes again and reopens the new issue', async () => {
+    const w = undoWorld();
+    const close = (n: number) => {
+      const issue = w.f.state.issues.get(n);
+      if (!issue) throw new Error(`no issue ${n}`);
+      issue.state = 'closed';
+    };
+    close(2);
+    const first = cardIn(w, { op: 'reopen' }, 2);
+    expect((await w.undo(w.session, first.card.id)).statusCode).toBe(200);
+    expect(w.f.state.issues.get(2)?.state).toBe('open');
+    expect(writes(w, 'updateIssue')).toBe(1);
+    expect((await del(w, first.th.id)).statusCode).toBe(200);
+    close(3);
+    const next = cardIn(w, { op: 'reopen' }, 3);
+    expect(next.card.id).toBeGreaterThan(first.card.id);
+    const res = await w.undo(w.session, next.card.id);
+    expect(res.statusCode).toBe(200);
+    expect(writes(w, 'updateIssue')).toBe(2);
+    expect(w.f.state.issues.get(3)?.state).toBe('open');
+    expect(listCards(w.db, next.th.id)[0]?.state).toBe('undone');
   });
 });
 

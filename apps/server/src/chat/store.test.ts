@@ -275,6 +275,25 @@ describe('deleteThread (#833)', () => {
     expect(getThread(db, pending.id)).toBeUndefined();
   });
 
+  test('a thread, message and card made after a delete never take a deleted id (#943)', () => {
+    const db = openDb(tmpDbFile());
+    seed(db, 'kept');
+    const gone = seed(db, 'gone');
+    const goneMessage = Math.max(...listMessages(db, gone.id).map((m) => m.id));
+    const goneCard = Math.max(...listCards(db, gone.id).map((c) => c.id));
+    expect(deleteThread(db, gone.id, t0)).toBe('deleted');
+    const th = createThread(db, { title: 'new' }, t0);
+    const m = appendMessage(db, th.id, { role: 'owner', text: 'hi', state: 'done' }, t0);
+    const c = recordCard(
+      db,
+      { threadId: th.id, messageId: m.id, kind: 'queue', state: 'done', summary: 'new card' },
+      t0,
+    );
+    expect(th.id).toBeGreaterThan(gone.id);
+    expect(m.id).toBeGreaterThan(goneMessage);
+    expect(c.id).toBeGreaterThan(goneCard);
+  });
+
   test("another session's thread is unknown to a viewer and kept", () => {
     const db = openDb(tmpDbFile());
     const th = createThread(db, { title: 'mine', owner: 'a' }, t0);
