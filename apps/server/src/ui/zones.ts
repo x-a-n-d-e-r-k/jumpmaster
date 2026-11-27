@@ -2,6 +2,7 @@ import { PRESETS } from '@jumpmaster/protocol';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { withCsrf } from '../auth/guard.js';
 import { listBriefings } from '../briefings.js';
+import type { Focus } from '../chat/focus.js';
 import type { ConfigStore } from '../config/store.js';
 import { type Config, type DropZoneConfig, STARTER_WARNING } from '../config.js';
 import type { Db } from '../db/open.js';
@@ -53,7 +54,8 @@ import { PROJECT_WORDS_FN, type ZoneRef, zoneName, zoneNameText } from './zone-n
 
 /**
  * The project header and tab bar (#616) for a project page outside the tabs (GitHub, the GOAL.md
- * stub, New issue, advanced settings): the zone's mode and open briefings from the database.
+ * stub, New issue, advanced settings, a work item): the zone's mode and open briefings from the
+ * database. Ask about this focuses `ask` if given (a work item's page, #938), else the zone.
  */
 export function projectHeaderFor(
   db: Db,
@@ -61,6 +63,7 @@ export function projectHeaderFor(
   zones: readonly ZoneRef[],
   current?: ProjectTab,
   trail: readonly Crumb[] = [],
+  ask?: Focus,
 ): string {
   return projectHeader({
     zone,
@@ -69,6 +72,7 @@ export function projectHeaderFor(
     openBriefings: listBriefings(db, { zoneId: zone.id, state: 'open' }).length,
     current,
     trail,
+    ...(ask ? { ask } : {}),
   });
 }
 

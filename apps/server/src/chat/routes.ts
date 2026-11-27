@@ -108,7 +108,7 @@ function afterSeqOf(req: FastifyRequest): number {
 }
 
 const FocusBody = z.strictObject({
-  kind: z.enum(['zone', 'goals', 'briefing', 'drop', 'doctor']),
+  kind: z.enum(['zone', 'goals', 'briefing', 'drop', 'doctor', 'item']),
   zoneId: z.string().min(1).max(200),
   ref: z.string().min(1).max(200),
 });
@@ -162,13 +162,16 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     if (!body.success) {
       return reply.code(400).send({
         error:
-          'a title is 1 to 200 characters, and a focus a zone, goals, briefing, drop or doctor check',
+          'a title is 1 to 200 characters, and a focus a zone, goals, briefing, drop, doctor check or work item',
       });
     }
     const { focus } = body.data;
     if (focus && !focusKnown(db, config(), focus)) {
       // Fixed words: the ref is never echoed.
       if (focus.kind === 'drop') return reply.code(400).send({ error: 'unknown drop' });
+      if (focus.kind === 'item' && config().dropZones.some((z) => z.id === focus.zoneId)) {
+        return reply.code(400).send({ error: 'unknown work item' });
+      }
       if (focus.kind === 'doctor') {
         return reply
           .code(400)

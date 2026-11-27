@@ -620,6 +620,14 @@ function projectCrumbs(
 /** The header's Pause or Resume button: it sets the zone's mode as the projects list's buttons do. */
 const PROJECT_MODE_SCRIPT = `<script>for(const b of document.querySelectorAll('button.project-mode')){if(b.dataset.bound)continue;b.dataset.bound='1';b.addEventListener('click',async()=>{const r=await jmFetch('/api/control/zones/'+encodeURIComponent(b.dataset.zone),{mode:b.dataset.mode});if(r.ok){location.reload();return;}const j=await r.json().catch(()=>({}));document.getElementById('project-mode-out').textContent=b.dataset.name+': '+(j.error||('refused ('+r.status+')'));});}</script>`;
 
+/** The Ask panel chip of a project header's focus: the project, its goals or one of its issues. */
+const headerChip = (ask: Focus, name: string): string =>
+  ask.kind === 'goals'
+    ? `${name} · goals`
+    : ask.kind === 'item'
+      ? `${name} · #${escapeHtml(ask.ref)}`
+      : name;
+
 /**
  * A project's header (#616), on every project page: the repository name and mode badge, the
  * Briefings count, then Ask about this (zone focus unless the page names its own), Pause or
@@ -646,7 +654,7 @@ export function projectHeader(p: {
     `<p class="project-links"><a href="${escapeHtml(githubSetupHref(id))}">GitHub</a> · <a href="${escapeHtml(zoneBriefingsHref(id))}">Briefings (${escapeHtml(p.openBriefings)} open)</a></p>` +
     `<header class="project-header"><h2>${zoneName(zone, zones)} ${badge(mode)}</h2>` +
     `<p class="project-mode-label">${escapeHtml(MODE_LABELS[mode] ?? mode)}</p>` +
-    `<div class="project-actions">${askButton(ask, ask.kind === 'goals' ? `${zoneName(zone, zones)} · goals` : zoneName(zone, zones))} ${control} <a href="${escapeHtml(projectHref(id, 'issues/new'))}">New issue</a> <span id="project-mode-out" role="status"></span></div>` +
+    `<div class="project-actions">${askButton(ask, headerChip(ask, zoneName(zone, zones)))} ${control} <a href="${escapeHtml(projectHref(id, 'issues/new'))}">New issue</a> <span id="project-mode-out" role="status"></span></div>` +
     `${PROJECT_MODE_SCRIPT}</header>${projectTabs(zone, p.current)}`
   );
 }
@@ -1157,14 +1165,14 @@ const volatile = (html: string): string => `<span data-live-ignore>${html}</span
  * finding's form is one row's of many on Health, never the page's own focus.
  */
 const ASK_FORM =
-  /<form class="ask" data-focus-kind="(zone|goals|briefing|drop)" data-focus-zone="([^"]*)" data-focus-ref="([^"]*)">(?:<template class="ask-chip">(.*?)<\/template>)?/;
+  /<form class="ask" data-focus-kind="(zone|goals|briefing|drop|item)" data-focus-zone="([^"]*)" data-focus-ref="([^"]*)">(?:<template class="ask-chip">(.*?)<\/template>)?/;
 
 /** A page's focus: the escaped values and the chip HTML. */
 type PageFocus = Focus & { chip: string | undefined };
 
 /**
- * The focus of what a page shows (#626): a project page's (its zone, or Goals' goals) or a
- * briefing's, as its Ask about this form names it; any other page has none. Values stay escaped.
+ * The focus of what a page shows (#626): a project page's (its zone, Goals' goals, or a work
+ * item page's item) or a briefing's, as its Ask about this form names it; any other page has none. Values stay escaped.
  */
 export function pageFocus(body: string): PageFocus | undefined {
   const m = ASK_FORM.exec(body);

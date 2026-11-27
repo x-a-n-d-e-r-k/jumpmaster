@@ -898,6 +898,19 @@ export type AttemptKey =
   /** Resolves that ended in a carried verdict (a clean merge of the base), bounded by maxBaseSync. */
   | 'base_sync';
 
+/** Every attempt key, in the order the pages and the item focus list them. */
+export const ATTEMPT_KEYS: readonly AttemptKey[] = [
+  'heal',
+  'resolve',
+  'resolve_total',
+  'resume',
+  'review',
+  'no_change',
+  'heal_no_change',
+  'rate_limit',
+  'base_sync',
+];
+
 export interface PullRequestRow {
   workItemId: number;
   number: number;

@@ -1,15 +1,25 @@
 import { type GateResult, GateResultSchema, protectedPathMatches } from '@jumpmaster/protocol';
-import { type Briefing, type BriefingSource, briefingContext, getBriefing } from '../briefings.js';
+import {
+  type Briefing,
+  type BriefingSource,
+  briefingContext,
+  getBriefing,
+  listBriefings,
+} from '../briefings.js';
 import type { Config, DropZoneConfig } from '../config.js';
 import type { Db } from '../db/open.js';
 import {
+  ATTEMPT_KEYS,
   type Drop,
+  findWorkItem,
+  getAttempts,
   getDrop,
   getPullRequest,
   getWorkItem,
   getZoneMode,
   latestVerdict,
   listWorkItems,
+  type WorkItem,
 } from '../db/repo.js';
 import type { DoctorCheck } from '../doctor/checks.js';
 import { latestDoctorRun } from '../doctor/run.js';
@@ -20,16 +30,16 @@ import { redactionList } from '../scrub.js';
 import type { FocusKind } from './store.js';
 
 /**
- * Focused threads (#336 slice 4, #103, #627): a thread opened from a zone, its goals, a briefing,
- * a drop or a doctor finding. Its
+ * Focused threads (#336 slice 4, #103, #627, #938): a thread opened from a zone, its goals, a
+ * briefing, a drop, a doctor finding or a work item. Its
  * first turn is given the object's context. Everything the forge or an agent wrote goes inside a
  * `jm-data` fence, labelled `(data)` or `(data, untrusted)`, redacted and neutralised.
  */
 
 /**
  * What a thread is about: `ref` is the briefing id, the drop id (`zoneId` its zone), the doctor
- * check id (`zoneId` its zone, or {@link INSTALL_ZONE} for an install-wide check), or the zone id
- * for `zone` and `goals`.
+ * check id (`zoneId` its zone, or {@link INSTALL_ZONE} for an install-wide check), the issue
+ * number in canonical decimal (`item`), or the zone id for `zone` and `goals`.
  */
 export type Focus = { kind: FocusKind; zoneId: string; ref: string };
 
@@ -38,6 +48,8 @@ export const INSTALL_ZONE = 'install';
 
 /** How many of the briefing item's latest drops the context lists. */
 export const FOCUS_DROPS = 5;
+/** How many of a work item's briefings, newest first, an item focus lists. */
+export const FOCUS_BRIEFINGS = 10;
 /** How many lines of the end of a failing gate's output a drop focus carries. */
 export const FOCUS_GATE_LINES = 40;
 /** The longest thread title, as the thread route allows. */
@@ -50,6 +62,15 @@ const briefingOf = (db: Db, f: Focus): Briefing | undefined => {
   if (!/^[1-9]\d{0,15}$/.test(f.ref)) return undefined;
   const b = getBriefing(db, Number(f.ref));
   return b && b.zoneId === f.zoneId ? b : undefined;
+};
+
+/** An item focus's ref: the issue number in canonical decimal, else none. */
+const issueOf = (ref: string): number | undefined =>
+  /^[1-9]\d{0,15}$/.test(ref) && Number.isSafeInteger(Number(ref)) ? Number(ref) : undefined;
+
+const itemOf = (db: Db, f: Focus): WorkItem | undefined => {
+  const n = issueOf(f.ref);
+  return n === undefined ? undefined : findWorkItem(db, f.zoneId, n);
 };
 
 const dropOf = (db: Db, f: Focus): Drop | undefined => {
@@ -69,13 +90,14 @@ function checkOf(
 
 /**
  * Whether the focus names something that exists: a drop of that zone, a check of the doctor's
- * latest run, or a zone of the install, and for a briefing, one of that zone's.
+ * latest run, or a zone of the install, and for a briefing or a work item, one of that zone's.
  */
 export function focusKnown(db: Db, config: Config, f: Focus): boolean {
   if (f.kind === 'drop') return dropOf(db, f) !== undefined;
   if (f.kind === 'doctor') return checkOf(db, f) !== undefined;
   if (!zoneOf(config, f.zoneId)) return false;
   if (f.kind === 'briefing') return briefingOf(db, f) !== undefined;
+  if (f.kind === 'item') return itemOf(db, f) !== undefined;
   return f.ref === f.zoneId;
 }
 
@@ -93,6 +115,10 @@ export function focusTitle(db: Db, config: Config, f: Focus): string {
   if (f.kind === 'doctor') return clip(`Doctor: ${f.ref}`);
   if (f.kind === 'zone') return clip(`Project ${f.zoneId}`);
   if (f.kind === 'goals') return clip(`Goals of ${f.zoneId}`);
+  if (f.kind === 'item') {
+    const item = itemOf(db, f);
+    return clip(item ? `Issue #${item.issueNumber}: ${item.title}` : `Issue #${f.ref}`);
+  }
   const b = briefingOf(db, f);
   return clip(b ? `Briefing ${b.id}: ${b.decision}` : `Briefing ${f.ref}`);
 }
@@ -146,12 +172,25 @@ function briefingLines(
   const itemId = /^item:(\d+)$/.exec(b.subject)?.[1];
   const item = itemId === undefined ? undefined : getWorkItem(db, Number(itemId));
   if (!item || item.dropZoneId !== zone.id) return lines;
-  lines.push(
-    '',
+  return [...lines, '', ...workItemLines(db, zone, item, fx, extraRefs)];
+}
+
+/**
+ * A work item's own lines: its title, body and reason, latest drops, latest verdict and PR head
+ * (whose ref goes in `extraRefs`).
+ */
+function workItemLines(
+  db: Db,
+  zone: DropZoneConfig,
+  item: WorkItem,
+  fx: Fence,
+  extraRefs: Record<string, string[]>,
+): string[] {
+  const lines = [
     `Work item #${item.issueNumber} state=${item.state}`,
     `title ${fx('data', 'title', item.title)}`,
     `body ${fx('data', 'body', item.body)}`,
-  );
+  ];
   if (item.reason) lines.push(`reason ${fx('untrusted', 'reason', item.reason)}`);
 
   lines.push('', `Latest drops (newest first, at most ${FOCUS_DROPS}):`);
@@ -179,6 +218,69 @@ function briefingLines(
     );
     extraRefs[zone.id] = [`pull/${pr.number}/head`];
   } else lines.push('Pull request: none');
+  return lines;
+}
+
+/** The id, choice and note of each ruling on a briefing, oldest first. */
+function rulingsOf(
+  db: Db,
+  briefingId: number,
+): { choice: string; label: string | null; note: string; createdAt: string }[] {
+  return db
+    .prepare(
+      `SELECT choice, choice_label AS label, note, created_at AS createdAt FROM rulings
+         WHERE briefing_id = ? ORDER BY id`,
+    )
+    .all(briefingId) as { choice: string; label: string | null; note: string; createdAt: string }[];
+}
+
+/**
+ * An item focus (#938): the item's state, reason, PR, head, latest verdict, attempt counts and
+ * drops, then the zone's briefings about it (`item:<id>`), each with its diagnosis and rulings.
+ */
+function itemLines(
+  db: Db,
+  zone: DropZoneConfig,
+  item: WorkItem,
+  fx: Fence,
+  extraRefs: Record<string, string[]>,
+): string[] {
+  const lines = [
+    `(trusted) The owner opened this thread from work item #${item.issueNumber} in zone ${zone.id} (repository ${zone.repo}).`,
+    '',
+    ...workItemLines(db, zone, item, fx, extraRefs),
+  ];
+  const counts = ATTEMPT_KEYS.map((k) => [k, getAttempts(db, item.id, k).count] as const).filter(
+    ([, n]) => n > 0,
+  );
+  lines.push(
+    `Attempt counts: ${counts.length === 0 ? 'none' : counts.map(([k, n]) => `${k}=${n}`).join(' ')}`,
+  );
+
+  const subject = `item:${item.id}`;
+  const briefings = listBriefings(db, { zoneId: zone.id })
+    .filter((b) => b.subject === subject)
+    .reverse()
+    .slice(0, FOCUS_BRIEFINGS);
+  lines.push('', `Briefings about this item (newest first, at most ${FOCUS_BRIEFINGS}):`);
+  if (briefings.length === 0) lines.push('- none');
+  for (const b of briefings) {
+    const t = briefingTrust(b.source);
+    lines.push(
+      `- Briefing ${b.id} (${b.kind}, ${b.state}, raised by ${b.source === 'mcp' ? 'assistant' : b.source})`,
+      `  decision ${fx(t, 'decision', b.decision)}`,
+      `  why ${fx(t, 'why', b.why)}`,
+    );
+    if (b.diagnosis) lines.push(`  diagnosis ${fx('untrusted', 'diagnosis', b.diagnosis)}`);
+    const rulings = rulingsOf(db, b.id);
+    if (rulings.length === 0) lines.push('  Ruling: none');
+    for (const r of rulings) {
+      lines.push(
+        `  Ruling of ${r.createdAt}: choice ${fx(t, 'choice', r.label ? `${r.choice}: ${r.label}` : r.choice)}`,
+      );
+      if (r.note) lines.push(`  note ${fx('untrusted', 'note', r.note)}`);
+    }
+  }
   return lines;
 }
 
@@ -343,7 +445,16 @@ export function focusContext(
   } else if (!zone) lines = [`(trusted) The zone this thread was opened from no longer exists.`];
   else if (f.kind === 'zone') lines = zoneLines(db, zone, fx);
   else if (f.kind === 'goals') lines = goalsLines(db, zone, fx);
-  else {
+  else if (f.kind === 'item') {
+    const item = itemOf(db, f);
+    lines = item
+      ? itemLines(db, zone, item, fx, extraRefs)
+      : [
+          issueOf(f.ref) === undefined
+            ? '(trusted) The work item this thread was opened from no longer exists.'
+            : `(trusted) Work item #${f.ref}, which this thread was opened from, no longer exists.`,
+        ];
+  } else {
     const b = briefingOf(db, f);
     lines = b
       ? briefingLines(db, zone, b, fx, extraRefs)
