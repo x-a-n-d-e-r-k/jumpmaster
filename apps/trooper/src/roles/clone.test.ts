@@ -3,9 +3,11 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,8 +20,8 @@ import {
   READY_LINE,
   RESULT_PREFIX,
 } from '@jumpmaster/protocol';
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
-import { initBare, mirrorFetch, setSpawn } from '../git.js';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest';
+import { initBare, mirrorFetch, setSpawn, setSystemCaBundle, setWorkRoot } from '../git.js';
 import { CLONE_MIRROR_DIR, type CloneDeps, mirrorHolds, runClone } from './clone.js';
 
 const TOKEN = 'dtok-Zx9plain0123456789ab';
@@ -82,6 +84,8 @@ async function run(
     from?: string | null;
     after?: (mirror: string) => void;
     early?: boolean;
+    /** Sees the options the role passed to `mirrorFetch`, while the fetch runs. */
+    onFetch?: (opts: Parameters<typeof mirrorFetch>[4]) => void;
   } = {},
 ): Promise<Run> {
   const mirror = join(tmp, `mirror-${n++}`);
@@ -105,6 +109,7 @@ async function run(
       },
       mirrorFetch: async (d, t, target, refs, opts) => {
         log.push(`fetch ${refs.join(',')}`);
+        o.onFetch?.(opts);
         await mirrorFetch(d, t, from ? { ...target, url: `file://${from}` } : target, refs, opts);
         o.after?.(d);
       },
@@ -277,4 +282,85 @@ test('stdin closing before the grant fails retryable', async () => {
   });
   expect(r).toMatchObject({ status: 'failed', retryable: true });
   expect(lines[0]).toBe(READY_LINE);
+});
+
+describe('a grant with caCert (#947)', () => {
+  const CERT =
+    '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUY2xvbmUtY2E=\n-----END CERTIFICATE-----\n';
+  const PEM_LINES = CERT.trim().split('\n');
+  const SYSTEM = '-----BEGIN CERTIFICATE-----\nU1lTVEVN\n-----END CERTIFICATE-----\n';
+  const KEY = 'http.https://git.example.internal:8443/.sslCAInfo';
+  let scratch: string;
+  let system: string;
+
+  beforeAll(() => {
+    scratch = join(tmp, 'scratch');
+    mkdirSync(scratch);
+    system = join(tmp, 'system-ca.crt');
+    writeFileSync(system, SYSTEM);
+  });
+  beforeEach(() => {
+    setWorkRoot(scratch);
+    setSystemCaBundle(system);
+  });
+  afterEach(() => {
+    setWorkRoot(realpathSync(tmpdir()));
+    setSystemCaBundle(null);
+  });
+
+  type Seen = { config?: [string, string][]; body?: string; dirMode?: number; fileMode?: number };
+  const watchFetch = (seen: Seen) => (opts: Parameters<typeof mirrorFetch>[4]) => {
+    seen.config = opts?.extraConfig;
+    const file = opts?.extraConfig?.find(([k]) => k === KEY)?.[1];
+    if (!file) return;
+    seen.body = readFileSync(file, 'utf8');
+    seen.fileMode = statSync(file).mode & 0o777;
+    seen.dirMode = statSync(join(file, '..')).mode & 0o777;
+  };
+
+  test('the mirror fetch trusts the bundle for the origin only; the file is gone after', async () => {
+    const seen: Seen = {};
+    const r = await run({ grant: grant({ caCert: CERT }), onFetch: watchFetch(seen) });
+    expect(r.result.status).toBe('cloned');
+    expect(seen.config).toEqual([[KEY, expect.any(String)]]);
+    const file = (seen.config as [string, string][])[0]?.[1] as string;
+    expect(file.startsWith(`${r.mirror}/`)).toBe(false);
+    expect(seen.body).toBe(SYSTEM + CERT);
+    expect(seen.dirMode).toBe(0o700);
+    expect(seen.fileMode).toBe(0o600);
+    expect(existsSync(file)).toBe(false);
+    expect(readdirSync(scratch)).toEqual([]);
+  });
+
+  test('without caCert the mirror fetch gets no CA config', async () => {
+    const seen: Seen = {};
+    const r = await run({ onFetch: watchFetch(seen) });
+    expect(r.result.status).toBe('cloned');
+    expect(seen.config).toBeUndefined();
+  });
+
+  test('a failed fetch removes the file, and its reason holds no PEM line', async () => {
+    const seen: Seen = {};
+    const r = await run({
+      grant: grant({ caCert: CERT }),
+      from: join(tmp, 'no-such-origin.git'),
+      onFetch: watchFetch(seen),
+    });
+    expect(r.result).toMatchObject({ status: 'failed', retryable: true });
+    expect(seen.body).toBe(SYSTEM + CERT);
+    for (const l of r.lines) for (const p of PEM_LINES) expect(l).not.toContain(p);
+    expect(readdirSync(scratch)).toEqual([]);
+  });
+
+  test('a missing system bundle fails for good before the mirror fetch', async () => {
+    setSystemCaBundle(join(tmp, 'no-such-bundle.crt'));
+    const r = await run({ grant: grant({ caCert: CERT }) });
+    expect(r.result).toMatchObject({ status: 'failed', retryable: false });
+    if (r.result.status !== 'failed') return;
+    expect(r.result.reason).toContain('the GitLab CA bundle');
+    expect(r.result.reason).not.toContain('no-such-bundle');
+    expect(r.log.some((l) => l.startsWith('fetch'))).toBe(false);
+    for (const l of r.lines) for (const p of PEM_LINES) expect(l).not.toContain(p);
+    expect(readdirSync(scratch)).toEqual([]);
+  });
 });

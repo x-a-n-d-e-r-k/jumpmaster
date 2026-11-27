@@ -22,7 +22,8 @@ LABEL org.opencontainers.image.source="${SOURCE_URL}" \
       org.jumpmaster.trooper.egress="1" \
       org.jumpmaster.trooper.push="1" \
       org.jumpmaster.trooper.clone="1" \
-      org.jumpmaster.trooper.mirror="1"
+      org.jumpmaster.trooper.mirror="1" \
+      org.jumpmaster.trooper.ca="1"
 # python3, make and g++: npm builds any package with a binding.gyp (better-sqlite3, bcrypt, …)
 # with node-gyp; npm_config_nodedir points it at this image's Node headers, so it never downloads them.
 RUN apt-get update \

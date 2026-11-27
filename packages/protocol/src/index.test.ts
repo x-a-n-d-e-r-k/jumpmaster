@@ -1289,3 +1289,63 @@ describe('egress-ports-v1 (#914)', () => {
     expect([...STICK_CAPABILITIES]).toEqual([...STICK_CAPABILITIES].sort());
   });
 });
+
+describe('grant caCert (#947)', () => {
+  const forge = {
+    kind: 'gitlab' as const,
+    origin: 'https://gitlab.example.com:8443',
+    projectPath: 'group/project',
+  };
+  const block = (type: string, body = 'MIIBszCCAVmgAwIBAgIUQ2E=') =>
+    `-----BEGIN ${type}-----\n${body}\n-----END ${type}-----\n`;
+  const CERT = block('CERTIFICATE');
+  const push = {
+    token: 't',
+    owner: 'o',
+    name: 'n',
+    forge,
+    branch: 'agent/issue-1',
+    base: 'main',
+    lease: '',
+    protectedPaths: [],
+    secrets: [],
+  };
+  const clone = { token: 'tok', forge, secrets: [] };
+  const both = [
+    ['push', PushGrantSchema, push],
+    ['clone', CloneGrantSchema, clone],
+  ] as const;
+
+  test.each(both)('the %s grant accepts 1 to 16 certificate blocks', (_n, schema, g) => {
+    expect(schema.parse({ ...g, caCert: CERT })).toEqual({ ...g, caCert: CERT });
+    expect(schema.safeParse({ ...g, caCert: `\n  ${CERT}\r\n${CERT}  \n` }).success).toBe(true);
+    expect(schema.safeParse({ ...g, caCert: CERT.repeat(16) }).success).toBe(true);
+    expect(schema.parse(g)).toEqual(g);
+  });
+
+  test.each(both)('the %s grant refuses a bad caCert', (_n, schema, g) => {
+    const bad: [string, unknown][] = [
+      ['empty', ''],
+      ['whitespace only', '  \n'],
+      ['oversize', block('CERTIFICATE', 'A'.repeat(65536))],
+      ['17 blocks', CERT.repeat(17)],
+      ['a private key', block('PRIVATE KEY')],
+      ['a certificate and a key', CERT + block('RSA PRIVATE KEY')],
+      ['no PEM block', 'MIIBszCCAVmgAwIBAgIUQ2E='],
+      ['text before', `hello\n${CERT}`],
+      ['text after', `${CERT}trailing`],
+      ['text between', `${CERT}x\n${CERT}`],
+      ['an unterminated block', '-----BEGIN CERTIFICATE-----\nAAAA\n'],
+      ['not a string', 1],
+    ];
+    for (const [what, caCert] of bad)
+      expect(schema.safeParse({ ...g, caCert }).success, what).toBe(false);
+  });
+
+  test('a push grant with caCert and no forge is refused; without caCert it parses as before', () => {
+    const { forge: _f, ...github } = push;
+    expect(PushGrantSchema.safeParse({ ...github, caCert: CERT }).success).toBe(false);
+    expect(PushGrantSchema.parse(github)).toEqual(github);
+    expect(PushGrantSchema.parse(push)).toEqual(push);
+  });
+});

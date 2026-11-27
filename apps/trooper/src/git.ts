@@ -1,5 +1,6 @@
 import { type ChildProcess, type SpawnOptions, spawn } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -111,6 +112,55 @@ export function setGitOutputMaxBytes(n: number | null): void {
 let workRoot = realpathSync(tmpdir());
 export function setWorkRoot(dir: string): void {
   workRoot = dir;
+}
+
+// ---- a GitLab grant's private CA (#947) --------------------------------------------------------
+
+/** The image's system roots: a grant's CA file starts with them, never replaces them. */
+export const SYSTEM_CA_BUNDLE = '/etc/ssl/certs/ca-certificates.crt';
+let systemCaBundle = SYSTEM_CA_BUNDLE;
+/** Test seam: the system bundle a grant's CA file starts with (null restores the default). */
+export function setSystemCaBundle(path: string | null): void {
+  systemCaBundle = path ?? SYSTEM_CA_BUNDLE;
+}
+
+/** How every failure about a grant's CA names it: never a path or any of the PEM text. */
+export const GITLAB_CA_BUNDLE = 'the GitLab CA bundle';
+
+/** A grant's CA file, written for one push or clone; `remove` deletes it and its directory. */
+export interface GrantCa {
+  /** `http.<origin>/.sslCAInfo=<file>`: the trust, scoped to the grant's GitLab origin. */
+  config: [string, string][];
+  remove(): void;
+}
+
+/**
+ * Writes the system bundle followed by `caCert` to a 0600 file in a fresh 0700 directory of this
+ * process's uid, under the root scratch (never in a push dir or a mirror an agent later mounts).
+ * The returned config trusts it for `forge`'s origin only, port kept. Throws, naming only
+ * `GITLAB_CA_BUNDLE`, when the system bundle can't be read or the file can't be written: no
+ * fallback to the grant's certificates alone or to the default roots.
+ */
+export function writeGrantCa(forge: ForgeRemote, caCert: string): GrantCa {
+  let dir: string | null = null;
+  const remove = () => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  };
+  try {
+    const system = readFileSync(systemCaBundle, 'utf8');
+    dir = mkdtempSync(join(workRoot, 'jm-ca-'));
+    chmodSync(dir, 0o700);
+    const file = join(dir, 'ca.crt');
+    const sep = system === '' || system.endsWith('\n') ? '' : '\n';
+    writeFileSync(file, `${system}${sep}${caCert}`, { mode: 0o600, flag: 'wx' });
+    return {
+      config: [[`http.${authScope({ owner: '', name: '', forge })}.sslCAInfo`, file]],
+      remove,
+    };
+  } catch {
+    remove();
+    throw new Error(`could not prepare ${GITLAB_CA_BUNDLE}`);
+  }
 }
 
 /**
@@ -428,6 +478,8 @@ export async function mirrorFetch(
     timeoutMs?: number;
     username?: string;
     refuseRedirects?: boolean;
+    /** Extra env-carried config (a grant's `sslCAInfo`, `writeGrantCa`). */
+    extraConfig?: [string, string][];
   } = {},
 ): Promise<void> {
   const url = remoteUrl(target);
@@ -454,6 +506,7 @@ export async function mirrorFetch(
       ...(o.timeoutMs !== undefined ? { timeoutMs: o.timeoutMs } : {}),
       ...(o.username !== undefined ? { username: o.username } : {}),
       ...(o.refuseRedirects ? { refuseRedirects: true } : {}),
+      ...(o.extraConfig?.length ? { extraConfig: o.extraConfig } : {}),
     },
   );
   try {
@@ -696,6 +749,8 @@ export async function remoteBranchSha(
   branch: string,
   token: string,
   timeoutMs?: number,
+  /** Extra env-carried config (a grant's `sslCAInfo`, `writeGrantCa`). */
+  extraConfig: [string, string][] = [],
 ): Promise<string | null> {
   const scratch = mkdtempSync(join(workRoot, 'jm-lsremote-'));
   try {
@@ -713,7 +768,12 @@ export async function remoteBranchSha(
         `refs/heads/${branch}`,
       ],
       token,
-      { gitDir: scratch, remote: target, ...(timeoutMs !== undefined ? { timeoutMs } : {}) },
+      {
+        gitDir: scratch,
+        remote: target,
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        ...(extraConfig.length ? { extraConfig } : {}),
+      },
     );
     const line = out.split('\n').find((l) => l.endsWith(`\trefs/heads/${branch}`));
     return line ? (line.split('\t')[0] as string) : null;
@@ -1177,7 +1237,18 @@ export async function pushStaged(
   };
   const url = remoteUrl(target);
   const secrets = [...grant.secrets, ...targetTokenSecrets(target, token)];
+  let ca: GrantCa | null = null;
   try {
+    if (grant.caCert !== undefined) {
+      // The trust is scoped to a GitLab origin: a grant without one has none to give it.
+      if (!grant.forge) throw new PushFailure(`${GITLAB_CA_BUNDLE} needs a GitLab forge`, false);
+      try {
+        ca = writeGrantCa(grant.forge, grant.caCert);
+      } catch (e) {
+        throw failure(e, false);
+      }
+    }
+    const caConfig = ca ? { extraConfig: ca.config } : {};
     try {
       await runGit(
         undefined,
@@ -1193,7 +1264,7 @@ export async function pushStaged(
           `+refs/heads/${grant.base}:refs/jm/base`,
         ],
         token,
-        { gitDir: pushDir, remote: target, timeoutMs },
+        { gitDir: pushDir, remote: target, timeoutMs, ...caConfig },
       );
     } catch (e) {
       throw failure(e, true);
@@ -1241,15 +1312,17 @@ export async function pushStaged(
           `${ref}:${ref}`,
         ],
         token,
-        { gitDir: pushDir, remote: target, timeoutMs },
+        { gitDir: pushDir, remote: target, timeoutMs, ...caConfig },
       );
     } catch (e) {
       // The remote decides: our own earlier push that died before reporting, a remote that moved
       // past the lease (stale), or a push that never landed (retry).
       const want = grant.expectSha ?? head;
-      const tip = await remoteBranchSha(target, branch, token, timeoutMs).catch((le: unknown) => {
-        throw failure(le, true);
-      });
+      const tip = await remoteBranchSha(target, branch, token, timeoutMs, ca?.config).catch(
+        (le: unknown) => {
+          throw failure(le, true);
+        },
+      );
       if (tip === want) return { status: 'pushed', headSha: want, alreadyThere: true };
       if (tip !== (lease === '' ? null : lease)) {
         throw new PushFailure(
@@ -1272,6 +1345,7 @@ export async function pushStaged(
       retryable: f.retryable,
     };
   } finally {
+    ca?.remove();
     rmSync(pushDir, { recursive: true, force: true });
   }
 }
