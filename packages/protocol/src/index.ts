@@ -1043,26 +1043,31 @@ export type PushPlan = z.infer<typeof PushPlanSchema>;
 export const GRANT_CA_CERT_MAX_BYTES = 64 * 1024;
 /** The most certificates a grant's `caCert` holds: the server's `CA_CERT_MAX_BLOCKS`. */
 export const GRANT_CA_CERT_MAX_BLOCKS = 16;
-const GRANT_PEM_BLOCK = /-----BEGIN ([^-\r\n]*)-----([\s\S]*?)-----END \1-----/g;
+const GRANT_PEM_BEGIN = '-----BEGIN CERTIFICATE-----';
+const GRANT_PEM_END = '-----END CERTIFICATE-----';
 
 /**
  * True for a PEM bundle of 1 to 16 `CERTIFICATE` blocks, at most 64 KiB, with only whitespace
  * outside its blocks. Restates the server's `parseCaBundle` (apps/server/src/config.ts) without
- * importing it; it does not parse the certificates (the server did).
+ * importing it; it does not parse the certificates (the server did). A plain `indexOf` scan, not a
+ * backtracking regex, so a crafted near-PEM string is checked in linear time.
  */
 export function isGrantCaBundle(pem: string): boolean {
   if (Buffer.byteLength(pem, 'utf8') > GRANT_CA_CERT_MAX_BYTES) return false;
   let blocks = 0;
-  let outside = '';
-  let last = 0;
-  for (const m of pem.matchAll(GRANT_PEM_BLOCK)) {
-    if (m[1] !== 'CERTIFICATE') return false;
-    outside += pem.slice(last, m.index);
-    last = m.index + m[0].length;
-    blocks++;
+  let pos = 0;
+  for (;;) {
+    const begin = pem.indexOf('-----', pos);
+    // Anything other than whitespace between blocks (or a block of another type) is refused.
+    if (pem.slice(pos, begin === -1 ? pem.length : begin).trim() !== '') return false;
+    if (begin === -1) break;
+    if (!pem.startsWith(GRANT_PEM_BEGIN, begin)) return false;
+    const end = pem.indexOf(GRANT_PEM_END, begin + GRANT_PEM_BEGIN.length);
+    if (end === -1) return false;
+    if (++blocks > GRANT_CA_CERT_MAX_BLOCKS) return false;
+    pos = end + GRANT_PEM_END.length;
   }
-  outside += pem.slice(last);
-  return outside.trim() === '' && blocks >= 1 && blocks <= GRANT_CA_CERT_MAX_BLOCKS;
+  return blocks >= 1;
 }
 
 /** A GitLab grant's private CA (#947): PEM certificates the trooper trusts for that origin only. */

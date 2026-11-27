@@ -1342,6 +1342,31 @@ describe('grant caCert (#947)', () => {
       expect(schema.safeParse({ ...g, caCert }).success, what).toBe(false);
   });
 
+  test.each(both)(
+    'the %s grant checks a crafted near-PEM caCert in linear time',
+    (_n, schema, g) => {
+      // CodeQL: '-----BEGIN -----' then many '-----BEGIN -----a' made the block regex polynomial.
+      const crafted = `-----BEGIN -----${'-----BEGIN -----a'.repeat(3800)}`;
+      const nested = `-----BEGIN CERTIFICATE-----${'-----BEGIN CERTIFICATE-----'.repeat(2400)}`;
+      const started = performance.now();
+      for (let i = 0; i < 5; i++) {
+        expect(schema.safeParse({ ...g, caCert: crafted }).success).toBe(false);
+        expect(schema.safeParse({ ...g, caCert: nested }).success).toBe(false);
+      }
+      // The old regex took about 100 ms per crafted input at this size; a linear scan takes well under 1.
+      expect(performance.now() - started).toBeLessThan(150);
+    },
+  );
+
+  test.each(both)('the %s grant refuses a block whose END names another type', (_n, schema, g) => {
+    const mixed = '-----BEGIN CERTIFICATE-----\nAAAA\n-----END PRIVATE KEY-----\n';
+    expect(schema.safeParse({ ...g, caCert: mixed }).success).toBe(false);
+    const cert = '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n';
+    expect(schema.safeParse({ ...g, caCert: `${cert}-----END CERTIFICATE-----\n` }).success).toBe(
+      false,
+    );
+  });
+
   test('a push grant with caCert and no forge is refused; without caCert it parses as before', () => {
     const { forge: _f, ...github } = push;
     expect(PushGrantSchema.safeParse({ ...github, caCert: CERT }).success).toBe(false);
