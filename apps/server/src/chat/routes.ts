@@ -184,13 +184,14 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     const title = body.data.title ?? (focus ? focusTitle(db, config(), focus) : DEFAULT_TITLE);
     // A drop or doctor focus carries gate output and findings: its thread is this session's own.
     const owner = focus && SESSION_BOUND_FOCUS.includes(focus.kind) ? session : undefined;
-    return {
+    // 201 Created, whatever the focus.
+    return reply.code(201).send({
       thread: createThread(
         db,
         { title, ...(focus ? { focus } : {}), ...(owner ? { owner } : {}) },
         deps.now(),
       ),
-    };
+    });
   });
 
   app.get<{ Params: { id: string } }>('/api/chat/threads/:id', async (req, reply) => {

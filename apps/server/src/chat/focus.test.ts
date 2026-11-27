@@ -239,7 +239,7 @@ describe('POST /api/chat/threads with a focus', () => {
     const app = routeApp(db);
     const post = async (focus: Focus) => {
       const r = await app.inject({ method: 'POST', url: '/api/chat/threads', payload: { focus } });
-      expect(r.statusCode).toBe(200);
+      expect(r.statusCode).toBe(201);
       return (r.json() as { thread: { id: number; title: string } }).thread;
     };
     const b = await post(briefingFocus(briefingId));
@@ -619,6 +619,10 @@ describe('an item focus (#938)', () => {
     expect(text).toContain(
       '(trusted) Work item #9, which this thread was opened from, no longer exists.',
     );
+    // A non-canonical ref is never echoed, even in a trusted line.
+    const odd = focusContext(db, configOf(), itemFocus('07'), NONCE).text;
+    expect(odd).toContain('(trusted) The work item this thread was opened from no longer exists.');
+    expect(odd).not.toContain('07');
   });
 });
 
@@ -631,14 +635,14 @@ describe('POST /api/chat/threads with a drop or doctor focus (#627)', () => {
     const post = (focus: Focus) =>
       app.inject({ method: 'POST', url: '/api/chat/threads', payload: { focus } });
     const drop = await post({ kind: 'drop', zoneId: 'main', ref: id });
-    expect(drop.statusCode).toBe(200);
+    expect(drop.statusCode).toBe(201);
     expect(drop.json().thread).toMatchObject({
       title: 'Drop abcdef01 (implement, failed)',
       focusKind: 'drop',
       focusRef: id,
     });
     const doc = await post({ kind: 'doctor', zoneId: 'install', ref: 'claude.plan' });
-    expect(doc.statusCode).toBe(200);
+    expect(doc.statusCode).toBe(201);
     expect(doc.json().thread.title).toBe('Doctor: claude.plan');
     const before = db.prepare('SELECT COUNT(*) AS n FROM chat_threads').get();
     const bad: Focus[] = [

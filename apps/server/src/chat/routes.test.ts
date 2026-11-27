@@ -133,7 +133,7 @@ describe('/api/chat', () => {
       headers: w.session,
       payload: { title: 'About the backlog' },
     });
-    expect(made.statusCode).toBe(200);
+    expect(made.statusCode).toBe(201);
     const { thread } = made.json() as { thread: { id: number; title: string } };
     expect(thread.title).toBe('About the backlog');
     const res = await w.app.inject({
@@ -273,7 +273,7 @@ describe('/api/chat', () => {
         headers: w.session,
         payload: { focus },
       });
-      expect(made.statusCode).toBe(200);
+      expect(made.statusCode).toBe(201);
       const id = (made.json() as { thread: { id: number } }).thread.id;
       const mine = await w.app.inject({
         method: 'GET',
@@ -401,7 +401,7 @@ describe('POST /api/chat/threads with an item focus (#938)', () => {
   test('an existing item makes a thread titled for the issue, listed with its focus', async () => {
     const w = itemWorld();
     const made = await w.post({ kind: 'item', zoneId: 'main', ref: '7' });
-    expect(made.statusCode).toBe(200);
+    expect(made.statusCode).toBe(201);
     const { thread } = made.json() as { thread: { id: number } };
     expect(thread).toMatchObject({
       title: 'Issue #7: Make the widget spin',
