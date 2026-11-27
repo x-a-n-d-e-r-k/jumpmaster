@@ -375,8 +375,9 @@ export interface Forge {
    * each GitHub Actions workflow run on `headSha`, PR `prNumber`'s head, that has a failed job
    * named in `names`; once per run. Returns the runs it re-ran. A matching run whose `status` is not
    * `completed` re-runs none of them (GitHub refuses a run still in progress) and returns
-   * `running: true`, as does a POST refused 403 "already running" (#772). Any other refusal (403,
-   * 404) or error rejects; runs re-run before it stay re-run.
+   * `running: true`. A POST refused 403 "already running" (#772) stops the POSTs and returns
+   * `running: true` with the runs re-run before it in `runIds` (none when it was the first, #925).
+   * Any other refusal (403, 404) or error rejects; runs re-run before it stay re-run.
    */
   rerunFailedChecks(
     prNumber: number,
@@ -1385,6 +1386,7 @@ export class GitHubForge implements Forge {
       if (run.status !== 'completed') return { runIds: [], running: true };
       if (!runIds.includes(run.id)) runIds.push(run.id);
     }
+    const rerun: number[] = [];
     for (const id of runIds) {
       try {
         await this.octokit.request(
@@ -1396,12 +1398,14 @@ export class GitHubForge implements Forge {
           },
         );
       } catch (e) {
-        // The run started again between the read and the POST.
-        if (isAlreadyRunning(e)) return { runIds: [], running: true };
+        // The run started again between the read and the POST. The runs re-run before it are
+        // reported, so the caller records them and never posts them again (#925).
+        if (isAlreadyRunning(e)) return { runIds: rerun, running: true };
         throw e;
       }
+      rerun.push(id);
     }
-    return { runIds, running: false };
+    return { runIds: rerun, running: false };
   }
 
   async getBranchRules(branch: string): Promise<BranchRulesRead> {
