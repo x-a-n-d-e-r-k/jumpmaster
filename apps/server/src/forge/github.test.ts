@@ -782,6 +782,20 @@ describe('GitHubForge', () => {
         });
       });
 
+      test('an earlier run re-run, then a POST refused 403 "already running" (#925) → the re-run run is reported', async () => {
+        runs([11, 12]);
+        jobs(11, [job('images', 'failure')]);
+        jobs(12, [job('images', 'failure')]);
+        const first = nock(api).post('/repos/o/r/actions/runs/11/rerun-failed-jobs').reply(201, {});
+        nock(api)
+          .post('/repos/o/r/actions/runs/12/rerun-failed-jobs')
+          .reply(403, { message: 'This workflow is already running' });
+        const out = await forge.rerunFailedChecks(5, 'sha1', ['images']);
+        expect(first.isDone()).toBe(true);
+        expect(nock.pendingMocks()).toEqual([]);
+        expect(out).toEqual({ runIds: [11], running: true });
+      });
+
       test('a refused re-run rejects with its status', async () => {
         runs([11]);
         jobs(11, [job('images', 'failure')]);
