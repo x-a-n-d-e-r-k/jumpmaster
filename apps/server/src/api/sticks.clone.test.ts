@@ -336,7 +336,11 @@ describe('clone-token (#840)', () => {
       origin: 'https://gitlab.example.com',
       projectPath: 'octo/demo',
     });
-    expect([...g.secrets].sort()).toEqual([...ALL_TOKENS].sort());
+    // The token that can push is handed out only for pushes (the clone container spec, #945).
+    const body = JSON.stringify(res.json());
+    expect(body).not.toContain(AUTHOR);
+    expect(body).not.toContain(REVIEWER);
+    expect([...g.secrets].sort()).toEqual([...READ_FORMS].sort());
     expect(new Set(g.secrets).size).toBe(g.secrets.length);
     expect(rows(w.db)).toEqual([{ epoch: 1, seq: 1, minted: t0.toISOString(), revoked: null }]);
     const audit = listAudit(w.db).filter((a) => a.action === 'clone-token');
@@ -357,7 +361,10 @@ describe('clone-token (#840)', () => {
     const g = CloneGrantSchema.parse(res.json().grant);
     expect(g.token).toBe(AUTHOR);
     expect(g.username).toBeUndefined();
-    expect([...g.secrets].sort()).toEqual([AUTHOR, REVIEWER].sort());
+    expect(g.secrets).toContain(AUTHOR);
+    // The clone never uses the reviewer token, so it is not sent (#945).
+    expect(JSON.stringify(res.json())).not.toContain(REVIEWER);
+    expect(g.secrets).toEqual([AUTHOR]);
     const audit = listAudit(w.db).filter((a) => a.action === 'clone-token');
     expect(audit[0]?.detail).toEqual({ drop: 'd1', epoch: 1, credential: 'author' });
     holdsNoToken(JSON.stringify(listAudit(w.db)) + w.logs.join('\n'));
