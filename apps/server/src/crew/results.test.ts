@@ -2977,6 +2977,43 @@ describe('the crew acts once on a parked PR on its own diagnosis (#420)', () => 
       noRulings(h);
     });
 
+    test('run 11 re-run, then run 12 refused 403 "already running" (#925) → the re-run is recorded, never posted again, and the item is retried', async () => {
+      const h = await rerunRecorded(['images']);
+      nock(api)
+        .get('/repos/o/r/actions/runs')
+        .query((q) => q.head_sha === headN(1))
+        .reply(200, {
+          total_count: 2,
+          workflow_runs: [
+            { id: 11, status: 'completed' },
+            { id: 12, status: 'completed' },
+          ],
+        });
+      for (const id of [11, 12]) {
+        nock(api)
+          .get(`/repos/o/r/actions/runs/${id}/jobs`)
+          .query(true)
+          .reply(200, {
+            total_count: 1,
+            jobs: [{ name: 'images', status: 'completed', conclusion: 'failure' }],
+          });
+      }
+      const post = nock(api).post('/repos/o/r/actions/runs/11/rerun-failed-jobs').reply(201, {});
+      nock(api)
+        .post('/repos/o/r/actions/runs/12/rerun-failed-jobs')
+        .reply(403, { message: 'This workflow is already running' });
+      expect(await applyCrewRetries(h.db, ghDeps(h), 'main', h.now())).toBe(1);
+      expect(post.isDone()).toBe(true);
+      expect(nock.pendingMocks()).toEqual([]);
+      expect(getCrewRetry(h.db, 1)?.rerunAt).not.toBeNull();
+      // Nothing is mocked and the network is off: a second POST for run 11 would be refused.
+      await applyCrewRetries(h.db, ghDeps(h), 'main', plus(h.now(), 5 * 60_000));
+      expect(nock.pendingMocks()).toEqual([]);
+      expect(getCrewRetry(h.db, 1)).toMatchObject({ outcome: 'retried' });
+      expect(item(h)?.state).toBe('pr_open');
+      noRulings(h);
+    });
+
     test('still running 61 minutes after the row was recorded (#772) → skipped, and the item stays parked', async () => {
       const h = await rerunRecorded(['images']);
       actionsOn(headN(1), 'in_progress');
