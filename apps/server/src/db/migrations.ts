@@ -1743,6 +1743,151 @@ ALTER TABLE new_chat_threads RENAME TO chat_threads;
 CREATE INDEX chat_threads_updated ON chat_threads (updated_at);
 `;
 
+/**
+ * v70 (#943): chat thread, message and card ids are never reused. Deleting a thread (#833)
+ * hard-deletes its rows, and without AUTOINCREMENT SQLite hands the highest deleted id to the next
+ * row; a card's Undo outbox key, a chat token, a goal change's `sourceRef` and the audit all keep
+ * those ids. The three tables are rebuilt with AUTOINCREMENT, every row and column kept, and
+ * `afterV70` seeds each sequence past every id a surviving reference still names.
+ */
+const V70_SQL = `
+CREATE TABLE new_chat_threads (
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  title              TEXT NOT NULL,
+  focus_kind         TEXT CHECK (focus_kind IN ('zone','goals','briefing','drop','doctor','item')),
+  focus_zone_id      TEXT,
+  focus_ref          TEXT,
+  claude_session_id  TEXT,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL,
+  owner_session      TEXT
+);
+INSERT INTO new_chat_threads (id, title, focus_kind, focus_zone_id, focus_ref, claude_session_id,
+  created_at, updated_at, owner_session)
+SELECT id, title, focus_kind, focus_zone_id, focus_ref, claude_session_id, created_at, updated_at,
+  owner_session
+FROM chat_threads;
+DROP TABLE chat_threads;
+ALTER TABLE new_chat_threads RENAME TO chat_threads;
+CREATE INDEX chat_threads_updated ON chat_threads (updated_at);
+CREATE TABLE new_chat_messages (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread_id         INTEGER NOT NULL REFERENCES chat_threads(id),
+  seq               INTEGER NOT NULL,
+  role              TEXT NOT NULL CHECK (role IN ('owner','assistant','tool','system')),
+  text              TEXT NOT NULL,
+  state             TEXT NOT NULL CHECK (state IN ('queued','running','done','failed')),
+  session_hash      TEXT,
+  usage_json        TEXT,
+  error             TEXT,
+  created_at        TEXT NOT NULL,
+  tool_name         TEXT,
+  tool_use_id       TEXT,
+  input_json        TEXT,
+  result_text       TEXT,
+  result_truncated  INTEGER CHECK (result_truncated IN (0, 1)),
+  result_lines      INTEGER,
+  result_error      INTEGER CHECK (result_error IN (0, 1)),
+  result_pruned_at  TEXT,
+  UNIQUE (thread_id, seq)
+);
+INSERT INTO new_chat_messages (id, thread_id, seq, role, text, state, session_hash, usage_json,
+  error, created_at, tool_name, tool_use_id, input_json, result_text, result_truncated,
+  result_lines, result_error, result_pruned_at)
+SELECT id, thread_id, seq, role, text, state, session_hash, usage_json, error, created_at,
+  tool_name, tool_use_id, input_json, result_text, result_truncated, result_lines, result_error,
+  result_pruned_at
+FROM chat_messages;
+DROP TABLE chat_messages;
+ALTER TABLE new_chat_messages RENAME TO chat_messages;
+CREATE TABLE new_chat_cards (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  thread_id   INTEGER NOT NULL,
+  message_id  INTEGER NOT NULL,
+  kind        TEXT NOT NULL,
+  zone_id     TEXT,
+  target      TEXT,
+  link        TEXT,
+  state       TEXT NOT NULL CHECK (state IN ('done','pending','refused','undone')),
+  summary     TEXT NOT NULL,
+  undo_json   TEXT,
+  created_at  TEXT NOT NULL,
+  undone_at   TEXT
+);
+INSERT INTO new_chat_cards (id, thread_id, message_id, kind, zone_id, target, link, state, summary,
+  undo_json, created_at, undone_at)
+SELECT id, thread_id, message_id, kind, zone_id, target, link, state, summary, undo_json,
+  created_at, undone_at
+FROM chat_cards;
+DROP TABLE chat_cards;
+ALTER TABLE new_chat_cards RENAME TO chat_cards;
+CREATE INDEX chat_cards_by_thread ON chat_cards (thread_id, id);
+`;
+
+/** The largest integer among `values`, ignoring anything that is not a non-negative integer. */
+function maxId(values: unknown[]): number {
+  let max = 0;
+  for (const v of values) {
+    const n = typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : v;
+    if (typeof n === 'number' && Number.isSafeInteger(n) && n > max) max = n;
+  }
+  return max;
+}
+
+/**
+ * Seeds the chat sequences past every id still named by a row that outlived its thread: a card's
+ * Undo outbox key (`labels:<zone>:undo:<card>`, `reopen:<zone>:<card>`), a chat token's thread
+ * and message, a goal change's `chat:<thread>:<message>` source, and the chat audit's card,
+ * thread and message. Over-seeding only skips ids; it never reuses one.
+ */
+function afterV70(db: Db): void {
+  const col = (sql: string): unknown[] =>
+    (db.prepare(sql).all() as { v: unknown }[]).map((r) => r.v);
+  const lastPart = (s: unknown): string | undefined =>
+    typeof s === 'string' ? s.slice(s.lastIndexOf(':') + 1) : undefined;
+  const sourceRefs = col(
+    `SELECT source_ref AS v FROM goal_changes WHERE source = 'chat' AND source_ref LIKE 'chat:%'`,
+  )
+    .map((r) => String(r).split(':'))
+    .filter((p) => p.length === 3);
+  const audit = (path: string) =>
+    col(`SELECT json_extract(detail_json, '${path}') AS v FROM control_audit
+         WHERE json_valid(detail_json) AND json_extract(detail_json, '${path}') IS NOT NULL`);
+
+  const threads = maxId([
+    ...col('SELECT MAX(id) AS v FROM chat_threads'),
+    ...col('SELECT MAX(thread_id) AS v FROM chat_messages'),
+    ...col('SELECT MAX(thread_id) AS v FROM chat_cards'),
+    ...col('SELECT MAX(chat_thread_id) AS v FROM mcp_tokens'),
+    ...sourceRefs.map((p) => p[1]),
+    ...audit('$.thread'),
+  ]);
+  const messages = maxId([
+    ...col('SELECT MAX(id) AS v FROM chat_messages'),
+    ...col('SELECT MAX(message_id) AS v FROM chat_cards'),
+    ...col('SELECT MAX(chat_message_id) AS v FROM mcp_tokens'),
+    ...sourceRefs.map((p) => p[2]),
+    ...audit('$.message'),
+  ]);
+  const cards = maxId([
+    ...col('SELECT MAX(id) AS v FROM chat_cards'),
+    ...col(
+      `SELECT op_key AS v FROM outbox WHERE op_key LIKE 'labels:%:undo:%' OR op_key LIKE 'reopen:%'`,
+    ).map(lastPart),
+    ...col(`SELECT target AS v FROM control_audit WHERE target LIKE 'card:%'`).map(lastPart),
+    ...audit('$.opKey').map(lastPart),
+  ]);
+  const seed = db.prepare('INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)');
+  for (const [name, seq] of [
+    ['chat_threads', threads],
+    ['chat_messages', messages],
+    ['chat_cards', cards],
+  ] as const) {
+    db.prepare('DELETE FROM sqlite_sequence WHERE name = ?').run(name);
+    seed.run(name, seq);
+  }
+}
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1813,6 +1958,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 67, sql: V67_SQL },
   { version: 68, sql: V68_SQL },
   { version: 69, sql: V69_SQL, foreignKeysOff: true },
+  { version: 70, sql: V70_SQL, foreignKeysOff: true, after: afterV70 },
 ];
 
 /**
