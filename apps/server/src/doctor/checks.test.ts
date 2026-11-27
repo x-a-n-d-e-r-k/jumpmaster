@@ -5556,6 +5556,57 @@ describe('forge.codeowners on a GitLab zone (issue #815)', () => {
     expect(c.fix).toContain('gitlab-pat/main/author');
     expect(c.fix).not.toContain('Fine-grained');
   });
+  const counted = (header: string) =>
+    [header, '*', '[Protected] @alice', '/.github/', '/CODEOWNERS', '/.gitlab/'].join('\n');
+
+  test('a section requiring 2 approvals on paths the reviewer must own: fail', async () => {
+    const { c } = await codeowners({
+      required: true,
+      files: { CODEOWNERS: counted('[Code][2] @jm-reviewer @alice') },
+    });
+    // The bot gives one of the two approvals GitLab requires; a person must give the other.
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('line 2 (*)');
+    expect(c.summary).toContain('2 approvals');
+    expect(c.summary).toContain('only one');
+    expect(c.fix).toContain('to 1');
+    expect(c.fix).toContain('Code owner approval');
+  });
+
+  test('a section requiring 1 approval, or naming no count, on paths the reviewer owns: pass', async () => {
+    for (const header of ['[Code][1] @jm-reviewer @alice', '[Code] @jm-reviewer @alice']) {
+      const { c } = await codeowners({ required: true, files: { CODEOWNERS: counted(header) } });
+      expect(c.status).toBe('pass');
+      gl?.stop();
+      nock.cleanAll();
+    }
+  });
+
+  test('a count of 0 is 1, as on GitLab: pass', async () => {
+    const { c } = await codeowners({
+      required: true,
+      files: { CODEOWNERS: counted('[Code][0] @jm-reviewer') },
+    });
+    expect(c.status).toBe('pass');
+  });
+
+  test("an optional section's count does not fail the check", async () => {
+    const { c } = await codeowners({
+      required: true,
+      files: {
+        CODEOWNERS: [
+          '* @jm-reviewer',
+          '^[Code][2] @jm-reviewer @alice',
+          '*',
+          '[Protected] @alice',
+          '/.github/',
+          '/CODEOWNERS',
+          '/.gitlab/',
+        ].join('\n'),
+      },
+    });
+    expect(c.status).toBe('pass');
+  });
 });
 
 describe('forge.labels on a GitLab zone (issue #812)', () => {

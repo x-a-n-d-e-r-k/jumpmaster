@@ -44,6 +44,7 @@ import {
   branchProtectionProblems,
   type CodeownersFindings,
   codeownersFindings,
+  countedCodeownersLines,
   MERGE_RULESET,
 } from '../flow/guards.js';
 import {
@@ -2652,17 +2653,23 @@ const CODE_OWNER_SETTING =
  * (`codeownersFindings`): every other line blank, so line numbers hold. Header lines (`[Name]`,
  * `^[Name]`, `[Name][n]`, with default owners after) are not path lines; a path line with no
  * owners takes its section's defaults. An optional (`^`) section requires no approval, so it is
- * left out: its owners count as no owner. Sections of the same name are one section.
+ * left out: its owners count as no owner. Sections of the same name are one section. `approvals`
+ * is the section's required approval count (`[Name][n]`; missing or below 1 is 1, as on GitLab;
+ * the highest a same-named header gives).
  */
-function gitlabCodeownersSections(text: string): string[] {
+function gitlabCodeownersSections(text: string): { text: string; approvals: number }[] {
   const lines = text.split('\n');
-  const sections = new Map<string, { optional: boolean; lines: Map<number, string> }>();
-  const section = (key: string, optional: boolean) => {
+  const sections = new Map<
+    string,
+    { optional: boolean; approvals: number; lines: Map<number, string> }
+  >();
+  const section = (key: string, optional: boolean, approvals: number) => {
     let s = sections.get(key);
-    if (!s) sections.set(key, (s = { optional, lines: new Map() }));
+    if (!s) sections.set(key, (s = { optional, approvals, lines: new Map() }));
+    else s.approvals = Math.max(s.approvals, approvals);
     return s;
   };
-  let current = section('', false);
+  let current = section('', false, 1);
   let defaults: string[] = [];
   lines.forEach((raw, i) => {
     const line = raw
@@ -2670,10 +2677,14 @@ function gitlabCodeownersSections(text: string): string[] {
       .replace(/(^|\s)#.*$/, '')
       .trim();
     if (line === '') return;
-    const header = /^(\^?)\[([^\]]+)\](?:\[\d+\])?(?:\s+(.*))?$/.exec(line);
+    const header = /^(\^?)\[([^\]]+)\](?:\[(\d+)\])?(?:\s+(.*))?$/.exec(line);
     if (header) {
-      current = section(`[${(header[2] ?? '').trim().toLowerCase()}]`, header[1] === '^');
-      defaults = (header[3] ?? '').split(/\s+/).filter((o) => o !== '');
+      current = section(
+        `[${(header[2] ?? '').trim().toLowerCase()}]`,
+        header[1] === '^',
+        Math.max(1, Number(header[3] ?? '1')),
+      );
+      defaults = (header[4] ?? '').split(/\s+/).filter((o) => o !== '');
       return;
     }
     const [pattern = '', ...owners] = line.split(/(?<!\\)\s+/);
@@ -2681,7 +2692,10 @@ function gitlabCodeownersSections(text: string): string[] {
   });
   return [...sections.values()]
     .filter((s) => !s.optional)
-    .map((s) => lines.map((_, i) => s.lines.get(i) ?? '').join('\n'));
+    .map((s) => ({
+      text: lines.map((_, i) => s.lines.get(i) ?? '').join('\n'),
+      approvals: s.approvals,
+    }));
 }
 
 /**
@@ -2693,8 +2707,9 @@ function gitlabCodeownersFindings(
   text: string,
   zone: DropZoneConfig,
   reviewer: string,
-): CodeownersFindings {
-  const per = gitlabCodeownersSections(text).map((t) => codeownersFindings(t, zone, reviewer));
+): CodeownersFindings & { counted: { line: number; pattern: string; approvals: number }[] } {
+  const sections = gitlabCodeownersSections(text);
+  const per = sections.map((s) => codeownersFindings(s.text, zone, reviewer));
   const byLine = (a: { line: number }, b: { line: number }) => a.line - b.line;
   const warn: CodeownersFindings['warn'] = [];
   for (const glob of zone.protectedPaths) {
@@ -2709,6 +2724,9 @@ function gitlabCodeownersFindings(
   }
   return {
     fail: per.flatMap((f) => f.fail).sort(byLine),
+    counted: sections
+      .flatMap((s) => countedCodeownersLines(s.text, s.approvals, zone, reviewer))
+      .sort(byLine),
     unknown: per.flatMap((f) => f.unknown).sort(byLine),
     warn,
   };
@@ -2772,13 +2790,33 @@ async function gitlabCodeownersCheck(zone: DropZoneConfig, r: ZoneReads): Promis
     };
   const found = gitlabCodeownersFindings(text, zone, reviewer.value);
   const at = (f: { line: number; pattern: string }) => `line ${f.line} (${f.pattern})`;
-  if (found.fail.length > 0)
+  if (found.fail.length > 0 || found.counted.length > 0) {
+    const where = '.gitlab/CODEOWNERS (or the CODEOWNERS file the project uses)';
+    const summary: string[] = [];
+    const fix: string[] = [];
+    if (found.fail.length > 0) {
+      summary.push(
+        `CODEOWNERS ${found.fail.map(at).join(', ')} names only people: every merge request touching those paths waits for a person, so nothing Jumpmaster approves can merge`,
+      );
+      fix.push(
+        `In ${where}, name @${reviewer.value} on ${found.fail.length === 1 ? 'that line' : 'those lines'}, or in its section's default owners (the protected lines after it stay people-only; the last match in a section wins)`,
+      );
+    }
+    if (found.counted.length > 0) {
+      summary.push(
+        `CODEOWNERS ${found.counted.map((f) => `${at(f)} is in a section requiring ${f.approvals} approvals`).join(', ')}: the reviewer ${reviewer.value} can give only one approval, so a person must approve every merge request touching those paths, and nothing Jumpmaster approves can merge`,
+      );
+      fix.push(
+        `In ${where}, lower the approval count of ${found.counted.length === 1 ? "that line's section" : "those lines' sections"} to 1 (or remove the [n] from its header) for the paths @${reviewer.value} must own`,
+      );
+    }
     return {
       ...base,
       status: 'fail',
-      summary: `the protected branch requires code owner approval, and CODEOWNERS ${found.fail.map(at).join(', ')} names only people: every merge request touching those paths waits for a person, so nothing Jumpmaster approves can merge`,
-      fix: `In .gitlab/CODEOWNERS (or the CODEOWNERS file the project uses), name @${reviewer.value} on ${found.fail.length === 1 ? 'that line' : 'those lines'}, or in its section's default owners (the protected lines after it stay people-only; the last match in a section wins); or turn off ${CODE_OWNER_SETTING}.`,
+      summary: `the protected branch requires code owner approval, and ${summary.join('; and ')}`,
+      fix: `${fix.join('; ')}; or turn off ${CODE_OWNER_SETTING}.`,
     };
+  }
   const notes = [
     ...found.unknown.map(
       (u) =>

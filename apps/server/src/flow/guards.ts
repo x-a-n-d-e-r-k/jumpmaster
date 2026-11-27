@@ -934,6 +934,31 @@ export function codeownersFindings(
   return out;
 }
 
+/**
+ * The lines of a GitLab CODEOWNERS section requiring `approvals` (2 or more) that hold the reviewer
+ * as an owner of paths it must own: not protected, naming the reviewer, and not overridden by a
+ * later line covering them (the last match in a section wins). The reviewer gives one approval, so
+ * a person must give the rest.
+ */
+export function countedCodeownersLines(
+  text: string,
+  approvals: number,
+  zone: Pick<DropZoneConfig, 'protectedPaths'>,
+  reviewer: string,
+): { line: number; pattern: string; approvals: number }[] {
+  if (approvals < 2) return [];
+  const bot = reviewer.toLowerCase();
+  const rules = codeownersRules(text);
+  return rules
+    .filter(
+      (r, i) =>
+        r.owners.some((o) => o.replace(/^@/, '').toLowerCase() === bot) &&
+        !zone.protectedPaths.some((g) => protectedMatch(asPath(r.pattern), g)) &&
+        !rules.slice(i + 1).some((l) => covers(l.pattern, r.pattern)),
+    )
+    .map((r) => ({ line: r.line, pattern: r.pattern, approvals }));
+}
+
 export type AppCodeownersFindings = {
   /** Non-protected lines that are the effective owners of their paths: nothing touching them merges. */
   fail: { line: number; pattern: string; app: boolean; others: boolean }[];
