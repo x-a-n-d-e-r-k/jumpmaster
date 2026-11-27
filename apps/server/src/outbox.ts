@@ -1019,16 +1019,23 @@ export async function runOpIf(
  * Kinds whose effect reads back exactly and that the forge refuses or ignores a second time, so a
  * write lost to a dropped connection may be sent again (#787). Not here: `create_issue` and
  * `post_review`, where a late first write could leave two (they are `STRICT_RESEND_KINDS`),
- * `comment_issue`, never sent again, and `update_branch`, which its caller sends again.
+ * `comment_issue`, never sent again, `update_branch`, which its caller sends again, and `merge`
+ * (`DECIDED_RESEND_KINDS`).
  */
 export const RESENDABLE_KINDS: ReadonlySet<OpKind> = new Set<OpKind>([
   'create_pr',
-  'merge',
   'set_labels',
   'update_issue',
   'create_labels',
   'add_blocked_by',
 ]);
+/**
+ * Kinds sent again only by the code that decides them (#932), never by `resolveUnknown`: a merge
+ * follows a fresh decision every time, so its caller makes the decision again on current forge
+ * state and, only while it still says merge at the row's SHA, sends it through `runDecidedOp`,
+ * under the same cap, gap, holds and single-sender claim as `RESENDABLE_KINDS`.
+ */
+export const DECIDED_RESEND_KINDS: ReadonlySet<OpKind> = new Set<OpKind>(['merge']);
 /** The least time between two sends of one write, counted from the last (`updated_at`). */
 export const RESEND_AFTER_MS = 2 * 60_000;
 /** The most times one write is sent again. */
@@ -1060,7 +1067,8 @@ export const DUPLICATE_WINDOW_MS = 30 * 60_000;
  */
 async function mayResend(db: Db, forges: ForgePair, row: OutboxRow, now: Date): Promise<boolean> {
   const strict = STRICT_RESEND_KINDS.has(row.kind);
-  if (!strict && !RESENDABLE_KINDS.has(row.kind)) return false;
+  if (!strict && !RESENDABLE_KINDS.has(row.kind) && !DECIDED_RESEND_KINDS.has(row.kind))
+    return false;
   if (row.resends >= (strict ? MAX_STRICT_RESENDS : MAX_RESENDS)) return false;
   if (now.getTime() - Date.parse(row.updatedAt) < RESEND_AFTER_MS) return false;
   if (isKilled(db) || zoneMode(db, row.zoneId) !== 'active') return false;
@@ -1082,6 +1090,47 @@ async function mayResend(db: Db, forges: ForgePair, row: OutboxRow, now: Date): 
   } catch {
     return false;
   }
+}
+
+/**
+ * Whether an `unknown` write its caller decides (`DECIDED_RESEND_KINDS`, #932) is due to be sent
+ * again: under the cap, 2 minutes after its last send, kill switch off, zone active. Until then the
+ * caller waits on the outbox; once due, it decides again, and only a decision that still makes this
+ * write sends it (`runDecidedOp`, which reads it back first).
+ */
+export function decidedResendDue(db: Db, row: OutboxRow | undefined, now: Date): boolean {
+  return (
+    row !== undefined &&
+    row.state === 'unknown' &&
+    DECIDED_RESEND_KINDS.has(row.kind) &&
+    row.resends < MAX_RESENDS &&
+    now.getTime() - Date.parse(row.updatedAt) >= RESEND_AFTER_MS &&
+    !isKilled(db) &&
+    zoneMode(db, row.zoneId) === 'active'
+  );
+}
+
+/**
+ * `runOp` for a write its caller has just decided (#932). An `unknown` row of a
+ * `DECIDED_RESEND_KINDS` kind is read back, and only a clean, empty read-back of a row whose resend
+ * is due (`mayResend`) sends it again (`resend`); a failed read proves nothing and holds it. Any
+ * other row goes as `runOp`.
+ */
+export async function runDecidedOp(
+  db: Db,
+  forges: ForgePair,
+  op: Op,
+  now: Date,
+): Promise<OpResult> {
+  const row = getOutbox(db, op.opKey);
+  if (row?.state !== 'unknown' || !DECIDED_RESEND_KINDS.has(row.kind)) {
+    return runOp(db, forges, op, now);
+  }
+  if (isKilled(db)) throw new Error(`kill switch engaged: forge write ${op.kind} refused`);
+  const r = await readBack(db, forges, row, now);
+  if (r.state === 'done' || r.error !== undefined) return r;
+  if (!(await mayResend(db, forges, row, now))) return r;
+  return (await resend(db, forges, row, now)) ?? r;
 }
 
 /**
@@ -1223,7 +1272,8 @@ function repointFiledNumber(
 /**
  * Read-back for every `unknown` row of one zone; returns how many became `done`. A row still
  * unresolved `maxAgeMinutes` after it was created becomes `failed`. Before that, a resendable
- * write the read-back cleanly did not find is sent again (`mayResend`, #787); an issue filing or a
+ * write the read-back cleanly did not find is sent again (`mayResend`, #787), a merge only by its
+ * caller (`DECIDED_RESEND_KINDS`, #932); an issue filing or a
  * review only after three clean reads (`strictResend`, #900). Then a resent filing's duplicates
  * are closed (`closeDuplicateIssues`).
  */
@@ -1256,6 +1306,8 @@ export async function resolveUnknown(
       );
       continue;
     }
+    // Its caller sends it again, after deciding it again (`runDecidedOp`).
+    if (DECIDED_RESEND_KINDS.has(row.kind)) continue;
     if (STRICT_RESEND_KINDS.has(row.kind)) {
       if (await strictResend(db, forges, row, r, now)) resolved++;
       continue;

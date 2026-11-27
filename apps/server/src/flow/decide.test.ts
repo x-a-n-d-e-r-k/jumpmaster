@@ -151,6 +151,7 @@ function snap(over: Partial<Snapshot> = {}): Snapshot {
     verdictsOnHead: [],
     reviewOp: { state: 'done' },
     mergeOp: null,
+    mergeResendDue: false,
     trustedChangeRequests: [],
     humanBlockStanding: false,
     held: false,
@@ -1251,6 +1252,39 @@ describe('overlaps', () => {
       kind: 'wait',
       on: 'outbox',
     }));
+
+  describe('an unknown merge due to be sent again is decided afresh (#932)', () => {
+    const due = (over: Partial<Snapshot> = {}) =>
+      decide(mergeable({ mergeOp: { state: 'unknown' }, mergeResendDue: true, ...over }));
+
+    test('not yet due: waits on the outbox, as a pending one always does', () => {
+      expect(decide(mergeable({ mergeOp: { state: 'unknown' } }))).toEqual({
+        kind: 'wait',
+        on: 'outbox',
+      });
+      expect(decide(mergeable({ mergeOp: { state: 'pending' }, mergeResendDue: true }))).toEqual({
+        kind: 'wait',
+        on: 'outbox',
+      });
+    });
+
+    test('nothing changed: merge at the head again', () =>
+      expect(due()).toEqual({ kind: 'merge', sha: 's' }));
+
+    test('anything that stops a merge stops its resend', () => {
+      expect(due({ trustedChangeRequests: [humanRc(3, 's')] }).kind).toBe('enqueue');
+      expect(due({ humanBlockStanding: true })).toEqual({
+        kind: 'park',
+        reason: 'human block stands',
+      });
+      expect(due({ issueState: 'closed' })).toEqual({ kind: 'park', reason: 'issue closed' });
+      expect(due({ checks: { state: 'failure', names: ['ci'], failed: [] } }).kind).toBe('enqueue');
+      expect(
+        due({ mergeReservedBy: { itemId: 9, issueNumber: 9, since: '2026-01-01T00:00:00Z' } }),
+      ).toEqual({ kind: 'wait', on: 'merge-reservation' });
+      expect(due({ forgeUnavailable: 'listReviews' })).toEqual({ kind: 'wait', on: 'forge' });
+    });
+  });
 });
 
 describe('purity', () => {

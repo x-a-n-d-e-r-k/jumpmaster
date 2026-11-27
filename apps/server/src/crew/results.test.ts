@@ -131,6 +131,7 @@ describe('crew-lead results', () => {
       filed: [listCrewIssues(w.db, 'main')[0]?.id],
       briefings: [],
       refused: [],
+      refusedIssues: [],
     });
   });
 

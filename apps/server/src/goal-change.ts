@@ -12,6 +12,7 @@ import {
   opKeys,
   opMarker,
   type PostReviewPayload,
+  runDecidedOp,
   runOp,
 } from './outbox.js';
 
@@ -507,7 +508,8 @@ async function advanceGoalChange(
     title: goalChangePullTitle(path, c.id),
     message: goalChangeCommitMessage(path, c.id),
   };
-  const m = await runOp(
+  // A merge row left `unknown` is sent again only here, after every check above passed again (#932).
+  const m = await runDecidedOp(
     db,
     forges,
     {

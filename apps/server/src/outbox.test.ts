@@ -22,6 +22,7 @@ import {
   appPushToken,
   COMMENT_BODY_MAX,
   commentMarker,
+  decidedResendDue,
   type ForgePair,
   ForgePairs,
   forgeTokenFingerprint,
@@ -33,6 +34,7 @@ import {
   pairOptionsFor,
   pushOptionsFor,
   resolveUnknown,
+  runDecidedOp,
   runOp,
   sanitizeCrewText,
   sanitizeForgeText,
@@ -1787,9 +1789,10 @@ describe('resend after a clean read-back (issue #787)', () => {
           f.state.branches.set(head, 'h1');
         },
       ],
+      // Sent again only by the caller that decides it (#932): see `runDecidedOp` below.
       [
         'merge',
-        true,
+        false,
         { pr: 1, sha: 'h1', title: 't', message: 'm' },
         () => {
           f.state.addPull({ headRef: head, headSha: 'h1', author: 'author-bot' });
@@ -1925,6 +1928,138 @@ describe('resend after a clean read-back (issue #787)', () => {
     const migrated = openDb(file);
     expect(getOutbox(migrated, 'merge:9:h1')?.resends).toBe(0);
     migrated.close();
+  });
+});
+
+describe('a merge is sent again only by its caller, on a fresh decision (issue #932)', () => {
+  const at = (minutes: number) => plus(t0, minutes * MIN);
+  const pass = (minutes: number) => resolveUnknown(db, forges, 'main', at(minutes), 45);
+  const decided = (minutes: number) => runDecidedOp(db, forges, mergeOp(), at(minutes));
+  const due = (minutes: number) =>
+    decidedResendDue(db, getOutbox(db, mergeOp().opKey), at(minutes));
+
+  /** A merge whose connection drops: the row is `unknown`, and the PR is not merged. */
+  async function droppedMerge(): Promise<string> {
+    f.state.addPull({ headRef: 'agent/issue-1', headSha: 'h1', author: 'author-bot' });
+    f.author.failNext('merge', 'throw');
+    expect((await runOp(db, forges, mergeOp(), t0)).state).toBe('unknown');
+    return mergeOp().opKey;
+  }
+
+  beforeEach(() => setZoneMode(db, 'main', 'active', t0));
+
+  test('resolveUnknown reads a dropped merge back but never sends it again', async () => {
+    const key = await droppedMerge();
+    for (let m = 2; m <= 44; m += 2) await pass(m);
+    expect(calls('merge')).toHaveLength(1);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'unknown', resends: 0 });
+    await pass(46);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'failed', error: 'unresolved after 45 min' });
+  });
+
+  test('a merge that landed is read back as done by resolveUnknown, never sent twice', async () => {
+    f.state.addPull({ headRef: 'agent/issue-1', headSha: 'h1', author: 'author-bot' });
+    f.author.failNext('merge', '5xx-after-success');
+    expect((await runOp(db, forges, mergeOp(), t0)).state).toBe('unknown');
+    expect(await pass(2)).toBe(1);
+    expect((await decided(4)).state).toBe('done');
+    expect(calls('merge')).toHaveLength(1);
+    expect(getOutbox(db, mergeOp().opKey)).toMatchObject({ state: 'done', resends: 0 });
+  });
+
+  test('the caller sends it again 2 minutes after the last send, and it merges', async () => {
+    const key = await droppedMerge();
+    expect(due(1)).toBe(false);
+    expect((await decided(1)).state).toBe('unknown');
+    expect(calls('merge')).toHaveLength(1);
+    expect(due(2)).toBe(true);
+    expect((await decided(2)).state).toBe('done');
+    expect(calls('merge')).toHaveLength(2);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'done', resends: 1 });
+    expect(f.state.merges).toHaveLength(1);
+  });
+
+  test('a read-back that fails proves nothing: no send, resends unchanged', async () => {
+    const key = await droppedMerge();
+    f.author.failNext('getPull', 'throw');
+    const r = await decided(2);
+    expect(r).toMatchObject({ state: 'unknown', error: expect.any(String) });
+    expect(calls('merge')).toHaveLength(1);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'unknown', resends: 0 });
+  });
+
+  test('a forge that always drops gets 3 resends, then the row fails at its deadline', async () => {
+    const key = await droppedMerge();
+    for (let i = 0; i < 10; i++) f.author.failNext('merge', 'throw');
+    for (let m = 1; m <= 44; m++) {
+      await pass(m);
+      await decided(m);
+    }
+    expect(calls('merge')).toHaveLength(4);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'unknown', resends: 3 });
+    expect(due(44)).toBe(false);
+    await pass(46);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'failed', error: 'unresolved after 45 min' });
+    expect(calls('merge')).toHaveLength(4);
+  });
+
+  test('resends are 2 minutes apart, counted from the last send', async () => {
+    const key = await droppedMerge();
+    f.author.failNext('merge', 'throw');
+    await decided(2);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'unknown', resends: 1 });
+    expect(due(3)).toBe(false);
+    await decided(3);
+    expect(calls('merge')).toHaveLength(2);
+    expect(due(4)).toBe(true);
+    await decided(4);
+    expect(calls('merge')).toHaveLength(3);
+    expect(getOutbox(db, key)?.state).toBe('done');
+  });
+
+  test.each([
+    ['a paused zone', () => setZoneMode(db, 'main', 'paused', t0)],
+    ['an observing zone', () => setZoneMode(db, 'main', 'observe', t0)],
+  ])('%s holds the resend', async (_name, hold) => {
+    const key = await droppedMerge();
+    hold();
+    expect(due(2)).toBe(false);
+    expect((await decided(2)).state).toBe('unknown');
+    expect(calls('merge')).toHaveLength(1);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'unknown', resends: 0 });
+  });
+
+  test('the kill switch holds the resend', async () => {
+    const key = await droppedMerge();
+    setKilled(db, true, t0);
+    expect(due(2)).toBe(false);
+    await expect(decided(2)).rejects.toThrow(/kill switch/);
+    expect(calls('merge')).toHaveLength(1);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'unknown', resends: 0 });
+  });
+
+  test('two callers at once send once', async () => {
+    const key = await droppedMerge();
+    await Promise.all([decided(2), decided(2)]);
+    expect(calls('merge')).toHaveLength(2);
+    expect(getOutbox(db, key)).toMatchObject({ state: 'done', resends: 1 });
+  });
+
+  test('a resend the forge refuses (405) fails, as today', async () => {
+    const key = await droppedMerge();
+    f.author.failNext('merge', { status: 405, message: 'Base branch was modified' });
+    expect((await decided(2)).state).toBe('failed');
+    expect(getOutbox(db, key)).toMatchObject({ state: 'failed', resends: 1 });
+  });
+
+  test('a resendable kind other than merge goes as runOp: read back, never sent here', async () => {
+    f.state.branches.set('agent/issue-1', 'h1');
+    f.author.failNext('findOrCreatePullRequest', 'throw');
+    expect((await runOp(db, forges, prOp(), t0)).state).toBe('unknown');
+    expect(decidedResendDue(db, getOutbox(db, prOp().opKey), at(2))).toBe(false);
+    expect((await runDecidedOp(db, forges, prOp(), at(2))).state).toBe('unknown');
+    expect(calls('findOrCreatePullRequest')).toHaveLength(1);
+    expect(getOutbox(db, prOp().opKey)).toMatchObject({ state: 'unknown', resends: 0 });
   });
 });
 
