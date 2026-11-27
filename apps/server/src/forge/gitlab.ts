@@ -1297,6 +1297,12 @@ export class GitLabForge implements Forge {
     return p;
   }
 
+  /** The project's "Pipelines must succeed": a project setting, not a branch rule (#936). */
+  async pipelinesMustSucceed(): Promise<boolean> {
+    const project = await this.readProject();
+    return project.only_allow_merge_if_pipeline_succeeds === true;
+  }
+
   // --- Branch rules, merge and rebase ---------------------------------------------------------
 
   /**

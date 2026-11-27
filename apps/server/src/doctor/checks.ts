@@ -2896,22 +2896,33 @@ const PIPELINES_SETTING = 'Settings → Merge requests → Pipelines must succee
 
 /**
  * `forge.ci` for a GitLab zone (issue #809): CI is `.gitlab-ci.yml` at the branch's root, and the
- * project's "Pipelines must succeed" (`requiredChecks: ['pipeline']`) is what holds a merge for it.
+ * project's "Pipelines must succeed" is what holds a merge for it. That setting is the project's,
+ * so it is read from the project (#936), not from the branch rules: those stop short of it for an
+ * unprotected branch or a refused protected-branch read, and the setting applies regardless.
  */
 async function gitlabCiCheck(zone: DropZoneConfig, r: ZoneReads): Promise<DoctorCheck> {
   const base = { id: 'forge.ci', zoneId: zone.id, doc: doc('ci') };
+  const gitlab = { zoneId: zone.id, baseUrl: zone.gitlab?.baseUrl ?? 'the GitLab instance' };
   const branch = await r.branch();
   const root = await attempt(() => r.pair.author.listDir(branch, ''));
   if (!root.ok)
-    return readFailed(base, 'author', `list the root of ${branch}`, 'the api scope', root, {
-      zoneId: zone.id,
-      baseUrl: zone.gitlab?.baseUrl ?? 'the GitLab instance',
-    });
+    return readFailed(base, 'author', `list the root of ${branch}`, 'the api scope', root, gitlab);
   const hasCi = (root.value ?? []).includes(GITLAB_CI);
-  const rules = await r.rules();
-  const pipelines = [rules.author, rules.reviewer].some(
-    (x) => x?.kind === 'ok' && x.rules.requiredChecks.includes('pipeline'),
-  );
+  const author = r.pair.author;
+  const setting = await attempt(() => {
+    if (!author.pipelinesMustSucceed) throw new Error('the forge cannot read the project setting');
+    return author.pipelinesMustSucceed();
+  });
+  if (!setting.ok)
+    return readFailed(
+      base,
+      'author',
+      "read the project's Pipelines must succeed setting (GET the project)",
+      'the api scope',
+      setting,
+      gitlab,
+    );
+  const pipelines = setting.value;
   const seen = `${hasCi ? GITLAB_CI : `no ${GITLAB_CI}`} on ${branch}; Pipelines must succeed is ${pipelines ? 'on' : 'off'}`;
   if (!zone.ciRequired)
     return {
