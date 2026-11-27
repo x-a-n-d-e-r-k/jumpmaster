@@ -563,7 +563,7 @@ export function fakeGitLab(opts: {
   const findIssue = (iid: string | undefined) => issues.find((i) => String(i.iid) === iid);
   const str = (v: unknown) => (v === undefined || v === null ? undefined : String(v));
 
-  route('GET', /^$/, () => [
+  const projectBody = (): Reply => [
     200,
     {
       id: project.id,
@@ -573,7 +573,16 @@ export function fakeGitLab(opts: {
       namespace: { kind: project.namespaceKind },
       only_allow_merge_if_pipeline_succeeds: project.onlyAllowMergeIfPipelineSucceeds,
     },
-  ]);
+  ];
+  /** What `GET /projects/:id` answers instead of the project (default: the project). */
+  let projectReadStatus: 403 | 500 | undefined;
+  route('GET', /^$/, () =>
+    projectReadStatus === 403
+      ? FORBIDDEN
+      : projectReadStatus === 500
+        ? err(500, '500 Internal Server Error')
+        : projectBody(),
+  );
 
   route('GET', /^\/members\/all$/, (c) => {
     const q = c.query.get('query')?.toLowerCase();
@@ -1871,6 +1880,11 @@ export function fakeGitLab(opts: {
      *  restores the list. */
     setProtectedBranchesStatus(status: 403 | 500 | undefined) {
       protectedBranchesStatus = status;
+    },
+    /** Make `GET /projects/:id` (the project read only, not its sub-routes) answer 403 or 500;
+     *  undefined restores the project. */
+    setProjectReadStatus(status: 403 | 500 | undefined) {
+      projectReadStatus = status;
     },
     /** The approvals merge request `iid` holds now, oldest first, with the head SHA each was
      *  given on. */

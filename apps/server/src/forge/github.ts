@@ -384,6 +384,12 @@ export interface Forge {
     names: string[],
   ): Promise<{ runIds: number[]; running: boolean }>;
   getBranchRules(branch: string): Promise<BranchRulesRead>;
+  /**
+   * GitLab only: the project's "Pipelines must succeed" (`only_allow_merge_if_pipeline_succeeds`),
+   * read from the project itself, so it holds whether or not a branch is protected (#936). Rejects
+   * when the project can't be read. GitHub has no such project setting and leaves it undefined.
+   */
+  pipelinesMustSucceed?(): Promise<boolean>;
   getFileAt(ref: string, path: string): Promise<string | null>;
   listReviews(number: number): Promise<ForgeReview[]>;
   createReview(

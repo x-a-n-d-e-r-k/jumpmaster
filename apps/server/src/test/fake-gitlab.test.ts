@@ -131,6 +131,23 @@ describe('project addressing', () => {
     ).toBe(true);
   });
 
+  test('setProjectReadStatus fails only the project read, and undefined restores it', async () => {
+    const { gl, call } = setup();
+    gl.setProjectReadStatus(403);
+    expect(await call('GET', `/projects/${PROJECT.id}`)).toMatchObject({
+      status: 403,
+      body: { message: '403 Forbidden' },
+    });
+    // The project's sub-routes still answer.
+    expect((await call('GET', `/projects/${PROJECT.id}/issues`)).status).toBe(200);
+    gl.setProjectReadStatus(500);
+    expect((await call('GET', `/projects/${ENCODED}`)).status).toBe(500);
+    gl.setProjectReadStatus(undefined);
+    const ok = await call('GET', `/projects/${PROJECT.id}`);
+    expect(ok.status).toBe(200);
+    expect(ok.body.id).toBe(PROJECT.id);
+  });
+
   test('GET /user answers the caller', async () => {
     const { call } = setup();
     const r = await call('GET', '/user', { token: REPORTER });

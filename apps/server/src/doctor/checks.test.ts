@@ -5110,6 +5110,12 @@ describe('forge.ci on a GitLab zone (issue #809)', () => {
     gitlabCi: boolean;
     /** The author token's scopes (default `api`). */
     authorScopes?: string[];
+    /** Leave `main` unprotected (default: protected). */
+    unprotected?: boolean;
+    /** What `GET /protected_branches` answers instead of the list. */
+    protectedBranchesStatus?: 403 | 500;
+    /** What `GET /projects/:id` answers instead of the project. */
+    projectReadStatus?: 403 | 500;
   }) {
     const w = world({
       zone: { repo: PATH, forge: 'gitlab', gitlab: { baseUrl: GL }, ciRequired: o.ciRequired },
@@ -5144,11 +5150,14 @@ describe('forge.ci on a GitLab zone (issue #809)', () => {
         ...(o.gitlabCi ? { '.gitlab-ci.yml': 'test:\n  script: npm test\n' } : {}),
       },
     });
-    gl.protectBranch({
-      name: 'main',
-      pushAccessLevels: [ACCESS.maintainer],
-      mergeAccessLevels: [ACCESS.developer],
-    });
+    if (!o.unprotected)
+      gl.protectBranch({
+        name: 'main',
+        pushAccessLevels: [ACCESS.maintainer],
+        mergeAccessLevels: [ACCESS.developer],
+      });
+    if (o.protectedBranchesStatus) gl.setProtectedBranchesStatus(o.protectedBranchesStatus);
+    if (o.projectReadStatus) gl.setProjectReadStatus(o.projectReadStatus);
     w.deps.forges = () => ({
       author: new GitLabForge(GL, PATH, A_TOKEN),
       reviewer: new GitLabForge(GL, PATH, R_TOKEN),
@@ -5228,6 +5237,84 @@ describe('forge.ci on a GitLab zone (issue #809)', () => {
     expect(c.fix).toContain('api scope');
     expect(c.fix).toContain(`gitlab-pat/main/author`);
     expect(c.fix).not.toContain('Fine-grained');
+  });
+
+  // Issue #936: the setting is the project's, read from the project, not from the branch rules.
+  test('an unprotected branch with Pipelines must succeed on and .gitlab-ci.yml passes', async () => {
+    const c = await ci({
+      ciRequired: true,
+      pipelinesMustSucceed: true,
+      gitlabCi: true,
+      unprotected: true,
+    });
+    expect(c.status).toBe('pass');
+    expect(c.summary).toContain('Pipelines must succeed is on');
+    expect(c.summary).not.toContain('Pipelines must succeed is off');
+  });
+
+  test('an unprotected branch with Pipelines must succeed off fails, saying it is off', async () => {
+    const c = await ci({
+      ciRequired: true,
+      pipelinesMustSucceed: false,
+      gitlabCi: true,
+      unprotected: true,
+    });
+    expect(c.status).toBe('fail');
+    expect(c.summary).toContain('Pipelines must succeed is off');
+  });
+
+  test.each([403, 500] as const)(
+    'protected_branches answering %i does not hide Pipelines must succeed',
+    async (status) => {
+      const c = await ci({
+        ciRequired: true,
+        pipelinesMustSucceed: true,
+        gitlabCi: true,
+        protectedBranchesStatus: status,
+      });
+      expect(c.status).toBe('pass');
+      expect(c.summary).not.toContain('Pipelines must succeed is off');
+      expect(c.summary).toContain('Pipelines must succeed is on');
+    },
+  );
+
+  test.each([
+    [403, 'fail'],
+    [500, 'warn'],
+  ] as const)(
+    'a project read answering %i is a read failure in GitLab wording, never a pass or "is off"',
+    async (status, verdict) => {
+      for (const ciRequired of [true, false]) {
+        const c = await ci({
+          ciRequired,
+          pipelinesMustSucceed: true,
+          gitlabCi: true,
+          projectReadStatus: status,
+        });
+        expect(c.status).toBe(verdict);
+        expect(c.summary).toContain('Pipelines must succeed setting');
+        expect(c.summary).toContain(`HTTP ${status}`);
+        expect(c.summary).not.toContain('is off');
+        expect(c.summary).not.toContain('is on');
+        if (status === 500) expect(c.summary).toContain('the check did not run');
+        else expect(c.fix).toContain('gitlab-pat/main/author');
+        gl?.stop();
+        nock.cleanAll();
+      }
+    },
+  );
+
+  test('ciRequired: false on an unprotected branch with the setting on says it is on', async () => {
+    const c = await ci({
+      ciRequired: false,
+      pipelinesMustSucceed: true,
+      gitlabCi: true,
+      unprotected: true,
+    });
+    expect(c.status).toBe('warn');
+    expect(c.summary).toContain('ciRequired: false');
+    expect(c.summary).toContain('Pipelines must succeed is on');
+    expect(c.summary).not.toContain('is off');
   });
 });
 
