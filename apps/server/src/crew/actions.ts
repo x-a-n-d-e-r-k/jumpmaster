@@ -32,6 +32,13 @@ export type CrewActionInput = Partial<
 export type ApplyReport = { filed: number[]; briefings: number[]; refused: string[] };
 
 /**
+ * An `ApplyReport` with, parallel to `refused`, the index in `fileIssues` of the proposal each
+ * entry refused, null for an entry that is not an issue's (#934). A key may repeat in one output,
+ * so only this index says which proposal's title an entry belongs to.
+ */
+export type TrackedApplyReport = { report: ApplyReport; refusedIssues: (number | null)[] };
+
+/**
  * How a triage drop files through the same path as the lead: `objective` is the one objective
  * (`triage:#N`) its issues may carry besides the ladder's, `allOrNothing` files no issue at all
  * when any is refused, and `ownBriefing` raises a drop's briefing under `crew:<subject>` as given
@@ -469,11 +476,29 @@ export function applyCrewActions(
   now: Date,
   opts: ApplyOptions = {},
 ): ApplyReport {
+  return applyCrewActionsTracked(db, zone, input, source, now, opts).report;
+}
+
+/** `applyCrewActions`, also saying which issue proposal each refused entry refused (#934). */
+export function applyCrewActionsTracked(
+  db: Db,
+  zone: DropZoneConfig,
+  input: CrewActionInput,
+  source: CrewSource,
+  now: Date,
+  opts: ApplyOptions = {},
+): TrackedApplyReport {
   const issues = input.fileIssues ?? [];
   const briefs = input.briefings ?? [];
   const done = input.objectiveDone;
   const goalChange = input.goalChange;
   const report: ApplyReport = { filed: [], briefings: [], refused: [] };
+  const refusedIssues: (number | null)[] = [];
+  /** Records a refused entry, with the index of the issue proposal it refused, if any. */
+  const refuseEntry = (entry: string, issue: number | null = null) => {
+    report.refused.push(entry);
+    refusedIssues.push(issue);
+  };
   const run = db.transaction((): ApplyReport => {
     const mode = getZoneMode(db, zone.id, zone.mode);
     const blocked = isKilled(db)
@@ -482,12 +507,12 @@ export function applyCrewActions(
         ? `zone is ${mode}`
         : null;
     if (blocked) {
-      for (const i of issues) report.refused.push(`${i.key}: ${blocked}`);
+      issues.forEach((i, n) => refuseEntry(`${i.key}: ${blocked}`, n));
       briefs.forEach((_, n) => {
-        report.refused.push(`briefing ${n + 1}: ${blocked}`);
+        refuseEntry(`briefing ${n + 1}: ${blocked}`);
       });
-      if (done) report.refused.push(`objectiveDone ${done.key}: ${blocked}`);
-      if (goalChange) report.refused.push(`goalChange: ${blocked}`);
+      if (done) refuseEntry(`objectiveDone ${done.key}: ${blocked}`);
+      if (goalChange) refuseEntry(`goalChange: ${blocked}`);
       return report;
     }
 
@@ -507,7 +532,7 @@ export function applyCrewActions(
     let slots = crewIssueSlots(db, zone);
     const copiesNote = noteCopyCheck(db, zone.id, mainTexts(db, zone.id));
     for (const [n, i] of issues.entries()) {
-      const refuse = (why: string) => report.refused.push(`${i.key}: ${why}`);
+      const refuse = (why: string) => refuseEntry(`${i.key}: ${why}`, n);
       if (!ladder.has(i.objective)) {
         refuse(`objective "${i.objective.slice(0, 60)}" is not on the ladder`);
         continue;
@@ -609,7 +634,7 @@ export function applyCrewActions(
           | { id: number; subject: string }
           | undefined;
         if (open && open.subject !== subject) {
-          report.refused.push(
+          refuseEntry(
             `briefing ${n + 1}: briefing ${open.id} is open for objective ${objectiveKey}`,
           );
           return;
@@ -638,20 +663,20 @@ export function applyCrewActions(
     if (done) {
       const id = objectiveDoneBriefing(db, zone, done, source, now);
       if (typeof id === 'number') report.briefings.push(id);
-      else report.refused.push(`objectiveDone ${done.key}: ${id.refused}`);
+      else refuseEntry(`objectiveDone ${done.key}: ${id.refused}`);
     }
     if (goalChange) {
       const id = goalChangeBriefing(db, zone, goalChange, source, now, copiesNote);
       if (typeof id === 'number') report.briefings.push(id);
-      else report.refused.push(`goalChange: ${id.refused}`);
+      else refuseEntry(`goalChange: ${id.refused}`);
     }
     return report;
   });
   try {
-    return run();
+    return { report: run(), refusedIssues };
   } catch (e) {
     if (!(e instanceof Refused)) throw e;
     // Rolled back: nothing filed, nothing briefed.
-    return { filed: [], briefings: [], refused: report.refused };
+    return { report: { filed: [], briefings: [], refused: report.refused }, refusedIssues };
   }
 }

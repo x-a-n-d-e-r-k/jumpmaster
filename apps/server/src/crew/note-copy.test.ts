@@ -141,6 +141,7 @@ describe("a crew issue never copies Command's ruling note (#893)", () => {
       filed: [],
       briefings: [],
       refused: [`add-docs: copies Command's ruling note (ruling ${n})`],
+      refusedIssues: [0],
     });
     expect(logs.some((l) => l.includes(`copies Command's ruling note (ruling ${n})`))).toBe(true);
     expectNoNoteWords(report, listEvents(w.db, id));

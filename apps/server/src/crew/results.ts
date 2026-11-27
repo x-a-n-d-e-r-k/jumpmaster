@@ -34,6 +34,7 @@ import { type ResultDeps, STALE_REASON } from '../results.js';
 import { retryParkedItem } from '../sync.js';
 import {
   applyCrewActions,
+  applyCrewActionsTracked,
   isSecurityTouching,
   issueText,
   mainTexts,
@@ -1090,10 +1091,18 @@ export async function applyCrewResult(
     }
     if (role === 'crew-lead') {
       const out = parsed.value as CrewOutput['crew-lead'];
-      const report = applyCrewActions(db, deps.zone, out, { kind: 'drop', dropId: drop.id }, now);
+      const { report, refusedIssues } = applyCrewActionsTracked(
+        db,
+        deps.zone,
+        out,
+        { kind: 'drop', dropId: drop.id },
+        now,
+      );
+      // `refusedIssues` says which proposal each entry refused, so the next lead input shows that
+      // proposal's own title even when a key repeats in the output (#934).
       updateDrop(db, drop.id, {
         state: 'succeeded',
-        resultJson: JSON.stringify({ ...result, crewReport: report }),
+        resultJson: JSON.stringify({ ...result, crewReport: { ...report, refusedIssues } }),
       });
       // One line per refusal: the zone and the entry (a key and the server's reason), never a body.
       for (const entry of report.refused) {
