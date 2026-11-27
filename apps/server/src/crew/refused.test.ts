@@ -190,6 +190,92 @@ describe('what the last lead cycle had refused, in the next input (#808)', () =>
     expect(shown.endsWith('x')).toBe(true);
   });
 
+  test('a key repeated in one output, refused first and filed second: the refused entry keeps its own title', async () => {
+    const id = await cycle(
+      t0,
+      lead([issue('same-key', 'First title', PROTECTED_BODY), issue('same-key', 'Second title')]),
+    );
+    expect(getDrop(w.db, id)?.state).toBe('succeeded');
+    expect(listCrewIssues(w.db, 'main').map((c) => c.title)).toEqual(['Second title']);
+    const lines = section(await nextInput(plus(t0, MIN))).split('\n');
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('(First title)');
+    expect(lines[0]).not.toContain('Second title');
+  });
+
+  test('a key repeated in one output, filed first and refused second: the refused entry has the second title', async () => {
+    await cycle(t0, lead([issue('same-key', 'First title'), issue('same-key', 'Second title')]));
+    expect(listCrewIssues(w.db, 'main').map((c) => c.title)).toEqual(['First title']);
+    expect(section(await nextInput(plus(t0, MIN))).split('\n')).toEqual([
+      'same-key: key already used (Second title)',
+    ]);
+  });
+
+  test('a key repeated in one output, both refused: each entry has its own title', async () => {
+    await cycle(
+      t0,
+      lead([
+        issue('same-key', 'First title', PROTECTED_BODY),
+        issue('same-key', 'Second title', PROTECTED_BODY),
+      ]),
+    );
+    expect(listCrewIssues(w.db, 'main')).toEqual([]);
+    expect(section(await nextInput(plus(t0, MIN))).split('\n')).toEqual([
+      'same-key: names protected path .github/** (First title)',
+      'same-key: names protected path .github/** (Second title)',
+    ]);
+  });
+
+  test('a stored result in the old shape: a repeated key shows no title, a unique one its own', async () => {
+    const id = await cycle(t0, lead([issue('bad-0', 'Bad 0', PROTECTED_BODY)]));
+    const stored = JSON.parse(getDrop(w.db, id)?.resultJson ?? '{}') as Record<string, unknown>;
+    updateDrop(w.db, id, {
+      resultJson: JSON.stringify({
+        ...stored,
+        crew: lead([
+          issue('same-key', 'First title', PROTECTED_BODY),
+          issue('same-key', 'Second title'),
+          issue('unique', 'Unique title', PROTECTED_BODY),
+        ]),
+        crewReport: {
+          filed: [1],
+          briefings: [],
+          refused: [
+            'same-key: names protected path .github/**',
+            'unique: names protected path .github/**',
+            'goalChange: no',
+          ],
+        },
+      }),
+    });
+    expect(section(await nextInput(plus(t0, MIN))).split('\n')).toEqual([
+      'same-key: names protected path .github/**',
+      'unique: names protected path .github/** (Unique title)',
+      'goalChange: no',
+    ]);
+  });
+
+  test('a stored per-entry index that does not name a proposal of that key shows no title', async () => {
+    const id = await cycle(t0, lead([issue('bad-0', 'Bad 0', PROTECTED_BODY)]));
+    const stored = JSON.parse(getDrop(w.db, id)?.resultJson ?? '{}') as Record<string, unknown>;
+    updateDrop(w.db, id, {
+      resultJson: JSON.stringify({
+        ...stored,
+        crew: lead([issue('a', 'A title', PROTECTED_BODY), issue('b', 'B title', PROTECTED_BODY)]),
+        crewReport: {
+          filed: [],
+          briefings: [],
+          refused: ['a: names protected path .github/**', 'b: names protected path .github/**'],
+          refusedIssues: [1, 7],
+        },
+      }),
+    });
+    expect(section(await nextInput(plus(t0, MIN))).split('\n')).toEqual([
+      'a: names protected path .github/**',
+      'b: names protected path .github/**',
+    ]);
+  });
+
   test('one log line per refused entry: the zone and the entry, never the body', async () => {
     const id = await cycle(t0, lead([issue('doctor-gitlab-ci', 'Doctor', PROTECTED_BODY)]));
     const lines = logged.filter((l) => l.includes('refused'));

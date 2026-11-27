@@ -20,13 +20,7 @@ import {
 } from '../payloads.js';
 import { isCrewFiled } from '../sync.js';
 import { crewIssueSlots } from './actions.js';
-import {
-  cutChars,
-  MAX_REFUSED_CHARS,
-  MAX_REFUSED_SHOWN,
-  refusedKey,
-  storedRefusals,
-} from './refused.js';
+import { cutChars, MAX_REFUSED_CHARS, MAX_REFUSED_SHOWN, storedRefusals } from './refused.js';
 import {
   type CrewIssue,
   commandRejection,
@@ -341,11 +335,10 @@ function refusedText(db: Db, zoneId: string, dropId: string, scrub: string[]): s
   if (stored.refused.length === 0) return 'Nothing was refused.';
   return stored.refused
     .slice(0, MAX_REFUSED_SHOWN)
-    .map((entry) => {
-      const key = refusedKey(entry, stored.titles);
-      const title = key === null ? undefined : stored.titles.get(key);
+    .map((entry, n) => {
+      const title = stored.titles[n] ?? null;
       const line = redact(entry, scrub).replace(/\s+/g, ' ');
-      if (title === undefined) return line;
+      if (title === null) return line;
       const shown = cutChars(redact(title, scrub).replace(/\s+/g, ' ').trim(), MAX_REFUSED_CHARS);
       return `${line} (${shown})`;
     })
