@@ -1936,8 +1936,15 @@ describe('zone.egress warns when a GitLab host resolves to a private address (is
   test("a resolver that never settles gives today's result after the 5 s bound, not a guard timeout", async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
-      const { w } = gitlabZone({ mode: 'enforce', allow: [HOST] }, () => new Promise(() => {}));
+      const { w, lookup } = gitlabZone(
+        { mode: 'enforce', allow: [HOST] },
+        () => new Promise(() => {}),
+      );
       const pending = w.run();
+      // The 5 s bound is set just before the resolver is called, after real I/O a slow host can
+      // stretch past one advance. Wait (on the unfaked setImmediate) until the resolver is called,
+      // so the advance below always reaches the bound's timer.
+      while (lookup.mock.calls.length === 0) await new Promise((r) => setImmediate(r));
       await vi.advanceTimersByTimeAsync(5_000);
       const c = one(await pending, 'zone.egress');
       expect(c.status).toBe('pass');
