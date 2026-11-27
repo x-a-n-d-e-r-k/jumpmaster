@@ -1826,6 +1826,67 @@ test('v57 widens chat_threads.focus_kind to drop and doctor and adds owner_sessi
   db.close();
 });
 
+test('v69 (#938) widens chat_threads.focus_kind to item, keeping every row of every earlier kind and its owner_session', () => {
+  const kinds = ['zone', 'goals', 'briefing', 'drop', 'doctor'];
+  const f = dbAt(68, (raw) => {
+    const put = raw.prepare(
+      `INSERT INTO chat_threads (id, title, focus_kind, focus_zone_id, focus_ref,
+         claude_session_id, created_at, updated_at, owner_session)
+       VALUES (?, ?, ?, 'z', ?, ?, 'c', 'u', ?)`,
+    );
+    kinds.forEach((k, i) => {
+      put.run(
+        i + 1,
+        `t-${k}`,
+        k,
+        `r${i}`,
+        `cs${i}`,
+        k === 'drop' || k === 'doctor' ? `o${i}` : null,
+      );
+    });
+    put.run(6, 'plain', null, null, null, null);
+    raw.exec(
+      `INSERT INTO chat_messages (thread_id, seq, role, text, state, created_at)
+       VALUES (4, 1, 'owner', 'hi', 'done', 'c')`,
+    );
+  });
+  const db = openDb(f);
+  expect(maxVersion(db)).toBe(MIGRATIONS.length);
+  expect(
+    db
+      .prepare(
+        `SELECT id, title, focus_kind AS k, focus_zone_id AS z, focus_ref AS r,
+           claude_session_id AS cs, created_at AS c, updated_at AS u, owner_session AS o
+         FROM chat_threads ORDER BY id`,
+      )
+      .all(),
+  ).toEqual([
+    ...kinds.map((k, i) => ({
+      id: i + 1,
+      title: `t-${k}`,
+      k,
+      z: 'z',
+      r: `r${i}`,
+      cs: `cs${i}`,
+      c: 'c',
+      u: 'u',
+      o: k === 'drop' || k === 'doctor' ? `o${i}` : null,
+    })),
+    { id: 6, title: 'plain', k: null, z: 'z', r: null, cs: null, c: 'c', u: 'u', o: null },
+  ]);
+  expect(db.prepare('SELECT thread_id AS t FROM chat_messages').all()).toEqual([{ t: 4 }]);
+  const put = db.prepare(
+    `INSERT INTO chat_threads (title, focus_kind, created_at, updated_at) VALUES ('t', ?, 'c', 'u')`,
+  );
+  put.run('item');
+  expect(() => put.run('issue')).toThrow(/CHECK/);
+  expect(db.pragma('foreign_key_check')).toEqual([]);
+  expect(
+    db.prepare("SELECT name FROM sqlite_master WHERE name = 'chat_threads_updated'").all(),
+  ).toHaveLength(1);
+  db.close();
+});
+
 test('v58 adds diagnose_stale_reruns to briefings, default 0, keeping every row', () => {
   const f = dbAt(57, (raw) => {
     raw.exec(

@@ -1030,6 +1030,23 @@ describe('/work and /drops list pages (#119)', () => {
       );
     });
 
+    test('#938 the page’s Ask about this and the header’s Ask carry the item focus', async () => {
+      const { h } = await lists();
+      five(h, 'main');
+      const body = (await h.view('/projects/main/work/5')).body;
+      expect(body).toContain(
+        '<form class="ask" data-focus-kind="item" data-focus-zone="main" data-focus-ref="5">',
+      );
+      expect(body).toMatch(
+        /id="ask-open"[^>]* data-focus-kind="item" data-focus-zone="main" data-focus-ref="5"/,
+      );
+      // The project's own pages keep the zone focus.
+      const overview = (await h.view('/projects/main/work')).body;
+      expect(overview).toContain(
+        '<form class="ask" data-focus-kind="zone" data-focus-zone="main" data-focus-ref="main">',
+      );
+    });
+
     test('two zones with #5: each page lists only its own zone’s drops', async () => {
       const { h } = await lists();
       const a = five(h, 'main');

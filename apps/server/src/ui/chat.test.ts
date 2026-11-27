@@ -27,6 +27,7 @@ import { operatorSession, plus, t0, tmpDbFile } from '../test/helpers.js';
 import {
   CHAT_MISSING_COMMAND,
   deleteAsk,
+  focusChip,
   messageTextHtml,
   PANEL_ESCAPE_SCRIPT,
   renderChatList,
@@ -1944,6 +1945,19 @@ describe('focus chips and relative times', () => {
     expect(rowOf(html, c.id)).toContain(
       '<span class="chip">Doctor: <code>claude.plan</code></span>',
     );
+  });
+
+  test('#938 an item focus chips as the project and its issue number', () => {
+    const db = openDb(tmpDbFile());
+    const at = new Date('2026-11-26T11:55:00.000Z');
+    const i = createThread(
+      db,
+      { title: 'Issue #925: x', focus: { kind: 'item', zoneId: 'main', ref: '925' } },
+      at,
+    );
+    expect(focusChip(i, zones)).toBe(' <span class="chip">acme/demo · #925</span>');
+    const html = renderChatList(listThreads(db), { serviceMissing: false, zones, now });
+    expect(rowOf(html, i.id)).toContain('<span class="chip">acme/demo · #925</span>');
   });
 
   test('a focus whose zone was removed shows its raw id', () => {

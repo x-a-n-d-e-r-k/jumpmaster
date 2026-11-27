@@ -108,7 +108,7 @@ function afterSeqOf(req: FastifyRequest): number {
 }
 
 const FocusBody = z.strictObject({
-  kind: z.enum(['zone', 'goals', 'briefing', 'drop', 'doctor']),
+  kind: z.enum(['zone', 'goals', 'briefing', 'drop', 'doctor', 'item']),
   zoneId: z.string().min(1).max(200),
   ref: z.string().min(1).max(200),
 });
@@ -162,13 +162,16 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     if (!body.success) {
       return reply.code(400).send({
         error:
-          'a title is 1 to 200 characters, and a focus a zone, goals, briefing, drop or doctor check',
+          'a title is 1 to 200 characters, and a focus a zone, goals, briefing, drop, doctor check or work item',
       });
     }
     const { focus } = body.data;
     if (focus && !focusKnown(db, config(), focus)) {
       // Fixed words: the ref is never echoed.
       if (focus.kind === 'drop') return reply.code(400).send({ error: 'unknown drop' });
+      if (focus.kind === 'item' && config().dropZones.some((z) => z.id === focus.zoneId)) {
+        return reply.code(400).send({ error: 'unknown work item' });
+      }
       if (focus.kind === 'doctor') {
         return reply
           .code(400)
@@ -181,13 +184,14 @@ export function registerChatRoutes(app: FastifyInstance, deps: ChatRouteDeps): v
     const title = body.data.title ?? (focus ? focusTitle(db, config(), focus) : DEFAULT_TITLE);
     // A drop or doctor focus carries gate output and findings: its thread is this session's own.
     const owner = focus && SESSION_BOUND_FOCUS.includes(focus.kind) ? session : undefined;
-    return {
+    // 201 Created, whatever the focus.
+    return reply.code(201).send({
       thread: createThread(
         db,
         { title, ...(focus ? { focus } : {}), ...(owner ? { owner } : {}) },
         deps.now(),
       ),
-    };
+    });
   });
 
   app.get<{ Params: { id: string } }>('/api/chat/threads/:id', async (req, reply) => {

@@ -1717,6 +1717,32 @@ ALTER TABLE outbox ADD COLUMN clean_reads INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE outbox ADD COLUMN clean_read_at TEXT;
 `;
 
+/**
+ * v69 (#938): a chat thread may focus a work item (`item`, its ref the issue number). Every row
+ * and column is kept, `owner_session` with it.
+ */
+const V69_SQL = `
+CREATE TABLE new_chat_threads (
+  id                 INTEGER PRIMARY KEY,
+  title              TEXT NOT NULL,
+  focus_kind         TEXT CHECK (focus_kind IN ('zone','goals','briefing','drop','doctor','item')),
+  focus_zone_id      TEXT,
+  focus_ref          TEXT,
+  claude_session_id  TEXT,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL,
+  owner_session      TEXT
+);
+INSERT INTO new_chat_threads (id, title, focus_kind, focus_zone_id, focus_ref, claude_session_id,
+  created_at, updated_at, owner_session)
+SELECT id, title, focus_kind, focus_zone_id, focus_ref, claude_session_id, created_at, updated_at,
+  owner_session
+FROM chat_threads;
+DROP TABLE chat_threads;
+ALTER TABLE new_chat_threads RENAME TO chat_threads;
+CREATE INDEX chat_threads_updated ON chat_threads (updated_at);
+`;
+
 export const MIGRATIONS: Migration[] = [
   { version: 1, sql: M0_SCHEMA_SQL },
   { version: 2, sql: V2_SQL },
@@ -1786,6 +1812,7 @@ export const MIGRATIONS: Migration[] = [
   { version: 66, sql: V66_SQL },
   { version: 67, sql: V67_SQL },
   { version: 68, sql: V68_SQL },
+  { version: 69, sql: V69_SQL, foreignKeysOff: true },
 ];
 
 /**

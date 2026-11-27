@@ -13,7 +13,7 @@ import { PENDING_MS } from '../config/confirm.js';
 import { ConfigStore } from '../config/store.js';
 import type { Config } from '../config.js';
 import { openDb } from '../db/open.js';
-import { insertDrop, setZoneMode, upsertDropZone } from '../db/repo.js';
+import { insertDrop, setZoneMode, upsertDropZone, upsertWorkItem } from '../db/repo.js';
 import { usageCfg, zoneWorld } from '../test/fixtures.js';
 import { operatorSession, t0, tmpDbFile } from '../test/helpers.js';
 import { listCards, recordCard } from './cards.js';
@@ -133,7 +133,7 @@ describe('/api/chat', () => {
       headers: w.session,
       payload: { title: 'About the backlog' },
     });
-    expect(made.statusCode).toBe(200);
+    expect(made.statusCode).toBe(201);
     const { thread } = made.json() as { thread: { id: number; title: string } };
     expect(thread.title).toBe('About the backlog');
     const res = await w.app.inject({
@@ -273,7 +273,7 @@ describe('/api/chat', () => {
         headers: w.session,
         payload: { focus },
       });
-      expect(made.statusCode).toBe(200);
+      expect(made.statusCode).toBe(201);
       const id = (made.json() as { thread: { id: number } }).thread.id;
       const mine = await w.app.inject({
         method: 'GET',
@@ -364,6 +364,86 @@ function undoWorld() {
     bearer: { host: HOST, authorization: `Bearer ${TOKEN}` },
   };
 }
+
+describe('POST /api/chat/threads with an item focus (#938)', () => {
+  /** A zone with work item #7, on the guarded chat routes. */
+  function itemWorld() {
+    const z = zoneWorld();
+    upsertWorkItem(z.db, {
+      dropZoneId: 'main',
+      issueNumber: 7,
+      title: 'Make the widget spin',
+      body: 'b',
+      author: 'human',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    const config = {
+      listen: { host: '127.0.0.1', port: 7420 },
+      dataDir: '.',
+      pollSeconds: 60,
+      dropZones: [z.zone],
+      claude: { plan: 'max', fableWeeklyDropCap: 5 },
+      usage: usageCfg,
+      secrets: { operatorToken: TOKEN, joinToken: 'join-secret-value-4' },
+    } as Config;
+    const a = Fastify();
+    registerGuard(a, { db: z.db, config, now: () => t0 });
+    registerChatRoutes(a, { db: z.db, config, now: () => t0 });
+    app = a;
+    const session = { host: HOST, ...operatorSession(z.db, t0).headers };
+    const post = (focus: { kind: string; zoneId: string; ref: string }) =>
+      a.inject({ method: 'POST', url: '/api/chat/threads', headers: session, payload: { focus } });
+    return { db: z.db, app: a, session, post };
+  }
+
+  test('an existing item makes a thread titled for the issue, listed with its focus', async () => {
+    const w = itemWorld();
+    const made = await w.post({ kind: 'item', zoneId: 'main', ref: '7' });
+    expect(made.statusCode).toBe(201);
+    const { thread } = made.json() as { thread: { id: number } };
+    expect(thread).toMatchObject({
+      title: 'Issue #7: Make the widget spin',
+      focusKind: 'item',
+      focusZoneId: 'main',
+      focusRef: '7',
+    });
+    const listed = await w.app.inject({
+      method: 'GET',
+      url: '/api/chat/threads',
+      headers: w.session,
+    });
+    expect((listed.json() as { threads: unknown[] }).threads).toEqual([
+      expect.objectContaining({
+        id: thread.id,
+        focusKind: 'item',
+        focusZoneId: 'main',
+        focusRef: '7',
+      }),
+    ]);
+    // Shared like a zone or briefing thread: no owner session.
+    expect(
+      w.db.prepare('SELECT owner_session AS o FROM chat_threads WHERE id = ?').get(thread.id),
+    ).toEqual({ o: null });
+  });
+
+  test('an unknown or non-canonical item is 400, an unknown zone 404, and neither echoes the ref', async () => {
+    const w = itemWorld();
+    for (const ref of ['4242', '01', '1.0', '-3', '0']) {
+      const r = await w.post({ kind: 'item', zoneId: 'main', ref });
+      expect(r.statusCode, ref).toBe(400);
+      expect(r.json()).toEqual({ error: 'unknown work item' });
+    }
+    const unknown = await w.post({ kind: 'item', zoneId: 'main', ref: '4242' });
+    expect(unknown.body).not.toContain('4242');
+    const zoneless = await w.post({ kind: 'item', zoneId: 'nope', ref: '4242' });
+    expect(zoneless.statusCode).toBe(404);
+    expect(zoneless.json()).toEqual({ error: 'unknown zone' });
+    expect(zoneless.body).not.toContain('4242');
+    expect(w.db.prepare('SELECT COUNT(*) AS n FROM chat_threads').get()).toEqual({ n: 0 });
+  });
+});
 
 describe('POST /api/chat/cards/:id/undo', () => {
   test('D1 undo needs the browser session (403 for the Bearer token)', async () => {

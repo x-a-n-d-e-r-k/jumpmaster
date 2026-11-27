@@ -29,7 +29,7 @@ import { listCrewIssues } from './crew/store.js';
 import type { Db } from './db/open.js';
 import {
   ACTIVE_DROP_STATES,
-  type AttemptKey,
+  ATTEMPT_KEYS,
   effectiveSlots,
   findWorkItem,
   getAttempts,
@@ -140,18 +140,6 @@ import { renderInviteResult, renderStickImages, renderSticks, type StickRow } fr
 import { zoneTextNamer } from './ui/zone-name.js';
 import { projectHeaderFor, registerZonesPages } from './ui/zones.js';
 import { dispatchGate, gateReason, usageWarning } from './usage.js';
-
-const ATTEMPT_KEYS: AttemptKey[] = [
-  'heal',
-  'resolve',
-  'resolve_total',
-  'resume',
-  'review',
-  'no_change',
-  'heal_no_change',
-  'rate_limit',
-  'base_sync',
-];
 
 /** The Floor's gate allowance line: the head Command's allowance covers, and where it came from. */
 function gateAllowedOf(
@@ -875,7 +863,11 @@ export function createApp(
         ...(detail ? { detail } : {}),
         drops,
         now: deps.now(),
-        header: projectHeaderFor(db, zone, zones, 'work', [{ label: `#${item.issueNumber}` }]),
+        header: projectHeaderFor(db, zone, zones, 'work', [{ label: `#${item.issueNumber}` }], {
+          kind: 'item',
+          zoneId: zone.id,
+          ref: String(item.issueNumber),
+        }),
       });
       return reply.type('text/html; charset=utf-8').send(withCsrf(req, html));
     },
