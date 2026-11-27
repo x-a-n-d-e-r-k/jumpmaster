@@ -8,9 +8,10 @@ import type { Db } from '../db/open.js';
 
 /**
  * What a focused thread is about: `ref` is the zone id (`zone`, `goals`), the briefing id, the
- * drop id, or the doctor check id (its zone in `zoneId`, or `install` for an install-wide check).
+ * drop id, the doctor check id (its zone in `zoneId`, or `install` for an install-wide check), or
+ * the work item's issue number (`item`, #938).
  */
-export type FocusKind = 'zone' | 'goals' | 'briefing' | 'drop' | 'doctor';
+export type FocusKind = 'zone' | 'goals' | 'briefing' | 'drop' | 'doctor' | 'item';
 /** The focus kinds whose thread belongs to the session that opened it (#627). */
 export const SESSION_BOUND_FOCUS: readonly FocusKind[] = ['drop', 'doctor'];
 export type ChatRole = 'owner' | 'assistant' | 'tool' | 'system';

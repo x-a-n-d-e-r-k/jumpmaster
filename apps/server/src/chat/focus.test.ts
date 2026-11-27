@@ -1,12 +1,13 @@
 import type { ChatEvent, ChatTurnRequest } from '@jumpmaster/protocol';
 import Fastify from 'fastify';
 import { describe, expect, test } from 'vitest';
-import { raiseBriefing } from '../briefings.js';
+import { raiseBriefing, ruleBriefing } from '../briefings.js';
 import type { Config, DropZoneConfig } from '../config.js';
 import { type Db, openDb } from '../db/open.js';
 import {
   insertDrop,
   insertVerdict,
+  setAttempts,
   setWorkItemState,
   upsertDropZone,
   upsertPullRequest,
@@ -16,7 +17,7 @@ import type { Forge } from '../forge/github.js';
 import { refreshGoals } from '../goals.js';
 import { makeZone } from '../test/fixtures.js';
 import { plus, t0, tmpDbFile } from '../test/helpers.js';
-import { type Focus, focusContext, focusTitle } from './focus.js';
+import { type Focus, focusContext, focusKnown, focusTitle } from './focus.js';
 import { registerChatRoutes } from './routes.js';
 import type { ChatServiceClient } from './service.js';
 import { appendMessage, createThread, getThread } from './store.js';
@@ -238,7 +239,7 @@ describe('POST /api/chat/threads with a focus', () => {
     const app = routeApp(db);
     const post = async (focus: Focus) => {
       const r = await app.inject({ method: 'POST', url: '/api/chat/threads', payload: { focus } });
-      expect(r.statusCode).toBe(200);
+      expect(r.statusCode).toBe(201);
       return (r.json() as { thread: { id: number; title: string } }).thread;
     };
     const b = await post(briefingFocus(briefingId));
@@ -505,6 +506,126 @@ describe('focusContext of a drop or a doctor finding (#627)', () => {
   });
 });
 
+const itemFocus = (ref: string): Focus => ({ kind: 'item', zoneId: 'main', ref });
+
+describe('an item focus (#938)', () => {
+  /** The seeded item with a reason, an attempt count, and its briefing diagnosed and ruled. */
+  function ruled() {
+    const w = seeded();
+    w.db.prepare("UPDATE work_items SET reason = 'crew reason here' WHERE id = ?").run(w.itemId);
+    setAttempts(w.db, w.itemId, 'heal', 2, null);
+    w.db
+      .prepare('UPDATE briefings SET diagnosis = ? WHERE id = ?')
+      .run('The gate fails on spin direction.', w.briefingId);
+    expect(ruleBriefing(w.db, w.briefingId, 'retry', 'Spin it the other way.', t0).ok).toBe(true);
+    return w;
+  }
+
+  test('focusContext carries the item: state, reason, PR, head, verdict, attempts, drops and its briefings with diagnosis and ruling, fenced', () => {
+    const { db, itemId, briefingId } = ruled();
+    const { text, extraRefs } = focusContext(db, configOf(), itemFocus('7'), NONCE);
+    expect(text).toContain('(trusted) The owner opened this thread from work item #7 in zone main');
+    expect(text).toContain('Work item #7 state=pr_open');
+    expect(text).toMatch(/title \(data\) <<<jm-data:[^\n]+:begin title>>>\nMake the widget spin/);
+    expect(text).toMatch(
+      /reason \(data, untrusted\) <<<jm-data:[^\n]+:begin reason>>>\ncrew reason here/,
+    );
+    expect(text).toContain('Pull request #12 (open) head abc123');
+    expect(text).toContain('Latest verdict: request_changes on abc123');
+    expect(text).toMatch(
+      /summary \(data, untrusted\) <<<jm-data:[^\n]+:begin verdict>>>\nThe spin/,
+    );
+    expect(text).toContain('Attempt counts: heal=2');
+    expect(text).toContain('drop drop-7 role=implement state=failed status=failed');
+    expect(text).toMatch(
+      /reason \(data, untrusted\) <<<jm-data:[^\n]+:begin drop-reason>>>\ngate broke 7/,
+    );
+    expect(text).toContain(`Briefing ${briefingId} (parked, ruled, raised by server)`);
+    expect(text).toMatch(
+      /decision \(data\) <<<jm-data:[^\n]+:begin decision>>>\nRetry the widget item\?/,
+    );
+    expect(text).toMatch(
+      /diagnosis \(data, untrusted\) <<<jm-data:[^\n]+:begin diagnosis>>>\nThe gate fails on spin direction\./,
+    );
+    expect(text).toMatch(/choice \(data\) <<<jm-data:[^\n]+:begin choice>>>\nretry: Retry it/);
+    expect(text).toMatch(
+      /note \(data, untrusted\) <<<jm-data:[^\n]+:begin note>>>\nSpin it the other way\./,
+    );
+    expect(extraRefs).toEqual({ main: ['pull/12/head'] });
+    // Another item's briefing is not this item's.
+    expect(text).not.toContain(`item:${itemId + 1}`);
+  });
+
+  test('a crew-written briefing is fenced untrusted; another item’s briefing is left out', () => {
+    const { db, itemId } = seeded();
+    const other = upsertWorkItem(db, {
+      dropZoneId: 'main',
+      issueNumber: 8,
+      title: 'Other',
+      body: '',
+      author: 'human',
+      priority: 0,
+      isFix: false,
+      issueCreatedAt: t0.toISOString(),
+    });
+    const opts = [{ id: 'ok', label: 'OK', effect: 'none' as const }];
+    raiseBriefing(
+      db,
+      {
+        zoneId: 'main',
+        kind: 'parked',
+        subject: `item:${itemId}`,
+        decision: 'Crew asks this',
+        why: 'crew why',
+        options: opts,
+        source: 'crew',
+      },
+      t0,
+    );
+    raiseBriefing(
+      db,
+      {
+        zoneId: 'main',
+        kind: 'parked',
+        subject: `item:${other.id}`,
+        decision: 'About item eight',
+        why: 'w',
+        options: opts,
+        source: 'server',
+      },
+      t0,
+    );
+    const { text } = focusContext(db, configOf(), itemFocus('7'), NONCE);
+    expect(text).toMatch(
+      /decision \(data, untrusted\) <<<jm-data:[^\n]+:begin decision>>>\nCrew asks this/,
+    );
+    expect(text).not.toContain('About item eight');
+  });
+
+  test('focusKnown needs the zone, a canonical ref and the work item; focusTitle names the issue', () => {
+    const { db } = seeded();
+    const config = configOf();
+    expect(focusKnown(db, config, itemFocus('7'))).toBe(true);
+    for (const ref of ['8', '01', '07', '1.0', '-3', '7 ', 'x', '0', '99999999999999999999']) {
+      expect(focusKnown(db, config, itemFocus(ref)), ref).toBe(false);
+    }
+    expect(focusKnown(db, config, { kind: 'item', zoneId: 'nope', ref: '7' })).toBe(false);
+    expect(focusTitle(db, config, itemFocus('7'))).toBe('Issue #7: Make the widget spin');
+  });
+
+  test('an item that has gone gets a trusted line saying so', () => {
+    const { db } = seeded();
+    const { text } = focusContext(db, configOf(), itemFocus('9'), NONCE);
+    expect(text).toContain(
+      '(trusted) Work item #9, which this thread was opened from, no longer exists.',
+    );
+    // A non-canonical ref is never echoed, even in a trusted line.
+    const odd = focusContext(db, configOf(), itemFocus('07'), NONCE).text;
+    expect(odd).toContain('(trusted) The work item this thread was opened from no longer exists.');
+    expect(odd).not.toContain('07');
+  });
+});
+
 describe('POST /api/chat/threads with a drop or doctor focus (#627)', () => {
   test('a known drop or check makes a titled thread; an unknown one is 400 and never echoed', async () => {
     const { db, itemId } = seeded();
@@ -514,14 +635,14 @@ describe('POST /api/chat/threads with a drop or doctor focus (#627)', () => {
     const post = (focus: Focus) =>
       app.inject({ method: 'POST', url: '/api/chat/threads', payload: { focus } });
     const drop = await post({ kind: 'drop', zoneId: 'main', ref: id });
-    expect(drop.statusCode).toBe(200);
+    expect(drop.statusCode).toBe(201);
     expect(drop.json().thread).toMatchObject({
       title: 'Drop abcdef01 (implement, failed)',
       focusKind: 'drop',
       focusRef: id,
     });
     const doc = await post({ kind: 'doctor', zoneId: 'install', ref: 'claude.plan' });
-    expect(doc.statusCode).toBe(200);
+    expect(doc.statusCode).toBe(201);
     expect(doc.json().thread.title).toBe('Doctor: claude.plan');
     const before = db.prepare('SELECT COUNT(*) AS n FROM chat_threads').get();
     const bad: Focus[] = [

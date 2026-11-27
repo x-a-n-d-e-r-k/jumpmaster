@@ -53,6 +53,7 @@ import {
   OBSERVATION_ACTIONS,
   observationWords,
   page,
+  pageFocus,
   projectHeader,
   renderBriefing,
   renderDoctor,
@@ -3382,6 +3383,53 @@ describe('the Ask panel (#626)', () => {
     expect(r.gets).toEqual(['/api/chat/threads']);
     expect(r.posts).toEqual([]);
     expect((r.ids['ask-frame'] as El).attrs.src).toBe('/chat/9?panel=1');
+  });
+
+  /** A work item page's header: Ask about this focused on issue `n` of jm. */
+  const itemPage = (n: number) =>
+    page(
+      projectHeader({
+        zone: jm,
+        zones: [jm],
+        mode: 'active',
+        openBriefings: 0,
+        current: 'work',
+        ask: { kind: 'item', zoneId: 'jm', ref: String(n) },
+      }),
+    );
+
+  test('#938 an item ask renders the item focus, the header button carries it and pageFocus parses it', () => {
+    const html = itemPage(925);
+    expect(html).toContain(
+      '<form class="ask" data-focus-kind="item" data-focus-zone="jm" data-focus-ref="925">',
+    );
+    expect(askDataset(html)).toEqual({ focusKind: 'item', focusZone: 'jm', focusRef: '925' });
+    expect(pageFocus(html)).toMatchObject({ kind: 'item', zoneId: 'jm', ref: '925' });
+    expect(html).toContain('<span class="chip">octo/jm · #925</span>');
+    // Without an ask, the header keeps the zone focus.
+    expect(pageFocus(projectPage())).toMatchObject({ kind: 'zone', zoneId: 'jm', ref: 'jm' });
+  });
+
+  test('#938 on an item page, Ask reuses that item’s recent thread and posts nothing', async () => {
+    const r = runPanel(itemPage(925), {
+      threads: [recent({ id: 3 }), recent({ id: 5, focusKind: 'item', focusRef: '925' })],
+    });
+    r.open.fire('click');
+    await r.settle();
+    expect(r.posts).toEqual([]);
+    expect((r.ids['ask-frame'] as El).attrs.src).toBe('/chat/5?panel=1');
+  });
+
+  test('#938 on an item page, only another item’s thread listed: Ask makes a thread for this item', async () => {
+    const r = runPanel(itemPage(925), {
+      threads: [recent({ id: 5, focusKind: 'item', focusRef: '924' }), recent({ id: 3 })],
+    });
+    r.open.fire('click');
+    await r.settle();
+    expect(r.posts).toEqual([
+      { url: '/api/chat/threads', body: { focus: { kind: 'item', zoneId: 'jm', ref: '925' } } },
+    ]);
+    expect((r.ids['ask-frame'] as El).attrs.src).toBe('/chat/100?panel=1');
   });
 
   test('the next page with the same focus keeps the tab’s thread, opened, without making one', async () => {
