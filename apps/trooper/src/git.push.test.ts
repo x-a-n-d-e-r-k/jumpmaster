@@ -8,6 +8,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   symlinkSync,
   unlinkSync,
   writeFileSync,
@@ -15,7 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { PushGrant } from '@jumpmaster/protocol';
-import { afterAll, afterEach, beforeAll, describe, expect, test } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest';
 import {
   authHeader,
   checkoutBranch,
@@ -28,6 +29,7 @@ import {
   pushStaged,
   setGitOutputMaxBytes,
   setSpawn,
+  setSystemCaBundle,
   setWorkRoot,
   stageFromAgent,
 } from './git.js';
@@ -930,5 +932,193 @@ describe('pushStaged: guard cases carried over from the in-container push', () =
     }
     expect(git(decoy, 'for-each-ref')).toBe('');
     expect(w.remoteTip()).toBe(await headSha(w.dir));
+  });
+});
+
+describe('pushStaged with a GitLab grant that carries caCert (#947)', () => {
+  const CERT =
+    '-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIUZ3JhbnQtY2EtMQ==\n-----END CERTIFICATE-----\n';
+  const PEM_LINES = CERT.trim().split('\n');
+  const SYSTEM =
+    '# system roots fixture\n-----BEGIN CERTIFICATE-----\nU1lTVEVN\n-----END CERTIFICATE-----\n';
+  const GL_BASIC = Buffer.from(`oauth2:${TOKEN}`).toString('base64');
+  const forgeAt = (origin: string) => ({
+    kind: 'gitlab' as const,
+    origin,
+    projectPath: 'group/project',
+  });
+  const forge = forgeAt('https://gitlab.example.com:8443');
+  let system: string;
+
+  beforeAll(() => {
+    system = join(tmp, 'system-ca.crt');
+    writeFileSync(system, SYSTEM);
+  });
+  beforeEach(() => setSystemCaBundle(system));
+  afterEach(() => setSystemCaBundle(null));
+
+  /** The GIT_CONFIG_KEY_n / GIT_CONFIG_VALUE_n pairs the trooper set, in order. */
+  const pairs = (env: NodeJS.ProcessEnv): [string, string][] =>
+    Array.from({ length: Number(env.GIT_CONFIG_COUNT ?? 0) }, (_, i) => [
+      env[`GIT_CONFIG_KEY_${i}`] as string,
+      env[`GIT_CONFIG_VALUE_${i}`] as string,
+    ]);
+  const network = (c: Call) => ['fetch', 'push', 'ls-remote'].find((s) => c.argv.includes(s));
+  const caLeftovers = () => readdirSync(work).filter((e) => e.startsWith('jm-ca-'));
+  type Seen = {
+    op: string;
+    pairs: [string, string][];
+    file?: string;
+    dirMode?: number;
+    fileMode?: number;
+    uid?: number;
+  };
+
+  /** Records each network call's config pairs and, while it runs, the CA file it names. */
+  function watch(): Seen[] {
+    const seen: Seen[] = [];
+    recordSpawn((c) => {
+      const op = network(c);
+      if (!op) return;
+      const p = pairs(c.env);
+      const ca = p.find(([k]) => k.endsWith('.sslCAInfo'));
+      const s: Seen = { op, pairs: p };
+      if (ca) {
+        const dir = join(ca[1], '..');
+        s.file = readFileSync(ca[1], 'utf8');
+        s.dirMode = statSync(dir).mode & 0o777;
+        s.fileMode = statSync(ca[1]).mode & 0o777;
+        s.uid = statSync(dir).uid;
+      }
+      seen.push(s);
+    });
+    return seen;
+  }
+
+  const expectCa = (s: Seen, origin: string, file: string) => {
+    expect(s.pairs).toEqual([
+      [`http.${origin}/.extraheader`, `AUTHORIZATION: basic ${GL_BASIC}`],
+      [`http.${origin}/.sslCAInfo`, file],
+    ]);
+    expect(s.file).toBe(SYSTEM + CERT);
+    expect(s.dirMode).toBe(0o700);
+    expect(s.fileMode).toBe(0o600);
+    expect(s.uid).toBe(process.getuid?.());
+  };
+
+  test('the base fetch and the push trust the bundle for the origin only, a non-443 port kept', async () => {
+    const w = await world('ca-push');
+    writeFileSync(join(w.dir, 'ca.txt'), 'ca\n');
+    await commitIfDirty(w.dir, 'feat: ca');
+    const r = await stage(w);
+    const seen = watch();
+    const res = await pushStaged(r.pushDir, grantFor(w, { forge, caCert: CERT }), {
+      remoteUrl: w.target.url,
+    });
+    expect(res).toMatchObject({ status: 'pushed' });
+    expect(seen.map((s) => s.op)).toEqual(['fetch', 'push']);
+    const file = (seen[0] as Seen).pairs[1]?.[1] as string;
+    expect(file.startsWith(`${r.pushDir}/`)).toBe(false);
+    for (const s of seen) expectCa(s, 'https://gitlab.example.com:8443', file);
+    expect(existsSync(file)).toBe(false);
+    expect(caLeftovers()).toEqual([]);
+  });
+
+  test('a default-port origin scopes the key to it', async () => {
+    const w = await world('ca-443');
+    writeFileSync(join(w.dir, 'ca.txt'), 'ca\n');
+    await commitIfDirty(w.dir, 'feat: ca');
+    const r = await stage(w);
+    const seen = watch();
+    const res = await pushStaged(
+      r.pushDir,
+      grantFor(w, { forge: forgeAt('https://gitlab.example.com'), caCert: CERT }),
+      { remoteUrl: w.target.url },
+    );
+    expect(res.status).toBe('pushed');
+    const file = (seen[0] as Seen).pairs[1]?.[1] as string;
+    for (const s of seen) expectCa(s, 'https://gitlab.example.com', file);
+  });
+
+  test('a failed push carries the pair on the ls-remote too, and removes the file', async () => {
+    const w = await world('ca-declined');
+    writeFileSync(join(w.dir, 'dc.txt'), 'dc\n');
+    await commitIfDirty(w.dir, 'feat: dc');
+    const hook = join(w.origin, 'hooks', 'pre-receive');
+    writeFileSync(hook, '#!/bin/sh\necho "denied by policy" >&2\nexit 1\n');
+    chmodSync(hook, 0o755);
+    const r = await stage(w);
+    const seen = watch();
+    const res = await pushStaged(r.pushDir, grantFor(w, { forge, caCert: CERT }), {
+      remoteUrl: w.target.url,
+    });
+    expect(res).toMatchObject({ status: 'failed', retryable: false });
+    expect(seen.map((s) => s.op)).toEqual(['fetch', 'push', 'ls-remote']);
+    const file = (seen[0] as Seen).pairs[1]?.[1] as string;
+    for (const s of seen) expectCa(s, 'https://gitlab.example.com:8443', file);
+    if (res.status === 'failed') for (const l of PEM_LINES) expect(res.reason).not.toContain(l);
+    expect(existsSync(file)).toBe(false);
+    expect(caLeftovers()).toEqual([]);
+  });
+
+  test('a failed base fetch removes the file', async () => {
+    const w = await world('ca-gone');
+    const r = await stage(w);
+    const seen = watch();
+    const res = await pushStaged(r.pushDir, grantFor(w, { forge, caCert: CERT }), {
+      remoteUrl: `file://${join(w.base, 'gone.git')}`,
+    });
+    expect(res).toMatchObject({ status: 'failed', retryable: true });
+    expect(seen.map((s) => s.op)).toEqual(['fetch']);
+    expect(existsSync((seen[0] as Seen).pairs[1]?.[1] as string)).toBe(false);
+    if (res.status === 'failed') for (const l of PEM_LINES) expect(res.reason).not.toContain(l);
+    expect(caLeftovers()).toEqual([]);
+  });
+
+  test('an unreadable system bundle fails for good before any network call', async () => {
+    const w = await world('ca-nosystem');
+    writeFileSync(join(w.dir, 'ns.txt'), 'ns\n');
+    await commitIfDirty(w.dir, 'feat: ns');
+    const r = await stage(w);
+    setSystemCaBundle(join(tmp, 'no-such-bundle.crt'));
+    const seen = watch();
+    const res = await pushStaged(r.pushDir, grantFor(w, { forge, caCert: CERT }), {
+      remoteUrl: w.target.url,
+    });
+    expect(res).toMatchObject({ status: 'failed', retryable: false });
+    if (res.status !== 'failed') return;
+    expect(res.reason).toContain('the GitLab CA bundle');
+    expect(res.reason).not.toContain('no-such-bundle');
+    for (const l of PEM_LINES) expect(res.reason).not.toContain(l);
+    expect(seen).toEqual([]);
+    expect(w.remoteTip()).toBe(w.s0);
+    expect(caLeftovers()).toEqual([]);
+    expect(leftovers()).toEqual([]);
+  });
+
+  test('without caCert the config pairs are what they were', async () => {
+    const w = await world('ca-none');
+    writeFileSync(join(w.dir, 'nc.txt'), 'nc\n');
+    await commitIfDirty(w.dir, 'feat: nc');
+    const hook = join(w.origin, 'hooks', 'pre-receive');
+    writeFileSync(hook, '#!/bin/sh\nexit 1\n');
+    chmodSync(hook, 0o755);
+    for (const over of [{ forge }, {}]) {
+      const r = await stage(w);
+      const seen = watch();
+      await pushStaged(r.pushDir, grantFor(w, over), { remoteUrl: w.target.url });
+      expect(seen.map((s) => s.op)).toEqual(['fetch', 'push', 'ls-remote']);
+      const header: [string, string] = over.forge
+        ? ['http.https://gitlab.example.com:8443/.extraheader', `AUTHORIZATION: basic ${GL_BASIC}`]
+        : ['http.https://github.com/.extraheader', authHeader(TOKEN)];
+      for (const s of seen) expect(s.pairs).toEqual([header]);
+      setSpawn(null);
+    }
+  });
+
+  test('no code path turns TLS verification off', () => {
+    const src = readFileSync(new URL('./git.ts', import.meta.url), 'utf8');
+    expect(src).not.toMatch(/sslVerify/i);
+    expect(src).not.toContain('GIT_SSL_NO_VERIFY');
   });
 });

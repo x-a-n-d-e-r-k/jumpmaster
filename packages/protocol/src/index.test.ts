@@ -1289,3 +1289,88 @@ describe('egress-ports-v1 (#914)', () => {
     expect([...STICK_CAPABILITIES]).toEqual([...STICK_CAPABILITIES].sort());
   });
 });
+
+describe('grant caCert (#947)', () => {
+  const forge = {
+    kind: 'gitlab' as const,
+    origin: 'https://gitlab.example.com:8443',
+    projectPath: 'group/project',
+  };
+  const block = (type: string, body = 'MIIBszCCAVmgAwIBAgIUQ2E=') =>
+    `-----BEGIN ${type}-----\n${body}\n-----END ${type}-----\n`;
+  const CERT = block('CERTIFICATE');
+  const push = {
+    token: 't',
+    owner: 'o',
+    name: 'n',
+    forge,
+    branch: 'agent/issue-1',
+    base: 'main',
+    lease: '',
+    protectedPaths: [],
+    secrets: [],
+  };
+  const clone = { token: 'tok', forge, secrets: [] };
+  const both = [
+    ['push', PushGrantSchema, push],
+    ['clone', CloneGrantSchema, clone],
+  ] as const;
+
+  test.each(both)('the %s grant accepts 1 to 16 certificate blocks', (_n, schema, g) => {
+    expect(schema.parse({ ...g, caCert: CERT })).toEqual({ ...g, caCert: CERT });
+    expect(schema.safeParse({ ...g, caCert: `\n  ${CERT}\r\n${CERT}  \n` }).success).toBe(true);
+    expect(schema.safeParse({ ...g, caCert: CERT.repeat(16) }).success).toBe(true);
+    expect(schema.parse(g)).toEqual(g);
+  });
+
+  test.each(both)('the %s grant refuses a bad caCert', (_n, schema, g) => {
+    const bad: [string, unknown][] = [
+      ['empty', ''],
+      ['whitespace only', '  \n'],
+      ['oversize', block('CERTIFICATE', 'A'.repeat(65536))],
+      ['17 blocks', CERT.repeat(17)],
+      ['a private key', block('PRIVATE KEY')],
+      ['a certificate and a key', CERT + block('RSA PRIVATE KEY')],
+      ['no PEM block', 'MIIBszCCAVmgAwIBAgIUQ2E='],
+      ['text before', `hello\n${CERT}`],
+      ['text after', `${CERT}trailing`],
+      ['text between', `${CERT}x\n${CERT}`],
+      ['an unterminated block', '-----BEGIN CERTIFICATE-----\nAAAA\n'],
+      ['not a string', 1],
+    ];
+    for (const [what, caCert] of bad)
+      expect(schema.safeParse({ ...g, caCert }).success, what).toBe(false);
+  });
+
+  test.each(both)(
+    'the %s grant checks a crafted near-PEM caCert in linear time',
+    (_n, schema, g) => {
+      // CodeQL: '-----BEGIN -----' then many '-----BEGIN -----a' made the block regex polynomial.
+      const crafted = `-----BEGIN -----${'-----BEGIN -----a'.repeat(3800)}`;
+      const nested = `-----BEGIN CERTIFICATE-----${'-----BEGIN CERTIFICATE-----'.repeat(2400)}`;
+      const started = performance.now();
+      for (let i = 0; i < 5; i++) {
+        expect(schema.safeParse({ ...g, caCert: crafted }).success).toBe(false);
+        expect(schema.safeParse({ ...g, caCert: nested }).success).toBe(false);
+      }
+      // The old regex took about 100 ms per crafted input at this size; a linear scan takes well under 1.
+      expect(performance.now() - started).toBeLessThan(150);
+    },
+  );
+
+  test.each(both)('the %s grant refuses a block whose END names another type', (_n, schema, g) => {
+    const mixed = '-----BEGIN CERTIFICATE-----\nAAAA\n-----END PRIVATE KEY-----\n';
+    expect(schema.safeParse({ ...g, caCert: mixed }).success).toBe(false);
+    const cert = '-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n';
+    expect(schema.safeParse({ ...g, caCert: `${cert}-----END CERTIFICATE-----\n` }).success).toBe(
+      false,
+    );
+  });
+
+  test('a push grant with caCert and no forge is refused; without caCert it parses as before', () => {
+    const { forge: _f, ...github } = push;
+    expect(PushGrantSchema.safeParse({ ...github, caCert: CERT }).success).toBe(false);
+    expect(PushGrantSchema.parse(github)).toEqual(github);
+    expect(PushGrantSchema.parse(push)).toEqual(push);
+  });
+});

@@ -1039,6 +1039,42 @@ export const PushPlanSchema = z
 export type PushPlan = z.infer<typeof PushPlanSchema>;
 
 /** The credential and rules for one push, handed over only after the container reports ready. */
+/** The most bytes a grant's `caCert` holds: the server's `CA_CERT_MAX_BYTES`. */
+export const GRANT_CA_CERT_MAX_BYTES = 64 * 1024;
+/** The most certificates a grant's `caCert` holds: the server's `CA_CERT_MAX_BLOCKS`. */
+export const GRANT_CA_CERT_MAX_BLOCKS = 16;
+const GRANT_PEM_BEGIN = '-----BEGIN CERTIFICATE-----';
+const GRANT_PEM_END = '-----END CERTIFICATE-----';
+
+/**
+ * True for a PEM bundle of 1 to 16 `CERTIFICATE` blocks, at most 64 KiB, with only whitespace
+ * outside its blocks. Restates the server's `parseCaBundle` (apps/server/src/config.ts) without
+ * importing it; it does not parse the certificates (the server did). A plain `indexOf` scan, not a
+ * backtracking regex, so a crafted near-PEM string is checked in linear time.
+ */
+export function isGrantCaBundle(pem: string): boolean {
+  if (Buffer.byteLength(pem, 'utf8') > GRANT_CA_CERT_MAX_BYTES) return false;
+  let blocks = 0;
+  let pos = 0;
+  for (;;) {
+    const begin = pem.indexOf('-----', pos);
+    // Anything other than whitespace between blocks (or a block of another type) is refused.
+    if (pem.slice(pos, begin === -1 ? pem.length : begin).trim() !== '') return false;
+    if (begin === -1) break;
+    if (!pem.startsWith(GRANT_PEM_BEGIN, begin)) return false;
+    const end = pem.indexOf(GRANT_PEM_END, begin + GRANT_PEM_BEGIN.length);
+    if (end === -1) return false;
+    if (++blocks > GRANT_CA_CERT_MAX_BLOCKS) return false;
+    pos = end + GRANT_PEM_END.length;
+  }
+  return blocks >= 1;
+}
+
+/** A GitLab grant's private CA (#947): PEM certificates the trooper trusts for that origin only. */
+const GrantCaCertSchema = z.string().refine(isGrantCaBundle, {
+  message: 'caCert must be 1 to 16 PEM certificates, at most 64 KiB, with nothing outside them',
+});
+
 export const PushGrantSchema = z
   .object({
     token: z.string().min(1),
@@ -1055,8 +1091,14 @@ export const PushGrantSchema = z
     /** Globs where a real private key may be pushed (fixtures). Absent: none. */
     privateKeyPaths: z.array(z.string()).optional(),
     secrets: z.array(z.string()),
+    /** The GitLab origin's private CA bundle: trusted beside the system roots, for `forge` only. */
+    caCert: GrantCaCertSchema.optional(),
   })
-  .strict();
+  .strict()
+  .refine((g) => g.caCert === undefined || g.forge !== undefined, {
+    message: 'caCert needs a forge: it is trusted for a GitLab origin only',
+    path: ['caCert'],
+  });
 export type PushGrant = z.infer<typeof PushGrantSchema>;
 
 export const PushResultSchema = z.discriminatedUnion('status', [
@@ -1109,6 +1151,8 @@ export const CloneGrantSchema = z
       .optional(),
     forge: ForgeRemoteSchema,
     secrets: z.array(z.string()),
+    /** The GitLab origin's private CA bundle: trusted beside the system roots, for `forge` only. */
+    caCert: GrantCaCertSchema.optional(),
   })
   .strict();
 export type CloneGrant = z.infer<typeof CloneGrantSchema>;

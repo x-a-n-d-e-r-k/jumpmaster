@@ -10,7 +10,13 @@ import {
   RESULT_PREFIX,
   withBasicAuth,
 } from '@jumpmaster/protocol';
-import { type initBare, type mirrorFetch, PROVIDED_MIRROR_DIR } from '../git.js';
+import {
+  type GrantCa,
+  type initBare,
+  type mirrorFetch,
+  PROVIDED_MIRROR_DIR,
+  writeGrantCa,
+} from '../git.js';
 import { redact } from '../redact.js';
 import { readCloneGrant, StdinClosedError } from '../stdin.js';
 
@@ -123,9 +129,11 @@ const message = (e: unknown): string => (e instanceof Error ? e.message : String
  * The clone container's role. No agent runs here; the token arrives last.
  *
  * 1. print the ready line; only then read the grant (which carries the token) from stdin;
- * 2. create the root-owned bare mirror: fixed config, no hooks;
+ * 2. create the root-owned bare mirror: fixed config, no hooks; with a `caCert`, write the
+ *    system roots and the grant's certificates to a file outside the mirror (removed after);
  * 3. fetch every head from the grant's GitLab project: no checkout, no submodules, the auth header
- *    only on `<origin>/`, as the grant's username (else `oauth2`), and redirects refused;
+ *    only on `<origin>/`, as the grant's username (else `oauth2`), redirects refused, and the CA
+ *    file (if any) trusted for `<origin>/` only;
  * 4. search every path and file under the mirror for the token's forms; a hit fails the clone.
  *
  * Prints exactly one result line, redacted of the token in every form.
@@ -148,25 +156,40 @@ export async function runClone(_payload: ClonePayload, deps: CloneDeps): Promise
     }
     secrets = cloneGrantSecrets(grant);
     const mirror = deps.mirrorDir;
-    try {
-      await deps.git.initBare(mirror);
-    } catch (e) {
-      return fail(`mirror setup failed: ${message(e)}`, false);
+    // A private CA: the system roots plus the grant's certificates, for the origin only, in a
+    // file outside the mirror (an agent mounts it later). No fallback when it can't be written.
+    let ca: GrantCa | null = null;
+    if (grant.caCert !== undefined) {
+      try {
+        ca = writeGrantCa(grant.forge, grant.caCert);
+      } catch (e) {
+        return fail(message(e), false);
+      }
     }
     try {
-      await deps.git.mirrorFetch(
-        mirror,
-        grant.token,
-        { owner: '', name: '', forge: grant.forge },
-        ['*'],
-        {
-          ...(grant.username !== undefined ? { username: grant.username } : {}),
-          refuseRedirects: true,
-        },
-      );
-    } catch (e) {
-      // A network fault or a refused credential: the server may retry with a fresh grant.
-      return fail(`clone fetch failed: ${message(e)}`, true);
+      try {
+        await deps.git.initBare(mirror);
+      } catch (e) {
+        return fail(`mirror setup failed: ${message(e)}`, false);
+      }
+      try {
+        await deps.git.mirrorFetch(
+          mirror,
+          grant.token,
+          { owner: '', name: '', forge: grant.forge },
+          ['*'],
+          {
+            ...(grant.username !== undefined ? { username: grant.username } : {}),
+            refuseRedirects: true,
+            ...(ca ? { extraConfig: ca.config } : {}),
+          },
+        );
+      } catch (e) {
+        // A network fault or a refused credential: the server may retry with a fresh grant.
+        return fail(`clone fetch failed: ${message(e)}`, true);
+      }
+    } finally {
+      ca?.remove();
     }
     // Removes nothing: the stick drops the whole volume with the failed drop.
     if (mirrorHolds(mirror, cloneTokenForms(grant.token, grant.username))) {
