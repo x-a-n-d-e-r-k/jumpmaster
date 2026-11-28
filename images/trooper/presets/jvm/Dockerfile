@@ -9,7 +9,7 @@
 ARG BASE=ghcr.io/x-a-n-d-e-r-k/jumpmaster-trooper@sha256:d317048b6ab4ad86d03f0d08f6a8f72e9104a0aea63f11d6a1bcb75872f684c2
 
 # Temurin JDK 21.0.13+9 (released 2026-10-22). A named stage, so Dependabot bumps the digest.
-FROM eclipse-temurin:21.0.13_9-jdk-noble@sha256:06c1f157dacf6b68198bd9a4186dd4c34ef24e65d7bbbe2a0cf8e62571ad38c9 AS jdk
+FROM eclipse-temurin:21.0.13.1_2-jdk-noble@sha256:4dea56dcfa1a89832caf1ffe082c49b3878388df3ce97b7f0a49f9c4372b718c AS jdk
 
 FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS fetch
 RUN apt-get update \
